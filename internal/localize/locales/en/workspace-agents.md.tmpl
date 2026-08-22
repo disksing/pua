@@ -141,7 +141,7 @@ pua project archive --project=<project>
 
 pua task list --project=<project> [--all]
 pua task show --project=<project> --task=<task>
-pua task create --project=<project> ...
+pua task create --project=<project> [--profile=<name>|--agent=<name>] ...
 pua task archive --project=<project> --task=<task>
 ~~~
 
@@ -151,12 +151,20 @@ Query before creating to avoid duplicates. Creating a Project or Task does not s
 pua message send --to=<resource> '<message>'
 ~~~
 
+When creating a Task, use the mutually exclusive --profile=<name> or --agent=<name> option to set its initial binding. To change an existing resource's explicit binding, use:
+
+~~~sh
+pua workspace binding set (--profile=<name>|--agent=<name>)
+pua project binding set --project=<project> (--profile=<name>|--agent=<name>)
+pua task binding set --project=<project> --task=<task> (--profile=<name>|--agent=<name>)
+~~~
+
 Before creating a Task, check the Project's templates/. Prefer a suitable template and preserve its rules:
 
 ~~~sh
 pua template list --project=<project>
 pua template show --project=<project> <name>
-pua task create --project=<project> --template=<name> --field <name>=<value>
+pua task create --project=<project> --template=<name> --field <name>=<value> [--profile=<name>|--agent=<name>]
 ~~~
 
 For code changes, you must create a Task-owned worktree under the Task's worktree/ directory. Never modify shared source checkouts under repos/ directly. Projects do not own code worktrees.

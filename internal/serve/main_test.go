@@ -707,11 +707,11 @@ func TestArchiveResourcePrunesPersistedUIState(t *testing.T) {
 			"project2": {"project2.task1", "project2.task2"},
 		},
 		ResourceStates: map[string]resourceUserState{
-			"project1":       {Favorite: true},
-			"project1.task2": {Favorite: true},
-			"project2":       {Favorite: true},
-			"project2.task1": {Favorite: true},
-			"project2.task2": {Favorite: true},
+			"project1":       {ReadTurnNumber: intPointer(7)},
+			"project1.task2": {ReadTurnNumber: intPointer(7)},
+			"project2":       {ReadTurnNumber: intPointer(4)},
+			"project2.task1": {ReadTurnNumber: intPointer(4)},
+			"project2.task2": {ReadTurnNumber: intPointer(4)},
 		},
 	}
 	if err := saveUIStateFile(userUIStatePath(workspace, app.DefaultUserName), seed); err != nil {
@@ -764,8 +764,8 @@ func TestArchiveResourcePrunesPersistedUIState(t *testing.T) {
 			t.Fatalf("resource state for archived resource retained: %v", state.ResourceStates)
 		}
 	}
-	if !state.ResourceStates["project2"].Favorite {
-		t.Fatalf("favorite for unrelated project lost: %v", state.ResourceStates)
+	if state.ResourceStates["project2"].ReadTurnNumber == nil {
+		t.Fatalf("read cursor for unrelated project lost: %v", state.ResourceStates)
 	}
 	aliceState, err := loadUIStateFile(userUIStatePath(workspace, "Alice"))
 	if err != nil {
@@ -791,8 +791,8 @@ func TestArchiveResourcePrunesPersistedUIState(t *testing.T) {
 	if _, ok := state.ResourceStates["project2.task1"]; ok {
 		t.Fatalf("resource state for archived task retained: %v", state.ResourceStates)
 	}
-	if !state.ResourceStates["project2"].Favorite || !state.ResourceStates["project2.task2"].Favorite {
-		t.Fatalf("favorites for surviving resources lost: %v", state.ResourceStates)
+	if state.ResourceStates["project2"].ReadTurnNumber == nil || state.ResourceStates["project2.task2"].ReadTurnNumber == nil {
+		t.Fatalf("read cursors for surviving resources lost: %v", state.ResourceStates)
 	}
 	if got := strings.Join(state.TaskOrder["project2"], ","); got != "project2.task2" {
 		t.Fatalf("taskOrder for surviving project not pruned: %v", state.TaskOrder)

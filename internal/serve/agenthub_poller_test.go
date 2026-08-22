@@ -126,11 +126,6 @@ func TestAgentHubPollerProjectsTurnStartAndClearsStaleTurnIDAtReady(t *testing.T
 		ID: "ses_activity_turn", State: "running", CurrentTurnID: "turn-activity",
 		UpdatedAt: "2026-08-01T00:00:10Z",
 	})
-	if _, err := manager.server.mutateResourceUserStateAtPath(workspace.Path, "project1", func(state *resourceUserState) {
-		state.Favorite = true
-	}); err != nil {
-		t.Fatal(err)
-	}
 	fake.mu.Lock()
 	fake.turns["ses_activity_turn"] = map[string]agentHubTurn{
 		"turn-activity": {ID: "turn-activity", TurnID: "turn-activity", Status: "running", StartedAt: "2026-08-01T00:00:05Z"},
@@ -170,8 +165,8 @@ func TestAgentHubPollerProjectsTurnStartAndClearsStaleTurnIDAtReady(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tree.Activity.Running) != 0 || len(tree.Activity.Favorites) != 1 || tree.Activity.Favorites[0].Runtime == nil || tree.Activity.Favorites[0].Runtime.ActiveTurn {
-		t.Fatalf("Activity did not converge to an idle favorite row: %#v", tree.Activity)
+	if len(tree.Activity.Running) != 0 || tree.Projects[0].Runtime == nil || tree.Projects[0].Runtime.ActiveTurn {
+		t.Fatalf("Activity did not converge to an idle project row: %#v", tree.Projects[0])
 	}
 }
 

@@ -9,7 +9,6 @@
     activity,
     inbox,
     onSelect,
-    onToggleFavorite,
     onOpenInboxMessage,
     onReplyInboxMessage,
     onDeleteInboxMessage,
@@ -18,7 +17,6 @@
     activity: ShellActivityLists;
     inbox: ShellInboxMessage[];
     onSelect: (id: string) => Promise<void>;
-    onToggleFavorite: (id: string, favorite: boolean) => Promise<void>;
     onOpenInboxMessage: (id: string) => Promise<void>;
     onReplyInboxMessage: (id: string, text: string) => Promise<void>;
     onDeleteInboxMessage: (id: string) => Promise<void>;
@@ -31,7 +29,6 @@
   // full name stays available via tooltip (title) and the tabpanel aria-label.
   const tabs: Array<{ key: ActivityTab; label: string; fullLabel: string }> = [
     { key: "running", label: "Running", fullLabel: "Running" },
-    { key: "favorites", label: "Favs", fullLabel: "Favorites" },
     { key: "unread", label: "Unread", fullLabel: "Unread" },
     { key: "problems", label: "Issues", fullLabel: "Problems" },
     { key: "inbox", label: "Inbox", fullLabel: "Inbox" },
@@ -59,10 +56,6 @@
     return "home";
   }
 
-  function canFavorite(item: ShellActivityItem): boolean {
-    return item.type === "project" || item.type === "task";
-  }
-
   function metadata(item: ShellActivityItem): string {
     return [
       item.ref || item.id,
@@ -74,7 +67,6 @@
 
   function emptyMessage(tab: ActivityTab): string {
     if (tab === "inbox") return "No agent messages yet.";
-    if (tab === "favorites") return "Favorite a project or task to keep it here.";
     if (tab === "unread") return "All resource Turns have been read.";
     if (tab === "problems") return "No blocked or error Tasks.";
     return "No resources are currently running.";
@@ -86,22 +78,6 @@
     } catch (reason) {
       onToast(reason instanceof Error ? reason.message : String(reason));
     }
-  }
-
-  async function toggleFavorite(event: Event, item: ShellActivityItem): Promise<void> {
-    event.preventDefault();
-    event.stopPropagation();
-    if (event instanceof MouseEvent) (event.currentTarget as HTMLElement | null)?.blur();
-    try {
-      await onToggleFavorite(item.id, !item.favorite);
-    } catch (reason) {
-      onToast(reason instanceof Error ? reason.message : String(reason));
-    }
-  }
-
-  function favoriteKeydown(event: KeyboardEvent, item: ShellActivityItem): void {
-    if (event.key !== "Enter" && event.key !== " ") return;
-    void toggleFavorite(event, item);
   }
 
   async function openInboxMessage(message: ShellInboxMessage): Promise<void> {
@@ -215,12 +191,6 @@
               <span class="activity-status-runtime-slot" hidden={!item.status.hasTaskState}><StatusPresentation status={item.status} className="activity-status-icon" /></span>
             </span>
             <span class="activity-title"><strong>{item.title}</strong><span class="activity-meta">{metadata(item)}</span></span>
-            <span class="activity-actions">
-              {#if canFavorite(item)}
-                <!-- svelte-ignore a11y_no_static_element_interactions -->
-                <span class:favorite={item.favorite} class="favorite-star" role="checkbox" aria-checked={item.favorite} tabindex="0" aria-label={item.favorite ? `Remove ${item.title} from favorites` : `Add ${item.title} to favorites`} title={item.favorite ? "Remove from favorites" : "Add to favorites"} onclick={(event) => toggleFavorite(event, item)} onkeydown={(event) => favoriteKeydown(event, item)}><Icon name="star" /></span>
-              {/if}
-            </span>
           </button>
         {/each}
       {/if}

@@ -627,10 +627,6 @@ func (s *server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 			s.handleResourceRead(w, r, id, parts[2])
 			return
 		}
-		if len(parts) == 4 && parts[3] == "favorite" {
-			s.handleResourceFavorite(w, r, id, parts[2])
-			return
-		}
 		if len(parts) == 4 && parts[3] == "messages" {
 			s.agents.handleResourceMessages(w, r, id, parts[2])
 			return
@@ -1964,7 +1960,7 @@ func (s *server) saveUIState(id string, state uiState, userNames ...string) erro
 		return err
 	}
 	// UI navigation updates predate user resource state. Preserve the
-	// server-owned map so an older browser cannot overwrite favorites or reads.
+	// server-owned map so an older browser cannot overwrite read cursors.
 	statePath := userUIStatePath(workspace.Path, selectedUserName(userNames))
 	existing, err := loadUIStateFile(statePath)
 	if err != nil {

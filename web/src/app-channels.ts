@@ -24,13 +24,13 @@ const noopAsync = async () => undefined;
 export function createPUAAppChannels(): PUAAppChannels {
   return {
     appShell: createModelChannel<AppShellModel>({
-      identity: "", loading: true, error: "", version: "v0.1.0", activeWorkspaceId: "", workspaceName: "", workspaces: [], projects: [], treeEditing: false, activity: { running: [], favorites: [], unread: [], problems: [] }, inbox: [],
+      identity: "", loading: true, error: "", version: "v0.1.0", activeWorkspaceId: "", workspaceName: "", workspaces: [], projects: [], treeEditing: false, activity: { running: [], unread: [], problems: [] }, inbox: [],
       doctor: { checking: true, complete: false, summary: { errors: 0, warnings: 0 }, workspaces: [] },
       paneSizes: { sidebarWidth: 280, chatWidth: 420, chatHeight: 320, sidebarAttentionHeight: 210 }, mobile: { sidebarOpen: false },
       layout: { preference: "auto", effective: "three" },
       route: { path: "", revision: 0, replace: true },
       onSwitchWorkspace: noopAsync, onAddWorkspace: noop, onCreateProject: noop, onOpenSettings: noop, onRefreshDoctor: noopAsync, onToggleProject: noopAsync, onSelectResource: noopAsync,
-      onReorder: noopAsync, onDragState: noop, onToggleTreeEditing: noop, onCreateFolder: async () => "", onRenameFolder: noopAsync, onDeleteFolder: noopAsync, onToggleFolder: noopAsync, onToggleFavorite: noopAsync, onOpenInboxMessage: noopAsync, onReplyInboxMessage: noopAsync, onDeleteInboxMessage: noopAsync, onPanePreview: noop, onPaneCommit: noop, onPaneViewport: noop, onMobileSidebar: noop,
+      onReorder: noopAsync, onDragState: noop, onToggleTreeEditing: noop, onCreateFolder: async () => "", onRenameFolder: noopAsync, onDeleteFolder: noopAsync, onToggleFolder: noopAsync, onOpenInboxMessage: noopAsync, onReplyInboxMessage: noopAsync, onDeleteInboxMessage: noopAsync, onPanePreview: noop, onPaneCommit: noop, onPaneViewport: noop, onMobileSidebar: noop,
       onToast: noop, onHistoryNavigation: noopAsync,
     }),
     create: createModelChannel<CreateDialogModel>({

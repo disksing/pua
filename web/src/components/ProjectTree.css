@@ -378,40 +378,6 @@
   box-shadow: inset 0 0 0 2px var(--blue);
 }
 
-:where([data-component-owner="project-tree"]) .favorite-star {
-  width: 18px;
-  height: 18px;
-  display: grid;
-  place-items: center;
-  border-radius: 4px;
-  color: var(--sidebar-muted);
-  cursor: pointer;
-  opacity: 0;
-}
-
-:where([data-component-owner="project-tree"]) .favorite-star:hover,
-:where([data-component-owner="project-tree"]) .favorite-star:focus-visible,
-:where([data-component-owner="project-tree"]) .favorite-star.favorite,
-:where([data-component-owner="project-tree"]) .tree-item:hover .favorite-star,
-:where([data-component-owner="project-tree"]) .tree-item:focus-within .favorite-star {
-  opacity: 1;
-}
-
-:where([data-component-owner="project-tree"]) .favorite-star:hover,
-:where([data-component-owner="project-tree"]) .favorite-star:focus-visible {
-  background: var(--sidebar-row);
-  color: var(--sidebar-text);
-}
-
-:where([data-component-owner="project-tree"]) .favorite-star svg {
-  width: 14px;
-  height: 14px;
-}
-
-:where([data-component-owner="project-tree"]) .favorite-star.favorite svg {
-  fill: currentColor;
-}
-
 :where([data-component-owner="project-tree"]) .tree-item.drag-source {
   opacity: 0.5;
 }

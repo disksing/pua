@@ -41,11 +41,15 @@
   padding: 14px 14px 0;
 }
 
+/* No bottom padding here: scrolled content paints into the scroller's
+   padding box, which would peek out below the sticky settings-save-bar
+   (sticky offsets resolve against the content box). The bottom breathing
+   room lives on the settings panel root instead (see SettingsPanel.css). */
 :where([data-component-owner="settings"]) .settings-body {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 10px 24px 24px;
+  padding: 10px 24px 0;
 }
 
 :where([data-component-owner="settings"]) .settings-close {
@@ -77,6 +81,6 @@
   }
 
   :where([data-component-owner="settings"]) .settings-body {
-    padding: 10px 20px 20px;
+    padding: 10px 20px 0;
   }
 }

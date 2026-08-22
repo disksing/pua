@@ -982,6 +982,31 @@ func loadTrustedSnapshot(dir, id string) (Session, bool) {
 	if last.ID != snapshot.LastEventID || last.SessionID != id {
 		return Session{}, false
 	}
+	// Older trusted snapshots predate the semantic activity projection. Active
+	// sessions need one replay so a daemon restart can recover the real Turn
+	// activity boundary instead of falling back to the noisy session UpdatedAt.
+	if snapshot.LastActivityAt == nil && (snapshot.State == StateRunning || snapshot.State == StateWaitingApproval) {
+		events, err := readEventsRepairTail(filepath.Join(dir, "events.jsonl"))
+		if err != nil || len(events) == 0 {
+			return Session{}, false
+		}
+		var projected Session
+		for _, event := range events {
+			if event.SessionID != id {
+				return Session{}, false
+			}
+			if err := applyEvent(&projected, event); err != nil {
+				return Session{}, false
+			}
+		}
+		if projected.LastEventID != snapshot.LastEventID {
+			return Session{}, false
+		}
+		if err := writeJSONAtomic(filepath.Join(dir, "session.json"), projected); err != nil {
+			return Session{}, false
+		}
+		return projected, true
+	}
 	return snapshot, true
 }
 
@@ -1127,6 +1152,11 @@ func applyEvent(projected *Session, event Event) error {
 				projected.State = StateReady
 			}
 		}
+	}
+	if IsActivityEvent(event) {
+		activityAt := event.Time
+		projected.LastActivityAt = &activityAt
+		projected.LastActivityTurnID = event.TurnID
 	}
 	projected.LastEventID = event.ID
 	projected.UpdatedAt = event.Time

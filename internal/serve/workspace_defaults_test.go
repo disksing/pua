@@ -68,6 +68,19 @@ func TestWorkspaceDefaultsAndProjectTaskDefaultHTTPAPI(t *testing.T) {
 		t.Fatalf("invalid Generation policy = %d %s", invalidPolicy.Code, invalidPolicy.Body.String())
 	}
 
+	watchdogResponse := request(http.MethodPut, "/api/workspaces/workspace-defaults/stall-watchdog-policy", `{"enabled":true,"timeoutMinutes":45}`)
+	var watchdogBody struct {
+		Policy app.StallWatchdogPolicy `json:"stallWatchdogPolicy"`
+	}
+	watchdogErr := json.Unmarshal(watchdogResponse.Body.Bytes(), &watchdogBody)
+	if watchdogResponse.Code != http.StatusOK || watchdogErr != nil || watchdogBody.Policy != (app.StallWatchdogPolicy{Enabled: true, TimeoutMinutes: 45}) {
+		t.Fatalf("update stall watchdog policy = %d %s", watchdogResponse.Code, watchdogResponse.Body.String())
+	}
+	invalidWatchdog := request(http.MethodPut, "/api/workspaces/workspace-defaults/stall-watchdog-policy", `{"enabled":true,"timeoutMinutes":0}`)
+	if invalidWatchdog.Code != http.StatusBadRequest {
+		t.Fatalf("invalid stall watchdog policy = %d %s", invalidWatchdog.Code, invalidWatchdog.Body.String())
+	}
+
 	taskDefaultResponse := request(http.MethodPut, "/api/workspaces/workspace-defaults/resources/project1/task-default", `{"kind":"profile","name":"review"}`)
 	var taskDefaultBody struct {
 		TaskDefault app.AgentBinding `json:"taskDefault"`
@@ -100,7 +113,7 @@ func TestWorkspaceDefaultsAndProjectTaskDefaultHTTPAPI(t *testing.T) {
 	}
 
 	treeResponse := request(http.MethodGet, "/api/workspaces/workspace-defaults/tree", "")
-	if treeResponse.Code != http.StatusOK || !strings.Contains(treeResponse.Body.String(), `"resourceDefaults"`) || !strings.Contains(treeResponse.Body.String(), `"generationPolicy"`) || !strings.Contains(treeResponse.Body.String(), `"review"`) {
+	if treeResponse.Code != http.StatusOK || !strings.Contains(treeResponse.Body.String(), `"resourceDefaults"`) || !strings.Contains(treeResponse.Body.String(), `"generationPolicy"`) || !strings.Contains(treeResponse.Body.String(), `"stallWatchdogPolicy"`) || !strings.Contains(treeResponse.Body.String(), `"review"`) {
 		t.Fatalf("tree did not project Workspace defaults: %d %s", treeResponse.Code, treeResponse.Body.String())
 	}
 

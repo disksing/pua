@@ -232,7 +232,7 @@ func generationNeedsFastReconcile(m *agentManager, rt *agentRuntime, record gene
 	if projectedState == "" {
 		projectedState = agentHubStateForPUAStatus(record.Status)
 	}
-	pending := stopInFlight || record.CompletionPending || record.ReplacementPending || record.ArchivedTaskStopRequested ||
+	pending := stopInFlight || record.CompletionPending || record.ReplacementPending || record.ArchivedTaskStopRequested || record.StallWatchdog != nil ||
 		strings.TrimSpace(record.ResumeRetryAt) != "" || resourceGenerationLifecyclePending(record)
 	pending = pending || lifecycleReceiptNeedsReconcile(record.LifecycleReceipt)
 	switch record.Status {
@@ -306,7 +306,7 @@ func (m *agentManager) agentHubFastWorkPending() bool {
 		state := rt.agentHubState
 		stopInFlight := rt.lifecycleStopInFlight
 		rt.mu.Unlock()
-		if stopInFlight || record.CompletionPending || record.ReplacementPending || record.ArchivedTaskStopRequested ||
+		if stopInFlight || record.CompletionPending || record.ReplacementPending || record.ArchivedTaskStopRequested || record.StallWatchdog != nil ||
 			resourceGenerationLifecyclePending(record) || strings.TrimSpace(record.ResumeRetryAt) != "" ||
 			lifecycleReceiptNeedsReconcile(record.LifecycleReceipt) || (record.IdleSleepStopRequested && record.Status != "idle-suspended") {
 			return true

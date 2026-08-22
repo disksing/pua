@@ -267,8 +267,12 @@ type Session struct {
 	CurrentTurnID      string            `json:"currentTurnId,omitempty"`
 	PendingApprovalIDs []string          `json:"pendingApprovalIds,omitempty"`
 	LastEventID        int64             `json:"lastEventId"`
-	CreatedAt          time.Time         `json:"createdAt"`
-	UpdatedAt          time.Time         `json:"updatedAt"`
+	// LastActivityAt is updated only by semantic work events within a Turn.
+	// Session lifecycle changes, provider metadata, and stderr do not refresh it.
+	LastActivityAt     *time.Time `json:"lastActivityAt,omitempty"`
+	LastActivityTurnID string     `json:"lastActivityTurnId,omitempty"`
+	CreatedAt          time.Time  `json:"createdAt"`
+	UpdatedAt          time.Time  `json:"updatedAt"`
 }
 
 // Source is caller-supplied metadata for correlating sessions with the

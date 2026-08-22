@@ -16,6 +16,8 @@
   let generationPolicyEnabled = $state(true);
   let generationMaxTurns = $state(20);
   let generationMaxMinutes = $state(120);
+  let stallWatchdogEnabled = $state(true);
+  let stallWatchdogMinutes = $state(30);
   let nameEditing = $state(false);
   let nameDraft = $state("");
   let nameInput = $state<HTMLInputElement | null>(null);
@@ -31,6 +33,10 @@
     generationPolicyEnabled = model.generationPolicy.enabled;
     generationMaxTurns = model.generationPolicy.maxTurns;
     generationMaxMinutes = model.generationPolicy.maxAccumulatedTurnMinutes;
+  });
+  $effect(() => {
+    stallWatchdogEnabled = model.stallWatchdogPolicy.enabled;
+    stallWatchdogMinutes = model.stallWatchdogPolicy.timeoutMinutes;
   });
   $effect(() => {
     if (nameEditing && nameInput) nameInput.focus();
@@ -84,6 +90,14 @@
       enabled: generationPolicyEnabled,
       maxTurns: generationMaxTurns,
       maxAccumulatedTurnMinutes: generationMaxMinutes,
+    }));
+  }
+
+  function saveStallWatchdogPolicy(): void {
+    if (!Number.isInteger(stallWatchdogMinutes) || stallWatchdogMinutes < 1 || stallWatchdogMinutes > 525600) return;
+    void run("stallWatchdogPolicy", () => model.onSaveStallWatchdogPolicy({
+      enabled: stallWatchdogEnabled,
+      timeoutMinutes: stallWatchdogMinutes,
     }));
   }
 
@@ -191,6 +205,25 @@
             <label><input type="number" min="1" max="100000" step="1" bind:value={generationMaxTurns} disabled={Boolean(pending)} aria-label="Maximum Turns per Generation" /><span>Turns</span></label>
             <label><input type="number" min="1" max="525600" step="1" bind:value={generationMaxMinutes} disabled={Boolean(pending)} aria-label="Maximum accumulated Turn minutes per Generation" /><span>minutes</span></label>
             <button type="button" class="secondary-button" disabled={Boolean(pending) || !Number.isInteger(generationMaxTurns) || generationMaxTurns < 1 || !Number.isInteger(generationMaxMinutes) || generationMaxMinutes < 1 || (generationPolicyEnabled === model.generationPolicy.enabled && generationMaxTurns === model.generationPolicy.maxTurns && generationMaxMinutes === model.generationPolicy.maxAccumulatedTurnMinutes)} onclick={saveGenerationPolicy}><Icon name="save" /><span>Save</span></button>
+          </div>
+        </div>
+      </div>
+    </section>
+    <section class="resource-settings-section">
+      <div class="resource-settings-section-head">
+        <strong>Turn stall watchdog</strong>
+        <span>Applies to every resource. Stop and resume the same Session after a running Turn has had no effective activity for the configured time.</span>
+      </div>
+      <div class="resource-settings-list">
+        <label class="resource-settings-row resource-settings-policy-toggle">
+          <span class="resource-settings-row-label"><strong>Automatic recovery</strong><span>Approval-waiting Turns are left untouched; a stalled running Turn is stopped once and resumed from the same Session.</span></span>
+          <input type="checkbox" bind:checked={stallWatchdogEnabled} disabled={Boolean(pending)} aria-label="Enable Turn stall watchdog" />
+        </label>
+        <div class="resource-settings-row resource-settings-policy-budgets">
+          <div class="resource-settings-row-label"><strong>Timeout</strong><span>Effective activity includes messages, reasoning, tools, approvals, provider errors, and Turn terminal events.</span></div>
+          <div class="resource-settings-policy-controls resource-settings-stall-watchdog-controls">
+            <label><input type="number" min="1" max="525600" step="1" bind:value={stallWatchdogMinutes} disabled={Boolean(pending)} aria-label="Turn stall watchdog timeout in minutes" /><span>minutes</span></label>
+            <button type="button" class="secondary-button" disabled={Boolean(pending) || !Number.isInteger(stallWatchdogMinutes) || stallWatchdogMinutes < 1 || stallWatchdogMinutes > 525600 || (stallWatchdogEnabled === model.stallWatchdogPolicy.enabled && stallWatchdogMinutes === model.stallWatchdogPolicy.timeoutMinutes)} onclick={saveStallWatchdogPolicy}><Icon name="save" /><span>Save</span></button>
           </div>
         </div>
       </div>

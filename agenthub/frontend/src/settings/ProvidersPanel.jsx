@@ -12,11 +12,10 @@ function availabilityPill(item) {
 }
 
 // ProvidersPanel renders exactly four fixed enable/disable switches for the
-// built-in providers. There is intentionally no provider add/delete and no
-// editing of commands, arguments, environment variables or other advanced
-// fields; toggling only flips the persisted enabled flag and the daemon
-// preserves the underlying configuration.
-export function ProvidersPanel({ config, probes, pendingId, toggleError, onToggle }) {
+// built-in providers. Provider command paths are editable because a desktop
+// app may not inherit the shell PATH used by a terminal; toggling still only
+// flips the persisted enabled flag.
+export function ProvidersPanel({ config, probes, pendingId, toggleError, onToggle, onCommandChange }) {
   const switches = buildProviderSwitches(config, probes);
   return (
     <section aria-label="Provider settings">
@@ -55,6 +54,18 @@ export function ProvidersPanel({ config, probes, pendingId, toggleError, onToggl
                 <span className="provider-toggle-text">{pending ? "Saving…" : item.enabled ? "On" : "Off"}</span>
               </button>
             </div>
+            <label className="settings-provider-command">
+              <span>Executable path</span>
+              <input
+                type="text"
+                value={item.command}
+                placeholder={`Use PATH: ${item.id}`}
+                disabled={!item.present}
+                aria-label={`${item.name} executable path`}
+                onChange={(event) => onCommandChange?.(item.id, event.target.value)}
+              />
+              <small>{item.present ? `Optional. Leave blank to resolve ${item.id} from PATH.` : "Enable this provider before setting its executable path."}</small>
+            </label>
           </article>
         );
       })}

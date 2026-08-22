@@ -5,6 +5,9 @@
   flex-direction: column;
   gap: 20px;
   max-width: 760px;
+  /* Bottom breathing room lives on the panel (not the scroller) so the
+     sticky settings-save-bar stays flush with the viewport bottom. */
+  padding-bottom: 24px;
 }
 
 :where([data-component-owner][data-settings-panel]) .settings-panel-header {

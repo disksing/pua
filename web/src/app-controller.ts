@@ -1270,6 +1270,7 @@ function detailPanelModel(): DetailPanelModel {
 		workspaceUsers: controllerState.workspaceUsers,
 		currentUserName: currentUserName(),
 		generationPolicy: controllerState.tree?.generationPolicy || { enabled: true, maxTurns: 20, maxAccumulatedTurnMinutes: 120 },
+		stallWatchdogPolicy: controllerState.tree?.stallWatchdogPolicy || { enabled: true, timeoutMinutes: 30 },
 		agentBinding: controllerState.selectedId === "workspace"
 			? controllerState.tree?.agentBinding || { kind: "profile", name: "default" }
 			: findResource(controllerState.selectedId)?.agentBinding || { kind: "profile", name: "default" },
@@ -1343,6 +1344,14 @@ function detailPanelModel(): DetailPanelModel {
 			await loadTree({ updateURL: false });
 			publishViewModels();
 			toast("Generation policy saved.");
+		},
+		onSaveStallWatchdogPolicy: async (policy) => {
+			await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/stall-watchdog-policy`, {
+				method: "PUT", body: JSON.stringify(policy)
+			});
+			await loadTree({ updateURL: false });
+			publishViewModels();
+			toast("Turn stall watchdog saved.");
 		},
 		onSaveTaskDefault: async (projectId, binding) => {
 			await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/resources/${encodeURIComponent(projectId)}/task-default`, {

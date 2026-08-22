@@ -82,6 +82,48 @@ func TestStorePersistsOneContinuousEventLog(t *testing.T) {
 	}
 }
 
+func TestSessionLastActivityTracksSemanticTurnEventsOnly(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := store.Create(CreateInput{Title: "activity", Cwd: t.TempDir(), AgentName: "Codex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	turnID := "turn_activity"
+	started, err := store.Append(created.ID, "turn.started", turnID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := store.Get(created.ID)
+	if err != nil || value.LastActivityAt == nil || !value.LastActivityAt.Equal(started.Time) || value.LastActivityTurnID != turnID {
+		t.Fatalf("turn start activity = %#v, %v", value, err)
+	}
+	if _, err := store.Append(created.ID, "provider.stderr", "", []byte(`{"text":"still noisy"}`)); err != nil {
+		t.Fatal(err)
+	}
+	unchanged, err := store.Get(created.ID)
+	if err != nil || unchanged.LastActivityAt == nil || !unchanged.LastActivityAt.Equal(started.Time) {
+		t.Fatalf("provider stderr refreshed activity: %#v, %v", unchanged, err)
+	}
+	delta, err := store.Append(created.ID, "message.assistant.delta", turnID, []byte(`{"text":"working"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err = store.Get(created.ID)
+	if err != nil || value.LastActivityAt == nil || !value.LastActivityAt.Equal(delta.Time) {
+		t.Fatalf("assistant activity = %#v, %v", value, err)
+	}
+	if _, err := store.Append(created.ID, "session.state", "", []byte(`{"state":"stopping"}`)); err != nil {
+		t.Fatal(err)
+	}
+	unchanged, err = store.Get(created.ID)
+	if err != nil || unchanged.LastActivityAt == nil || !unchanged.LastActivityAt.Equal(delta.Time) {
+		t.Fatalf("session lifecycle refreshed activity: %#v, %v", unchanged, err)
+	}
+}
+
 func TestSubscribeAllObservesEverySessionAfterPersistence(t *testing.T) {
 	store, err := Open(t.TempDir())
 	if err != nil {

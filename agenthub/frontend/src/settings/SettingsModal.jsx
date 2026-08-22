@@ -149,6 +149,16 @@ export function SettingsModal({ onClose, onSaved, triggerRef }) {
     });
   }, []);
 
+  const updateProviderCommand = useCallback((id, command) => {
+    mutate((next) => {
+      const provider = next.agentProviders.find((item) => item.id === id);
+      if (!provider) return;
+      const normalized = String(command ?? "").trim();
+      if (normalized) provider.command = normalized;
+      else delete provider.command;
+    });
+  }, [mutate]);
+
   // toggleProvider flips one built-in provider through the minimal daemon
   // endpoint. On success the persisted provider is merged into both the draft
   // and the snapshot, so unsaved agent edits survive and dirty tracking stays
@@ -158,9 +168,23 @@ export function SettingsModal({ onClose, onSaved, triggerRef }) {
     if (pendingProviderId || !draft) return;
     setPendingProviderId(id);
     setProviderToggleError("");
+    const draftProvider = draft.agentProviders.find((item) => item.id === id);
+    const snapshotProvider = snapshot?.agentProviders?.find((item) => item.id === id);
+    const commandDirty = draftProvider?.command !== snapshotProvider?.command;
+    const draftCommand = draftProvider?.command;
     try {
       const provider = await requestProviderToggle(api, id, enabled);
-      setDraft((current) => applyProviderToggle(current, provider));
+      setDraft((current) => {
+        const next = applyProviderToggle(current, provider);
+        if (commandDirty) {
+          const updated = next.agentProviders.find((item) => item.id === id);
+          if (updated) {
+            if (draftCommand) updated.command = draftCommand;
+            else delete updated.command;
+          }
+        }
+        return next;
+      });
       setSnapshot((current) => applyProviderToggle(current, provider));
       const agentsBody = await api("/v1/agents");
       setProbes(agentsBody.probes || []);
@@ -178,7 +202,7 @@ export function SettingsModal({ onClose, onSaved, triggerRef }) {
     } finally {
       setPendingProviderId(null);
     }
-  }, [pendingProviderId, draft, onSaved]);
+  }, [pendingProviderId, draft, snapshot, onSaved]);
 
   const save = async (force = false) => {
     if (saving || !draft) return;
@@ -292,6 +316,7 @@ export function SettingsModal({ onClose, onSaved, triggerRef }) {
                     pendingId={pendingProviderId}
                     toggleError={providerToggleError}
                     onToggle={toggleProvider}
+                    onCommandChange={updateProviderCommand}
                   />
                 ) : null}
                 {section === "agents" ? (

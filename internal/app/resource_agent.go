@@ -48,6 +48,13 @@ func defaultGenerationPolicy() GenerationPolicy {
 	}
 }
 
+func defaultStallWatchdogPolicy() StallWatchdogPolicy {
+	return StallWatchdogPolicy{
+		Enabled:        true,
+		TimeoutMinutes: DefaultStallWatchdogTimeoutMinutes,
+	}
+}
+
 func resolveGenerationPolicy(value GenerationPolicyConfig) (GenerationPolicy, error) {
 	policy := defaultGenerationPolicy()
 	if value.Enabled != nil {
@@ -84,6 +91,30 @@ func generationPolicyConfig(policy GenerationPolicy) GenerationPolicyConfig {
 		MaxTurns:                  &maxTurns,
 		MaxAccumulatedTurnMinutes: &maxMinutes,
 	}
+}
+
+func resolveStallWatchdogPolicy(value StallWatchdogPolicyConfig) (StallWatchdogPolicy, error) {
+	policy := defaultStallWatchdogPolicy()
+	if value.Enabled != nil {
+		policy.Enabled = *value.Enabled
+	}
+	if value.TimeoutMinutes != nil {
+		policy.TimeoutMinutes = *value.TimeoutMinutes
+	}
+	return normalizeStallWatchdogPolicy(policy)
+}
+
+func normalizeStallWatchdogPolicy(policy StallWatchdogPolicy) (StallWatchdogPolicy, error) {
+	if policy.TimeoutMinutes < 1 || policy.TimeoutMinutes > 525600 {
+		return StallWatchdogPolicy{}, errors.New("stall watchdog timeout minutes must be between 1 and 525600")
+	}
+	return policy, nil
+}
+
+func stallWatchdogPolicyConfig(policy StallWatchdogPolicy) StallWatchdogPolicyConfig {
+	enabled := policy.Enabled
+	timeoutMinutes := policy.TimeoutMinutes
+	return StallWatchdogPolicyConfig{Enabled: &enabled, TimeoutMinutes: &timeoutMinutes}
 }
 
 // NormalizeAgentBinding validates one explicit resource binding. An empty
@@ -147,6 +178,14 @@ func (w *Workspace) EnsureResourceRuntime() (WorkspaceRuntimeConfig, error) {
 			cfg.GenerationPolicy = generationPolicyConfig(generationPolicy)
 			changed = true
 		}
+		stallWatchdogPolicy, err := resolveStallWatchdogPolicy(cfg.StallWatchdogPolicy)
+		if err != nil {
+			return err
+		}
+		if cfg.StallWatchdogPolicy.Enabled == nil || cfg.StallWatchdogPolicy.TimeoutMinutes == nil {
+			cfg.StallWatchdogPolicy = stallWatchdogPolicyConfig(stallWatchdogPolicy)
+			changed = true
+		}
 		if strings.TrimSpace(cfg.InstanceID) == "" {
 			cfg.InstanceID, err = newWorkspaceInstanceID()
 			if err != nil {
@@ -177,7 +216,7 @@ func (w *Workspace) EnsureResourceRuntime() (WorkspaceRuntimeConfig, error) {
 		if err := os.MkdirAll(filepath.Join(workspacepath.ControlDir(w.root), "runtime"), 0o700); err != nil {
 			return err
 		}
-		result = WorkspaceRuntimeConfig{InstanceID: cfg.InstanceID, AgentBinding: cfg.AgentBinding, ResourceDefaults: cfg.ResourceDefaults, GenerationPolicy: generationPolicy}
+		result = WorkspaceRuntimeConfig{InstanceID: cfg.InstanceID, AgentBinding: cfg.AgentBinding, ResourceDefaults: cfg.ResourceDefaults, GenerationPolicy: generationPolicy, StallWatchdogPolicy: stallWatchdogPolicy}
 		return nil
 	})
 	if err != nil {
@@ -238,7 +277,11 @@ func (w *Workspace) RuntimeConfig() (WorkspaceRuntimeConfig, error) {
 	if err != nil {
 		return WorkspaceRuntimeConfig{}, err
 	}
-	return WorkspaceRuntimeConfig{InstanceID: cfg.InstanceID, AgentBinding: binding, ResourceDefaults: normalizeResourceDefaults(cfg.ResourceDefaults), GenerationPolicy: policy}, nil
+	stallWatchdogPolicy, err := resolveStallWatchdogPolicy(cfg.StallWatchdogPolicy)
+	if err != nil {
+		return WorkspaceRuntimeConfig{}, err
+	}
+	return WorkspaceRuntimeConfig{InstanceID: cfg.InstanceID, AgentBinding: binding, ResourceDefaults: normalizeResourceDefaults(cfg.ResourceDefaults), GenerationPolicy: policy, StallWatchdogPolicy: stallWatchdogPolicy}, nil
 }
 
 // SetGenerationPolicy replaces the Workspace-wide automatic generation
@@ -262,6 +305,30 @@ func (w *Workspace) SetGenerationPolicy(policy GenerationPolicy) (GenerationPoli
 	})
 	if err != nil {
 		return GenerationPolicy{}, &APIError{Operation: "set generation policy", Kind: "generation_policy", Workspace: w.root, Err: err}
+	}
+	return policy, nil
+}
+
+// SetStallWatchdogPolicy replaces the Workspace-wide Turn stall watchdog. It
+// applies uniformly to Workspace, Project, Task, and Scheduler resources.
+func (w *Workspace) SetStallWatchdogPolicy(policy StallWatchdogPolicy) (StallWatchdogPolicy, error) {
+	if err := w.require(); err != nil {
+		return StallWatchdogPolicy{}, err
+	}
+	policy, err := normalizeStallWatchdogPolicy(policy)
+	if err != nil {
+		return StallWatchdogPolicy{}, &APIError{Operation: "set stall watchdog policy", Kind: "stall_watchdog_policy", Workspace: w.root, Err: err}
+	}
+	err = withWorkspaceMutationLock(w.root, func() error {
+		cfg, err := readWorkspaceConfig(w.root)
+		if err != nil {
+			return err
+		}
+		cfg.StallWatchdogPolicy = stallWatchdogPolicyConfig(policy)
+		return writeWorkspaceConfig(w.root, cfg)
+	})
+	if err != nil {
+		return StallWatchdogPolicy{}, &APIError{Operation: "set stall watchdog policy", Kind: "stall_watchdog_policy", Workspace: w.root, Err: err}
 	}
 	return policy, nil
 }

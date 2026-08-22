@@ -80,6 +80,10 @@ type generationRecord struct {
 	ResumeFailureCount int    `json:"resumeFailureCount,omitempty"`
 	ResumeRetryAt      string `json:"resumeRetryAt,omitempty"`
 	ResumeLastError    string `json:"resumeLastError,omitempty"`
+	// StallWatchdog is the durable Stop -> Resume recovery checkpoint for one
+	// stalled Turn. Keeping the checkpoint on the generation makes a restart
+	// fail closed instead of issuing a second non-idempotent Stop.
+	StallWatchdog *stallWatchdogState `json:"stallWatchdog,omitempty"`
 	// ArchivedTaskStopRequested is the legacy-named durable progress marker for
 	// any archived Project/Task generation stop. It records that reconciliation
 	// has entered the Stop -> stopped -> Archive sequence; unknown outcomes are
@@ -131,6 +135,18 @@ type generationRecord struct {
 	// lifecycle reconciler.
 	Retired      bool   `json:"-"`
 	RetireReason string `json:"retireReason,omitempty"`
+}
+
+type stallWatchdogState struct {
+	GenerationID      string `json:"generationId"`
+	SessionID         string `json:"sessionId"`
+	TurnID            string `json:"turnId"`
+	RecoveryTurnID    string `json:"recoveryTurnId,omitempty"`
+	RecoveryMessageID string `json:"recoveryMessageId"`
+	DetectedAt        string `json:"detectedAt"`
+	Attempt           int    `json:"attempt"`
+	StopRequested     bool   `json:"stopRequested,omitempty"`
+	RecoveryExhausted bool   `json:"recoveryExhausted,omitempty"`
 }
 
 const (
@@ -751,6 +767,10 @@ func cloneGenerationRecord(record generationRecord) generationRecord {
 	if record.LifecycleReceipt != nil {
 		receipt := *record.LifecycleReceipt
 		cloned.LifecycleReceipt = &receipt
+	}
+	if record.StallWatchdog != nil {
+		watchdog := *record.StallWatchdog
+		cloned.StallWatchdog = &watchdog
 	}
 	return cloned
 }

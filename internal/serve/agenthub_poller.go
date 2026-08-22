@@ -459,14 +459,15 @@ func (m *agentManager) reconcileAgentHubGenerationLocked(ctx context.Context, cf
 			}
 			runtime.record.CurrentTurnID = turnID
 		}
-		// LastOutputAt degenerates to the AgentHub session update time: without a
-		// server-side event pipeline it is the closest available recency signal.
+		// LastOutputAt follows AgentHub's semantic activity projection. Older
+		// AgentHub sessions may not expose it yet, so retain the historical
+		// UpdatedAt fallback until their next activity is observed.
 		if updatedAt := generationTime(session.UpdatedAt); !updatedAt.IsZero() {
 			if generationTime(runtime.record.UpdatedAt).Before(updatedAt) {
 				runtime.record.UpdatedAt = session.UpdatedAt
 			}
-			if generationTime(runtime.record.LastOutputAt).Before(updatedAt) {
-				runtime.record.LastOutputAt = session.UpdatedAt
+			if activityAt := agentHubActivityTime(session, runtime.record); !activityAt.IsZero() && generationTime(runtime.record.LastOutputAt).Before(activityAt) {
+				runtime.record.LastOutputAt = activityAt.Format(time.RFC3339Nano)
 			}
 		}
 		runtime.agentHubState = session.State
@@ -497,6 +498,9 @@ func (m *agentManager) reconcileAgentHubGenerationLocked(ctx context.Context, cf
 		rt.agentHub = client
 	}
 	rt.mu.Unlock()
+	if err := m.reconcileStallWatchdogLocked(ctx, cfg, workspace, updated, rt, session, client); err != nil {
+		rt.addPUANotice(m, "warning", "agenthub/turn-stall-watchdog", "Reconcile stalled Turn: "+err.Error())
+	}
 	if turnFinished {
 		// Mark the completion inspection before idle reconciliation can run. The
 		// terminal event timestamp, rather than this poll's ready projection,
@@ -570,6 +574,24 @@ func observedAgentHubTurnStartedAt(session agentHubSession) string {
 		return session.UpdatedAt
 	}
 	return time.Now().Format(time.RFC3339Nano)
+}
+
+func agentHubActivityTime(session agentHubSession, record generationRecord) time.Time {
+	activityAt := generationTime(session.LastActivityAt)
+	currentTurnID := strings.TrimSpace(activeAgentHubTurnID(session))
+	activityTurnID := strings.TrimSpace(session.LastActivityTurnID)
+	if !activityAt.IsZero() && (currentTurnID == "" || activityTurnID == "" || activityTurnID == currentTurnID) {
+		return activityAt
+	}
+	if currentTurnID != "" {
+		if startedAt := generationTime(record.TurnStartedAt); !startedAt.IsZero() {
+			return startedAt
+		}
+	}
+	if !activityAt.IsZero() {
+		return activityAt
+	}
+	return generationTime(session.UpdatedAt)
 }
 
 // refreshAgentHubTurnStartedAt replaces the stable first-observed timestamp
@@ -666,8 +688,8 @@ func (rt *agentRuntime) applyAgentHubSessionState(m *agentManager, session agent
 		}
 		if updatedAt := generationTime(session.UpdatedAt); !updatedAt.IsZero() {
 			runtime.record.UpdatedAt = session.UpdatedAt
-			if generationTime(runtime.record.LastOutputAt).Before(updatedAt) {
-				runtime.record.LastOutputAt = session.UpdatedAt
+			if activityAt := agentHubActivityTime(session, runtime.record); !activityAt.IsZero() && generationTime(runtime.record.LastOutputAt).Before(activityAt) {
+				runtime.record.LastOutputAt = activityAt.Format(time.RFC3339Nano)
 			}
 		} else {
 			runtime.record.UpdatedAt = time.Now().Format(time.RFC3339)

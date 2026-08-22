@@ -52,6 +52,7 @@ test("buildProviderSwitches always returns the four switches with states", () =>
   assert.equal(codex.status, "Enabled");
   assert.equal(codex.ariaLabel, "Disable Codex");
   assert.equal(codex.present, true);
+  assert.equal(codex.command, "");
 
   const kimi = byId.get("kimi");
   assert.equal(kimi.enabled, false);
@@ -65,6 +66,7 @@ test("buildProviderSwitches always returns the four switches with states", () =>
   const opencode = byId.get("opencode");
   assert.equal(opencode.enabled, false);
   assert.equal(opencode.present, false);
+  assert.equal(opencode.command, "");
 
   // Tolerates an empty config entirely.
   const empty = buildProviderSwitches(undefined);
@@ -88,16 +90,18 @@ test("buildProviderSwitches distinguishes enabled from CLI availability", () => 
   assert.equal(byId.get("pi").availabilityDetail, "pi executable not found");
 });
 
-test("switch descriptors expose no advanced configuration fields", () => {
+test("switch descriptors expose the configured executable path", () => {
   const allowed = new Set([
     "id", "name", "description", "present", "enabled", "status",
-    "availability", "availabilityTone", "availabilityDetail", "ariaLabel",
+    "command", "availability", "availabilityTone", "availabilityDetail", "ariaLabel",
   ]);
   for (const item of buildProviderSwitches(sampleConfig())) {
     for (const key of Object.keys(item)) {
       assert.ok(allowed.has(key), `unexpected advanced field "${key}" in switch descriptor`);
     }
   }
+  const kimi = buildProviderSwitches(sampleConfig()).find((item) => item.id === "kimi");
+  assert.equal(kimi.command, "/opt/kimi/bin/kimi");
 });
 
 test("applyProviderToggle preserves the underlying configuration", () => {

@@ -40,6 +40,7 @@ function model(overrides: Partial<DetailPanelModel> = {}): DetailPanelModel {
     workspaceUsers: [],
     currentUserName: "User",
     generationPolicy: { enabled: true, maxTurns: 20, maxAccumulatedTurnMinutes: 120 },
+    stallWatchdogPolicy: { enabled: true, timeoutMinutes: 30 },
     agentBinding: { kind: "profile", name: "default" },
     agentProfiles: [{ key: "default", description: "Default", agentName: "fake-agent" }],
     agents: [{ id: "fake-agent", label: "Fake Agent", summary: "fake" }],
@@ -57,6 +58,7 @@ function model(overrides: Partial<DetailPanelModel> = {}): DetailPanelModel {
     onSaveWorkspaceUserPreference: vi.fn(async () => undefined),
     onDeleteWorkspaceUser: vi.fn(async () => undefined),
     onSaveGenerationPolicy: vi.fn(async () => undefined),
+    onSaveStallWatchdogPolicy: vi.fn(async () => undefined),
     onSaveTaskDefault: vi.fn(async () => undefined),
     onRefreshScheduler: vi.fn(async () => undefined),
     onToast: vi.fn(),
@@ -94,6 +96,40 @@ describe("ResourceSettingsPanel", () => {
     maxTurns.dispatchEvent(new Event("input", { bubbles: true }));
     await tick();
     expect(save.disabled).toBe(false);
+  });
+
+  it("saves the Workspace Turn stall watchdog policy", async () => {
+    const onSaveStallWatchdogPolicy = vi.fn(async () => undefined);
+    const target = document.body.appendChild(document.createElement("div"));
+    const component = mount(ResourceSettingsPanel, {
+      target,
+      props: {
+        model: model({
+          identity: "ws-test:workspace:workspace",
+          resourceId: "workspace",
+          resourceType: "workspace",
+          resourceTitle: "Test workspace",
+          detail: null,
+          onSaveStallWatchdogPolicy,
+        }),
+      },
+    });
+    cleanups.push(() => unmount(component));
+    await tick();
+
+    const enabled = target.querySelector<HTMLInputElement>('[aria-label="Enable Turn stall watchdog"]')!;
+    const timeout = target.querySelector<HTMLInputElement>('[aria-label="Turn stall watchdog timeout in minutes"]')!;
+    const save = target.querySelector<HTMLButtonElement>(".resource-settings-stall-watchdog-controls button")!;
+    expect(enabled.checked).toBe(true);
+    expect(timeout.value).toBe("30");
+    expect(save.disabled).toBe(true);
+
+    enabled.click();
+    timeout.value = "45";
+    timeout.dispatchEvent(new Event("input", { bubbles: true }));
+    await tick();
+    save.click();
+    await vi.waitFor(() => expect(onSaveStallWatchdogPolicy).toHaveBeenCalledWith({ enabled: false, timeoutMinutes: 45 }));
   });
 
   it("shows range feedback and disables Save for an invalid Scheduler interval", async () => {

@@ -113,6 +113,37 @@ func TestGenerationPolicyDefaultsAndPersistsWorkspaceOverride(t *testing.T) {
 	}
 }
 
+func TestStallWatchdogPolicyDefaultsAndPersistsWorkspaceOverride(t *testing.T) {
+	workspace, err := app.Initialize(t.TempDir(), "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := workspace.RuntimeConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDefault := app.StallWatchdogPolicy{Enabled: true, TimeoutMinutes: app.DefaultStallWatchdogTimeoutMinutes}
+	if runtime.StallWatchdogPolicy != wantDefault {
+		t.Fatalf("default stall watchdog policy = %#v, want %#v", runtime.StallWatchdogPolicy, wantDefault)
+	}
+
+	wantDisabled := app.StallWatchdogPolicy{Enabled: false, TimeoutMinutes: 45}
+	if saved, err := workspace.SetStallWatchdogPolicy(wantDisabled); err != nil || saved != wantDisabled {
+		t.Fatalf("save stall watchdog policy = %#v, %v", saved, err)
+	}
+	reopened, err := app.OpenWorkspace(workspace.Root())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err = reopened.RuntimeConfig()
+	if err != nil || runtime.StallWatchdogPolicy != wantDisabled {
+		t.Fatalf("reopened stall watchdog policy = %#v, %v", runtime.StallWatchdogPolicy, err)
+	}
+	if _, err := workspace.SetStallWatchdogPolicy(app.StallWatchdogPolicy{Enabled: true, TimeoutMinutes: 0}); err == nil {
+		t.Fatal("invalid stall watchdog timeout was accepted")
+	}
+}
+
 func TestResourceDefaultsAcceptDirectAgentBindings(t *testing.T) {
 	workspace, err := app.Initialize(t.TempDir(), "en")
 	if err != nil {

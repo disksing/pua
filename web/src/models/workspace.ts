@@ -82,10 +82,16 @@ export interface GenerationPolicyRecord {
   maxAccumulatedTurnMinutes: number;
 }
 
+export interface StallWatchdogPolicyRecord {
+  enabled: boolean;
+  timeoutMinutes: number;
+}
+
 export interface WorkspaceTree {
   agentBinding?: { kind: "profile" | "agent"; name: string };
   resourceDefaults?: ResourceAgentDefaultsRecord;
   generationPolicy?: GenerationPolicyRecord;
+  stallWatchdogPolicy?: StallWatchdogPolicyRecord;
   workspace?: ResourceRecord;
   scheduler?: ResourceRecord;
   projects: ResourceRecord[];

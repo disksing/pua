@@ -33,6 +33,17 @@ const (
 	pathBlockEnd      = "# <<< PUA desktop managed PATH <<<"
 )
 
+// macOS applications launched from Finder or the Dock do not source the
+// user's shell profile. Keep the common Homebrew and Intel Homebrew paths in
+// the managed backend's environment so provider CLIs installed there can be
+// found by AgentHub.
+var macOSProviderPathEntries = []string{
+	"/opt/homebrew/bin",
+	"/opt/homebrew/sbin",
+	"/usr/local/bin",
+	"/usr/local/sbin",
+}
+
 // Options controls how the desktop shell finds and starts the PUA backend.
 type Options struct {
 	Address        string
@@ -328,10 +339,8 @@ func startBackend(ctx context.Context, options Options, backendPath, digest stri
 	}
 
 	command := exec.Command(backendPath, "serve", "--addr="+options.Address, "--no-default-workspace")
-	command.Env = replaceEnv(os.Environ(), "PUA_SERVE_CONFIG", options.ConfigPath)
-	if options.CLIPath != "" {
-		command.Env = prependEnvPath(command.Env, filepath.Dir(options.CLIPath))
-	}
+	command.Env = backendEnvironment(os.Environ(), options.CLIPath)
+	command.Env = replaceEnv(command.Env, "PUA_SERVE_CONFIG", options.ConfigPath)
 	command.Stdout = logFile
 	command.Stderr = logFile
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -638,6 +647,29 @@ func prependEnvPath(environ []string, directory string) []string {
 		return replaceEnv(environ, "PATH", directory)
 	}
 	return replaceEnv(environ, "PATH", directory+string(os.PathListSeparator)+current)
+}
+
+// prependEnvPaths prepends directories in the order supplied, while keeping
+// the operation idempotent. The reverse iteration is needed because each
+// prepend operation adds one entry at the front of PATH.
+func prependEnvPaths(environ []string, directories ...string) []string {
+	result := environ
+	for index := len(directories) - 1; index >= 0; index-- {
+		if strings.TrimSpace(directories[index]) == "" {
+			continue
+		}
+		result = prependEnvPath(result, directories[index])
+	}
+	return result
+}
+
+func backendEnvironment(environ []string, cliPath string) []string {
+	directories := make([]string, 0, len(macOSProviderPathEntries)+1)
+	if cliPath != "" {
+		directories = append(directories, filepath.Dir(cliPath))
+	}
+	directories = append(directories, macOSProviderPathEntries...)
+	return prependEnvPaths(environ, directories...)
 }
 
 func ensureShellPath(profilePath, directory string) error {

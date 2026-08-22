@@ -316,10 +316,14 @@ describe("settings domain panels", () => {
 
     expect(target.textContent).toContain("Compatible");
     expect(target.textContent).toContain("Codex");
-    expect(target.textContent).toContain("1 providers · switches save immediately");
+    expect(target.textContent).toContain("1 providers · switches immediate, paths on Save All");
     expect(target.textContent).toContain("1 agents");
     expect(target.textContent).not.toContain("API v1 · AgentHub 1.2.3");
     expect(target.querySelector(".settings-capability-list")).toBeNull();
+
+    input(target.querySelector<HTMLInputElement>('input[aria-label$="executable path"]')!, "/opt/homebrew/bin/codex");
+    await tick();
+    expect(target.querySelector(".settings-save-hint.visible")).toBeTruthy();
 
     input(target.querySelector<HTMLInputElement>("#settingsAgentHubEndpoint")!, "http://127.0.0.1:5656");
     await tick();
@@ -329,7 +333,11 @@ describe("settings domain panels", () => {
     saveButton.click();
     await tick();
     expect(onSaveAgentHub).toHaveBeenCalledTimes(1);
-    expect(onSaveAgentHub).toHaveBeenCalledWith(expect.objectContaining({ endpoint: "http://127.0.0.1:5656", dirty: true }));
+    expect(onSaveAgentHub).toHaveBeenCalledWith(expect.objectContaining({
+      endpoint: "http://127.0.0.1:5656",
+      dirty: true,
+      agentProviders: [expect.objectContaining({ id: "codex", command: "/opt/homebrew/bin/codex" })],
+    }));
     expect(saveButton.disabled).toBe(true);
 
     save.resolve();
@@ -360,10 +368,13 @@ describe("settings domain panels", () => {
     cleanups.push(() => unmount(component));
     await tick();
 
+    input(target.querySelector<HTMLInputElement>('input[aria-label$="executable path"]')!, "/opt/homebrew/bin/codex");
+    await tick();
     target.querySelector<HTMLButtonElement>('[role="switch"]')!.click();
     await vi.waitFor(() => expect(toggle).toHaveBeenCalledWith("codex", false));
     await tick();
     expect(target.querySelector('[role="switch"]')?.getAttribute("aria-checked")).toBe("false");
+    expect(target.querySelector<HTMLInputElement>('input[aria-label$="executable path"]')?.value).toBe("/opt/homebrew/bin/codex");
 
     target.querySelector<HTMLButtonElement>("#settingsAddAgent")!.click();
     await tick();

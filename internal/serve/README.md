@@ -64,6 +64,7 @@ POST /api/workspaces/{workspaceId}/resources/{resourceId}/approval
 POST /api/workspaces/{workspaceId}/resources/{resourceId}/turn/end
 POST /api/workspaces/{workspaceId}/resources/{resourceId}/generation/end
 PUT  /api/workspaces/{workspaceId}/generation-policy
+PUT  /api/workspaces/{workspaceId}/stall-watchdog-policy
 POST /api/workspaces/{workspaceId}/resources/{resourceId}/uploads
 GET  /api/workspaces/{workspaceId}/resources/{resourceId}/favorite
 PUT  /api/workspaces/{workspaceId}/resources/{resourceId}/favorite
@@ -90,6 +91,8 @@ DELETE /api/workspaces/{workspaceId}/users/{name}/messages/{messageId}
 用户收件箱是资源 mailbox 的外向对应物：Agent 通过 `POST .../users/{name}/messages`（携带稳定 sender 资源 ID 与匹配的 Workspace instance ID 作为来源证明）把消息持久化到 `<control-dir>/users/{name}/inbox.json`；投递在用户在 Web GUI 的 Inbox 面板中阅读时完成（`PUT .../read` 逐条标记已读并保留首个已读时间戳）。用户的回复由 `POST .../reply` 转换为对来源资源的普通 role=user mailbox 消息（正文以 `[Reply to your Inbox message <id>]` 加原文引用开头，引用超过 1KB 截断，Agent 据此识别回复对象），投递、generation 唤醒与 steer/enqueue 处理完全复用现有 mailbox 管线；回复成功后 inbox 条目记录 `repliedAt` 并同时视为已读。`DELETE` 按消息 ID 删除 inbox 条目，无论已读或未回复均可删除。inbox 最多保留 200 条，超出时优先淘汰最旧的已读消息，未读消息不因保留策略丢失。
 
 `PUT .../generation-policy` 更新 `workspace.json` 中统一覆盖 Workspace、Project、Task 和 Scheduler 的自动轮换预算。缺少该配置的现有 Workspace 与新 Workspace 均默认启用 20 个已结束 Turn 或累计 120 分钟 Turn wall-clock 的 OR 阈值；Turn 之间的 idle 不计时。设置页可以整体关闭策略并保留预算值。
+
+`PUT .../stall-watchdog-policy` 更新 `workspace.json` 中对所有资源统一生效的活动 Turn 停滞看门狗，正文为 `{ "enabled": true, "timeoutMinutes": 30 }`。缺少该配置的现有 Workspace 与新 Workspace 默认开启、超时 30 分钟；只有 `running` 且没有 pending approval 的 Turn 会被监控。AgentHub 只把 Turn 内的 message/reasoning/tool/approval/provider error/terminal 事件计为有效活动，普通 Session 更新时间、metadata 和 stderr 不会续期。超时后 PUA 持久化去重状态，Stop 同一 Session，再通过 mailbox 系统恢复消息 Resume 同一 Session；每条连续恢复链最多自动尝试一次，避免 Stop/Resume 无限循环。设置页可关闭看门狗或调整超时时间。
 
 发送正文示例：
 

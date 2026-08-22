@@ -65,6 +65,27 @@
   gap: 10px;
 }
 
+:where([data-component-owner="agenthub-settings-panel"]) .settings-provider-command {
+  display: grid;
+  gap: 5px;
+  min-width: min(280px, 34%);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+:where([data-component-owner="agenthub-settings-panel"]) .settings-provider-command input {
+  width: 100%;
+  min-width: 0;
+}
+
+:where([data-component-owner="agenthub-settings-panel"]) .settings-provider-command small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.35;
+}
+
 :where([data-component-owner="agenthub-settings-panel"]) .settings-service-row strong,
 :where([data-component-owner="agenthub-settings-panel"]) .settings-agent-card-head strong {
   display: block;
@@ -330,6 +351,11 @@
 
   :where([data-component-owner="agenthub-settings-panel"]) .settings-switch {
     align-self: flex-end;
+  }
+
+  :where([data-component-owner="agenthub-settings-panel"]) .settings-provider-command {
+    min-width: 0;
+    width: 100%;
   }
 
   :where([data-component-owner="agenthub-settings-panel"]) .settings-agent-card-body {

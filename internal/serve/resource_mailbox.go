@@ -36,10 +36,11 @@ const (
 	resourceResultSubscriptionNone     = "none"
 	resourceResultSubscriptionComplete = "complete"
 
-	resourceMessageTypeTurnResult       = "turn_result"
-	resourceMessageTypeDeliveryTerminal = "delivery_terminal_notice"
-	resourceMessageTypeSchedulerTick    = "scheduler_tick"
-	resourceMessageTypeTaskContinuation = "task_state_continuation"
+	resourceMessageTypeTurnResult        = "turn_result"
+	resourceMessageTypeDeliveryTerminal  = "delivery_terminal_notice"
+	resourceMessageTypeSchedulerTick     = "scheduler_tick"
+	resourceMessageTypeTaskContinuation  = "task_state_continuation"
+	resourceMessageTypeTurnStallRecovery = "turn_stall_recovery"
 
 	resourceNotificationWaiting   = "waiting"
 	resourceNotificationAccepted  = "accepted"

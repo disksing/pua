@@ -7,18 +7,20 @@ import (
 )
 
 type Config struct {
-	Version          int                    `json:"version"`
-	Language         string                 `json:"language"`
-	Name             string                 `json:"name,omitempty"`
-	InstanceID       string                 `json:"instanceId,omitempty"`
-	AgentBinding     AgentBinding           `json:"agentBinding,omitempty"`
-	ResourceDefaults ResourceAgentDefaults  `json:"resourceDefaults,omitempty"`
-	GenerationPolicy GenerationPolicyConfig `json:"generationPolicy,omitempty"`
+	Version             int                       `json:"version"`
+	Language            string                    `json:"language"`
+	Name                string                    `json:"name,omitempty"`
+	InstanceID          string                    `json:"instanceId,omitempty"`
+	AgentBinding        AgentBinding              `json:"agentBinding,omitempty"`
+	ResourceDefaults    ResourceAgentDefaults     `json:"resourceDefaults,omitempty"`
+	GenerationPolicy    GenerationPolicyConfig    `json:"generationPolicy,omitempty"`
+	StallWatchdogPolicy StallWatchdogPolicyConfig `json:"stallWatchdogPolicy,omitempty"`
 }
 
 const (
 	DefaultGenerationMaxTurns                  = 20
 	DefaultGenerationMaxAccumulatedTurnMinutes = 120
+	DefaultStallWatchdogTimeoutMinutes         = 30
 )
 
 // GenerationPolicyConfig is the optional on-disk representation. Pointers
@@ -37,6 +39,21 @@ type GenerationPolicy struct {
 	Enabled                   bool `json:"enabled"`
 	MaxTurns                  int  `json:"maxTurns"`
 	MaxAccumulatedTurnMinutes int  `json:"maxAccumulatedTurnMinutes"`
+}
+
+// StallWatchdogPolicyConfig is the optional on-disk representation. Pointers
+// distinguish an omitted field in an older workspace.json from an explicit
+// value while the policy is migrated to the default-enabled 30-minute setting.
+type StallWatchdogPolicyConfig struct {
+	Enabled        *bool `json:"enabled,omitempty"`
+	TimeoutMinutes *int  `json:"timeoutMinutes,omitempty"`
+}
+
+// StallWatchdogPolicy is the fully resolved Workspace policy applied to every
+// resource runtime, including Workspace, Projects, Tasks, and Scheduler.
+type StallWatchdogPolicy struct {
+	Enabled        bool `json:"enabled"`
+	TimeoutMinutes int  `json:"timeoutMinutes"`
 }
 
 type AgentBinding struct {
@@ -86,10 +103,11 @@ func (defaults *ResourceAgentDefaults) UnmarshalJSON(data []byte) error {
 }
 
 type WorkspaceRuntimeConfig struct {
-	InstanceID       string                `json:"instanceId"`
-	AgentBinding     AgentBinding          `json:"agentBinding"`
-	ResourceDefaults ResourceAgentDefaults `json:"resourceDefaults"`
-	GenerationPolicy GenerationPolicy      `json:"generationPolicy"`
+	InstanceID          string                `json:"instanceId"`
+	AgentBinding        AgentBinding          `json:"agentBinding"`
+	ResourceDefaults    ResourceAgentDefaults `json:"resourceDefaults"`
+	GenerationPolicy    GenerationPolicy      `json:"generationPolicy"`
+	StallWatchdogPolicy StallWatchdogPolicy   `json:"stallWatchdogPolicy"`
 }
 
 type ResourceMeta struct {

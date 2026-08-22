@@ -173,7 +173,7 @@ func TestAgentHubSettingsRoundTripsAgentHubConfigAndProviderToggle(t *testing.T)
 	request := httptest.NewRequest(http.MethodPut, "/api/settings/agenthub", strings.NewReader(`{
 		"endpoint":`+strconv.Quote(fake.URL)+`,
 		"agentProfiles":[],
-		"agentProviders":[{"id":"codex","name":"Codex","type":"codex","enabled":false,"command":"codex"}],
+		"agentProviders":[{"id":"codex","name":"Codex","type":"codex","enabled":false,"command":"/opt/homebrew/bin/codex"}],
 		"agents":[{"name":"Worker","providerId":"codex","options":{"model":"gpt-worker"},"environment":{"MODE":"ci"}}]
 	}`))
 	recorder := httptest.NewRecorder()
@@ -189,7 +189,7 @@ func TestAgentHubSettingsRoundTripsAgentHubConfigAndProviderToggle(t *testing.T)
 	if len(response.AgentConfig.Agents) != 1 || response.AgentConfig.Agents[0].Name != "Worker" {
 		t.Fatalf("save response did not project AgentHub config: %+v", response.AgentConfig)
 	}
-	if len(saved.Agents) != 1 || saved.Agents[0].Name != "Worker" || saved.AgentProviders[0].Enabled {
+	if len(saved.Agents) != 1 || saved.Agents[0].Name != "Worker" || saved.AgentProviders[0].Enabled || saved.AgentProviders[0].Command != "/opt/homebrew/bin/codex" {
 		t.Fatalf("PUA did not save AgentHub config through the API: %+v", saved)
 	}
 

@@ -1,7 +1,8 @@
 // Pure model for the simplified provider settings: exactly four built-in
-// provider enable/disable switches. Provider add/delete and advanced field
-// editing (command, args, env, transport, …) intentionally do not exist in
-// this layer. Unit tested with node --test.
+// provider enable/disable switches. Provider add/delete and transport-level
+// editing intentionally do not exist in this layer; the executable command
+// can be overridden for installations launched outside a shell environment.
+// Unit tested with node --test.
 
 // BUILTIN_PROVIDERS lists the four user-recognizable built-in integrations in
 // display order. The ids match the canonical provider ids of the daemon
@@ -53,6 +54,7 @@ export function buildProviderSwitches(config, probes = []) {
       description: builtin.description,
       present: Boolean(provider),
       enabled,
+      command: provider?.command || "",
       status: enabled ? "Enabled" : "Disabled",
       availability,
       availabilityTone,

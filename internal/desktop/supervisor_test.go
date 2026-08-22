@@ -205,6 +205,34 @@ func TestPrependEnvPath(t *testing.T) {
 	}
 }
 
+func TestBackendEnvironmentIncludesCommonProviderPaths(t *testing.T) {
+	t.Parallel()
+	environ := []string{"HOME=/tmp/home", "PATH=/usr/bin:/bin"}
+	updated := backendEnvironment(environ, "/tmp/home/.pua/bin/pua")
+	want := "PATH=/tmp/home/.pua/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/local/sbin:/usr/bin:/bin"
+	if !slices.Contains(updated, want) {
+		t.Fatalf("backend PATH = %v, want %q", updated, want)
+	}
+
+	// Existing entries are not duplicated when the app was launched with a
+	// partially populated PATH.
+	withHomebrew := backendEnvironment([]string{"PATH=/opt/homebrew/bin:/usr/bin"}, "/tmp/home/.pua/bin/pua")
+	var pathValue string
+	for _, entry := range withHomebrew {
+		if strings.HasPrefix(entry, "PATH=") {
+			pathValue = strings.TrimPrefix(entry, "PATH=")
+		}
+	}
+	if !strings.HasPrefix(pathValue, "/tmp/home/.pua/bin:") {
+		t.Fatalf("backend PATH did not keep the PUA CLI first: %q", pathValue)
+	}
+	for _, directory := range macOSProviderPathEntries {
+		if count := strings.Count(string(os.PathListSeparator)+pathValue+string(os.PathListSeparator), string(os.PathListSeparator)+directory+string(os.PathListSeparator)); count != 1 {
+			t.Fatalf("backend PATH contains %q %d times: %q", directory, count, pathValue)
+		}
+	}
+}
+
 func TestActiveTurnCount(t *testing.T) {
 	t.Parallel()
 	mux := http.NewServeMux()

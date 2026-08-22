@@ -235,11 +235,12 @@ describe("SettingsController", () => {
 		await controller.open("agenthub");
 
 		const draft = createSettingsDraft(published.at(-1)!);
+		draft.agentProviders[0]!.command = "/opt/homebrew/bin/codex";
 		draft.agentConfigs[0]!.name = "Worker";
 		draft.dirty = true;
 		await published.at(-1)!.onSaveAgentHub(draft);
 		const savedBody = requests.find((request) => request.path === "/api/settings/agenthub")?.body as Record<string, unknown>;
-		expect(savedBody.agentProviders).toEqual([{ id: "codex", name: "Codex", type: "codex", enabled: true }]);
+		expect(savedBody.agentProviders).toEqual([{ id: "codex", name: "Codex", type: "codex", enabled: true, command: "/opt/homebrew/bin/codex" }]);
 		expect(savedBody.agents).toEqual([{ name: "Worker", providerId: "codex" }]);
 
 		await published.at(-1)!.onToggleProvider("codex", false);

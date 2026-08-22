@@ -175,7 +175,8 @@ func initializeWorkspaceLocked(root, language string) error {
 	}
 	config := Config{
 		Version: 1, Language: language, InstanceID: instanceID, AgentBinding: defaultAgentBinding(),
-		GenerationPolicy: generationPolicyConfig(defaultGenerationPolicy()),
+		GenerationPolicy:    generationPolicyConfig(defaultGenerationPolicy()),
+		StallWatchdogPolicy: stallWatchdogPolicyConfig(defaultStallWatchdogPolicy()),
 	}
 	if err := readJSON(workspaceConfigPath(root), &config); err != nil && !os.IsNotExist(err) {
 		return err
@@ -192,6 +193,11 @@ func initializeWorkspaceLocked(root, language string) error {
 		return err
 	}
 	config.GenerationPolicy = generationPolicyConfig(generationPolicy)
+	stallWatchdogPolicy, err := resolveStallWatchdogPolicy(config.StallWatchdogPolicy)
+	if err != nil {
+		return err
+	}
+	config.StallWatchdogPolicy = stallWatchdogPolicyConfig(stallWatchdogPolicy)
 	if err := writeWorkspaceConfig(root, config); err != nil {
 		return err
 	}
@@ -280,6 +286,11 @@ func (w *Workspace) migrate(language string) error {
 		return &APIError{Operation: "migrate Workspace", Kind: "workspace", Workspace: w.root, Err: err}
 	}
 	config.GenerationPolicy = generationPolicyConfig(generationPolicy)
+	stallWatchdogPolicy, err := resolveStallWatchdogPolicy(config.StallWatchdogPolicy)
+	if err != nil {
+		return &APIError{Operation: "migrate Workspace", Kind: "workspace", Workspace: w.root, Err: err}
+	}
+	config.StallWatchdogPolicy = stallWatchdogPolicyConfig(stallWatchdogPolicy)
 	if err := writeWorkspaceConfig(w.root, config); err != nil {
 		return &APIError{Operation: "migrate Workspace", Kind: "workspace", Workspace: w.root, Err: err}
 	}

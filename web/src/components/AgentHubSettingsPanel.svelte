@@ -146,6 +146,15 @@
     onDirty();
   }
 
+  function updateProviderCommand(index: number, command: string): void {
+    const normalized = String(command || "").trim();
+    const provider = { ...draft.agentProviders[index] };
+    if (normalized) provider.command = normalized;
+    else delete provider.command;
+    draft.agentProviders[index] = provider;
+    onDirty();
+  }
+
   function addAgent(): void {
     if (!draft.agentProviders.length) {
       onToast("Add a provider before configuring an agent.");
@@ -168,7 +177,14 @@
     try {
       const updated = await onToggleProvider(provider.id, !provider.enabled);
       const index = draft.agentProviders.findIndex((item) => item.id === updated.id);
-      if (index >= 0) draft.agentProviders[index] = cloneAgentHubProvider(updated);
+      if (index >= 0) {
+        // Keep an unsaved executable-path edit in the modal while the
+        // immediate enabled toggle is persisted by the server.
+        const command = draft.agentProviders[index].command;
+        const next = cloneAgentHubProvider(updated);
+        if (command) next.command = command;
+        draft.agentProviders[index] = next;
+      }
       else draft.agentProviders = [...draft.agentProviders, cloneAgentHubProvider(updated)];
     } catch (error) {
       onToast(settingsErrorMessage(error));
@@ -198,7 +214,7 @@
 </script>
 
 <div class="settings-panel settings-agent-panel" data-component-owner="agenthub-settings-panel" data-settings-panel data-settings-section="agenthub">
-  <div class="settings-panel-header"><h2>AgentHub</h2><p>Manage the AgentHub connection, provider switches, and the agents used by PUA. Provider switches save immediately; agent changes are saved together below.</p></div>
+  <div class="settings-panel-header"><h2>AgentHub</h2><p>Manage the AgentHub connection, provider switches, executable paths, and the agents used by PUA. Provider switches save immediately; paths and agent changes are saved together below.</p></div>
 
   <section class="settings-agent-section settings-connection-section">
     <div class="settings-section-heading"><h3>Connection</h3><span class="settings-pill" class:pill-warning={!agentHub.connected || !agentHub.compatible}>{agentHub.connected && agentHub.compatible ? "Compatible" : agentHub.connected ? "Incompatible" : "Unavailable"}</span></div>
@@ -212,13 +228,14 @@
   </section>
 
   <section class="settings-agent-section">
-    <div class="settings-section-heading"><h3>Providers</h3><span>{draft.agentProviders.length} providers · switches save immediately</span></div>
+    <div class="settings-section-heading"><h3>Providers</h3><span>{draft.agentProviders.length} providers · switches immediate, paths on Save All</span></div>
     <div class="settings-provider-list">
-      {#each draft.agentProviders as provider (provider.id)}
+      {#each draft.agentProviders as provider, providerIndex (provider.id)}
         {@const probe = probeFor(provider.id)}
         {@const available = probe ? probe.available !== false : provider.enabled}
         <div class="settings-service-row" class:settings-service-disabled={!provider.enabled}>
           <div class="settings-provider-main"><span class="settings-agent-mark">{(provider.name || provider.id || "P").slice(0, 1).toUpperCase()}</span><span><strong>{provider.name || provider.id}</strong><small>{provider.type || provider.id} · {provider.enabled ? available ? "Available" : "Unavailable" : "Disabled"}</small></span></div>
+          <label class="settings-provider-command"><span>Executable path</span><input aria-label={`${provider.name || provider.id} executable path`} value={provider.command || ""} placeholder={`Use PATH: ${provider.type || provider.id}`} oninput={(event) => updateProviderCommand(providerIndex, event.currentTarget.value)} /><small>Optional. Leave blank to resolve the command from PATH.</small></label>
           <button type="button" class="settings-switch" role="switch" aria-checked={provider.enabled} aria-label={`${provider.enabled ? "Disable" : "Enable"} ${provider.name || provider.id}`} disabled={Boolean(pending)} onclick={() => toggleProvider(provider)}><span></span><strong>{provider.enabled ? "On" : "Off"}</strong></button>
         </div>
       {:else}

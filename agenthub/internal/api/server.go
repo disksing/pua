@@ -1254,25 +1254,7 @@ func (s *Server) activityEvents(w http.ResponseWriter, r *http.Request) {
 // Provider session, and background Provider stderr/metadata can arrive long
 // after its last Turn. Neither should make an idle session look active.
 func isActivityEvent(event session.Event) bool {
-	if event.TurnID == "" {
-		return false
-	}
-	switch event.Type {
-	case "turn.started",
-		session.EventMessageInput,
-		"message.assistant.delta",
-		"message.reasoning.delta",
-		"tool.event", "tool.call",
-		"approval.requested",
-		"approval.resolved",
-		"provider.error",
-		session.EventTurnCompleted,
-		session.EventTurnFailed,
-		session.EventTurnCancelled:
-		return true
-	default:
-		return false
-	}
+	return session.IsActivityEvent(event)
 }
 
 func writeActivitySSE(w http.ResponseWriter, frame activityFrame) error {

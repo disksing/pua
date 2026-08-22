@@ -62,6 +62,7 @@ function model(overrides: Partial<AppShellModel> = {}): AppShellModel {
     mobile: { sidebarOpen: false },
     layout: { preference: "auto", effective: "three" },
     route: { path: "", revision: 0, replace: true },
+    resolveResourceTitle: () => null,
     onSwitchWorkspace: vi.fn(async () => undefined), onAddWorkspace: vi.fn(), onCreateProject: vi.fn(), onOpenSettings: vi.fn(), onRefreshDoctor: vi.fn(async () => undefined),
     onToggleProject: vi.fn(async () => undefined), onSelectResource: vi.fn(async () => undefined), onReorder: vi.fn(async () => undefined),
     onDragState: vi.fn(), onToggleTreeEditing: vi.fn(), onCreateFolder: vi.fn(async () => ""), onRenameFolder: vi.fn(async () => undefined),

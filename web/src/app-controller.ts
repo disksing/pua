@@ -1002,6 +1002,7 @@ function renderAppShell() {
 		doctor: doctorSnapshotForWorkspace(controllerState.doctor, controllerState.activeWorkspaceId),
 		...paneLayoutController.snapshot(),
 		route: routeController.projection(),
+		resolveResourceTitle,
 		onSwitchWorkspace: (id) => switchWorkspace(id),
 		onAddWorkspace: () => openSettings("workspace").catch((err) => toast(err.message)),
 		onCreateProject: () => showProjectForm(),

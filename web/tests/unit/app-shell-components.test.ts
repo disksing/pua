@@ -1,4 +1,5 @@
 import { mount, tick, unmount } from "svelte";
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import MobileToolbar from "../../src/components/MobileToolbar.svelte";
@@ -57,6 +58,25 @@ function pointerEvent(type: string, clientX: number, clientY: number): Event {
   const event = new Event(type, { bubbles: true, cancelable: true });
   Object.defineProperties(event, { clientX: { value: clientX }, clientY: { value: clientY } });
   return event;
+}
+
+function loadVendor<T>(relativePath: string, globalName: string): T {
+  const source = readFileSync(new URL(relativePath, import.meta.url), "utf8");
+  return new Function("window", "globalThis", `const module=undefined,exports=undefined,define=undefined;${source}\nreturn globalThis[${JSON.stringify(globalName)}];`)(window, window) as T;
+}
+
+function inboxPanelProps(overrides: Record<string, unknown> = {}) {
+  return {
+    activity: { running: [], favorites: [], unread: [], problems: [] },
+    inbox: [],
+    onSelect: vi.fn(async () => undefined),
+    onToggleFavorite: vi.fn(async () => undefined),
+    onOpenInboxMessage: vi.fn(async () => undefined),
+    onReplyInboxMessage: vi.fn(async () => undefined),
+    onDeleteInboxMessage: vi.fn(async () => undefined),
+    onToast: vi.fn(),
+    ...overrides,
+  };
 }
 
 describe("AppShell responsibility components", () => {
@@ -678,6 +698,51 @@ describe("AppShell responsibility components", () => {
     deleteButton.click();
     await vi.waitFor(() => expect(onDeleteInboxMessage).toHaveBeenCalledWith("umsg-2"));
     expect(onOpenInboxMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("ActivityPanel inbox renders message text as markdown and follows resource links", async () => {
+    window.marked = loadVendor<NonNullable<Window["marked"]>>("../../static/vendor/marked/marked.min.js", "marked");
+    window.DOMPurify = loadVendor<NonNullable<Window["DOMPurify"]>>("../../static/vendor/dompurify/purify.min.js", "DOMPurify");
+    cleanups.push(async () => { delete window.marked; delete window.DOMPurify; });
+
+    const onOpenInboxMessage = vi.fn(async () => undefined);
+    const onNavigate = vi.fn();
+    const inbox: ShellInboxMessage[] = [
+      { id: "umsg-md", resourceId: "project1.task1", resourceTitle: "Task One", senderName: "project1.task1", text: "**Done** with [[project1.task2]].\n\n- one\n- two", timeLabel: "1m ago", unread: false, replied: false },
+    ];
+    const target = document.body.appendChild(document.createElement("div"));
+    const component = mount(ActivityPanel, {
+      target,
+      props: inboxPanelProps({
+        inbox,
+        workspaceId: "workspace-a",
+        resolveResourceTitle: (resourceId: string) => (resourceId === "project1.task2" ? "Second task" : null),
+        onNavigate,
+        onOpenInboxMessage,
+      }),
+    });
+    cleanups.push(() => unmount(component));
+    await tick();
+
+    target.querySelector<HTMLElement>('[role="tab"]:last-child')!.click();
+    await tick();
+
+    const text = target.querySelector<HTMLElement>(".inbox-text.markdown-rendered")!;
+    expect(text.querySelector("strong")?.textContent).toBe("Done");
+    expect(text.querySelectorAll("li").length).toBe(2);
+    const link = text.querySelector<HTMLAnchorElement>("a[data-pua-resource-id]")!;
+    expect(link.textContent).toBe("Second task");
+
+    // A resource link navigates to the linked resource without triggering the
+    // row's open action.
+    link.click();
+    await tick();
+    expect(onNavigate).toHaveBeenCalledWith("project1.task2");
+    expect(onOpenInboxMessage).not.toHaveBeenCalled();
+
+    // A plain click on the message body still opens the message.
+    text.click();
+    await vi.waitFor(() => expect(onOpenInboxMessage).toHaveBeenCalledWith("umsg-md"));
   });
 
   it("ActivityPanel shows tab counts and favorites without a dismiss control", async () => {

@@ -394,6 +394,24 @@ describe("AppShell responsibility components", () => {
     expect(onCreate).toHaveBeenCalledTimes(1);
   });
 
+  it("ProjectTree labels its ordering mode with a list-order action", async () => {
+    const target = document.body.appendChild(document.createElement("div"));
+    const component = mount(ProjectTree, { target, props: {
+      identity: "workspace-a", loading: false, error: "", projects: [resource("project-a")],
+      onCreate: vi.fn(), onToggle: vi.fn(async () => undefined), onSelect: vi.fn(async () => undefined),
+      onReorder: vi.fn(async () => undefined), onDragState: vi.fn(), onToggleFavorite: vi.fn(async () => undefined), onToast: vi.fn(),
+      ...treeEditProps(),
+    } });
+    cleanups.push(() => unmount(component));
+    await tick();
+
+    const button = target.querySelector<HTMLButtonElement>("#treeEditButton")!;
+    expect(button.textContent?.trim()).toBe("Reorder");
+    expect(button.title).toBe("Reorder projects");
+    expect(button.querySelector('[data-lucide="list-ordered"]')).not.toBeNull();
+    expect(button.querySelector('[data-lucide="square-pen"]')).toBeNull();
+  });
+
   it("ProjectTree shows each resource's own unread count and caps the visible badge at 99+", async () => {
     const task = { ...resource("task-a", "task"), unreadCount: 120 };
     const project = { ...resource("project-a"), expanded: true, unreadCount: 2, children: [task] };

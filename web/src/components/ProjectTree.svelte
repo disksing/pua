@@ -395,7 +395,7 @@
   <div class="section-title">
     <span class="section-label">Projects</span>
     <span class="section-actions">
-      <button id="treeEditButton" type="button" class:active={editing} aria-pressed={editing} title={editing ? "Done editing" : "Edit projects"} onclick={onToggleEditing}><Icon name={editing ? "check" : "square-pen"} /><span>{editing ? "Done" : "Edit"}</span></button>
+      <button id="treeEditButton" type="button" class:active={editing} aria-pressed={editing} title={editing ? "Done reordering" : "Reorder projects"} onclick={onToggleEditing}><Icon name={editing ? "check" : "list-ordered"} /><span>{editing ? "Done" : "Reorder"}</span></button>
       <button id="newProjectButton" type="button" title="New project" onclick={onCreate}><Icon name="plus" /><span>New</span></button>
     </span>
   </div>

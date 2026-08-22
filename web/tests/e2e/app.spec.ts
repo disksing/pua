@@ -1893,7 +1893,7 @@ test("keeps canonical navigation synchronized across history, workspace restore,
   await expect(page).toHaveURL(/\/w\/ws-a\/r\/project1\.task2$/);
   await expect(page.locator('#projectTree .tree-item.active')).toContainText("Follow-up task");
 
-  await page.getByRole("button", { name: "Edit projects" }).click();
+  await page.locator("#treeEditButton").click();
   const tasks = page.locator("#projectTree .task-group .tree-item");
   await expect(tasks).toHaveCount(2);
   await expect(tasks.first().locator(".drag-handle")).toBeVisible();
@@ -2082,13 +2082,13 @@ test("keeps the 440px Projects actions at a 44px touch size", async ({ page }) =
   const tree = page.locator('[data-component-owner="project-tree"]');
   const title = tree.locator(".section-title");
   const label = title.locator(".section-label");
-  const edit = tree.locator("#treeEditButton");
+  const reorder = tree.locator("#treeEditButton");
   const create = tree.locator("#newProjectButton");
   await expect.poll(async () => (await tree.boundingBox())?.x ?? -1).toBeGreaterThanOrEqual(0);
   await expect(label).toHaveText("Projects");
-  await expect(edit).toHaveAttribute("type", "button");
-  await expect(edit).toHaveAttribute("title", "Edit projects");
-  await expect(edit).toHaveAttribute("aria-pressed", "false");
+  await expect(reorder).toHaveAttribute("type", "button");
+  await expect(reorder).toHaveAttribute("title", "Reorder projects");
+  await expect(reorder).toHaveAttribute("aria-pressed", "false");
   await expect(create).toHaveAttribute("type", "button");
   await expect(create).toHaveAttribute("title", "New project");
 
@@ -2096,7 +2096,7 @@ test("keeps the 440px Projects actions at a 44px touch size", async ({ page }) =
   const firstProject = tree.locator("#projectTree > .tree-item").first();
   const firstProjectBox = (await firstProject.boundingBox())!;
   expect(titleBox.height).toBeGreaterThanOrEqual(44);
-  for (const button of [edit, create]) {
+  for (const button of [reorder, create]) {
     const box = (await button.boundingBox())!;
     expect(box.width).toBeGreaterThanOrEqual(44);
     expect(box.height).toBeGreaterThanOrEqual(44);
@@ -2115,12 +2115,12 @@ test("keeps the 440px Projects actions at a 44px touch size", async ({ page }) =
   expect(documentSize.html).toBe(440);
   expect(documentSize.scrollWidth).toBeLessThanOrEqual(documentSize.clientWidth);
 
-  await edit.click();
-  await expect(edit).toHaveAttribute("title", "Done editing");
-  await expect(edit).toHaveAttribute("aria-pressed", "true");
+  await reorder.click();
+  await expect(reorder).toHaveAttribute("title", "Done reordering");
+  await expect(reorder).toHaveAttribute("aria-pressed", "true");
   await expect(tree).toHaveClass(/editing/);
-  await edit.click();
-  await expect(edit).toHaveAttribute("title", "Edit projects");
+  await reorder.click();
+  await expect(reorder).toHaveAttribute("title", "Reorder projects");
 
   await create.click();
   await expect(page.getByRole("dialog", { name: "Create project" })).toBeVisible();

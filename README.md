@@ -386,6 +386,7 @@ pua project create [--slug <slug>] <description>
 pua project list [--all]
 pua project show [--project=<project>]
 pua project archive [--project=<project>]
+pua project binding set [--project=<project>] (--profile=<name>|--agent=<name>) [--server=<url>]
 pua template list|show|validate|render|create|migrate ...
 
 pua scheduler list [--json]
@@ -399,6 +400,9 @@ pua user list [--json]
 
 pua workspace status [--server=<url>]
 pua workspace history [--cursor=<cursor>] [--limit=<n>] [--server=<url>] [--json]
+pua workspace tree --json
+pua workspace resource --id=<resource> --json
+pua workspace binding set (--profile=<name>|--agent=<name>) [--server=<url>]
 pua project status [--project=<project>] [--server=<url>]
 pua project history [--project=<project>] [--cursor=<cursor>] [--limit=<n>] [--server=<url>] [--json]
 pua task status [--project=<project>] [--task=<task>] [--server=<url>]
@@ -407,16 +411,14 @@ pua history turn show --ref=<reference> [--server=<url>] [--json]
 pua history event show --ref=<reference> [--server=<url>] [--json]
 pua message send --to=<resource> [--mode=steer|enqueue|interrupt] [--server=<url>] <message>
 pua message show --id=<message-id> [--server=<url>]
-pua resource archive --id=<resource>
-
 pua task create [<title>] [--project=<project>] [--slug <slug>]
                   [--detail <detail>|--task-markdown <markdown>|--template=<name>]
-                  [--field <name>=<value>...] [--fields <file>] [--dry-run] [--json]
+                  [--field <name>=<value>...] [--fields <file>]
+                  [--profile=<name>|--agent=<name>] [--dry-run] [--json]
 pua task list [--project=<project>] [--all]
-pua task show|archive ...
-
-pua workspace tree --json
-pua workspace resource --id=<resource> --json
+pua task show [--project=<project>] [--task=<task>]
+pua task archive [--project=<project>] [--task=<task>]
+pua task binding set [--project=<project>] [--task=<task>] (--profile=<name>|--agent=<name>) [--server=<url>]
 
 pua serve [--addr=<address>] [--workspace=<path>]
           [--agenthub-mode=embedded|external]

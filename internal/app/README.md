@@ -23,8 +23,9 @@ project, err := workspace.CreateProjectWithInput(app.CreateProjectInput{
 - `Tree`、`Resource`、`Projects`、`Tasks`：读取 Workspace 资源视图；
 - `EnsureScheduler`、`Scheduler`、`AddSchedule`、`UpdateSchedule`、`RemoveSchedule`、`SetSchedulerSettings`：创建、读取和原子修改特殊 Scheduler 资源；
 - `Templates`、`Template`、`RenderTemplate`、`ValidateTemplateContent`、`CreateTemplate`、`MigrateTemplates`：模板发现、结构化校验、确定性渲染、脚手架和 V1 内容迁移；
-- `PreviewTask`：无副作用地计算最终标题、Markdown 与模板 digest；
+- `PreviewTask`：无副作用地计算最终标题、Markdown、最终 Agent binding 与模板 digest；
 - `CreateProject`、`CreateProjectWithInput`、`CreateTask`、`ArchiveResource`：资源生命周期。`ArchiveResource` 以可恢复目录移动为唯一提交点；Project 归档级联移动完整子树，Git 预检、开放子任务和移动后 worktree 修复问题通过 `ArchiveResult.Warnings` 返回，不会修改源码或阻断移动；
+- `ResourceAgentBinding`、`SetResourceAgentBinding`、`SetResourceAgentDefaults`、`SetProjectTaskDefault`：读取或修改 Workspace、Project、Task 的 Agent/Profile binding，并保持新建 Task 的显式值、Project 默认值和 Workspace 默认值的继承顺序；
 - `GenerationDiagnostics`、`GenerationDiagnostic`：从 `<control-dir>/runtime/resources/<resource-key>/` 的 resource-scoped generation store 派生只读 generation 诊断；不创建、修改或访问 AgentHub Session；
 - `Repositories`、`CloneRepository` 及 Task repository 方法：仓库数据。资源对话历史由 `pua serve` 的 Resource History API 提供；旧资源的 `log.jsonl` 仅由 `pua migrate` 迁移为 `artifacts/legacy-log.md`。
 

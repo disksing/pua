@@ -383,12 +383,13 @@ type CreateTaskInput struct {
 // TaskPreview is the side-effect-free result of resolving task content and
 // execution settings. It is also the contract shown by web and CLI previews.
 type TaskPreview struct {
-	ProjectID string              `json:"project"`
-	Title     string              `json:"title"`
-	Slug      string              `json:"slug,omitempty"`
-	Markdown  string              `json:"markdown"`
-	Template  *TaskTemplateSource `json:"template,omitempty"`
-	Warnings  []TemplateIssue     `json:"warnings,omitempty"`
+	ProjectID    string              `json:"project"`
+	Title        string              `json:"title"`
+	Slug         string              `json:"slug,omitempty"`
+	Markdown     string              `json:"markdown"`
+	AgentBinding AgentBinding        `json:"agentBinding"`
+	Template     *TaskTemplateSource `json:"template,omitempty"`
+	Warnings     []TemplateIssue     `json:"warnings,omitempty"`
 }
 
 // ArchiveResult describes an archive operation without relying on printed
@@ -611,6 +612,10 @@ func (w *Workspace) PreviewTask(input CreateTaskInput) (TaskPreview, error) {
 	if err := readProjectAtDir(parentPath, &parent); err != nil {
 		return TaskPreview{}, &APIError{Operation: "preview task", Kind: "task", Workspace: w.root, ResourceID: parentID, Err: err}
 	}
+	binding, err := w.resolveTaskAgentBinding(parent, input.AgentBinding)
+	if err != nil {
+		return TaskPreview{}, &APIError{Operation: "preview task", Kind: "binding", Workspace: w.root, ResourceID: parentID, Err: err}
+	}
 	slug, err := normalizeResourceSlug(input.Slug)
 	if err != nil {
 		return TaskPreview{}, &APIError{Operation: "preview task", Kind: "task", Workspace: w.root, ResourceID: parentID, Err: err}
@@ -619,7 +624,7 @@ func (w *Workspace) PreviewTask(input CreateTaskInput) (TaskPreview, error) {
 	if err != nil {
 		return TaskPreview{}, err
 	}
-	return TaskPreview{ProjectID: parentID, Title: title, Slug: slug, Markdown: markdown, Template: source, Warnings: warnings}, nil
+	return TaskPreview{ProjectID: parentID, Title: title, Slug: slug, Markdown: markdown, AgentBinding: binding, Template: source, Warnings: warnings}, nil
 }
 
 func (w *Workspace) resolveTaskContent(input CreateTaskInput) (string, string, *TaskTemplateSource, []TemplateIssue, error) {
@@ -657,6 +662,21 @@ func (w *Workspace) resolveTaskContent(input CreateTaskInput) (string, string, *
 	return title, markdown, nil, nil, nil
 }
 
+func (w *Workspace) resolveTaskAgentBinding(parent Project, explicit AgentBinding) (AgentBinding, error) {
+	if strings.TrimSpace(explicit.Name) != "" || strings.TrimSpace(explicit.Kind) != "" {
+		return NormalizeAgentBinding(explicit)
+	}
+	if strings.TrimSpace(parent.TaskDefault.Name) != "" {
+		// A Project-level Task default overrides the Workspace default.
+		return NormalizeAgentBinding(parent.TaskDefault)
+	}
+	cfg, err := readWorkspaceConfig(w.root)
+	if err != nil {
+		return AgentBinding{}, err
+	}
+	return normalizeDefaultBinding(cfg.ResourceDefaults.Task), nil
+}
+
 func (w *Workspace) createTask(input CreateTaskInput) (Task, error) {
 	if err := w.require(); err != nil {
 		return Task{}, err
@@ -692,17 +712,9 @@ func (w *Workspace) createTask(input CreateTaskInput) (Task, error) {
 	staging := filepath.Join(parentPath, fmt.Sprintf(".pua-create-%s-%d", strings.ReplaceAll(id, ".", "-"), time.Now().UnixNano()))
 	defer os.RemoveAll(staging)
 	task := newTask(id, parentID, title, "")
-	if strings.TrimSpace(input.AgentBinding.Name) != "" || strings.TrimSpace(input.AgentBinding.Kind) != "" {
-		task.AgentBinding, err = NormalizeAgentBinding(input.AgentBinding)
-	} else if strings.TrimSpace(parent.TaskDefault.Name) != "" {
-		// A Project-level Task default overrides the Workspace default.
-		task.AgentBinding, err = NormalizeAgentBinding(parent.TaskDefault)
-	} else {
-		cfg, configErr := readWorkspaceConfig(w.root)
-		if configErr != nil {
-			return Task{}, &APIError{Operation: "create task", Kind: "task", Workspace: w.root, ResourceID: id, Err: configErr}
-		}
-		task.AgentBinding = normalizeDefaultBinding(cfg.ResourceDefaults.Task)
+	task.AgentBinding, err = w.resolveTaskAgentBinding(parent, input.AgentBinding)
+	if err != nil {
+		return Task{}, &APIError{Operation: "create task", Kind: "binding", Workspace: w.root, ResourceID: id, Err: err}
 	}
 	task.Template = templateSource
 	language, err := workspaceLanguage(w.root)

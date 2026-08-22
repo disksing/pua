@@ -67,7 +67,7 @@ describe("Workspace AGENTS save flow", () => {
       if (url.pathname === "/api/workspaces/ws-test/ui-state" && method === "GET") return json({});
       if (url.pathname === "/api/workspaces/ws-test/ui-state" && method === "PUT") return json({});
       if (url.pathname === "/api/workspaces/ws-test/tree" && method === "GET") {
-		return json({ agentBinding: { kind: "profile", name: "default" }, projects: [], activity: { running: [], favorites: [], unread: [], problems: [] }, wiki: { exists: false } });
+		return json({ agentBinding: { kind: "profile", name: "default" }, projects: [], activity: { running: [], unread: [], problems: [] }, wiki: { exists: false } });
       }
       if (url.pathname === "/api/workspaces/ws-test/files" && url.searchParams.get("path") === "AGENTS.md") {
         if (method === "PUT") {

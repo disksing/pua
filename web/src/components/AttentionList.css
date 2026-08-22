@@ -185,46 +185,6 @@
   font-weight: 600;
 }
 
-:where([data-component-owner="attention-list"]) .activity-actions {
-  min-width: 18px;
-  display: flex;
-  align-items: center;
-  gap: 2px;
-}
-
-:where([data-component-owner="attention-list"]) .favorite-star {
-  width: 18px;
-  height: 18px;
-  display: grid;
-  place-items: center;
-  border-radius: 4px;
-  color: var(--sidebar-muted);
-  cursor: pointer;
-  opacity: 0;
-}
-
-:where([data-component-owner="attention-list"]) .activity-row:hover .favorite-star,
-:where([data-component-owner="attention-list"]) .activity-row:focus-within .favorite-star,
-:where([data-component-owner="attention-list"]) .favorite-star.favorite,
-:where([data-component-owner="attention-list"]) .favorite-star:focus-visible {
-  opacity: 1;
-}
-
-:where([data-component-owner="attention-list"]) .favorite-star:hover,
-:where([data-component-owner="attention-list"]) .favorite-star:focus-visible {
-  background: var(--sidebar-row);
-  color: var(--sidebar-text);
-}
-
-:where([data-component-owner="attention-list"]) .favorite-star svg {
-  width: 14px;
-  height: 14px;
-}
-
-:where([data-component-owner="attention-list"]) .favorite-star.favorite svg {
-  fill: currentColor;
-}
-
 :where([data-component-owner="attention-list"]) .empty-attention {
   grid-template-columns: 16px minmax(0, 1fr);
   cursor: default;

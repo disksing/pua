@@ -26,8 +26,8 @@ function resource(id: string, title: string, type: "project" | "task" = "project
 function activity(status: ShellStatusPresentation = emptyStatus): ShellActivityItem {
   return {
     id: "project-a", type: "project", title: "Project A", ref: "#1", selected: true,
-    activeTurn: status.hasTaskState, favorite: true, unreadCount: status.hasTaskState ? 1 : 0, turnNumber: status.hasTaskState ? 1 : 0,
-    agentName: status.hasTaskState ? "Codex" : "", statusLabel: status.hasTaskState ? "Resource working" : "Favorite", status,
+    activeTurn: status.hasTaskState, unreadCount: status.hasTaskState ? 1 : 0, turnNumber: status.hasTaskState ? 1 : 0,
+    agentName: status.hasTaskState ? "Codex" : "", statusLabel: status.hasTaskState ? "Resource working" : "Active turn", status,
   };
 }
 
@@ -38,7 +38,7 @@ function model(overrides: Partial<AppShellModel> = {}): AppShellModel {
       { id: "workspace-a", name: "Workspace A", path: "/tmp/a", iconSrc: "/favicon.svg" },
       { id: "workspace-b", name: "Workspace B", path: "/tmp/b", iconSrc: "/favicon.svg" },
     ],
-    projects: [resource("project-a", "Project A"), resource("project-b", "Project B")], treeEditing: false, activity: { running: [], favorites: [], unread: [], problems: [] }, inbox: [],
+    projects: [resource("project-a", "Project A"), resource("project-b", "Project B")], treeEditing: false, activity: { running: [], unread: [], problems: [] }, inbox: [],
     doctor: { checking: false, complete: true, summary: { errors: 0, warnings: 0 }, workspaces: [] },
     paneSizes: { sidebarWidth: 280, chatWidth: 420, chatHeight: 320, sidebarAttentionHeight: 210 },
     mobile: { sidebarOpen: false },
@@ -47,7 +47,7 @@ function model(overrides: Partial<AppShellModel> = {}): AppShellModel {
     onSwitchWorkspace: vi.fn(async () => undefined), onAddWorkspace: vi.fn(), onCreateProject: vi.fn(), onOpenSettings: vi.fn(), onRefreshDoctor: vi.fn(async () => undefined),
     onToggleProject: vi.fn(async () => undefined), onSelectResource: vi.fn(async () => undefined), onReorder: vi.fn(async () => undefined),
     onDragState: vi.fn(), onToggleTreeEditing: vi.fn(), onCreateFolder: vi.fn(async () => ""), onRenameFolder: vi.fn(async () => undefined),
-    onDeleteFolder: vi.fn(async () => undefined), onToggleFolder: vi.fn(async () => undefined), onToggleFavorite: vi.fn(async () => undefined), onOpenInboxMessage: vi.fn(async () => undefined), onReplyInboxMessage: vi.fn(async () => undefined), onDeleteInboxMessage: vi.fn(async () => undefined), onPanePreview: vi.fn(), onPaneCommit: vi.fn(), onPaneViewport: vi.fn(), onMobileSidebar: vi.fn(),
+    onDeleteFolder: vi.fn(async () => undefined), onToggleFolder: vi.fn(async () => undefined), onOpenInboxMessage: vi.fn(async () => undefined), onReplyInboxMessage: vi.fn(async () => undefined), onDeleteInboxMessage: vi.fn(async () => undefined), onPanePreview: vi.fn(), onPaneCommit: vi.fn(), onPaneViewport: vi.fn(), onMobileSidebar: vi.fn(),
     onToast: vi.fn(),
     onHistoryNavigation: vi.fn(async () => undefined),
     ...overrides,
@@ -199,7 +199,7 @@ describe("AppShell", () => {
   });
 
   it("keeps the Activity grid stable when a new resource starts its first turn", async () => {
-      const initial = model({ activity: { running: [activity()], favorites: [], unread: [], problems: [] } });
+      const initial = model({ activity: { running: [activity()], unread: [], problems: [] } });
     const channel = createModelChannel(initial);
     const target = document.body.appendChild(document.createElement("div"));
     const component = mount(AppShell, { target, props: { channel } });
@@ -209,14 +209,13 @@ describe("AppShell", () => {
     const row = target.querySelector<HTMLElement>('[data-component-owner="attention-list"] button.activity-row')!;
     const status = row.querySelector<HTMLElement>(".activity-status")!;
     expect([...row.children].map((child) => child.className)).toEqual([
-      "activity-status", "activity-title", "activity-actions",
+      "activity-status", "activity-title",
     ]);
     const fallbackSlot = status.querySelector<HTMLElement>(".activity-status-fallback-slot")!;
     const runtimeSlot = status.querySelector<HTMLElement>(".activity-status-runtime-slot")!;
     expect(fallbackSlot.hidden).toBe(false);
     expect(runtimeSlot.hidden).toBe(true);
     expect(fallbackSlot.querySelector('[data-lucide="folder"]')).not.toBeNull();
-      expect(row.querySelector('[aria-label="Remove Project A from favorites"]')).not.toBeNull();
 
     const runningStatus: ShellStatusPresentation = {
       hasTaskState: true,
@@ -230,7 +229,7 @@ describe("AppShell", () => {
 
     expect(target.querySelector('[data-component-owner="attention-list"] button.activity-row')).toBe(row);
     expect([...row.children].map((child) => child.className)).toEqual([
-      "activity-status", "activity-title", "activity-actions",
+      "activity-status", "activity-title",
     ]);
     expect(row.querySelector(".activity-status")).toBe(status);
     expect(fallbackSlot.hidden).toBe(true);
@@ -242,7 +241,6 @@ describe("AppShell", () => {
     await tick();
 
     expect(target.querySelector('[data-component-owner="attention-list"] button.activity-row')).toBe(row);
-      expect(row.querySelector('[aria-label="Remove Project A from favorites"]')).not.toBeNull();
   });
 
   it("keeps drag state local and sends one typed reorder transaction in tree edit mode", async () => {

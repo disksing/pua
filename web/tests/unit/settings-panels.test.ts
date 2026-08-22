@@ -377,6 +377,43 @@ describe("settings domain panels", () => {
     expect(target.querySelectorAll(".settings-agent-card")).toHaveLength(1);
   });
 
+  it("reorders agent cards via drag and keyboard", async () => {
+    const current = model({
+      agentHub: {
+        ...model().agentHub,
+        agents: [
+          { name: "Codex", providerId: "codex", available: true },
+          { name: "Review", providerId: "codex", available: true },
+          { name: "Fast", providerId: "codex", available: true },
+        ],
+      },
+    });
+    const target = document.body.appendChild(document.createElement("div"));
+    const component = mount(SettingsPanelHarness, { target, props: { panel: "agenthub", model: current, initialDraft: createSettingsDraft(current) } });
+    cleanups.push(() => unmount(component));
+    await tick();
+
+    const names = () => [...target.querySelectorAll<HTMLElement>(".settings-agent-card-title strong")].map((el) => el.textContent);
+    const handles = () => [...target.querySelectorAll<HTMLButtonElement>(".settings-drag-handle")];
+    const cards = () => [...target.querySelectorAll<HTMLElement>(".settings-agent-card")];
+    expect(names()).toEqual(["Codex", "Review", "Fast"]);
+    expect(target.querySelectorAll(".settings-order-button")).toHaveLength(0);
+
+    // Keyboard reorder stays available through the drag handle.
+    handles()[2]!.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true, cancelable: true }));
+    await tick();
+    expect(names()).toEqual(["Codex", "Fast", "Review"]);
+    expect(target.querySelector(".settings-save-hint.visible")).toBeTruthy();
+
+    // Drag the middle card onto the last card, matching the Profiles panel.
+    handles()[1]!.dispatchEvent(new Event("dragstart", { bubbles: true, cancelable: true }));
+    await tick();
+    cards()[2]!.dispatchEvent(new Event("dragover", { bubbles: true, cancelable: true }));
+    cards()[2]!.dispatchEvent(new Event("drop", { bubbles: true, cancelable: true }));
+    await tick();
+    expect(names()).toEqual(["Codex", "Review", "Fast"]);
+  });
+
   it("enforces system/custom profile rules, unavailable routes, and shared save pending", async () => {
     const save = deferred<void>();
     const current = model({ onSaveAgentHub: vi.fn(() => save.promise) });

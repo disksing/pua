@@ -34,11 +34,18 @@
   let rowIdCounter = 0;
   let rowIds = $state<number[]>(draft.agentConfigs.map(() => rowIdCounter++));
   let expanded = $state<Set<number>>(new Set());
+  // dragIndex/dropIndex track an in-flight reorder gesture: dragIndex is the
+  // card being dragged and dropIndex the card currently highlighted as the
+  // drop target (dropIndex is used only for visual feedback).
+  let dragIndex = $state<number | null>(null);
+  let dropIndex = $state<number | null>(null);
 
   $effect(() => {
     if (rowIds.length !== draft.agentConfigs.length) {
       rowIds = draft.agentConfigs.map(() => rowIdCounter++);
       expanded = new Set();
+      dragIndex = null;
+      dropIndex = null;
     }
   });
 
@@ -229,10 +236,52 @@
         {@const provider = providerByID(agent.providerId)}
         {@const agentNameError = errorFor(index, "name")}
         {@const providerError = errorFor(index, "providerId")}
-        <article class="settings-agent-card" class:settings-agent-card-open={open}>
+        <article
+          class="settings-agent-card"
+          class:settings-agent-card-open={open}
+          class:dragging={dragIndex === index}
+          class:drop-target={dropIndex === index}
+          ondragover={(event) => {
+            if (dragIndex === null || dragIndex === index) return;
+            event.preventDefault();
+            if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+            if (dropIndex !== index) dropIndex = index;
+          }}
+          ondrop={(event) => {
+            event.preventDefault();
+            if (dragIndex === null || dragIndex === index) return;
+            moveAgent(dragIndex, index);
+            dragIndex = null;
+            dropIndex = null;
+          }}
+        >
           <div class="settings-agent-card-head">
+            <button
+              type="button"
+              class="settings-drag-handle"
+              aria-label={`Reorder agent ${agent.name || "Unnamed agent"}`}
+              title="Drag to reorder (or focus and use Arrow keys)"
+              draggable="true"
+              ondragstart={(event) => {
+                dragIndex = index;
+                if (event.dataTransfer) {
+                  event.dataTransfer.effectAllowed = "move";
+                  event.dataTransfer.setData("text/plain", String(index));
+                }
+              }}
+              ondragend={() => { dragIndex = null; dropIndex = null; }}
+              onkeydown={(event) => {
+                if (event.key === "ArrowUp" && index > 0) {
+                  event.preventDefault();
+                  moveAgent(index, index - 1);
+                } else if (event.key === "ArrowDown" && index < draft.agentConfigs.length - 1) {
+                  event.preventDefault();
+                  moveAgent(index, index + 1);
+                }
+              }}
+            ><Icon name="grip-vertical" /></button>
             <button type="button" class="settings-agent-card-toggle" aria-expanded={open} aria-controls={`settings-agent-${index}-body`} onclick={() => toggleAgent(index)}><span class="settings-card-caret" class:open><Icon name="chevron-right" /></span><span class="settings-agent-card-title"><strong>{agent.name || "Unnamed agent"}</strong><small>{provider?.name || agent.providerId || "No provider"}{summarizeAgentOptions(agent.options).length ? ` · ${summarizeAgentOptions(agent.options).join(" · ")}` : ""}</small></span></button>
-            <div class="settings-agent-card-actions"><button type="button" class="settings-order-button" aria-label={`Move ${agent.name || "agent"} up`} disabled={index === 0} onclick={() => moveAgent(index, index - 1)}>↑</button><button type="button" class="settings-order-button" aria-label={`Move ${agent.name || "agent"} down`} disabled={index === draft.agentConfigs.length - 1} onclick={() => moveAgent(index, index + 1)}>↓</button><button type="button" class="settings-delete-button" title="Delete Agent" aria-label={`Delete ${agent.name || "agent"}`} onclick={() => removeAgent(index)}><Icon name="trash" /></button></div>
+            <button type="button" class="settings-delete-button" title="Delete Agent" aria-label={`Delete ${agent.name || "agent"}`} onclick={() => removeAgent(index)}><Icon name="trash" /></button>
           </div>
           {#if open}
             <div id={`settings-agent-${index}-body`} class="settings-agent-card-body">

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -245,6 +246,29 @@ func TestResultSubscriptionDefaultsAndSystemMessages(t *testing.T) {
 	}
 }
 
+func TestProviderMessageContextSurvivesReceiptAndClone(t *testing.T) {
+	original := resourceMailboxMessage{
+		ID: "msg-context", Role: "agent", Sender: &agentHubMessageSender{ID: "project1.task2"},
+		ProviderContext: &providerMessageContext{
+			Language: "zh-CN", TurnID: "turn-1", OpenerRole: "user",
+			OpenerSender: &agentHubMessageSender{Name: "disksing"}, OpenerResponse: providerResponseProgressFinal,
+		},
+	}
+	cloned := cloneMailboxMessage(original)
+	cloned.ProviderContext.OpenerSender.Name = "changed"
+	if original.ProviderContext.OpenerSender.Name != "disksing" {
+		t.Fatal("mailbox clone shared provider context sender")
+	}
+	roundTrip := mailboxMessageFromReceipt(receiptFromMailboxMessage(original))
+	if !reflect.DeepEqual(roundTrip.ProviderContext, original.ProviderContext) {
+		t.Fatalf("receipt provider context = %#v, want %#v", roundTrip.ProviderContext, original.ProviderContext)
+	}
+	roundTrip.ProviderContext.OpenerSender.Name = "changed again"
+	if original.ProviderContext.OpenerSender.Name != "disksing" {
+		t.Fatal("receipt round trip shared provider context sender")
+	}
+}
+
 func TestResourceMailboxReceiptRetentionReturnsStableExpiredError(t *testing.T) {
 	root := t.TempDir()
 	if _, err := app.Initialize(root, "en"); err != nil {
@@ -409,6 +433,85 @@ func TestResourceMailboxModesAndPriority(t *testing.T) {
 	}
 	if fake.messageSenders[0] == nil || fake.messageSenders[0].ID != "project1.task2" || fake.messageRoles[0] != "agent" {
 		t.Fatalf("agent provenance was not preserved: roles=%#v senders=%#v", fake.messageRoles, fake.messageSenders)
+	}
+}
+
+func TestResourceMailboxProviderEnvelopeUsesTurnOpenerAndFreezesLanguage(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	fake.enforceMessageIDs = true
+	hub := httptest.NewServer(fake)
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+
+	opener, err := manager.acceptResourceMessage(context.Background(), workspace, "project1.task1", resourceMessageRequest{
+		Text: "start here", Mode: resourceMessageModeSteer, Role: "user", Sender: &agentHubMessageSender{Name: "disksing"},
+	})
+	if err != nil || opener.Status != resourceMessageDelivered || opener.ActualMode != resourceMessageModeEnqueue {
+		t.Fatalf("user opener = %#v, err=%v", opener, err)
+	}
+	fake.mu.Lock()
+	openerWire := fake.messageInputs[opener.ID]
+	fake.mu.Unlock()
+	if openerWire.Text != "Message from user \"disksing\" [sender receives: progress + final reply]:\nstart here" {
+		t.Fatalf("opener provider text = %q", openerWire.Text)
+	}
+
+	record, found, err := currentResourceGeneration(workspace.Path, "project1.task1")
+	if err != nil || !found {
+		t.Fatalf("current generation missing: found=%v err=%v", found, err)
+	}
+	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeConfig, err := puaWorkspace.RuntimeConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.mu.Lock()
+	session := fake.sessions[record.AgentHubSessionID]
+	session.State = "running"
+	session.CurrentTurnID = "turn-opener"
+	session.InputCapabilities.Steer = true
+	fake.sessions[session.ID] = session
+	fake.failNextMessage = true
+	fake.mu.Unlock()
+
+	inserted, err := manager.acceptResourceMessage(context.Background(), workspace, "project1.task1", resourceMessageRequest{
+		Text: "check this", Mode: resourceMessageModeSteer, Role: "agent",
+		Sender: &agentHubMessageSender{ID: "project1.task347", Name: "project1.task347"}, SenderWorkspaceInstanceID: runtimeConfig.InstanceID,
+	})
+	if err != nil || inserted.Status != resourceMessageDelivering || inserted.ProviderContext == nil ||
+		inserted.ProviderContext.Language != "en" || inserted.ProviderContext.TurnID != "turn-opener" ||
+		inserted.ProviderContext.OpenerRole != "user" || inserted.ProviderContext.OpenerSender == nil ||
+		inserted.ProviderContext.OpenerSender.Name != "disksing" || inserted.ProviderContext.OpenerResponse != providerResponseProgressFinal {
+		t.Fatalf("inserted message context = %#v, err=%v", inserted, err)
+	}
+	wantInserted := "Inserted message from agent \"project1.task347\" (Reply via `pua message send --to=project1.task347 '<reply>'`. Current conversation: user \"disksing\" [sender receives: progress + final reply]):\ncheck this"
+	fake.mu.Lock()
+	insertedWire := fake.messageInputs[inserted.ID]
+	fake.mu.Unlock()
+	if insertedWire.Text != wantInserted {
+		t.Fatalf("inserted provider text = %q, want %q", insertedWire.Text, wantInserted)
+	}
+
+	if err := puaWorkspace.Migrate("zh-CN"); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.withResourceController(context.Background(), workspace, "project1.task1", func() error {
+		return manager.reconcileResourceMailboxLocked(context.Background(), workspace, "project1.task1")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	recovered, found, err := mailboxMessageByID(workspace.Path, inserted.ID)
+	if err != nil || !found || recovered.Status != resourceMessageDelivered || recovered.ProviderContext == nil || recovered.ProviderContext.Language != "en" {
+		t.Fatalf("recovered inserted message = %#v, found=%v err=%v", recovered, found, err)
+	}
+	fake.mu.Lock()
+	retriedWire := fake.messageInputs[inserted.ID]
+	fake.mu.Unlock()
+	if retriedWire.Text != wantInserted {
+		t.Fatalf("language change rewrote retry text = %q, want %q", retriedWire.Text, wantInserted)
 	}
 }
 

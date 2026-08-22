@@ -19,6 +19,14 @@
   line-height: 1.35;
 }
 
+:where([data-component-owner="workspace-settings-panel"]) .settings-field-help {
+  grid-column: 1 / -1;
+  margin: -4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 :where([data-component-owner="workspace-settings-panel"]) .settings-check {
   grid-column: 1 / -1;
   display: flex;
@@ -52,6 +60,11 @@
   color: var(--text);
   padding: 7px 9px;
   font: inherit;
+}
+
+:where([data-component-owner="workspace-settings-panel"]) .settings-initial-user input {
+  min-width: 0;
+  flex: 1;
 }
 
 :where([data-component-owner="workspace-settings-panel"]) .settings-list {

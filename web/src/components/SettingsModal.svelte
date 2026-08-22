@@ -12,7 +12,6 @@
   import ProfilesSettingsPanel from "./ProfilesSettingsPanel.svelte";
   import { createSettingsDraft } from "./settings-draft";
   import SettingsNavigation from "./SettingsNavigation.svelte";
-  import UserSettingsPanel from "./UserSettingsPanel.svelte";
   import WorkspaceSettingsPanel from "./WorkspaceSettingsPanel.svelte";
 
   let { channel }: { channel: ModelChannel<SettingsModel> } = $props();
@@ -22,27 +21,20 @@
   let dataVersion = $state(-1);
   // svelte-ignore state_referenced_locally
   let draft = $state<SettingsDraft>(createSettingsDraft(model));
-  // svelte-ignore state_referenced_locally
-  let userNameDraft = $state(model.userName);
   let pending = $state("");
 
   onMount(() => channel.subscribe((next) => {
-    const previousModel = model;
     model = next;
     if (next.identity !== identity) {
       identity = next.identity;
       dataVersion = next.dataVersion;
       draft = createSettingsDraft(next);
-      userNameDraft = next.userName;
       pending = "";
     } else if (next.dataVersion !== dataVersion && !draft.dirty) {
       const activeTab = draft.tab;
-      const preserveUserNameDraft = userNameDraft !== previousModel.userName;
       dataVersion = next.dataVersion;
       draft = createSettingsDraft(next);
       draft.tab = activeTab;
-      if (preserveUserNameDraft) draft.userName = userNameDraft;
-      else userNameDraft = next.userName;
     }
   }));
 
@@ -73,8 +65,6 @@
       <div class="settings-body">
       {#if draft.tab === "workspace"}
         <WorkspaceSettingsPanel workspaces={model.workspaces} activeWorkspaceId={model.activeWorkspaceId} workspaceIcons={model.workspaceIcons} bind:draft bind:pending onAddWorkspace={model.onAddWorkspace} onRemoveWorkspace={model.onRemoveWorkspace} onWorkspaceIcon={model.onWorkspaceIcon} onSaveWorkspaceName={model.onSaveWorkspaceName} onToast={model.onToast} />
-      {:else if draft.tab === "user"}
-        <UserSettingsPanel userName={userNameDraft} onUserNameInput={(value) => { userNameDraft = value; draft.userName = value; }} bind:pending onSaveUser={model.onSaveUser} onToast={model.onToast} />
       {:else if draft.tab === "appearance"}
         <AppearanceSettingsPanel appearance={model.appearance} onLayoutPreference={model.onLayoutPreference} onFontScale={model.onFontScale} onResetFontScales={model.onResetFontScales} onThemePreference={model.onThemePreference} />
       {:else if draft.tab === "agenthub"}

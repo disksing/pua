@@ -31,9 +31,6 @@ func runUser(args []string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := workspace.EnsureDefaultUser(); err != nil {
-		return err
-	}
 	users, err := workspace.Users()
 	if err != nil {
 		return err

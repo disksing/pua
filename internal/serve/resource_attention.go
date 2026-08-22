@@ -171,13 +171,17 @@ func selectedUserName(userNames []string) string {
 	if len(userNames) > 0 && strings.TrimSpace(userNames[0]) != "" {
 		return userNames[0]
 	}
-	return app.DefaultUserName
+	return ""
 }
 
 func (s *server) loadResourceStatesAtPath(path string, userNames ...string) (map[string]resourceUserState, error) {
+	userName := selectedUserName(userNames)
+	if userName == "" {
+		return map[string]resourceUserState{}, nil
+	}
 	s.uiStateMu.Lock()
 	defer s.uiStateMu.Unlock()
-	state, err := loadUIStateFile(userUIStatePath(path, selectedUserName(userNames)))
+	state, err := loadUIStateFile(userUIStatePath(path, userName))
 	if err != nil {
 		return nil, err
 	}
@@ -185,9 +189,13 @@ func (s *server) loadResourceStatesAtPath(path string, userNames ...string) (map
 }
 
 func (s *server) mutateResourceUserStateAtPath(path, resourceID string, mutate func(*resourceUserState), userNames ...string) (resourceUserState, error) {
+	userName := selectedUserName(userNames)
+	if userName == "" {
+		return resourceUserState{}, &resourceAPIError{Code: "user_required", Message: "select a Workspace user before accessing personal data"}
+	}
 	s.uiStateMu.Lock()
 	defer s.uiStateMu.Unlock()
-	statePath := userUIStatePath(path, selectedUserName(userNames))
+	statePath := userUIStatePath(path, userName)
 	state, err := loadUIStateFile(statePath)
 	if err != nil {
 		return resourceUserState{}, err
@@ -678,7 +686,7 @@ func (s *server) enrichTreeResourceActivity(workspacePath string, tree *workspac
 	}
 	tree.Activity = resourceActivityLists{
 		Running: make([]resourceSnapshot, 0),
-		Unread: make([]resourceSnapshot, 0), Problems: make([]resourceSnapshot, 0),
+		Unread:  make([]resourceSnapshot, 0), Problems: make([]resourceSnapshot, 0),
 	}
 	for _, item := range candidates {
 		if item.Archived {

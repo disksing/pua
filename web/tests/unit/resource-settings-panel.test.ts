@@ -56,6 +56,8 @@ function model(overrides: Partial<DetailPanelModel> = {}): DetailPanelModel {
     onSaveDescription: vi.fn(async () => undefined),
     onSaveWorkspaceDefaults: vi.fn(async () => undefined),
     onSaveWorkspaceUserPreference: vi.fn(async () => undefined),
+    onSwitchWorkspaceUser: vi.fn(async () => undefined),
+    onAddWorkspaceUser: vi.fn(async () => undefined),
     onDeleteWorkspaceUser: vi.fn(async () => undefined),
     onSaveGenerationPolicy: vi.fn(async () => undefined),
     onSaveStallWatchdogPolicy: vi.fn(async () => undefined),
@@ -67,6 +69,31 @@ function model(overrides: Partial<DetailPanelModel> = {}): DetailPanelModel {
 }
 
 describe("ResourceSettingsPanel", () => {
+  it("switches and adds Workspace users without auto-switching the new user", async () => {
+    const onSwitchWorkspaceUser = vi.fn(async () => undefined);
+    const onAddWorkspaceUser = vi.fn(async () => undefined);
+    const target = document.body.appendChild(document.createElement("div"));
+    const component = mount(ResourceSettingsPanel, {
+      target,
+      props: { model: model({ resourceType: "workspace", resourceId: "workspace", workspaceUsers: [{ version: 1, name: "Alice", preference: "" }, { version: 1, name: "Bob", preference: "" }], currentUserName: "Alice", onSwitchWorkspaceUser, onAddWorkspaceUser }) },
+    });
+    cleanups.push(() => unmount(component));
+    await tick();
+
+    const selector = target.querySelector<HTMLSelectElement>("#workspaceCurrentUser")!;
+    selector.value = "Bob";
+    selector.dispatchEvent(new Event("change", { bubbles: true }));
+    await vi.waitFor(() => expect(onSwitchWorkspaceUser).toHaveBeenCalledWith("Bob"));
+
+    const input = target.querySelector<HTMLInputElement>("#workspaceNewUser")!;
+    await vi.waitFor(() => expect(input.disabled).toBe(false));
+    input.value = "Carol";
+    input.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    input.form!.requestSubmit();
+    await vi.waitFor(() => expect(onAddWorkspaceUser).toHaveBeenCalledWith("Carol"));
+    expect(onSwitchWorkspaceUser).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps the Workspace Generation Save disabled until the policy changes", async () => {
     const onSaveGenerationPolicy = vi.fn(async () => undefined);
     const target = document.body.appendChild(document.createElement("div"));

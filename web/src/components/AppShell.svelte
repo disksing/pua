@@ -13,6 +13,7 @@
   import ProjectTree from "./ProjectTree.svelte";
   import SchedulerNav from "./SchedulerNav.svelte";
   import WorkspaceSwitcher from "./WorkspaceSwitcher.svelte";
+  import WorkspaceUserGate from "./WorkspaceUserGate.svelte";
 
   let { channel, details, timeline, composer, agentHeader }: {
     channel: ModelChannel<AppShellModel>;
@@ -122,14 +123,19 @@
   <div class="brand-band"><div class="brand-mark">P</div><div class="brand-copy"><strong>PUA</strong><span>{model.version}</span></div>{#if model.doctor.summary.errors + model.doctor.summary.warnings > 0 || model.doctor.error}<button id="doctorButton" class:has-errors={model.doctor.summary.errors > 0} class="brand-doctor" type="button" title="Workspace problems" aria-label={`${model.doctor.summary.errors} errors and ${model.doctor.summary.warnings} warnings`} onclick={() => { model.onMobileSidebar(false); doctorOpen = true; }}><Icon name={model.doctor.summary.errors > 0 ? "circle-alert" : "triangle-alert"} /><span>{model.doctor.summary.errors + model.doctor.summary.warnings}</span></button>{/if}<button id="systemSettingsButton" class="brand-settings" type="button" title="Settings" aria-label="Settings" onclick={() => { model.onMobileSidebar(false); model.onOpenSettings(); }}><Icon name="settings" /></button></div>
   <div class="workspace-card">
     <WorkspaceSwitcher identity={model.identity} mobileSidebarOpen={model.mobile.sidebarOpen} activeWorkspaceId={model.activeWorkspaceId} workspaces={model.workspaces} onSwitch={model.onSwitchWorkspace} onOpen={() => model.onSelectResource("workspace")} onAdd={model.onAddWorkspace} onToast={model.onToast} />
-    <SchedulerNav item={model.scheduler || null} onSelect={model.onSelectResource} onToast={model.onToast} />
+    {#if !model.userGate?.mode}<SchedulerNav item={model.scheduler || null} onSelect={model.onSelectResource} onToast={model.onToast} />{/if}
   </div>
-  <ProjectTree identity={model.identity} loading={model.loading} error={model.error} projects={model.projects} editing={model.treeEditing} onCreate={model.onCreateProject} onToggle={model.onToggleProject} onSelect={model.onSelectResource} onReorder={model.onReorder} onDragState={model.onDragState} onToggleEditing={model.onToggleTreeEditing} onCreateFolder={model.onCreateFolder} onRenameFolder={model.onRenameFolder} onDeleteFolder={model.onDeleteFolder} onToggleFolder={model.onToggleFolder} onToast={model.onToast} />
-  <PaneResizeHandle id="activityResize" kind="sidebarAttentionHeight" className="horizontal-resize sidebar-activity-resize" label="Resize activity panel" onPreview={model.onPanePreview} onCommit={model.onPaneCommit} />
-  <ActivityPanel activity={model.activity} inbox={model.inbox} workspaceId={model.activeWorkspaceId} resolveResourceTitle={model.resolveResourceTitle} onNavigate={(id) => { void model.onSelectResource(id); }} onSelect={model.onSelectResource} onOpenInboxMessage={model.onOpenInboxMessage} onReplyInboxMessage={model.onReplyInboxMessage} onDeleteInboxMessage={model.onDeleteInboxMessage} onToast={model.onToast} />
+  {#if !model.userGate?.mode}
+    <ProjectTree identity={model.identity} loading={model.loading} error={model.error} projects={model.projects} editing={model.treeEditing} onCreate={model.onCreateProject} onToggle={model.onToggleProject} onSelect={model.onSelectResource} onReorder={model.onReorder} onDragState={model.onDragState} onToggleEditing={model.onToggleTreeEditing} onCreateFolder={model.onCreateFolder} onRenameFolder={model.onRenameFolder} onDeleteFolder={model.onDeleteFolder} onToggleFolder={model.onToggleFolder} onToast={model.onToast} />
+    <PaneResizeHandle id="activityResize" kind="sidebarAttentionHeight" className="horizontal-resize sidebar-activity-resize" label="Resize activity panel" onPreview={model.onPanePreview} onCommit={model.onPaneCommit} />
+    <ActivityPanel activity={model.activity} inbox={model.inbox} workspaceId={model.activeWorkspaceId} resolveResourceTitle={model.resolveResourceTitle} onNavigate={(id) => { void model.onSelectResource(id); }} onSelect={model.onSelectResource} onOpenInboxMessage={model.onOpenInboxMessage} onReplyInboxMessage={model.onReplyInboxMessage} onDeleteInboxMessage={model.onDeleteInboxMessage} onToast={model.onToast} />
+  {/if}
 </aside>
 <PaneResizeHandle id="sidebarResize" kind="sidebarWidth" className="sidebar-resize" label="Resize sidebar" onPreview={model.onPanePreview} onCommit={model.onPaneCommit} />
 <main class="workspace-panel">
+  {#if model.userGate?.mode}
+    <WorkspaceUserGate {model} />
+  {:else}
   <div class="workspace-toolbar">
     <button id="splitMenuButton" class="workspace-menu-button" type="button" aria-label="Open navigation" aria-controls="mobileSidebar" aria-expanded={model.mobile.sidebarOpen} onclick={() => model.onMobileSidebar(true)}><Icon name="menu" /></button>
   </div>
@@ -137,6 +143,7 @@
   <PaneResizeHandle id="detailsResize" kind="chatWidth" className="details-resize" label="Resize chat panel" onPreview={model.onPanePreview} onCommit={model.onPaneCommit} />
   <PaneResizeHandle id="detailsResizeY" kind="chatHeight" className="horizontal-resize details-resize-y" label="Resize chat panel height" onPreview={model.onPanePreview} onCommit={model.onPaneCommit} />
   <aside id="agentPanel" class="agent-panel"><div class="chat-panel">{#if agentHeader}{@render agentHeader()}{/if}<div id="chatTimeline" class="chat-timeline" data-component-owner="event-timeline">{#if timeline}{@render timeline()}{/if}</div><div id="chatComposer" class="chat-composer" data-component-owner="chat-composer">{#if composer}{@render composer()}{/if}</div></div></aside>
+  {/if}
 </main>
 </div>
 {#if doctorOpen}<DoctorDialog snapshot={model.doctor} onClose={() => { doctorOpen = false; }} onRefresh={model.onRefreshDoctor} />{/if}

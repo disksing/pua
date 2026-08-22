@@ -36,6 +36,7 @@ interface SettingsData {
 	agents?: SettingsAgent[];
 	agentProfiles?: SettingsProfile[];
 	agentHub?: AgentHubData;
+	suggestedUserName?: string;
 }
 
 export interface SettingsControllerDependencies {
@@ -48,8 +49,6 @@ export interface SettingsControllerDependencies {
 	publish(model: SettingsModel): void;
 	agentOptions(): AgentOption[];
 	workspaceIcons: SettingsModel["workspaceIcons"];
-	userName(): string;
-	saveUser(name: string): Promise<string>;
 	appearance(): AppearanceSettings;
 	setLayoutPreference(preference: AppearanceSettings["layout"]): void;
 	setFontScale(column: keyof AppearanceSettings["fontScales"], value: number): void;
@@ -60,7 +59,7 @@ export interface SettingsControllerDependencies {
 	setCompletionSound(enabled: boolean): void;
 	flushDraft(): void;
 	resetAgentState(): void;
-	reloadWorkspaceContext(): Promise<void>;
+	reloadWorkspaceContext(initialUserName?: string): Promise<void>;
 	clearWorkspaceContext(): void;
 	renderWorkspace(): void;
 	renderAgentViews(): void;
@@ -106,6 +105,7 @@ export function createSettingsController(dependencies: SettingsControllerDepende
 		workspacePath: string;
 		createWorkspace: boolean;
 		workspaceLanguage: SettingsDraft["workspaceLanguage"];
+		initialUserName: string;
 		workspaceIconSavingId: string;
 	} = {
 		open: false,
@@ -117,6 +117,7 @@ export function createSettingsController(dependencies: SettingsControllerDepende
 		workspacePath: "",
 		createWorkspace: false,
 		workspaceLanguage: "en",
+		initialUserName: "",
 		workspaceIconSavingId: ""
 	};
 
@@ -143,7 +144,7 @@ export function createSettingsController(dependencies: SettingsControllerDepende
 			activeWorkspaceId: dependencies.activeWorkspaceId(),
 			workspaceIcons: dependencies.workspaceIcons,
 			workspaceIconSavingId: state.workspaceIconSavingId,
-			userName: dependencies.userName(),
+			suggestedUserName: String(data.suggestedUserName || config.suggestedUserName || ""),
 			appearance: dependencies.appearance(),
 			agentHub: {
 				mode: hub.mode || "embedded",
@@ -170,13 +171,6 @@ export function createSettingsController(dependencies: SettingsControllerDepende
 			onRemoveWorkspace: async (id, draft) => { syncDraft(draft); await removeWorkspace(id); },
 			onWorkspaceIcon: async (id, icon, draft) => { syncDraft(draft); await updateWorkspaceIcon(id, icon); },
 			onSaveWorkspaceName: async (id, name, draft) => { syncDraft(draft); await updateWorkspaceName(id, name); },
-			onSaveUser: async (name) => {
-				const normalized = await dependencies.saveUser(name);
-				await refreshPreservingAgentDraft();
-				render();
-				dependencies.toast(normalized === "User" ? "User name reset to User." : `User name saved as ${normalized}.`);
-				return normalized;
-			},
 			onLayoutPreference: (preference) => {
 				dependencies.setLayoutPreference(preference);
 				render();
@@ -235,6 +229,7 @@ export function createSettingsController(dependencies: SettingsControllerDepende
 		state.workspacePath = String(draft.workspacePath || "");
 		state.createWorkspace = Boolean(draft.createWorkspace);
 		state.workspaceLanguage = draft.workspaceLanguage === "zh-CN" ? "zh-CN" : "en";
+		state.initialUserName = String(draft.initialUserName || "");
 		state.agentDirty = Boolean(draft.dirty);
 		state.data = {
 			...state.data,
@@ -296,7 +291,7 @@ export function createSettingsController(dependencies: SettingsControllerDepende
 			method: "POST", body: JSON.stringify({
 				path,
 				create: created,
-				...(created ? { language: state.workspaceLanguage } : {})
+				...(created ? { language: state.workspaceLanguage, initialUserName: state.initialUserName } : {})
 			})
 		});
 		dependencies.flushDraft();
@@ -307,7 +302,7 @@ export function createSettingsController(dependencies: SettingsControllerDepende
 		dependencies.setActiveWorkspaceId(workspace.id);
 		dependencies.resetAgentState();
 		dependencies.renderWorkspace();
-		await dependencies.reloadWorkspaceContext();
+		await dependencies.reloadWorkspaceContext(created ? state.initialUserName : undefined);
 		await refreshPreservingAgentDraft();
 		render();
 		dependencies.toast(created ? "Workspace created." : "Workspace added.");

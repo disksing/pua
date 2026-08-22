@@ -161,7 +161,7 @@ func TestAgentHubPollerProjectsTurnStartAndClearsStaleTurnIDAtReady(t *testing.T
 	if record.Status != "idle" || record.CurrentTurnID != "" || generationHasActiveTurn(record) {
 		t.Fatalf("ready session retained a stale active Turn: %#v", record)
 	}
-	tree, err := manager.server.treeAt(context.Background(), workspace.Path)
+	tree, err := manager.server.treeAt(context.Background(), workspace.Path, app.LegacyDefaultUserName)
 	if err != nil {
 		t.Fatal(err)
 	}

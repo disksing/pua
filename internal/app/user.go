@@ -12,9 +12,16 @@ import (
 )
 
 const (
-	DefaultUserName  = "User"
+	// LegacyDefaultUserName identifies the user created by older PUA versions.
+	// It is retained for migration only; new Workspaces do not create it.
+	LegacyDefaultUserName = "User"
+	// DefaultUserName remains as a source-compatible alias for integrations
+	// that refer to the historical name. PUA no longer creates or selects it.
+	DefaultUserName  = LegacyDefaultUserName
 	userNameMaxBytes = 80
 )
+
+var ErrLastUser = errors.New("cannot delete the last Workspace user")
 
 // UserProfile is the Workspace-local identity and preference record.
 // User names are identifiers rather than display labels in the first version.
@@ -102,10 +109,6 @@ func ensureUserLocked(root, name string) (UserProfile, bool, error) {
 		return UserProfile{}, false, err
 	}
 	return profile, true, nil
-}
-
-func (w *Workspace) EnsureDefaultUser() (UserProfile, error) {
-	return w.RegisterUser(DefaultUserName)
 }
 
 func (w *Workspace) RegisterUser(name string) (profile UserProfile, err error) {
@@ -214,6 +217,13 @@ func (w *Workspace) DeleteUser(name string) error {
 		}
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("user path is not a directory: %s", name)
+		}
+		users, usersErr := w.Users()
+		if usersErr != nil {
+			return usersErr
+		}
+		if len(users) <= 1 {
+			return ErrLastUser
 		}
 		return os.RemoveAll(path)
 	})

@@ -4,6 +4,7 @@
   import Icon from "./Icon.svelte";
   import type { SettingsDraft, SettingsModel } from "./models";
   import { cloneSettingsDraft, settingsErrorMessage } from "./settings-draft";
+  import { sanitizeUserNameInput, validateUserName } from "../controllers/user-settings-controller";
 
   let {
     workspaces,
@@ -36,6 +37,11 @@
   const workspaceItems = $derived(workspaces || []);
 
   const workspacePathMissing = $derived(!draft.workspacePath.trim());
+  const initialUserError = $derived.by(() => {
+    if (!draft.createWorkspace) return "";
+    try { validateUserName(draft.initialUserName); return ""; }
+    catch (error) { return settingsErrorMessage(error); }
+  });
 
   $effect(() => {
     if (nameEditing && nameInput) nameInput.focus();
@@ -43,7 +49,7 @@
 
   async function addWorkspace(event: SubmitEvent): Promise<void> {
     event.preventDefault();
-    if (workspacePathMissing || pending) return;
+    if (workspacePathMissing || initialUserError || pending) return;
     pending = "workspace";
     try {
       await onAddWorkspace(cloneSettingsDraft(draft));
@@ -148,6 +154,12 @@
       <span>Create directory and run pua init</span>
     </label>
     {#if draft.createWorkspace}
+      <label class="settings-language settings-initial-user" for="settingsWorkspaceInitialUser">
+        <span>Initial user name</span>
+        <input id="settingsWorkspaceInitialUser" value={draft.initialUserName} aria-invalid={initialUserError ? "true" : undefined} aria-describedby={initialUserError ? "settings-workspace-user-error" : undefined} disabled={Boolean(pending)} oninput={(event) => draft.initialUserName = sanitizeUserNameInput((event.currentTarget as HTMLInputElement).value)} />
+      </label>
+      {#if initialUserError}<p id="settings-workspace-user-error" class="settings-field-error" role="alert">{initialUserError}</p>{/if}
+      <p class="settings-field-help">When available, this is prefilled from the account running PUA Server. You can change it.</p>
       <label class="settings-language" for="settingsWorkspaceLanguage">
         <span>Generated content language</span>
         <select id="settingsWorkspaceLanguage" bind:value={draft.workspaceLanguage} disabled={Boolean(pending)}>
@@ -156,7 +168,7 @@
         </select>
       </label>
     {/if}
-    <button type="submit" disabled={Boolean(pending) || workspacePathMissing}><Icon name="plus" /><span>{draft.createWorkspace ? "Create" : "Add"}</span></button>
+    <button type="submit" disabled={Boolean(pending) || workspacePathMissing || Boolean(initialUserError)}><Icon name="plus" /><span>{draft.createWorkspace ? "Create" : "Add"}</span></button>
   </form>
   <div class="settings-list">
     {#each workspaceItems as workspace (workspace.id)}

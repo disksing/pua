@@ -119,6 +119,12 @@ export interface AppShellModel {
   version: string;
   activeWorkspaceId: string;
   workspaceName: string;
+  userGate: {
+    mode: "" | "create" | "select" | "loading";
+    users: Array<{ name: string; preference: string }>;
+    suggestedUserName: string;
+    missingUserName: string;
+  };
   workspaces: ShellWorkspaceItem[];
   scheduler?: ShellResourceItem | null;
   projects: ShellResourceItem[];
@@ -132,6 +138,7 @@ export interface AppShellModel {
   route: { path: string; revision: number; replace: boolean };
   resolveResourceTitle: (resourceId: string) => string | null;
   onSwitchWorkspace: (id: string) => Promise<void>;
+  onResolveWorkspaceUser: (name: string, create: boolean) => Promise<void>;
   onAddWorkspace: () => void;
   onCreateProject: () => void;
   onOpenSettings: () => void;

@@ -856,7 +856,7 @@ func TestUserMessageSendMarksResourceRead(t *testing.T) {
 	if err := rewriteTestGenerationRecords(workspace.Path, []generationRecord{record}); err != nil {
 		t.Fatal(err)
 	}
-	tree, err := manager.server.treeAt(context.Background(), workspace.Path)
+	tree, err := manager.server.treeAt(context.Background(), workspace.Path, app.LegacyDefaultUserName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -870,7 +870,7 @@ func TestUserMessageSendMarksResourceRead(t *testing.T) {
 	if agentRecorder.Code != http.StatusAccepted {
 		t.Fatalf("agent send failed: %d %s", agentRecorder.Code, agentRecorder.Body.String())
 	}
-	state, err := manager.server.resourceUserStateForResource(workspace.Path, "project1.task1")
+	state, err := manager.server.resourceUserStateForResource(workspace.Path, "project1.task1", app.LegacyDefaultUserName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -880,18 +880,20 @@ func TestUserMessageSendMarksResourceRead(t *testing.T) {
 
 	// A user message marks the resource read through the latest completed Turn.
 	userRecorder := httptest.NewRecorder()
-	manager.server.handleWorkspace(userRecorder, httptest.NewRequest(http.MethodPost, "/api/workspaces/"+workspace.ID+"/resources/project1.task1/messages", strings.NewReader(`{"text":"hello","role":"user","sender":{"name":"User"}}`)))
+	userRequest := httptest.NewRequest(http.MethodPost, "/api/workspaces/"+workspace.ID+"/resources/project1.task1/messages", strings.NewReader(`{"text":"hello","role":"user","sender":{"name":"User"}}`))
+	userRequest.Header.Set(workspaceUserHeader, app.LegacyDefaultUserName)
+	manager.server.handleWorkspace(userRecorder, userRequest)
 	if userRecorder.Code != http.StatusAccepted {
 		t.Fatalf("user send failed: %d %s", userRecorder.Code, userRecorder.Body.String())
 	}
-	state, err = manager.server.resourceUserStateForResource(workspace.Path, "project1.task1")
+	state, err = manager.server.resourceUserStateForResource(workspace.Path, "project1.task1", app.LegacyDefaultUserName)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if state.ReadTurnNumber == nil || *state.ReadTurnNumber != 2 {
 		t.Fatalf("user message did not mark the resource read: %#v", state)
 	}
-	tree, err = manager.server.treeAt(context.Background(), workspace.Path)
+	tree, err = manager.server.treeAt(context.Background(), workspace.Path, app.LegacyDefaultUserName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -913,7 +915,7 @@ func TestUserMessageSendMarksResourceRead(t *testing.T) {
 	if err := saveGenerationRecord(workspace.Path, current); err != nil {
 		t.Fatal(err)
 	}
-	tree, err = manager.server.treeAt(context.Background(), workspace.Path)
+	tree, err = manager.server.treeAt(context.Background(), workspace.Path, app.LegacyDefaultUserName)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -22,8 +22,6 @@ describe("SettingsController", () => {
 			publish,
 			agentOptions: () => [],
 			workspaceIcons: [],
-			userName: () => "User",
-			saveUser: async (name: string) => name,
 			appearance: () => ({ layout: "auto" as const, fontScales: { sidebar: 1, details: 1, chat: 1 }, theme: "default", themeOptions: [{ id: "default", label: "Default", description: "The standard PUA appearance" }] }),
 			setLayoutPreference: () => undefined,
 			setFontScale: () => undefined,
@@ -78,7 +76,7 @@ describe("SettingsController", () => {
 	it("sends the selected generated-content language only when creating a Workspace", async () => {
 		const published: SettingsModel[] = [];
 		const requests: unknown[] = [];
-		const config: PUASettingsConfig = { activeId: "", workspaces: [], agents: [], agentProfiles: [] };
+		const config: PUASettingsConfig = { activeId: "", workspaces: [], agents: [], agentProfiles: [], suggestedUserName: "ServerUser" };
 		const dependencies = settingsDependencies("", config, (model) => published.push(model));
 		const baseRequest = dependencies.request;
 		dependencies.request = async <T>(path: string, init?: RequestInit): Promise<T> => {
@@ -100,7 +98,7 @@ describe("SettingsController", () => {
 		draft.workspaceLanguage = "zh-CN";
 		await published.at(-1)!.onAddWorkspace(draft);
 
-		expect(requests).toEqual([{ path: "/tmp/new", create: true, language: "zh-CN" }]);
+		expect(requests).toEqual([{ path: "/tmp/new", create: true, language: "zh-CN", initialUserName: "ServerUser" }]);
 	});
 
 	it("joins AgentHub availability and profiles into the PUA configuration without mutating the base", () => {

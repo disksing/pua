@@ -144,7 +144,8 @@ export interface AgentProfile {
 
 export interface WorkspaceConfig {
   activeId?: string;
-  workspaces: Array<{ id: string; name: string; path: string; icon?: string }>;
+  workspaces: Array<{ id: string; instanceId?: string; name: string; path: string; icon?: string }>;
+  suggestedUserName?: string;
   agents: AgentConfig[];
   agentProfiles: AgentProfile[];
   agentHubProviders?: Array<{ id: string; name?: string }>;

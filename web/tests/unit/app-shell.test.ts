@@ -34,6 +34,7 @@ function activity(status: ShellStatusPresentation = emptyStatus): ShellActivityI
 function model(overrides: Partial<AppShellModel> = {}): AppShellModel {
   return {
     identity: "workspace-a", loading: false, error: "", version: "v0.1.0", activeWorkspaceId: "workspace-a", workspaceName: "Workspace A",
+    userGate: { mode: "", users: [], suggestedUserName: "", missingUserName: "" },
     workspaces: [
       { id: "workspace-a", name: "Workspace A", path: "/tmp/a", iconSrc: "/favicon.svg" },
       { id: "workspace-b", name: "Workspace B", path: "/tmp/b", iconSrc: "/favicon.svg" },
@@ -45,7 +46,7 @@ function model(overrides: Partial<AppShellModel> = {}): AppShellModel {
     layout: { preference: "auto", effective: "three" },
     route: { path: "", revision: 0, replace: true },
     resolveResourceTitle: () => null,
-    onSwitchWorkspace: vi.fn(async () => undefined), onAddWorkspace: vi.fn(), onCreateProject: vi.fn(), onOpenSettings: vi.fn(), onRefreshDoctor: vi.fn(async () => undefined),
+    onSwitchWorkspace: vi.fn(async () => undefined), onResolveWorkspaceUser: vi.fn(async () => undefined), onAddWorkspace: vi.fn(), onCreateProject: vi.fn(), onOpenSettings: vi.fn(), onRefreshDoctor: vi.fn(async () => undefined),
     onToggleProject: vi.fn(async () => undefined), onSelectResource: vi.fn(async () => undefined), onReorder: vi.fn(async () => undefined),
     onDragState: vi.fn(), onToggleTreeEditing: vi.fn(), onCreateFolder: vi.fn(async () => ""), onRenameFolder: vi.fn(async () => undefined),
     onDeleteFolder: vi.fn(async () => undefined), onToggleFolder: vi.fn(async () => undefined), onOpenInboxMessage: vi.fn(async () => undefined), onReplyInboxMessage: vi.fn(async () => undefined), onDeleteInboxMessage: vi.fn(async () => undefined), onPanePreview: vi.fn(), onPaneCommit: vi.fn(), onPaneViewport: vi.fn(), onMobileSidebar: vi.fn(),
@@ -359,5 +360,58 @@ describe("AppShell", () => {
     expect(divider.getAttribute("aria-orientation")).toBe("horizontal");
     const vertical = target.querySelector<HTMLElement>("#detailsResize")!;
     expect(vertical.getAttribute("aria-orientation")).toBe("vertical");
+  });
+
+  it("keeps Workspace switching available while identity selection hides personal panes", async () => {
+    const onResolveWorkspaceUser = vi.fn(async () => undefined);
+    const initial = model({
+      scheduler: resource("scheduler", "Scheduler"),
+      userGate: {
+        mode: "select",
+        users: [{ name: "Alice", preference: "Concise replies" }, { name: "Bob", preference: "" }],
+        suggestedUserName: "",
+        missingUserName: "Missing",
+      },
+      onResolveWorkspaceUser,
+    });
+    const channel = createModelChannel(initial);
+    const target = document.body.appendChild(document.createElement("div"));
+    const component = mount(AppShell, { target, props: { channel } });
+    cleanups.push(() => unmount(component));
+    await tick();
+
+    expect(target.querySelector("#workspaceSwitcher")).not.toBeNull();
+    expect(target.querySelector("#schedulerNav")).toBeNull();
+    expect(target.querySelector("#detailsPanel")).toBeNull();
+    expect(target.querySelector("#agentPanel")).toBeNull();
+    expect(target.textContent).toContain("Previously selected user Missing is no longer available");
+    [...target.querySelectorAll<HTMLButtonElement>(".workspace-user-options button")].find((button) => button.textContent?.includes("Alice"))!.click();
+    await vi.waitFor(() => expect(onResolveWorkspaceUser).toHaveBeenCalledWith("Alice", false));
+  });
+
+  it("can create and select a new identity from the multi-user gate", async () => {
+    const onResolveWorkspaceUser = vi.fn(async () => undefined);
+    const initial = model({
+      userGate: {
+        mode: "select",
+        users: [{ name: "Alice", preference: "" }, { name: "Bob", preference: "" }],
+        suggestedUserName: "",
+        missingUserName: "",
+      },
+      onResolveWorkspaceUser,
+    });
+    const channel = createModelChannel(initial);
+    const target = document.body.appendChild(document.createElement("div"));
+    const component = mount(AppShell, { target, props: { channel } });
+    cleanups.push(() => unmount(component));
+    await tick();
+
+    target.querySelector<HTMLButtonElement>(".workspace-user-add-toggle")!.click();
+    await tick();
+    const newUser = target.querySelector<HTMLInputElement>("#workspaceNewUserName")!;
+    newUser.value = "Carol";
+    newUser.dispatchEvent(new Event("input", { bubbles: true }));
+    target.querySelector<HTMLFormElement>(".workspace-user-add")!.dispatchEvent(new SubmitEvent("submit", { bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(onResolveWorkspaceUser).toHaveBeenCalledWith("Carol", true));
   });
 });

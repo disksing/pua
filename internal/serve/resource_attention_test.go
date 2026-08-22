@@ -21,6 +21,9 @@ func attentionTestServer(t *testing.T) (*server, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := puaWorkspace.RegisterUser(app.LegacyDefaultUserName); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := puaWorkspace.CreateProject("Attention project", "attention"); err != nil {
 		t.Fatal(err)
 	}
@@ -35,6 +38,7 @@ func attentionRequest(t *testing.T, server *server, method, path, body string) *
 	t.Helper()
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(method, path, bytes.NewBufferString(body))
+	request.Header.Set(workspaceUserHeader, app.LegacyDefaultUserName)
 	server.handleWorkspace(recorder, request)
 	return recorder
 }
@@ -63,7 +67,7 @@ func TestResourceReadAPI(t *testing.T) {
 		t.Fatalf("read did not record current Turn: %#v", state)
 	}
 
-	tree, err := server.treeAt(context.Background(), workspace)
+	tree, err := server.treeAt(context.Background(), workspace, app.LegacyDefaultUserName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +79,7 @@ func TestResourceReadAPI(t *testing.T) {
 	if err := rewriteTestGenerationRecords(workspace, []generationRecord{record}); err != nil {
 		t.Fatal(err)
 	}
-	tree, err = server.treeAt(context.Background(), workspace)
+	tree, err = server.treeAt(context.Background(), workspace, app.LegacyDefaultUserName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +117,7 @@ func TestResourceReadAPIRejectsFutureTurnsAndNeverRegresses(t *testing.T) {
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("future read returned %d: %s", recorder.Code, recorder.Body.String())
 	}
-	state, err := server.resourceUserStateForResource(workspace, "project1")
+	state, err := server.resourceUserStateForResource(workspace, "project1", app.LegacyDefaultUserName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,10 +140,10 @@ func TestActiveTurnDoesNotCountAsUnreadAndCannotBeMarkedRead(t *testing.T) {
 	}
 	if _, err := server.mutateResourceUserStateAtPath(workspace, "project1", func(state *resourceUserState) {
 		state.ReadTurnNumber = intPointer(1)
-	}); err != nil {
+	}, app.LegacyDefaultUserName); err != nil {
 		t.Fatal(err)
 	}
-	tree, err := server.treeAt(context.Background(), workspace)
+	tree, err := server.treeAt(context.Background(), workspace, app.LegacyDefaultUserName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +164,7 @@ func TestActiveTurnDoesNotCountAsUnreadAndCannotBeMarkedRead(t *testing.T) {
 	if err := rewriteTestGenerationRecords(workspace, []generationRecord{record}); err != nil {
 		t.Fatal(err)
 	}
-	tree, err = server.treeAt(context.Background(), workspace)
+	tree, err = server.treeAt(context.Background(), workspace, app.LegacyDefaultUserName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +180,7 @@ func TestActiveTurnDoesNotCountAsUnreadAndCannotBeMarkedRead(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("ui-state update returned %d: %s", recorder.Code, recorder.Body.String())
 	}
-	state, err := server.loadUIState("workspace-one")
+	state, err := server.loadUIState("workspace-one", app.LegacyDefaultUserName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +206,7 @@ func TestSchedulerNeverCountsAsUnread(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	tree, err := server.treeAt(context.Background(), workspace)
+	tree, err := server.treeAt(context.Background(), workspace, app.LegacyDefaultUserName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +234,7 @@ func TestActivityUsesLatestTurnAcrossRetiredGenerations(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	tree, err := server.treeAt(context.Background(), workspace)
+	tree, err := server.treeAt(context.Background(), workspace, app.LegacyDefaultUserName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,7 +305,7 @@ func TestResourceActivityListsAndSortsIndependentCategories(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tree, err := server.treeAt(context.Background(), workspace)
+	tree, err := server.treeAt(context.Background(), workspace, app.LegacyDefaultUserName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -349,7 +353,7 @@ func TestResourceActivityProblemsIncludeOnlyBlockedAndErrorTasks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tree, err := server.treeAt(context.Background(), workspace)
+	tree, err := server.treeAt(context.Background(), workspace, app.LegacyDefaultUserName)
 	if err != nil {
 		t.Fatal(err)
 	}

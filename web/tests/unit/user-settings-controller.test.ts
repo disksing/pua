@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { createUserSettingsController, decodeStoredUserName, normalizeUserNameForSave, sanitizeUserNameInput, validateUserName } from "../../src/controllers/user-settings-controller";
+import { createUserSettingsController, decodeLegacyUserName, sanitizeUserNameInput, validateUserName } from "../../src/controllers/user-settings-controller";
 import { ResourceScope } from "../../src/runtime/resource-scope";
 
 const storedValues = new Map<string, string>();
@@ -24,25 +24,28 @@ describe("user settings validation", () => {
     expect(sanitizeUserNameInput("Alice 张/.._2-test")).toBe("Alice_2-test");
   });
 
-  it("keeps validation strict and normalizes an empty save to User", () => {
+  it("keeps validation strict without inventing a default user", () => {
     expect(() => validateUserName("")).toThrow("required");
-    expect(normalizeUserNameForSave("")).toBe("User");
     expect(() => validateUserName("two words")).toThrow("only letters");
     expect(() => validateUserName("name.dot")).toThrow("only letters");
     expect(validateUserName("User_2-test")).toBe("User_2-test");
   });
 
-  it("persists User when saving an empty name", () => {
+  it("persists independent selections by Workspace instance", () => {
     const scope = new ResourceScope();
     const controller = createUserSettingsController(scope, () => undefined);
 
-    expect(controller.save("")).toBe("User");
-    expect(JSON.parse(window.localStorage.getItem("pua.web.user.v1")!)).toMatchObject({ version: 1, name: "User" });
+    expect(controller.save("instance-a", "Alice")).toBe("Alice");
+    expect(controller.save("instance-b", "Bob")).toBe("Bob");
+    expect(controller.selected("instance-a")).toBe("Alice");
+    expect(controller.selected("instance-b")).toBe("Bob");
+    expect(JSON.parse(window.localStorage.getItem("pua.web.users.v2")!)).toMatchObject({ version: 2, selections: { "instance-a": "Alice", "instance-b": "Bob" } });
 
     scope.dispose();
   });
 
-  it("falls back to User for legacy invalid browser values", () => {
-    expect(decodeStoredUserName(JSON.stringify({ version: 1, name: "Old User" }))).toBe("User");
+  it("only offers a valid legacy selection as a migration candidate", () => {
+    expect(decodeLegacyUserName(JSON.stringify({ version: 1, name: "Old User" }))).toBe("");
+    expect(decodeLegacyUserName(JSON.stringify({ version: 1, name: "Alice" }))).toBe("Alice");
   });
 });

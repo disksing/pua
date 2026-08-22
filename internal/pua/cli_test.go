@@ -106,7 +106,7 @@ func TestUserListShowsWorkspaceProfiles(t *testing.T) {
 			t.Fatal(err)
 		}
 		listed := run(t, "user", "list")
-		if !strings.Contains(listed, "User\t\n") || !strings.Contains(listed, "alice_2\tUse concise replies\n") {
+		if listed != "alice_2\tUse concise replies\n" {
 			t.Fatalf("user list = %q", listed)
 		}
 		var result struct {
@@ -115,7 +115,7 @@ func TestUserListShowsWorkspaceProfiles(t *testing.T) {
 		if err := json.Unmarshal([]byte(run(t, "user", "list", "--json")), &result); err != nil {
 			t.Fatal(err)
 		}
-		if len(result.Users) != 2 {
+		if len(result.Users) != 1 || result.Users[0].Name != "alice_2" {
 			t.Fatalf("JSON users = %#v", result.Users)
 		}
 	})

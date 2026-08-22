@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/disksing/pua/internal/app"
@@ -15,7 +16,11 @@ import (
 func userTestServer(t *testing.T) (*server, string) {
 	t.Helper()
 	workspace := t.TempDir()
-	if _, err := app.Initialize(workspace, "en"); err != nil {
+	initialized, err := app.Initialize(workspace, "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := initialized.RegisterUser(app.LegacyDefaultUserName); err != nil {
 		t.Fatal(err)
 	}
 	server := &server{config: filepath.Join(t.TempDir(), "serve.json")}
@@ -70,6 +75,58 @@ func TestWorkspaceUsersAPIRegistersUpdatesListsAndDeletes(t *testing.T) {
 	recorder = userRequest(t, server, http.MethodDelete, "/api/workspaces/workspace-one/users/alice_2-test", "", "")
 	if recorder.Code != http.StatusNoContent {
 		t.Fatalf("delete returned %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestPersonalWorkspaceAPIsRequireAnExistingSelectedUser(t *testing.T) {
+	server, _ := userTestServer(t)
+	missing := userRequest(t, server, http.MethodGet, "/api/workspaces/workspace-one/tree", "", "")
+	if missing.Code != http.StatusBadRequest || !strings.Contains(missing.Body.String(), `"code":"user_required"`) {
+		t.Fatalf("missing user = %d %s", missing.Code, missing.Body.String())
+	}
+	unknown := userRequest(t, server, http.MethodGet, "/api/workspaces/workspace-one/tree", "", "Missing")
+	if unknown.Code != http.StatusBadRequest || !strings.Contains(unknown.Body.String(), `"code":"user_not_found"`) {
+		t.Fatalf("unknown user = %d %s", unknown.Code, unknown.Body.String())
+	}
+}
+
+func TestWorkspaceUsersAPIPreventsDeletingLastUser(t *testing.T) {
+	server, _ := userTestServer(t)
+	last := userRequest(t, server, http.MethodDelete, "/api/workspaces/workspace-one/users/User", "", "")
+	if last.Code != http.StatusConflict || !strings.Contains(last.Body.String(), `"code":"last_user"`) {
+		t.Fatalf("delete last user = %d %s", last.Code, last.Body.String())
+	}
+}
+
+func TestLegacyUIStateWaitsForFirstUserWhenWorkspaceHasNoUsers(t *testing.T) {
+	workspace := t.TempDir()
+	if _, err := app.Initialize(workspace, "en"); err != nil {
+		t.Fatal(err)
+	}
+	server := &server{config: filepath.Join(t.TempDir(), "serve.json")}
+	if err := server.saveConfig(config{Version: agentHubConfigVersion, Workspaces: []serveWorkspace{{ID: "workspace-one", Path: workspace}}}); err != nil {
+		t.Fatal(err)
+	}
+	legacy := uiState{Version: 1, ExpandedProjects: []string{"project1"}}
+	if err := saveJSONStateFile(uiStatePath(workspace), ".legacy-ui-*.tmp", legacy); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.ensureWorkspaceUsersAndMigrateUIState(workspace); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(uiStatePath(workspace)); err != nil {
+		t.Fatalf("legacy state removed before an identity existed: %v", err)
+	}
+	recorder := userRequest(t, server, http.MethodPost, "/api/workspaces/workspace-one/users", `{"name":"Alice"}`, "")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("create first user = %d %s", recorder.Code, recorder.Body.String())
+	}
+	migrated, err := loadUIStateFile(userUIStatePath(workspace, "Alice"))
+	if err != nil || len(migrated.ExpandedProjects) != 1 || migrated.ExpandedProjects[0] != "project1" {
+		t.Fatalf("first user legacy state = %#v, %v", migrated, err)
+	}
+	if _, err := os.Stat(uiStatePath(workspace)); !os.IsNotExist(err) {
+		t.Fatalf("legacy state remains after first-user migration: %v", err)
 	}
 }
 

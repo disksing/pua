@@ -18,6 +18,9 @@ func openTestPUAWorkspace(t *testing.T, path, language string) *app.Workspace {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := workspace.RegisterUser(app.LegacyDefaultUserName); err != nil {
+		t.Fatal(err)
+	}
 	return workspace
 }
 

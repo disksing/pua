@@ -53,10 +53,11 @@ type agentProfileRoute struct {
 }
 
 type serveWorkspace struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Path string `json:"path"`
-	Icon string `json:"icon,omitempty"`
+	ID         string `json:"id"`
+	InstanceID string `json:"instanceId,omitempty"`
+	Name       string `json:"name"`
+	Path       string `json:"path"`
+	Icon       string `json:"icon,omitempty"`
 }
 
 // workspacesResponse is the GET /api/workspaces payload: the persisted serve
@@ -64,7 +65,8 @@ type serveWorkspace struct {
 // changes made by other clients.
 type workspacesResponse struct {
 	config
-	Revision string `json:"revision"`
+	Revision          string `json:"revision"`
+	SuggestedUserName string `json:"suggestedUserName,omitempty"`
 }
 
 var workspaceIconFiles = map[string]string{
@@ -454,18 +456,19 @@ func (s *server) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		cfg.Workspaces = resolvedWorkspaceSummaries(cfg.Workspaces)
-		writeJSON(w, workspacesResponse{config: cfg, Revision: settingsRevision(cfg, cfg.Workspaces)})
+		writeJSON(w, workspacesResponse{config: cfg, Revision: settingsRevision(cfg, cfg.Workspaces), SuggestedUserName: suggestedSystemUserName()})
 	case http.MethodPost:
 		var body struct {
-			Path     string `json:"path"`
-			Create   bool   `json:"create"`
-			Language string `json:"language"`
+			Path            string `json:"path"`
+			Create          bool   `json:"create"`
+			Language        string `json:"language"`
+			InitialUserName string `json:"initialUserName"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			writeError(w, err, http.StatusBadRequest)
 			return
 		}
-		workspace, err := s.addWorkspaceWithOptions(r.Context(), body.Path, body.Create, body.Language)
+		workspace, err := s.addWorkspaceWithOptions(r.Context(), body.Path, body.Create, body.Language, body.InitialUserName)
 		if err != nil {
 			var conflict *workspaceLockConflictError
 			if errors.As(err, &conflict) {
@@ -1592,10 +1595,10 @@ func (s *server) addCurrentDirectoryIfEmpty(ctx context.Context) {
 }
 
 func (s *server) addWorkspace(ctx context.Context, path string) (serveWorkspace, error) {
-	return s.addWorkspaceWithOptions(ctx, path, false, "")
+	return s.addWorkspaceWithOptions(ctx, path, false, "", "")
 }
 
-func (s *server) addWorkspaceWithOptions(ctx context.Context, path string, create bool, language string) (workspace serveWorkspace, err error) {
+func (s *server) addWorkspaceWithOptions(ctx context.Context, path string, create bool, language, initialUserName string) (workspace serveWorkspace, err error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return serveWorkspace{}, errors.New("workspace path is required")
@@ -1604,6 +1607,10 @@ func (s *server) addWorkspaceWithOptions(ctx context.Context, path string, creat
 		return serveWorkspace{}, errors.New("language is only valid when creating a Workspace")
 	}
 	if create {
+		initialUserName = strings.TrimSpace(initialUserName)
+		if err := app.ValidateUserName(initialUserName); err != nil {
+			return serveWorkspace{}, fmt.Errorf("initial user name: %w", err)
+		}
 		language, err = app.NormalizeLanguage(language)
 		if err != nil {
 			return serveWorkspace{}, err
@@ -1665,6 +1672,18 @@ func (s *server) addWorkspaceWithOptions(ctx context.Context, path string, creat
 	}
 	if err := s.ensureWorkspaceUsersAndMigrateUIState(tree.Root); err != nil {
 		return serveWorkspace{}, err
+	}
+	if create {
+		profile, registerErr := puaWorkspace.RegisterUser(initialUserName)
+		if registerErr != nil {
+			return serveWorkspace{}, registerErr
+		}
+		if baselineErr := s.ensureUserUIStateBaseline(tree.Root, profile.Name); baselineErr != nil {
+			return serveWorkspace{}, baselineErr
+		}
+	}
+	if runtime, runtimeErr := puaWorkspace.RuntimeConfig(); runtimeErr == nil {
+		workspace.InstanceID = runtime.InstanceID
 	}
 	if _, err := puaWorkspace.EnsureResourceRuntime(); err != nil {
 		return serveWorkspace{}, err
@@ -1850,8 +1869,10 @@ func (s *server) treeAt(ctx context.Context, path string, userNames ...string) (
 	if err := s.enrichTreeResourceRuntime(path, &tree); err != nil {
 		return workspaceTree{}, err
 	}
-	if err := s.enrichTreeResourceActivity(path, &tree, userNames...); err != nil {
-		return workspaceTree{}, err
+	if selectedUserName(userNames) != "" {
+		if err := s.enrichTreeResourceActivity(path, &tree, userNames...); err != nil {
+			return workspaceTree{}, err
+		}
 	}
 	return tree, nil
 }
@@ -1943,16 +1964,24 @@ func (s *server) resource(ctx context.Context, id string, resourceID string) (ap
 }
 
 func (s *server) loadUIState(id string, userNames ...string) (uiState, error) {
+	userName := selectedUserName(userNames)
+	if userName == "" {
+		return uiState{}, &resourceAPIError{Code: "user_required", Message: "select a Workspace user before accessing personal data"}
+	}
 	s.uiStateMu.Lock()
 	defer s.uiStateMu.Unlock()
 	workspace, err := s.workspace(id)
 	if err != nil {
 		return uiState{}, err
 	}
-	return loadUIStateFile(userUIStatePath(workspace.Path, selectedUserName(userNames)))
+	return loadUIStateFile(userUIStatePath(workspace.Path, userName))
 }
 
 func (s *server) saveUIState(id string, state uiState, userNames ...string) error {
+	userName := selectedUserName(userNames)
+	if userName == "" {
+		return &resourceAPIError{Code: "user_required", Message: "select a Workspace user before accessing personal data"}
+	}
 	s.uiStateMu.Lock()
 	defer s.uiStateMu.Unlock()
 	workspace, err := s.workspace(id)
@@ -1961,7 +1990,7 @@ func (s *server) saveUIState(id string, state uiState, userNames ...string) erro
 	}
 	// UI navigation updates predate user resource state. Preserve the
 	// server-owned map so an older browser cannot overwrite read cursors.
-	statePath := userUIStatePath(workspace.Path, selectedUserName(userNames))
+	statePath := userUIStatePath(workspace.Path, userName)
 	existing, err := loadUIStateFile(statePath)
 	if err != nil {
 		return err
@@ -2161,6 +2190,11 @@ func resolvedWorkspaceSummaries(workspaces []serveWorkspace) []serveWorkspace {
 	result := make([]serveWorkspace, len(workspaces))
 	for i, workspace := range workspaces {
 		workspace.Name = workspaceName(workspace.Path)
+		if opened, err := app.OpenWorkspace(workspace.Path); err == nil {
+			if runtime, runtimeErr := opened.RuntimeConfig(); runtimeErr == nil {
+				workspace.InstanceID = runtime.InstanceID
+			}
+		}
 		result[i] = workspace
 	}
 	return result

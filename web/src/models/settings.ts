@@ -85,11 +85,11 @@ export interface AppearanceSettings {
 }
 
 export interface SettingsDraft {
-  tab: "workspace" | "user" | "appearance" | "agenthub" | "profiles" | "notifications";
+  tab: "workspace" | "appearance" | "agenthub" | "profiles" | "notifications";
   workspacePath: string;
   createWorkspace: boolean;
   workspaceLanguage: "en" | "zh-CN";
-  userName: string;
+  initialUserName: string;
   endpoint: string;
   profiles: ProfileDraft[];
   agentProviders: AgentHubConfigProvider[];
@@ -106,7 +106,7 @@ export interface SettingsModel {
   activeWorkspaceId: string;
   workspaceIcons: Array<{ id: string; label: string; src: string }>;
   workspaceIconSavingId: string;
-  userName: string;
+  suggestedUserName: string;
   appearance: AppearanceSettings;
   agentHub: AgentHubSettings;
   profiles: ProfileDraft[];
@@ -117,7 +117,6 @@ export interface SettingsModel {
   onRemoveWorkspace: (id: string, draft: SettingsDraft) => Promise<void>;
   onWorkspaceIcon: (id: string, icon: string, draft: SettingsDraft) => Promise<void>;
   onSaveWorkspaceName: (id: string, name: string, draft: SettingsDraft) => Promise<void>;
-  onSaveUser: (name: string) => Promise<string>;
   onLayoutPreference: (preference: AppearanceSettings["layout"]) => void;
   onFontScale: (column: keyof AppearanceSettings["fontScales"], value: number) => void;
   onResetFontScales: () => void;

@@ -589,6 +589,9 @@ func newRuntimeTestManager(t *testing.T, hubURL string) (*agentManager, serveWor
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := puaWorkspace.RegisterUser(app.LegacyDefaultUserName); err != nil {
+		t.Fatal(err)
+	}
 	project, err := puaWorkspace.CreateProject("Runtime test project", "runtime-test")
 	if err != nil {
 		t.Fatal(err)

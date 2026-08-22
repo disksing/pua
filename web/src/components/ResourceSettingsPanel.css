@@ -321,3 +321,26 @@
 .resource-settings-template-list .empty-list-row {
   padding: 12px 14px;
 }
+/* Workspace user controls inherit the semantic theme tokens used by the rest
+   of this settings surface. */
+:where([data-component-owner="resource-settings-panel"]) .resource-settings-user-controls select,
+:where([data-component-owner="resource-settings-panel"]) .resource-settings-add-user input {
+  min-width: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  padding: 8px 10px;
+  font: inherit;
+}
+
+:where([data-component-owner="resource-settings-panel"]) .resource-settings-user-controls select { width: min(220px, 100%); }
+:where([data-component-owner="resource-settings-panel"]) .resource-settings-add-user > div { display: flex; gap: 8px; min-width: min(320px, 100%); }
+:where([data-component-owner="resource-settings-panel"]) .resource-settings-add-user input { flex: 1; }
+
+@media (max-width: 560px) {
+  :where([data-component-owner="resource-settings-panel"]) .resource-settings-user-controls,
+  :where([data-component-owner="resource-settings-panel"]) .resource-settings-add-user { align-items: stretch; flex-direction: column; }
+  :where([data-component-owner="resource-settings-panel"]) .resource-settings-user-controls select,
+  :where([data-component-owner="resource-settings-panel"]) .resource-settings-add-user > div { width: 100%; min-width: 0; }
+}

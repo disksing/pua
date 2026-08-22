@@ -5,7 +5,7 @@ import type { DetailPanelModel } from "./models/detail";
 import type { SettingsModel } from "./models/settings";
 import type { AppShellModel, DoctorSnapshotModel, ShellActivityItem, ShellActivityLists, ShellDragTarget, ShellInboxMessage, ShellResourceItem, ShellStatusPresentation } from "./models/shell";
 import type { AgentConfig, AgentProfile, DiffRecord, ResourceRecord, WorkspaceConfig, WorkspaceFileRecord, WorkspaceTree, WorkspaceUser } from "./models/workspace";
-import type { ArchiveResponse } from "./api/types";
+import type { ApiErrorResponse, ArchiveResponse } from "./api/types";
 import { createAgentDraftController } from "./controllers/agent-draft-controller";
 import { createAgentOperationController } from "./controllers/agent-operation-controller";
 import { confirmDialog } from "./controllers/confirm-dialog-controller";
@@ -29,7 +29,7 @@ import {
 	SIDEBAR_FOLDER_DEFAULT_NAME,
 	type SidebarFolder,
 } from "./controllers/sidebar-folders";
-import { createUserSettingsController, normalizeUserNameForSave } from "./controllers/user-settings-controller";
+import { createUserSettingsController, validateUserName } from "./controllers/user-settings-controller";
 import { ApiError } from "./api/client";
 import { errorMessage } from "./runtime/errors";
 import { ResourceScope } from "./runtime/resource-scope";
@@ -70,6 +70,8 @@ interface ControllerState {
 	details: Record<string, ResourceRecord>;
 	workspaceAgents: WorkspaceFileRecord | null;
 	workspaceUsers: WorkspaceUser[];
+	currentUserName: string;
+	userGate: { mode: "" | "create" | "select" | "loading"; suggestedUserName: string; missingUserName: string };
 	activeWorkspaceId: string;
 	navigationLoading: boolean;
 	navigationError: string;
@@ -130,6 +132,8 @@ const controllerState: ControllerState = {
 	details: {},
 	workspaceAgents: null,
 	workspaceUsers: [],
+	currentUserName: "",
+	userGate: { mode: "", suggestedUserName: "", missingUserName: "" },
 	activeWorkspaceId: "",
 	navigationLoading: true,
 	navigationError: "",
@@ -372,18 +376,6 @@ const settingsController = createSettingsController({
 	publish: (model) => publisher.renderSettings(model),
 	agentOptions: svelteAgentOptions,
 	workspaceIcons: [DEFAULT_WORKSPACE_ICON, ...WORKSPACE_ICONS],
-	userName: currentUserName,
-	saveUser: async (name) => {
-		if (!userSettingsController) throw new Error("User settings are unavailable.");
-		const normalized = normalizeUserNameForSave(name);
-		if (controllerState.activeWorkspaceId) await registerWorkspaceUser(controllerState.activeWorkspaceId, normalized);
-		const saved = userSettingsController.save(normalized);
-		if (controllerState.activeWorkspaceId) {
-			await loadUIState();
-			await loadTree({ updateURL: false });
-		}
-		return saved;
-	},
 	appearance: () => {
 		const snapshot = paneLayoutController.snapshot();
 		return {
@@ -402,7 +394,10 @@ const settingsController = createSettingsController({
 	setCompletionSound: (enabled) => notificationController?.setSoundEnabled(enabled),
 	flushDraft: flushAgentDraft,
 	resetAgentState,
-	reloadWorkspaceContext: async () => { await registerWorkspaceUser(controllerState.activeWorkspaceId); await loadUIState(); await loadTree(); },
+	reloadWorkspaceContext: async (initialUserName) => {
+		if (initialUserName) selectWorkspaceUser(initialUserName);
+		await loadWorkspaceContext();
+	},
 	clearWorkspaceContext: () => {
 		controllerState.tree = null;
 		controllerState.workspaceUsers = [];
@@ -471,34 +466,141 @@ function clearUnreadForResource(resourceId: string): void {
 	notificationController?.clearResource(resourceId);
 }
 function currentUserName() {
-	return userSettingsController?.current() || "User";
+	return controllerState.currentUserName;
 }
 async function api<Response>(path: string, options: RequestInit = {}): Promise<Response> {
 	const headers = new Headers(options.headers);
 	if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
-	if (path.startsWith("/api/workspaces/")) headers.set("X-PUA-User", currentUserName());
+	if (path.startsWith("/api/workspaces/") && currentUserName()) headers.set("X-PUA-User", currentUserName());
 	const response = await fetch(path, {
 		...options,
 		headers
 	});
 	if (!response.ok) {
 		let message = `${response.status} ${response.statusText}`;
+		let body: ApiErrorResponse | undefined;
 		try {
-			message = (await response.json()).error || message;
+			body = await response.json() as ApiErrorResponse;
+			message = body.error || message;
 		} catch (_) {}
-		throw new ApiError(response.status, message);
+		throw new ApiError(response.status, message, body);
 	}
 	if (response.status === 204) return null as Response;
 	return response.json() as Promise<Response>;
 }
 
-async function registerWorkspaceUser(workspaceId: string, name = currentUserName()): Promise<void> {
+async function registerWorkspaceUser(workspaceId: string, name: string): Promise<void> {
 	if (!workspaceId) return;
 	await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/users`, {
 		method: "POST",
 		body: JSON.stringify({ name })
 	});
 	await loadWorkspaceUsers(workspaceId);
+}
+
+function activeWorkspaceInstanceId(): string {
+	const workspace = controllerState.config?.workspaces.find((item) => item.id === controllerState.activeWorkspaceId);
+	return String(workspace?.instanceId || workspace?.id || "");
+}
+
+function selectWorkspaceUser(name: string): string {
+	const selected = validateUserName(name);
+	const instanceId = activeWorkspaceInstanceId();
+	if (!userSettingsController || !instanceId) throw new Error("Workspace user selection is unavailable.");
+	userSettingsController.save(instanceId, selected);
+	controllerState.currentUserName = selected;
+	controllerState.userGate = { mode: "", suggestedUserName: "", missingUserName: "" };
+	return selected;
+}
+
+function beginWorkspaceUserTransition(name: string): void {
+	controllerState.navigationVersion++;
+	controllerState.autoRefreshVersion++;
+	controllerState.treeRequestVersion++;
+	controllerState.detailRequestVersion++;
+	selectWorkspaceUser(name);
+	controllerState.tree = null;
+	controllerState.inbox = [];
+	clearResourceDetailState();
+	controllerState.navigationLoading = true;
+	controllerState.navigationError = "";
+	controllerState.userGate = { mode: "loading", suggestedUserName: "", missingUserName: "" };
+	publishViewModels();
+}
+
+function finishWorkspaceUserTransition(): void {
+	if (controllerState.userGate.mode !== "loading") return;
+	controllerState.userGate = { mode: "", suggestedUserName: "", missingUserName: "" };
+	publishViewModels();
+}
+
+async function resolveWorkspaceIdentity(workspaceId = controllerState.activeWorkspaceId): Promise<boolean> {
+	await loadWorkspaceUsers(workspaceId);
+	if (workspaceId !== controllerState.activeWorkspaceId) return false;
+	const instanceId = activeWorkspaceInstanceId();
+	const users = controllerState.workspaceUsers;
+	const saved = userSettingsController?.selected(instanceId) || "";
+	const existingNames = new Set(users.map((user) => user.name));
+	let selected = existingNames.has(saved) ? saved : "";
+	if (!selected && !saved) {
+		const legacy = userSettingsController?.legacyCandidate() || "";
+		if (existingNames.has(legacy)) selected = legacy;
+	}
+	if (!selected && users.length === 1) selected = users[0].name;
+	if (selected) {
+		if (controllerState.currentUserName && controllerState.currentUserName !== selected) {
+			await saveUIState().catch((err) => console.warn("failed to save UI state before switching user", err));
+			beginWorkspaceUserTransition(selected);
+		} else selectWorkspaceUser(selected);
+		if (saved && saved !== selected) toast(`User ${saved} is no longer available. Switched to ${selected}.`);
+		return true;
+	}
+	if (controllerState.currentUserName) {
+		await saveUIState().catch((err) => console.warn("failed to save UI state before clearing user", err));
+		controllerState.navigationVersion++;
+		controllerState.autoRefreshVersion++;
+		controllerState.treeRequestVersion++;
+		controllerState.detailRequestVersion++;
+	}
+	controllerState.currentUserName = "";
+	controllerState.tree = null;
+	controllerState.inbox = [];
+	clearResourceDetailState();
+	controllerState.navigationLoading = false;
+	controllerState.navigationError = "";
+	controllerState.userGate = {
+		mode: users.length ? "select" : "create",
+		suggestedUserName: String(controllerState.config?.suggestedUserName || ""),
+		missingUserName: saved,
+	};
+	publishViewModels();
+	return false;
+}
+
+async function loadWorkspaceContext(): Promise<void> {
+	if (!controllerState.activeWorkspaceId) return;
+	if (!await resolveWorkspaceIdentity()) return;
+	try {
+		await loadUIState();
+		controllerState.selectedId = controllerState.lastResourceId || controllerState.selectedId || "workspace";
+		await loadTree();
+	} finally {
+		finishWorkspaceUserTransition();
+	}
+}
+
+async function resolveWorkspaceUser(name: string, create: boolean): Promise<void> {
+	const workspaceId = controllerState.activeWorkspaceId;
+	if (!workspaceId) return;
+	if (create) await registerWorkspaceUser(workspaceId, validateUserName(name));
+	beginWorkspaceUserTransition(name);
+	try {
+		await loadUIState();
+		controllerState.selectedId = controllerState.lastResourceId || "workspace";
+		await loadTree();
+	} finally {
+		finishWorkspaceUserTransition();
+	}
 }
 
 async function loadWorkspaceUsers(workspaceId = controllerState.activeWorkspaceId): Promise<void> {
@@ -579,10 +681,11 @@ async function load() {
 	renderWorkspaceSelect();
 	if (controllerState.activeWorkspaceId) {
 		initializeNotificationState(controllerState.activeWorkspaceId);
-		await registerWorkspaceUser(controllerState.activeWorkspaceId);
-		await loadUIState();
-		if (!route.resourceId && controllerState.lastResourceId) controllerState.selectedId = controllerState.lastResourceId;
-		await loadTree({ replaceURL: true });
+		if (await resolveWorkspaceIdentity()) {
+			await loadUIState();
+			if (!route.resourceId && controllerState.lastResourceId) controllerState.selectedId = controllerState.lastResourceId;
+			await loadTree({ replaceURL: true });
+		}
 	} else {
 		controllerState.navigationLoading = false;
 		controllerState.tree = null;
@@ -609,6 +712,10 @@ async function loadTree(options: LoadTreeOptions = {}) {
 	try {
 		tree = await api(`/api/workspaces/${workspaceId}/tree`);
 	} catch (err) {
+		if (err instanceof ApiError && (err.code === "user_required" || err.code === "user_not_found")) {
+			await loadWorkspaceContext();
+			return;
+		}
 		if (isCurrentWorkspaceView(workspaceId, navigationVersion, treeRequestVersion)) {
 			controllerState.navigationLoading = false;
 			controllerState.navigationError = errorMessage(err);
@@ -731,7 +838,7 @@ function startAutoRefresh() {
 	}, AUTO_REFRESH_INTERVAL_MS) ?? null;
 }
 async function autoRefresh() {
-	if (!controllerState.activeWorkspaceId || controllerState.autoRefreshInFlight || controllerState.listDrag) return;
+	if (!controllerState.activeWorkspaceId || controllerState.userGate.mode || controllerState.autoRefreshInFlight || controllerState.listDrag) return;
 	const refreshVersion = controllerState.autoRefreshVersion;
 	const workspaceId = controllerState.activeWorkspaceId;
 	const navigationVersion = controllerState.navigationVersion;
@@ -981,6 +1088,7 @@ function renderAppShell() {
 		version: "v0.1.0",
 		activeWorkspaceId: controllerState.activeWorkspaceId,
 		workspaceName: workspaceName(),
+		userGate: { ...controllerState.userGate, users: controllerState.workspaceUsers.map((user) => ({ name: user.name, preference: user.preference })) },
 		workspaces: (controllerState.config?.workspaces || []).map((workspace) => ({
 			id: workspace.id,
 			name: workspace.name || workspace.id,
@@ -1000,6 +1108,7 @@ function renderAppShell() {
 		route: routeController.projection(),
 		resolveResourceTitle,
 		onSwitchWorkspace: (id) => switchWorkspace(id),
+		onResolveWorkspaceUser: (name, create) => resolveWorkspaceUser(name, create),
 		onAddWorkspace: () => openSettings("workspace").catch((err) => toast(err.message)),
 		onCreateProject: () => showProjectForm(),
 		onOpenSettings: () => openSettings().catch((err) => toast(err.message)),
@@ -1055,7 +1164,9 @@ async function switchWorkspace(id: string): Promise<void> {
 	closeCreateDialog();
 	resetAgentState();
 	renderWorkspaceSelect();
-	await registerWorkspaceUser(id);
+	controllerState.currentUserName = "";
+	controllerState.userGate = { mode: "", suggestedUserName: "", missingUserName: "" };
+	if (!await resolveWorkspaceIdentity(id)) return;
 	if (!await loadUIState(id, navigationVersion)) return;
 	controllerState.selectedId = controllerState.lastResourceId || "workspace";
 	await loadTree();
@@ -1325,6 +1436,24 @@ function detailPanelModel(): DetailPanelModel {
 			publishViewModels();
 			toast(`Preferences saved for ${name}.`);
 		},
+		onSwitchWorkspaceUser: async (name) => {
+			if (name === currentUserName()) return;
+			await saveUIState().catch((err) => console.warn("failed to save UI state before switching user", err));
+			beginWorkspaceUserTransition(name);
+			try {
+				await loadUIState();
+				controllerState.selectedId = controllerState.lastResourceId || "workspace";
+				await loadTree({ updateURL: false });
+			} finally {
+				finishWorkspaceUserTransition();
+			}
+			toast(`Switched to ${name}.`);
+		},
+		onAddWorkspaceUser: async (name) => {
+			await registerWorkspaceUser(workspaceId, validateUserName(name));
+			publishViewModels();
+			toast(`User ${name} added.`);
+		},
 		onDeleteWorkspaceUser: async (name) => {
 			if (name === currentUserName()) throw new Error("Switch to another user before deleting the current user.");
 			if (!(await confirmDialog({ title: "Delete user", message: `Delete ${name} and all of this user's Workspace UI state?`, confirmLabel: "Delete", danger: true }))) return;
@@ -1469,7 +1598,16 @@ function closeDiff(): void {
 async function fetchCurrentTree(workspaceId = controllerState.activeWorkspaceId): Promise<WorkspaceTree | null> {
 	const requestVersion = ++controllerState.treeRequestVersion;
 	const navigationVersion = controllerState.navigationVersion;
-	const tree = await api<WorkspaceTree>(`/api/workspaces/${workspaceId}/tree`);
+	let tree: WorkspaceTree;
+	try {
+		tree = await api<WorkspaceTree>(`/api/workspaces/${workspaceId}/tree`);
+	} catch (error) {
+		if (error instanceof ApiError && (error.code === "user_required" || error.code === "user_not_found")) {
+			await loadWorkspaceContext();
+			return null;
+		}
+		throw error;
+	}
 	return isCurrentWorkspaceView(workspaceId, navigationVersion, requestVersion) ? tree : null;
 }
 // refreshInbox loads the current user's durable agent-to-user inbox. The
@@ -2195,7 +2333,8 @@ export function startPUAApp(nextPublisher: PUAViewPublisher): void {
 		flushDraft: flushAgentDraftOnPageLeave
 	});
 	userSettingsController = createUserSettingsController(scope, () => {
-		if (settingsController.isOpenTab("user")) renderSettingsModal();
+		if (!controllerState.activeWorkspaceId) return;
+		void loadWorkspaceContext().catch((err) => toast(errorMessage(err)));
 	});
 	installControllerListeners();
 	initPaneResize();
@@ -2259,7 +2398,9 @@ async function handleHistoryNavigation(pathname: string): Promise<void> {
 	if (workspaceChanged) resetAgentState();
 	renderWorkspaceSelect();
 	if (workspaceChanged) {
-		await registerWorkspaceUser(route.workspaceId || "");
+		controllerState.currentUserName = "";
+		controllerState.userGate = { mode: "", suggestedUserName: "", missingUserName: "" };
+		if (!await resolveWorkspaceIdentity(route.workspaceId || "")) return;
 		if (!await loadUIState(route.workspaceId || "", navigationVersion)) return;
 		if (!route.resourceId && controllerState.lastResourceId) controllerState.selectedId = controllerState.lastResourceId;
 		await loadTree({ updateURL: false });

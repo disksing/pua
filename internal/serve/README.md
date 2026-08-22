@@ -66,8 +66,6 @@ POST /api/workspaces/{workspaceId}/resources/{resourceId}/generation/end
 PUT  /api/workspaces/{workspaceId}/generation-policy
 PUT  /api/workspaces/{workspaceId}/stall-watchdog-policy
 POST /api/workspaces/{workspaceId}/resources/{resourceId}/uploads
-GET  /api/workspaces/{workspaceId}/resources/{resourceId}/favorite
-PUT  /api/workspaces/{workspaceId}/resources/{resourceId}/favorite
 PUT  /api/workspaces/{workspaceId}/resources/{resourceId}/read
 GET  /api/workspaces/{workspaceId}/users
 POST /api/workspaces/{workspaceId}/users
@@ -84,7 +82,7 @@ DELETE /api/workspaces/{workspaceId}/users/{name}/messages/{messageId}
 
 `POST .../generation/end?generationId={currentGenerationId}` 只在没有活动 Turn/approval 时接受。它以 generation ID 防止过期页面误操作，随后沿统一 lifecycle 完成 Session Stop、stopped 确认、Archive 和 generation retire；不会立即创建空 successor，下一条 mailbox 消息会按资源当前绑定懒创建新 generation。
 
-`GET /api/workspaces/{workspaceId}/tree` 还会返回由服务端计算的 `activity`，其中 `running`、`favorites`、`unread` 和 `problems` 是相互独立的四个列表，同一资源可同时出现在多个列表。资源树快照包含当前用户的 `userState.favorite`、`userState.readTurnNumber`、`latestTurnNumber` 与 `unreadCount`；其中 `latestTurnNumber` 只表示最新已完成 Turn，活动 Turn 仅出现在 `running`，不计入未读。收藏仅支持 Project 和 Task，且只由用户通过 `PUT .../favorite` 改变；创建资源、发送消息或阅读都不会自动收藏。`PUT .../read` 接收前端实际观察到的 `throughTurnNumber`，只单调推进当前用户的已读游标，且不允许超过资源当前已完成 Turn 高水位，因此活动 Turn 不能被提前标记已读。Scheduler 不参与未读计算，也不会出现在 `unread` 列表。用户通过 `POST .../messages` 发送 role 为 `user` 的消息时，服务端会自动把该资源的已读游标推进到当前最新已完成 Turn（即发消息隐式触发一次 read，新触发的 Turn 完成后重新计为 1 条未读）；Agent 消息不影响用户的已读游标。前端在 Project 或虚拟目录处于折叠状态时，会把其内部 Task 的未读数聚合到该行的未读胶囊上。个人 UI/资源状态保存在 `<control-dir>/users/{name}/ui-state.json`；公共 Turn 编号高水位保存在 `<control-dir>/resource-state.json`。用户级请求通过 `X-PUA-User` 指定用户，未提供时兼容使用默认 `User`。归档 Project/Task 时会同步删除所有用户的收藏与阅读状态。ui-state 还保存侧栏虚拟目录（`folders` 与 `folderOrder`）：虚拟目录是纯 UI 层的 Task 分组，只挂在 Project 下、不支持嵌套，不影响磁盘上的真实任务目录；`taskOrder` 中混合记录项目根级的 Task 与目录 ID。归档 Task 时会将其从所属目录移除，归档 Project 时会连带删除其目录。
+`GET /api/workspaces/{workspaceId}/tree` 还会返回由服务端计算的 `activity`，其中 `running`、`unread` 和 `problems` 是相互独立的三个列表，同一资源可同时出现在多个列表。资源树快照包含当前用户的 `userState.readTurnNumber`、`latestTurnNumber` 与 `unreadCount`；其中 `latestTurnNumber` 只表示最新已完成 Turn，活动 Turn 仅出现在 `running`，不计入未读。`PUT .../read` 接收前端实际观察到的 `throughTurnNumber`，只单调推进当前用户的已读游标，且不允许超过资源当前已完成 Turn 高水位，因此活动 Turn 不能被提前标记已读。Scheduler 不参与未读计算，也不会出现在 `unread` 列表。用户通过 `POST .../messages` 发送 role 为 `user` 的消息时，服务端会自动把该资源的已读游标推进到当前最新已完成 Turn（即发消息隐式触发一次 read，新触发的 Turn 完成后重新计为 1 条未读）；Agent 消息不影响用户的已读游标。前端在 Project 或虚拟目录处于折叠状态时，会把其内部 Task 的未读数聚合到该行的未读胶囊上。个人 UI/资源状态保存在 `<control-dir>/users/{name}/ui-state.json`；公共 Turn 编号高水位保存在 `<control-dir>/resource-state.json`。用户级请求通过 `X-PUA-User` 指定用户，未提供时兼容使用默认 `User`。归档 Project/Task 时会同步删除所有用户的阅读状态。ui-state 还保存侧栏虚拟目录（`folders` 与 `folderOrder`）：虚拟目录是纯 UI 层的 Task 分组，只挂在 Project 下、不支持嵌套，不影响磁盘上的真实任务目录；`taskOrder` 中混合记录项目根级的 Task 与目录 ID。归档 Task 时会将其从所属目录移除，归档 Project 时会连带删除其目录。
 
 用户名只允许 ASCII 字母、数字、下划线和减号，最长 80 个字符；`workspace`、`scheduler`、`project`、`task` 以及 `projectN`、`taskN` 这类与稳定资源 ID 相同或近似的名字（不区分大小写）被保留，不能注册为用户名，避免 `pua message send --to=` 目标产生歧义。`POST .../users` 显式注册用户，`PUT .../users/{name}` 接收 `{ "preference": "..." }`，删除用户会级联删除该用户目录，但不会改写历史消息中的 sender。用户只是 Workspace 范围的身份标记，不构成认证或权限边界。
 

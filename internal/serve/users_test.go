@@ -91,9 +91,9 @@ func TestUIAndResourceStateAreIsolatedByUser(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("Alice UI update returned %d: %s", recorder.Code, recorder.Body.String())
 	}
-	recorder = userRequest(t, server, http.MethodPut, "/api/workspaces/workspace-one/resources/"+project.ID+"/favorite", `{"favorite":true}`, "Alice")
+	recorder = userRequest(t, server, http.MethodPut, "/api/workspaces/workspace-one/resources/"+project.ID+"/read", `{"throughTurnNumber":0}`, "Alice")
 	if recorder.Code != http.StatusOK {
-		t.Fatalf("Alice favorite update returned %d: %s", recorder.Code, recorder.Body.String())
+		t.Fatalf("Alice read update returned %d: %s", recorder.Code, recorder.Body.String())
 	}
 
 	alice, err := server.loadUIState("workspace-one", "Alice")
@@ -104,10 +104,10 @@ func TestUIAndResourceStateAreIsolatedByUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(alice.ExpandedProjects) != 1 || !alice.ResourceStates[project.ID].Favorite {
+	if len(alice.ExpandedProjects) != 1 || alice.ResourceStates[project.ID].ReadTurnNumber == nil {
 		t.Fatalf("Alice state = %#v", alice)
 	}
-	if len(defaultUser.ExpandedProjects) != 0 || defaultUser.ResourceStates[project.ID].Favorite {
+	if len(defaultUser.ExpandedProjects) != 0 || defaultUser.ResourceStates[project.ID].ReadTurnNumber != nil {
 		t.Fatalf("default User inherited Alice state: %#v", defaultUser)
 	}
 }
@@ -122,7 +122,7 @@ func TestLegacyUIStateMigratesToDefaultUserAndResourceState(t *testing.T) {
 	legacy := uiState{
 		Version: 1, ExpandedProjects: []string{"project1"},
 		Attention: map[string]resourceAttentionState{
-			"project1":  {Followed: true, DismissedTurn: &read, TurnNumber: 4},
+			"project1":  {DismissedTurn: &read, TurnNumber: 4},
 			"workspace": {TurnNumber: 3},
 		},
 	}
@@ -137,11 +137,11 @@ func TestLegacyUIStateMigratesToDefaultUserAndResourceState(t *testing.T) {
 		t.Fatal(err)
 	}
 	resourceState := migrated.ResourceStates["project1"]
-	if !resourceState.Favorite || resourceState.ReadTurnNumber == nil || *resourceState.ReadTurnNumber != 2 {
+	if resourceState.ReadTurnNumber == nil || *resourceState.ReadTurnNumber != 2 {
 		t.Fatalf("migrated resource state = %#v", resourceState)
 	}
 	workspaceState := migrated.ResourceStates["workspace"]
-	if workspaceState.Favorite || workspaceState.ReadTurnNumber == nil || *workspaceState.ReadTurnNumber != 3 {
+	if workspaceState.ReadTurnNumber == nil || *workspaceState.ReadTurnNumber != 3 {
 		t.Fatalf("untracked resource did not receive migration baseline: %#v", workspaceState)
 	}
 	loadedShared, err := loadResourceStateFile(resourceStatePath(workspace))

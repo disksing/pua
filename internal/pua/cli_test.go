@@ -277,7 +277,7 @@ func TestStatusAndMessageCommandsUseOwningServerAndProvenance(t *testing.T) {
 			t.Fatalf("duplicate history --json was accepted: %v", err)
 		}
 		for _, args := range [][]string{{"resource", "status"}, {"resource", "send", "--id=project1.task1", "legacy"}, {"resource", "message", "--id=msg-test"}} {
-			if _, err := runErr(t, args...); err == nil || !strings.Contains(err.Error(), "unknown resource subcommand") {
+			if _, err := runErr(t, args...); err == nil || !strings.Contains(err.Error(), `unknown command "resource"`) {
 				t.Fatalf("legacy resource command still exists: %v", args)
 			}
 		}
@@ -838,7 +838,6 @@ func TestHelpGroupsCommandSections(t *testing.T) {
 		"  pua scheduler <command>",
 		"  pua template <command>",
 		"  pua workspace <command>",
-		"  pua resource <command>",
 		"  pua message <command>",
 		"  pua history <command>",
 		"  pua serve [--addr=<address>] [--workspace=<path>] [--version]",
@@ -863,7 +862,6 @@ func TestHelpGroupsCommandSections(t *testing.T) {
 		"pua template list [--project=<project>]",
 		"pua scheduler add",
 		"pua workspace tree --json",
-		"pua resource archive --id=<resource>",
 		"pua message send",
 		"pua history turn show",
 	} {
@@ -899,6 +897,7 @@ func TestTaskHelpVariants(t *testing.T) {
 			"pua task list [--project=<project>] [--all]",
 			"pua task show [--project=<project>] [--task=<task>]",
 			"pua task archive [--project=<project>] [--task=<task>]",
+			"pua task binding set [--project=<project>] [--task=<task>]",
 			"pua task status [--project=<project>] [--task=<task>] [--server=<url>]",
 			"pua task history [--project=<project>] [--task=<task>]",
 			"Print a task's task.json as formatted JSON",
@@ -1272,17 +1271,17 @@ func TestTaskArchiveSubtaskMovesToParentArchive(t *testing.T) {
 	})
 }
 
-func TestResourceArchiveDispatchesByStoredType(t *testing.T) {
+func TestArchiveDispatchesByTypedCommand(t *testing.T) {
 	withTempCwd(t, func(root string) {
 		run(t, "init")
 		run(t, "project", "create", "Project")
 		run(t, "task", "create", "--project=project1", "Task")
 
-		taskOut := run(t, "resource", "archive", "--id=project1.task1")
+		taskOut := run(t, "task", "archive", "--project=project1", "--task=task1")
 		if !strings.Contains(taskOut, "project1/archive/task1") {
 			t.Fatalf("unexpected task archive path: %s", taskOut)
 		}
-		projectOut := run(t, "resource", "archive", "--id=project1")
+		projectOut := run(t, "project", "archive", "--project=project1")
 		if !strings.Contains(projectOut, "archive/project1") {
 			t.Fatalf("unexpected project archive path: %s", projectOut)
 		}

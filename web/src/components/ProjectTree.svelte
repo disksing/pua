@@ -23,7 +23,6 @@
     onRenameFolder,
     onDeleteFolder,
     onToggleFolder,
-    onToggleFavorite,
     onToast,
   }: {
     identity: string;
@@ -41,7 +40,6 @@
     onRenameFolder: (id: string, name: string) => Promise<void>;
     onDeleteFolder: (id: string) => Promise<void>;
     onToggleFolder: (id: string) => Promise<void>;
-    onToggleFavorite: (id: string, favorite: boolean) => Promise<void>;
     onToast: (message: string) => void;
   } = $props();
   let drag = $state<ShellDragTarget | null>(null);
@@ -275,42 +273,23 @@
         return;
       }
       if (item.type === "project" && target?.closest("[data-project-toggle]")) {
-        // Pointer clicks on the chevron focus the row button, and the
-        // tree-item:focus-within rule would then pin the favorite star
-        // visible even after the pointer leaves the row. Drop that focus.
+        // Pointer clicks on the chevron focus the row button; drop that
+        // focus so hover-only row actions do not stay pinned visible after
+        // the pointer leaves the row.
         (event.currentTarget as HTMLElement | null)?.blur();
         await onToggle(item.id);
       }
       else {
-        // Pointer clicks on the row itself focus the row button, and the
-        // tree-item:focus-within rule would then pin the favorite star
-        // visible even after the pointer leaves the row. Drop that focus;
-        // keyboard activation (detail === 0) keeps it.
+        // Pointer clicks on the row itself focus the row button; drop that
+        // focus so hover-only row actions do not stay pinned visible after
+        // the pointer leaves the row. Keyboard activation (detail === 0)
+        // keeps it.
         if (event.detail > 0) (event.currentTarget as HTMLElement | null)?.blur();
         await onSelect(item.id);
       }
     } catch (reason) {
       onToast(reason instanceof Error ? reason.message : String(reason));
     }
-  }
-
-  async function toggleFavorite(event: Event, item: ShellResourceItem): Promise<void> {
-    event.preventDefault();
-    event.stopPropagation();
-    // Pointer clicks focus the star (tabindex="0"), and the
-    // tree-item:focus-within rule would then pin it visible even after the
-    // pointer leaves the row. Drop that focus; keyboard toggles keep it.
-    if (event instanceof MouseEvent) (event.currentTarget as HTMLElement | null)?.blur();
-    try {
-      await onToggleFavorite(item.id, !item.favorite);
-    } catch (reason) {
-      onToast(reason instanceof Error ? reason.message : String(reason));
-    }
-  }
-
-  function favoriteKeydown(event: KeyboardEvent, item: ShellResourceItem): void {
-    if (event.key !== "Enter" && event.key !== " ") return;
-    void toggleFavorite(event, item);
   }
 
   function actionKeydown(event: KeyboardEvent, run: (event: Event) => void): void {
@@ -423,9 +402,6 @@
             <span class="row-actions"><span class="row-action-button" role="button" tabindex="0" aria-label={`New folder in ${project.title}`} title="New folder" onclick={(event) => addFolder(event, project)} onkeydown={(event) => actionKeydown(event, (e) => void addFolder(e, project))}><Icon name="folder-plus" /></span></span>
             <!-- svelte-ignore a11y_no_static_element_interactions -->
             <span class="drag-handle" draggable="true" title="Drag to reorder" ondragstart={(event) => beginDrag(event, { kind: "project", id: project.id, projectId: "" })} ondragend={finishDrag}><Icon name="grip-vertical" className="drag-handle-icon" /></span>
-          {:else}
-            <!-- svelte-ignore a11y_no_static_element_interactions -->
-            <span class:favorite={project.favorite} class="favorite-star" role="checkbox" aria-checked={project.favorite} tabindex="0" aria-label={project.favorite ? `Remove ${project.title} from favorites` : `Add ${project.title} to favorites`} title={project.favorite ? "Remove from favorites" : "Add to favorites"} onclick={(event) => toggleFavorite(event, project)} onkeydown={(event) => favoriteKeydown(event, project)}><Icon name="star" /></span>
           {/if}
         </button>
         {#if project.expanded}
@@ -495,9 +471,6 @@
       <span class="row-actions"></span>
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <span class="drag-handle" draggable="true" title="Drag to reorder" ondragstart={(event) => beginDrag(event, { kind: "task", id: task.id, projectId: project.id, containerId })} ondragend={finishDrag}><Icon name="grip-vertical" className="drag-handle-icon" /></span>
-    {:else}
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <span class:favorite={task.favorite} class="favorite-star" role="checkbox" aria-checked={task.favorite} tabindex="0" aria-label={task.favorite ? `Remove ${task.title} from favorites` : `Add ${task.title} to favorites`} title={task.favorite ? "Remove from favorites" : "Add to favorites"} onclick={(event) => toggleFavorite(event, task)} onkeydown={(event) => favoriteKeydown(event, task)}><Icon name="star" /></span>
     {/if}
   </button>
 {/snippet}

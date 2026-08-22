@@ -141,7 +141,7 @@ pua project archive --project=<project>
 
 pua task list --project=<project> [--all]
 pua task show --project=<project> --task=<task>
-pua task create --project=<project> ...
+pua task create --project=<project> [--profile=<name>|--agent=<name>] ...
 pua task archive --project=<project> --task=<task>
 ~~~
 
@@ -151,12 +151,20 @@ pua task archive --project=<project> --task=<task>
 pua message send --to=<resource> '<message>'
 ~~~
 
+创建 Task 时，可以使用互斥的 --profile=<name> 或 --agent=<name> 设置初始绑定。修改已有资源的显式绑定时使用：
+
+~~~sh
+pua workspace binding set (--profile=<name>|--agent=<name>)
+pua project binding set --project=<project> (--profile=<name>|--agent=<name>)
+pua task binding set --project=<project> --task=<task> (--profile=<name>|--agent=<name>)
+~~~
+
 创建 Task 前先查看 Project 的 templates/。有合适模板时优先使用，并保留模板中的规则：
 
 ~~~sh
 pua template list --project=<project>
 pua template show --project=<project> <name>
-pua task create --project=<project> --template=<name> --field <name>=<value>
+pua task create --project=<project> --template=<name> --field <name>=<value> [--profile=<name>|--agent=<name>]
 ~~~
 
 需要修改代码时，必须在 Task 的 worktree/ 目录下创建专用 worktree。不得直接修改 repos/ 中的共享源码目录。Project 本身不管理代码 worktree。

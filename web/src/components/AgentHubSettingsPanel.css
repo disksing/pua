@@ -165,18 +165,52 @@
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--panel);
+  transition: box-shadow 0.12s ease, border-color 0.12s ease;
 }
 
 :where([data-component-owner="agenthub-settings-panel"]) .settings-agent-card-open {
   border-color: var(--line-strong);
 }
 
+:where([data-component-owner="agenthub-settings-panel"]) .settings-agent-card.dragging {
+  opacity: 0.55;
+}
+
+:where([data-component-owner="agenthub-settings-panel"]) .settings-agent-card.drop-target {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-ring);
+}
+
 :where([data-component-owner="agenthub-settings-panel"]) .settings-agent-card-head {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
   min-width: 0;
   padding: 8px 10px;
+}
+
+:where([data-component-owner="agenthub-settings-panel"]) .settings-drag-handle {
+  width: 28px;
+  height: 30px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  color: var(--faint);
+  cursor: grab;
+}
+
+:where([data-component-owner="agenthub-settings-panel"]) .settings-drag-handle:hover {
+  background: var(--panel-sunken);
+  color: var(--ink);
+}
+
+:where([data-component-owner="agenthub-settings-panel"]) .settings-drag-handle:active {
+  cursor: grabbing;
+}
+
+:where([data-component-owner="agenthub-settings-panel"]) .settings-drag-handle:focus-visible {
+  outline: 2px solid var(--accent);
 }
 
 :where([data-component-owner="agenthub-settings-panel"]) .settings-agent-card-toggle {
@@ -204,14 +238,6 @@
   transform: rotate(90deg);
 }
 
-:where([data-component-owner="agenthub-settings-panel"]) .settings-agent-card-actions {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  flex: 0 0 auto;
-}
-
-:where([data-component-owner="agenthub-settings-panel"]) .settings-order-button,
 :where([data-component-owner="agenthub-settings-panel"]) .settings-delete-button {
   width: 28px;
   height: 28px;
@@ -221,7 +247,6 @@
   color: var(--muted);
 }
 
-:where([data-component-owner="agenthub-settings-panel"]) .settings-order-button:hover:not(:disabled),
 :where([data-component-owner="agenthub-settings-panel"]) .settings-delete-button:hover:not(:disabled) {
   background: var(--panel-sunken);
   color: var(--ink);
@@ -229,11 +254,6 @@
 
 :where([data-component-owner="agenthub-settings-panel"]) .settings-delete-button:hover:not(:disabled) {
   color: var(--red, var(--accent));
-}
-
-:where([data-component-owner="agenthub-settings-panel"]) .settings-order-button:disabled {
-  cursor: default;
-  opacity: 0.35;
 }
 
 :where([data-component-owner="agenthub-settings-panel"]) .settings-agent-card-body {

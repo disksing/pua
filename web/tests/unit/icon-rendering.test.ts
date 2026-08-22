@@ -56,7 +56,7 @@ function model(overrides: Partial<AppShellModel> = {}): AppShellModel {
   return {
     identity: "workspace-a", loading: false, error: "", version: "v0.1.0", activeWorkspaceId: "workspace-a", workspaceName: "Workspace A",
     workspaces: [{ id: "workspace-a", name: "Workspace A", path: "/tmp/a", iconSrc: "/favicon.svg" }],
-    projects: [], treeEditing: false, activity: { running: [], favorites: [], unread: [], problems: [] }, inbox: [],
+    projects: [], treeEditing: false, activity: { running: [], unread: [], problems: [] }, inbox: [],
     doctor: { checking: false, complete: true, summary: { errors: 0, warnings: 0 }, workspaces: [] },
     paneSizes: { sidebarWidth: 280, chatWidth: 420, chatHeight: 320, sidebarAttentionHeight: 210 },
     mobile: { sidebarOpen: false },
@@ -66,7 +66,7 @@ function model(overrides: Partial<AppShellModel> = {}): AppShellModel {
     onSwitchWorkspace: vi.fn(async () => undefined), onAddWorkspace: vi.fn(), onCreateProject: vi.fn(), onOpenSettings: vi.fn(), onRefreshDoctor: vi.fn(async () => undefined),
     onToggleProject: vi.fn(async () => undefined), onSelectResource: vi.fn(async () => undefined), onReorder: vi.fn(async () => undefined),
     onDragState: vi.fn(), onToggleTreeEditing: vi.fn(), onCreateFolder: vi.fn(async () => ""), onRenameFolder: vi.fn(async () => undefined),
-    onDeleteFolder: vi.fn(async () => undefined), onToggleFolder: vi.fn(async () => undefined), onToggleFavorite: vi.fn(async () => undefined), onOpenInboxMessage: vi.fn(async () => undefined), onReplyInboxMessage: vi.fn(async () => undefined), onDeleteInboxMessage: vi.fn(async () => undefined), onPanePreview: vi.fn(), onPaneCommit: vi.fn(), onPaneViewport: vi.fn(), onMobileSidebar: vi.fn(),
+    onDeleteFolder: vi.fn(async () => undefined), onToggleFolder: vi.fn(async () => undefined), onOpenInboxMessage: vi.fn(async () => undefined), onReplyInboxMessage: vi.fn(async () => undefined), onDeleteInboxMessage: vi.fn(async () => undefined), onPanePreview: vi.fn(), onPaneCommit: vi.fn(), onPaneViewport: vi.fn(), onMobileSidebar: vi.fn(),
     onToast: vi.fn(),
     onHistoryNavigation: vi.fn(async () => undefined),
     ...overrides,

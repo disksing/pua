@@ -205,7 +205,7 @@ Resource messages use `steer` (default), `enqueue`, or `interrupt`. A supported 
 
 Public work-subject state is `idle`, `working`, `attention_required`, `unavailable`, or `archived`. Waiting is a message state and count, never a Task state: the persisted internal `queued` value is exposed as `waiting`. Promoting a waiting message to the current Turn records `promotedAt` and changes its actual mode to steer on the same durable mailbox item.
 
-The Web sidebar has a server-owned Activity panel below the resource tree with four independent tabs: Running, Favorites, Unread, and Problems. Every tab title always includes its item count, including zero. Running includes resources with an active Turn; Favorites contains manually favorited Projects and Tasks; Unread contains resources whose latest completed resource-wide Turn ordinal is newer than the current user's read cursor; Problems contains Tasks whose persisted workflow state is blocked or error. A resource may appear in multiple tabs. Project and Task rows expose a hollow favorite star on hover/focus and a filled star when favorited, while unread Project/Task rows show their own non-aggregated unread count badge. Opening a resource marks only the latest completed Turn observed by that client as read. An active Turn does not count as unread and cannot be marked read; if it finishes while the resource stays selected, the completed Turn becomes unread until the row is clicked again. Favorites and read cursors are independent per-user state in `<workspace>/.pua/users/<name>/ui-state.json`; archiving a resource removes that state for every user. Version 1 Follow/Dismiss state and the pre-rename `gui-state.json` are migrated on startup, preserving tracked read cursors while baselining previously untracked resources at their current latest completed Turn.
+The Web sidebar has a server-owned Activity panel below the resource tree with independent tabs: Running, Unread, Problems, and Inbox. Every tab title always includes its item count, including zero. Running includes resources with an active Turn; Unread contains resources whose latest completed resource-wide Turn ordinal is newer than the current user's read cursor; Problems contains Tasks whose persisted workflow state is blocked or error. A resource may appear in multiple tabs. Unread Project/Task rows show their own non-aggregated unread count badge. Opening a resource marks only the latest completed Turn observed by that client as read. An active Turn does not count as unread and cannot be marked read; if it finishes while the resource stays selected, the completed Turn becomes unread until the row is clicked again. Read cursors are per-user state in `<workspace>/.pua/users/<name>/ui-state.json`; archiving a resource removes that state for every user. Version 1 Follow/Dismiss state and the pre-rename `gui-state.json` are migrated on startup, preserving tracked read cursors while baselining previously untracked resources at their current latest completed Turn; the legacy Follow flags and the later Favorite state have been dropped.
 
 ### Scheduler
 
@@ -386,6 +386,7 @@ pua project create [--slug <slug>] <description>
 pua project list [--all]
 pua project show [--project=<project>]
 pua project archive [--project=<project>]
+pua project binding set [--project=<project>] (--profile=<name>|--agent=<name>) [--server=<url>]
 pua template list|show|validate|render|create|migrate ...
 
 pua scheduler list [--json]
@@ -399,6 +400,9 @@ pua user list [--json]
 
 pua workspace status [--server=<url>]
 pua workspace history [--cursor=<cursor>] [--limit=<n>] [--server=<url>] [--json]
+pua workspace tree --json
+pua workspace resource --id=<resource> --json
+pua workspace binding set (--profile=<name>|--agent=<name>) [--server=<url>]
 pua project status [--project=<project>] [--server=<url>]
 pua project history [--project=<project>] [--cursor=<cursor>] [--limit=<n>] [--server=<url>] [--json]
 pua task status [--project=<project>] [--task=<task>] [--server=<url>]
@@ -407,16 +411,14 @@ pua history turn show --ref=<reference> [--server=<url>] [--json]
 pua history event show --ref=<reference> [--server=<url>] [--json]
 pua message send --to=<resource> [--mode=steer|enqueue|interrupt] [--server=<url>] <message>
 pua message show --id=<message-id> [--server=<url>]
-pua resource archive --id=<resource>
-
 pua task create [<title>] [--project=<project>] [--slug <slug>]
                   [--detail <detail>|--task-markdown <markdown>|--template=<name>]
-                  [--field <name>=<value>...] [--fields <file>] [--dry-run] [--json]
+                  [--field <name>=<value>...] [--fields <file>]
+                  [--profile=<name>|--agent=<name>] [--dry-run] [--json]
 pua task list [--project=<project>] [--all]
-pua task show|archive ...
-
-pua workspace tree --json
-pua workspace resource --id=<resource> --json
+pua task show [--project=<project>] [--task=<task>]
+pua task archive [--project=<project>] [--task=<task>]
+pua task binding set [--project=<project>] [--task=<task>] (--profile=<name>|--agent=<name>) [--server=<url>]
 
 pua serve [--addr=<address>] [--workspace=<path>]
           [--agenthub-mode=embedded|external]

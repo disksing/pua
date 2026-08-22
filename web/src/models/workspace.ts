@@ -31,7 +31,6 @@ export interface ResourceRecord {
 }
 
 export interface ResourceUserState {
-  favorite?: boolean;
   readTurnNumber?: number;
 }
 
@@ -101,7 +100,6 @@ export interface WorkspaceTree {
 
 export interface ResourceActivityLists {
   running: ResourceRecord[];
-  favorites: ResourceRecord[];
   unread: ResourceRecord[];
   problems: ResourceRecord[];
 }

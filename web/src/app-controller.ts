@@ -855,7 +855,6 @@ function appShellResourceModel(item: ResourceRecord, kind: "project" | "task", p
 		} : null,
 		children: kind === "project" ? appShellProjectChildrenModel(item) : [],
 		projectId,
-		favorite: Boolean(item.userState?.favorite),
 		unreadCount
 	};
 }
@@ -910,7 +909,6 @@ function appShellFolderModel(folder: SidebarFolder, project: ResourceRecord, tas
 		summary: null,
 		children,
 		projectId: project.id,
-		favorite: false,
 		unreadCount
 	};
 }
@@ -943,11 +941,10 @@ function appShellActivityModel(item: ResourceRecord, category: keyof ShellActivi
 		ref: type === "project" || type === "task" ? resourceRefText(item.id) : "",
 		selected: controllerState.selectedId === item.id,
 		activeTurn: Boolean(item.runtime?.activeTurn),
-		favorite: Boolean(item.userState?.favorite),
 		unreadCount: Number(item.unreadCount) || 0,
 		turnNumber: category === "running" ? Number(item.runtime?.turnNumber) || 0 : Number(item.latestTurnNumber) || 0,
 		agentName: String(item.runtime?.agentName || item.latestAgentName || "").trim(),
-		statusLabel: state.label || (category === "favorites" ? "Favorite" : category === "unread" ? `${Number(item.unreadCount) || 0} unread` : "Active turn"),
+		statusLabel: state.label || (category === "unread" ? `${Number(item.unreadCount) || 0} unread` : "Active turn"),
 		status: appShellStatusModel(state.statusPresentation)
 	};
 }
@@ -969,7 +966,6 @@ function renderAppShell() {
 	const activitySource = controllerState.tree?.activity;
 	const activity: ShellActivityLists = {
 		running: activitySource?.running?.map((item) => appShellActivityModel(item, "running")) || [],
-		favorites: activitySource?.favorites?.map((item) => appShellActivityModel(item, "favorites")) || [],
 		unread: activitySource?.unread?.map((item) => appShellActivityModel(item, "unread")) || [],
 		problems: activitySource?.problems?.map((item) => appShellActivityModel(item, "problems")) || [],
 	};
@@ -1019,7 +1015,6 @@ function renderAppShell() {
 		onRenameFolder: (id, name) => renameFolder(id, name),
 		onDeleteFolder: (id) => deleteFolder(id),
 		onToggleFolder: (id) => toggleFolder(id),
-		onToggleFavorite: (id, favorite) => toggleResourceFavorite(id, favorite),
 		onOpenInboxMessage: (id) => openInboxMessage(id),
 		onReplyInboxMessage: (id, text) => replyInboxMessage(id, text),
 		onDeleteInboxMessage: (id) => deleteInboxMessage(id),
@@ -1537,17 +1532,6 @@ async function refreshTreeAfterResourceMutation(): Promise<void> {
 	const tree = await fetchCurrentTree(controllerState.activeWorkspaceId);
 	if (tree) controllerState.tree = tree;
 }
-async function toggleResourceFavorite(resourceId: string, favorite: boolean): Promise<void> {
-	const workspaceId = controllerState.activeWorkspaceId;
-	if (!workspaceId || !resourceId) return;
-	await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/resources/${encodeURIComponent(resourceId)}/favorite`, {
-		method: "PUT",
-		body: JSON.stringify({ favorite })
-	});
-	await refreshTreeAfterResourceMutation();
-	publishViewModels();
-}
-
 async function markSelectedResourceRead(): Promise<boolean> {
 	const workspaceId = controllerState.activeWorkspaceId;
 	const resourceId = selectedAgentResourceId();
@@ -1558,7 +1542,7 @@ async function markSelectedResourceRead(): Promise<boolean> {
 	const readTurnNumber = Number(item.userState?.readTurnNumber) || 0;
 	if (turnNumber <= 0 || turnNumber <= readTurnNumber) return false;
 	const navigationVersion = controllerState.navigationVersion;
-	const userState = await api<{ favorite?: boolean; readTurnNumber?: number }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/resources/${encodeURIComponent(resourceId)}/read`, {
+	const userState = await api<{ readTurnNumber?: number }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/resources/${encodeURIComponent(resourceId)}/read`, {
 		method: "PUT",
 		body: JSON.stringify({ throughTurnNumber: turnNumber })
 	});
@@ -1567,7 +1551,7 @@ async function markSelectedResourceRead(): Promise<boolean> {
 	return true;
 }
 
-function updateResourceReadState(resourceId: string, userState: { favorite?: boolean; readTurnNumber?: number }): void {
+function updateResourceReadState(resourceId: string, userState: { readTurnNumber?: number }): void {
 	const tree = controllerState.tree;
 	if (!tree) return;
 	const update = (item: ResourceRecord | null | undefined): void => {

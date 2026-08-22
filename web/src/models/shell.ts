@@ -34,7 +34,6 @@ export interface ShellResourceItem {
   summary: ShellProjectSummary | null;
   children: ShellResourceItem[];
   projectId?: string;
-  favorite?: boolean;
   unreadCount: number;
 }
 
@@ -45,7 +44,6 @@ export interface ShellActivityItem {
   ref: string;
   selected: boolean;
   activeTurn: boolean;
-  favorite: boolean;
   unreadCount: number;
   turnNumber: number;
   agentName: string;
@@ -55,7 +53,6 @@ export interface ShellActivityItem {
 
 export interface ShellActivityLists {
   running: ShellActivityItem[];
-  favorites: ShellActivityItem[];
   unread: ShellActivityItem[];
   problems: ShellActivityItem[];
 }
@@ -148,7 +145,6 @@ export interface AppShellModel {
   onRenameFolder: (id: string, name: string) => Promise<void>;
   onDeleteFolder: (id: string) => Promise<void>;
   onToggleFolder: (id: string) => Promise<void>;
-  onToggleFavorite: (id: string, favorite: boolean) => Promise<void>;
   onOpenInboxMessage: (id: string) => Promise<void>;
   onReplyInboxMessage: (id: string, text: string) => Promise<void>;
   onDeleteInboxMessage: (id: string) => Promise<void>;

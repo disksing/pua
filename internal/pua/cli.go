@@ -12,7 +12,7 @@ import (
 
 const (
 	projectCreateUsage = "usage: pua project create [--slug <slug>] <description>"
-	taskCreateUsage    = "usage: pua task create [<title>] [--project=<project>] [--slug <slug>] [--detail <detail>|--task-markdown <markdown>|--template=<name> [--field <name>=<value>...] [--fields <file>]] [--title <title>] [--dry-run] [--json]"
+	taskCreateUsage    = "usage: pua task create [<title>] [--project=<project>] [--slug <slug>] [--detail <detail>|--task-markdown <markdown>|--template=<name> [--field <name>=<value>...] [--fields <file>]] [--title <title>] [--profile=<name>|--agent=<name>] [--dry-run] [--json]"
 	taskListUsage      = "usage: pua task list [--project=<project>] [--all]"
 	taskShowUsage      = "usage: pua task show [--project=<project>] [--task=<task>]"
 	taskArchiveUsage   = "usage: pua task archive [--project=<project>] [--task=<task>]"
@@ -57,8 +57,6 @@ func Run(args []string) error {
 		return runAgent(args[1:])
 	case "user":
 		return runUser(args[1:])
-	case "resource":
-		return runResource(args[1:])
 	case "message":
 		return runMessage(args[1:])
 	case "history":
@@ -75,29 +73,6 @@ func Run(args []string) error {
 		return runHelp(args[1:])
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
-	}
-}
-
-func runResource(args []string) error {
-	if len(args) > 0 && isHelpCommand(args[0]) {
-		printResourceHelp()
-		return nil
-	}
-	if len(args) == 0 {
-		return errors.New("resource requires a subcommand")
-	}
-	switch args[0] {
-	case "archive":
-		if len(args) != 2 || !strings.HasPrefix(args[1], "--id=") {
-			return errors.New("usage: pua resource archive --id=<resource>")
-		}
-		id := strings.TrimSpace(strings.TrimPrefix(args[1], "--id="))
-		if id == "" {
-			return errors.New("resource id cannot be empty")
-		}
-		return applicationArchiveResource(id)
-	default:
-		return fmt.Errorf("unknown resource subcommand %q", args[0])
 	}
 }
 
@@ -125,6 +100,8 @@ func runWorkspace(args []string) error {
 			return err
 		}
 		return workspaceResourceJSON(id)
+	case "binding":
+		return runWorkspaceBinding(args[1:])
 	default:
 		return fmt.Errorf("unknown workspace subcommand %q", args[0])
 	}
@@ -185,6 +162,8 @@ func runProject(args []string) error {
 		return runProjectStatus(args[1:])
 	case "history":
 		return runProjectHistory(args[1:])
+	case "binding":
+		return runProjectBinding(args[1:])
 	case "archive":
 		projectID, err := resolveProjectArg(args[1:], "archive")
 		if err != nil {
@@ -238,6 +217,7 @@ func runTask(args []string) error {
 			}
 		}
 		input := appCreateTaskInput(parentID, options.Title, options.Detail, options.TaskMarkdown, options.TaskMarkdownSet, options.Slug)
+		input.AgentBinding = options.Binding
 		input.TemplateName, input.TemplateFields = options.TemplateName, fields
 		if options.DryRun {
 			preview, err := workspace.PreviewTask(input)
@@ -271,6 +251,8 @@ func runTask(args []string) error {
 		return applicationArchiveResource(taskID)
 	case "history":
 		return runTaskHistory(args[1:])
+	case "binding":
+		return runTaskBinding(args[1:])
 	default:
 		return fmt.Errorf("unknown task subcommand %q", args[0])
 	}
@@ -302,7 +284,6 @@ Usage:
   pua agent <command>
   pua user <command>
   pua workspace <command>
-  pua resource <command>
   pua message <command>
   pua history <command>
   pua serve [--addr=<address>] [--workspace=<path>] [--version]
@@ -328,11 +309,12 @@ Commands:
     Manage repositories known to the workspace. Subcommands: add, list.
 
   pua project <command>
-    Manage projects. Subcommands: create, list, show, archive, status, history.
+    Manage projects. Subcommands: create, list, show, archive, status, history,
+    binding.
 
   pua task <command>
     Manage tasks. Subcommands: create, list, show, archive, status, history,
-    repo.
+    binding, repo.
 
   pua scheduler <command>
     Manage natural-language schedules. Subcommands: list, show, add, update,
@@ -350,10 +332,8 @@ Commands:
     Manage Workspace-local users. Subcommands: list.
 
   pua workspace <command>
-    Query workspace state. Subcommands: status, history, tree, resource.
-
-  pua resource <command>
-    Manage resources. Subcommands: archive.
+    Query workspace state and settings. Subcommands: status, history, tree,
+    resource, binding.
 
   pua message <command>
     Send and inspect mailbox messages. Subcommands: send, show.
@@ -401,8 +381,6 @@ func runHelp(args []string) error {
 		printUserHelp()
 	case "workspace":
 		printWorkspaceHelp()
-	case "resource":
-		printResourceHelp()
 	case "message":
 		printMessageHelp()
 	case "history":
@@ -464,6 +442,7 @@ func printProjectHelp() {
   pua project list [--all]
   pua project show [--project=<project>]
   pua project archive [--project=<project>]
+  pua project binding set [--project=<project>] (--profile=<name>|--agent=<name>) [--server=<url>]
   pua project status [--project=<project>] [--server=<url>]
   pua project history [--project=<project>] [--cursor=<cursor>] [--limit=<n>] [--server=<url>] [--json]
 
@@ -488,6 +467,12 @@ Commands:
     project22 or just a number such as 22. When omitted, PUA uses the project
     containing the current working directory.
 
+  pua project binding set [--project=<project>] (--profile=<name>|--agent=<name>) [--server=<url>]
+    Set the Project's explicit Profile or direct Agent binding through the
+    owning pua serve process. <project> follows the same rules as pua project
+    show. The server validates configured Profile names and converges a
+    running generation when the resolved Agent changes.
+
   pua project status [--project=<project>] [--server=<url>]
     Query the owning pua serve process for the project's public session
     state and generation status, message counts, waiting messages, steer
@@ -505,17 +490,18 @@ Commands:
 
 func printTaskHelp() {
 	fmt.Print(`Usage:
-  pua task create [<title>] [--project=<project>] [--slug <slug>] [--detail <detail>|--task-markdown <markdown>|--template=<name> [--field <name>=<value>...] [--fields <file>]] [--title <title>] [--dry-run] [--json]
+  pua task create [<title>] [--project=<project>] [--slug <slug>] [--detail <detail>|--task-markdown <markdown>|--template=<name> [--field <name>=<value>...] [--fields <file>]] [--title <title>] [--profile=<name>|--agent=<name>] [--dry-run] [--json]
   pua task list [--project=<project>] [--all]
   pua task show [--project=<project>] [--task=<task>]
   pua task archive [--project=<project>] [--task=<task>]
+  pua task binding set [--project=<project>] [--task=<task>] (--profile=<name>|--agent=<name>) [--server=<url>]
   pua task status [--project=<project>] [--task=<task>] [--server=<url>]
   pua task state [--project=<project>] [--task=<task>] [--server=<url>]
   pua task state set <waiting|blocked|paused|completed> [--note <text>] [--project=<project>] [--task=<task>] [--server=<url>]
   pua task history [--project=<project>] [--task=<task>] [--cursor=<cursor>] [--limit=<n>] [--server=<url>] [--json]
 
 Commands:
-  pua task create [<title>] [--project=<project>] [--slug <slug>] [--detail <detail>|--task-markdown <markdown>|--template=<name>] [--field <name>=<value>...] [--fields <file>] [--title <title>] [--dry-run]
+  pua task create [<title>] [--project=<project>] [--slug <slug>] [--detail <detail>|--task-markdown <markdown>|--template=<name>] [--field <name>=<value>...] [--fields <file>] [--title <title>] [--profile=<name>|--agent=<name>] [--dry-run]
     Create the next task under the project in a short taskN/ or taskN-<slug>/
     directory, including task.json, task.md, artifacts/, worktree/,
     and task-local AGENTS.md. Conversation history is created lazily through
@@ -543,6 +529,12 @@ Commands:
   pua task archive [--project=<project>] [--task=<task>]
     Move an open task into its project archive. <task> follows the same rules
     as pua task show.
+
+  pua task binding set [--project=<project>] [--task=<task>] (--profile=<name>|--agent=<name>) [--server=<url>]
+    Set a Task's explicit Profile or direct Agent binding through the owning
+    pua serve process. Task selection follows pua task show. The server
+    validates configured Profile names and converges a running generation
+    when the resolved Agent changes.
 
   pua task status [--project=<project>] [--task=<task>] [--server=<url>]
     Query the owning pua serve process for the task's public session state
@@ -615,6 +607,7 @@ func printWorkspaceHelp() {
   pua workspace history [--cursor=<cursor>] [--limit=<n>] [--server=<url>] [--json]
   pua workspace tree --json
   pua workspace resource --id=<resource> --json
+  pua workspace binding set (--profile=<name>|--agent=<name>) [--server=<url>]
 
 Commands:
   pua workspace status [--server=<url>]
@@ -637,16 +630,11 @@ Commands:
   pua workspace resource --id=<resource> --json
     Print detail JSON for one project or task, including common Markdown files,
     artifacts, worktrees, and task repository metadata discovered from Git.
-`)
-}
 
-func printResourceHelp() {
-	fmt.Print(`Usage:
-  pua resource archive --id=<resource>
-
-Commands:
-  pua resource archive --id=<resource>
-    Archive the resource identified by <resource>, for example project1.task1.
+  pua workspace binding set (--profile=<name>|--agent=<name>) [--server=<url>]
+    Set the Workspace's explicit Profile or direct Agent binding through the
+    owning pua serve process. The server validates configured Profile names
+    and converges a running generation when the resolved Agent changes.
 `)
 }
 
@@ -747,6 +735,8 @@ type taskCreateOptions struct {
 	DryRun          bool
 	TitleSet        bool
 	JSON            bool
+	Binding         app.AgentBinding
+	BindingSet      bool
 }
 
 func parseTaskCreateArgs(args []string) (taskCreateOptions, error) {
@@ -757,6 +747,13 @@ func parseTaskCreateArgs(args []string) (taskCreateOptions, error) {
 	var title []string
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
+		handled, err := parseAgentBindingOption(args, &i, &options.Binding, &options.BindingSet, taskCreateUsage)
+		if err != nil {
+			return taskCreateOptions{}, err
+		}
+		if handled {
+			continue
+		}
 		if strings.HasPrefix(arg, "--project=") {
 			value := strings.TrimPrefix(arg, "--project=")
 			if value == "" {

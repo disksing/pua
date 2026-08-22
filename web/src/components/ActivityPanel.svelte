@@ -3,11 +3,15 @@
 
   import Icon from "./Icon.svelte";
   import StatusPresentation from "./StatusPresentation.svelte";
+  import { markdownHTML, markdownResourceNavigation, type ResourceTitleResolver } from "./markdown";
   import type { ShellActivityItem, ShellActivityLists, ShellInboxMessage, ShellStatusPresentation } from "./models";
 
   let {
     activity,
     inbox,
+    workspaceId = "",
+    resolveResourceTitle = () => null,
+    onNavigate = () => {},
     onSelect,
     onToggleFavorite,
     onOpenInboxMessage,
@@ -17,6 +21,9 @@
   }: {
     activity: ShellActivityLists;
     inbox: ShellInboxMessage[];
+    workspaceId?: string;
+    resolveResourceTitle?: ResourceTitleResolver;
+    onNavigate?: (resourceId: string) => void;
     onSelect: (id: string) => Promise<void>;
     onToggleFavorite: (id: string, favorite: boolean) => Promise<void>;
     onOpenInboxMessage: (id: string) => Promise<void>;
@@ -118,6 +125,22 @@
     void openInboxMessage(message);
   }
 
+  function inboxTextHTML(text: string): string {
+    const source = String(text || "");
+    if (!window.marked || !window.DOMPurify) return escapeHTML(source).replaceAll("\n", "<br>");
+    return markdownHTML(source, { workspaceId, resolveResourceTitle });
+  }
+
+  // Link clicks inside the message body follow the link itself; they must not
+  // bubble to the row, which would open the source resource instead.
+  function inboxTextClick(event: Event): void {
+    if (event.target instanceof Element && event.target.closest("a")) event.stopPropagation();
+  }
+
+  function escapeHTML(value: string): string {
+    return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+  }
+
   function toggleReply(event: Event, message: ShellInboxMessage): void {
     event.preventDefault();
     event.stopPropagation();
@@ -183,7 +206,8 @@
               </span>
               {#if message.replied}<span class="inbox-replied-badge" title="You replied to this message">Replied</span>{/if}
             </span>
-            <span class="inbox-text">{message.text}</span>
+            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+            <div class="inbox-text markdown-rendered" use:markdownResourceNavigation={{ resolveResourceTitle, onNavigate }} onclick={inboxTextClick}>{@html inboxTextHTML(message.text)}</div>
             <span class="inbox-actions">
               <button type="button" class="inbox-action" title="Open the source resource" aria-label={`Open ${message.resourceId}`} onclick={(event) => { event.stopPropagation(); void openInboxMessage(message); }}><Icon name="arrow-right" /> Open</button>
               <button type="button" class="inbox-action" title="Reply to this message" aria-label={`Reply to message from ${message.resourceId}`} aria-expanded={replyOpenId === message.id} onclick={(event) => toggleReply(event, message)}><Icon name="reply" /> Reply</button>

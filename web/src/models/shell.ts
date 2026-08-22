@@ -133,6 +133,7 @@ export interface AppShellModel {
   mobile: { sidebarOpen: boolean };
   layout: { preference: "auto" | "three" | "two" | "split"; effective: "three" | "two" | "split" | "single" };
   route: { path: string; revision: number; replace: boolean };
+  resolveResourceTitle: (resourceId: string) => string | null;
   onSwitchWorkspace: (id: string) => Promise<void>;
   onAddWorkspace: () => void;
   onCreateProject: () => void;

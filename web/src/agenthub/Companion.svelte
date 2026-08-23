@@ -22,6 +22,9 @@
   let pulses = $state<any[]>([]);
   let audioBlocked = $state(false);
   let controlError = $state("");
+  let quotaScroll: HTMLDivElement | undefined = $state();
+  let quotaGrid: HTMLDivElement | undefined = $state();
+  let quotaDense = $state(false);
   let sequence = 0;
   let progressionFrame: any = null;
   const player = new TonePlayer();
@@ -32,12 +35,56 @@
   const cycleItem = $derived(cycleItems[quotaIndex % Math.max(1, cycleItems.length)]);
   const activeList = $derived([...sessions.values()].sort((left, right) => left.sessionId.localeCompare(right.sessionId)));
 
+  function measureQuotaLayout(): void {
+    if (!quotaScroll || !quotaGrid) return;
+    const card = quotaGrid.closest<HTMLElement>(".companion-card");
+    const providerCount = quotaGrid.children.length;
+    const wideEnough = (card?.clientWidth || 0) >= 680;
+    let singleHeight = quotaGrid.getBoundingClientRect().height;
+    if (quotaDense) {
+      const probe = quotaGrid.cloneNode(true) as HTMLDivElement;
+      probe.classList.remove("dense");
+      probe.setAttribute("aria-hidden", "true");
+      probe.style.cssText = `position:absolute;visibility:hidden;pointer-events:none;width:${quotaGrid.clientWidth}px`;
+      quotaGrid.parentElement?.append(probe);
+      singleHeight = probe.getBoundingClientRect().height;
+      probe.remove();
+    }
+    const currentHeight = quotaGrid.getBoundingClientRect().height;
+    const content = quotaGrid.parentElement;
+    const contentTop = content?.getBoundingClientRect().top || 0;
+    const contentBottom = Math.max(contentTop, ...[...(content?.children || [])].map((element) => element.getBoundingClientRect().bottom));
+    const paddingBottom = Number.parseFloat(content ? getComputedStyle(content).paddingBottom : "0") || 0;
+    const projectedSingleContentHeight = contentBottom - contentTop + paddingBottom - currentHeight + singleHeight;
+    quotaDense = providerCount > 1 && wideEnough && projectedSingleContentHeight > quotaScroll.clientHeight + 1;
+  }
+
+  $effect(() => {
+    expanded;
+    activeList.length;
+    quotaLoading;
+    (visibleQuota.providers || []).map((provider: any) => `${provider.provider}:${provider.quotas?.length || 0}`).join("|");
+    const frame = window.requestAnimationFrame(measureQuotaLayout);
+    return () => window.cancelAnimationFrame(frame);
+  });
+
+  $effect(() => {
+    if (!quotaScroll || !quotaGrid) return;
+    const resize = new ResizeObserver(measureQuotaLayout);
+    resize.observe(quotaScroll);
+    resize.observe(quotaGrid);
+    measureQuotaLayout();
+    return () => resize.disconnect();
+  });
+
   onMount(() => {
     const unsubscribe = subscribeCompanionPreferences((next: any) => preferences = next);
     const housekeeping = window.setInterval(() => {
       const now = Date.now();
-      sessions = (activitySessions as any)(sessions, { sessions: [] }, now);
-      pulses = (pruneActivityPulses as any)(pulses, now);
+      const nextSessions = (activitySessions as any)(sessions, { sessions: [] }, now);
+      const nextPulses = (pruneActivityPulses as any)(pulses, now);
+      if (nextSessions !== sessions) sessions = nextSessions;
+      if (nextPulses !== pulses) pulses = nextPulses;
       allocator.retain([...sessions].filter(([, session]) => activitySessionHoldsTone(session, now)).map(([id]) => id));
     }, 1000);
     const rotation = window.setInterval(() => { if (cycleItems.length > 1) quotaIndex = (quotaIndex + 1) % cycleItems.length; }, 3000);
@@ -124,16 +171,16 @@
     </button>
   {:else}
     <section class="companion-card" aria-label="Activity and provider quota companion">
-      <header class="companion-card-header"><span class:connected={quota.connected} class="companion-connection"><i></i>OnWatch · {!quota.configured ? "Not configured" : quota.connected ? "Connected" : "Disconnected"}</span><span>{quotaLoading ? "updating…" : updatedAgo(quota.updatedAt)}</span><div><button type="button" aria-label="Open settings" onclick={onOpenSettings}><Icon name="settings" /></button>{#if !standalone}<a href="/agenthub/beeper" target="_blank" rel="noreferrer" aria-label="Open Beeper"><Icon name="external-link" /></a><button type="button" aria-label="Collapse Companion" onclick={() => open = false}><Icon name="x" /></button>{/if}</div></header>
-      <div class="companion-scroll"><div class="companion-dark">
+      <header class="companion-card-header"><span class:connected={quota.connected} class="companion-connection"><i></i>OnWatch · {!quota.configured ? "Not configured" : quota.connected ? "Connected" : "Disconnected"}</span><span>{quotaLoading ? "updating…" : updatedAgo(quota.updatedAt)}</span><div><button type="button" aria-label="Open settings" title="Open settings" onclick={onOpenSettings}><Icon name="settings" /></button>{#if !standalone}<a class="companion-header-action" href="/agenthub/beeper" target="_blank" rel="noreferrer" aria-label="Open Beeper in a new window" title="Open Beeper in a new window"><Icon name="external-link" /><span>Beeper</span></a><button type="button" class="companion-header-action" aria-label="Collapse Companion" title="Collapse Companion" onclick={() => open = false}><Icon name="x" /><span>Collapse</span></button>{/if}</div></header>
+      <div bind:this={quotaScroll} class="companion-scroll"><div class="companion-dark">
         <div class="companion-cap-row"><span class="companion-cap">Activity Monitor</span><span class={`companion-live-state ${activityState}`}>{activityState === "live" ? "AgentHub Live" : activityState === "paused" ? "Paused" : "Connecting"}</span></div>
         <div class="companion-thread-stat"><strong>{activeList.length}</strong><span>active threads · last 5 min</span></div>
         <ActivityWaveform {pulses} live={activityState === "live"} />
-        <div class="companion-thread-list">{#each activeList as session (`${session.sessionId}:${session.lastActiveAt}`)}<div class={`companion-thread-row ${terminalClass(session)}`}><span class="companion-thread-title">{session.title || session.sessionId.slice(0, 8)}</span><span class="companion-thread-note">{noteForToneSlot(session.toneSlot, activityChord).name}</span></div>{:else}<span class="idle">Waiting for activity</span>{/each}</div>
+        <div class="companion-thread-list">{#each activeList as session (session.sessionId)}<div class={`companion-thread-row ${terminalClass(session)}`}>{#if !activitySessionTerminal(session)}{#key session.lastActiveAt}<span class="companion-thread-highlight" aria-hidden="true"><span class="companion-thread-title">{session.title || session.sessionId.slice(0, 8)}</span><span class="companion-thread-note">{noteForToneSlot(session.toneSlot, activityChord).name}</span></span>{/key}{/if}<span class="companion-thread-title">{session.title || session.sessionId.slice(0, 8)}</span><span class="companion-thread-note">{noteForToneSlot(session.toneSlot, activityChord).name}</span></div>{:else}<span class="idle">Waiting for activity</span>{/each}</div>
         <div class="companion-controls"><label><span><strong>Enable beeping</strong><small>{audioBlocked ? "Click to enable audio" : "Beep while agents are active"}</small></span><button type="button" role="switch" aria-label="Enable activity beeping" aria-checked={preferences.enableBeeping} class:on={preferences.enableBeeping} class="companion-switch" onclick={toggleBeeping}><span></span></button></label><label><strong>On finish</strong><span class="companion-sound-controls"><select value={preferences.completionSound} onchange={(event) => savePreference({ completionSound: event.currentTarget.value })}>{#each COMPLETION_SOUNDS as option}<option value={option.value}>{option.label}</option>{/each}</select><button type="button" aria-label="Preview completion sound" onclick={preview}><Icon name="play" /></button></span></label>{#if controlError}<p role="alert">{controlError}</p>{/if}</div>
         <div class="companion-quota-heading"><span class="companion-cap">Provider Quota</span><small>All data from OnWatch</small></div>
         {#if quota.error}<div class="companion-quota-error">{quota.error}</div>{/if}
-        <div class="companion-provider-grid">{#each visibleQuota.providers || [] as provider (provider.provider)}<section class="companion-provider"><header><strong>{provider.label}</strong><em class={statusTone(provider.status)}>{provider.stale ? "Stale" : provider.status}</em></header>{#each provider.quotas || [] as item}<div class={`companion-quota-row ${statusTone(item.status)}`}><div><span>{item.label || item.kind}</span><strong>{Math.round(Number(item.remainingPercent) || 0)}% <small>left</small></strong></div><div class="companion-quota-track"><span style={`width:${Math.max(0, Math.min(100, Number(item.remainingPercent) || 0))}%`}></span>{#if item.windowPositionPercent != null}<i style={`left:${item.windowPositionPercent}%`}></i>{/if}</div><small>{item.resetInSeconds != null ? `resets in ${formatDuration(item.resetInSeconds)}` : `${Math.round(item.usedPercent || 0)}% used`}</small></div>{/each}</section>{/each}</div>
+        <div bind:this={quotaGrid} class:dense={quotaDense} class="companion-provider-grid">{#each visibleQuota.providers || [] as provider (provider.provider)}<section class="companion-provider"><header><strong>{provider.label}</strong><em class={statusTone(provider.status)}>{provider.stale ? "Stale" : provider.status}</em></header>{#each provider.quotas || [] as item}<div class={`companion-quota-row ${statusTone(item.status)}`}><div><span>{item.label || item.kind}</span><strong>{Math.round(Number(item.remainingPercent) || 0)}% <small>left</small></strong></div><div class="companion-quota-track"><span style={`width:${Math.max(0, Math.min(100, Number(item.remainingPercent) || 0))}%`}></span>{#if item.windowPositionPercent != null}<i style={`left:${item.windowPositionPercent}%`}></i>{/if}</div><small>{item.resetInSeconds != null ? `resets in ${formatDuration(item.resetInSeconds)}` : `${Math.round(item.usedPercent || 0)}% used`}</small></div>{/each}</section>{/each}</div>
         {#if !quotaLoading && !(visibleQuota.providers || []).length}<p class="companion-empty-quota">No visible quota data</p>{/if}
       </div></div>
     </section>

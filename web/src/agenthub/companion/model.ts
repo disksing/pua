@@ -139,7 +139,11 @@ export function activitySessionHoldsTone(session, now = Date.now()) {
 }
 
 export function activitySessions(current, frame, now = Date.now()) {
-  const next = new Map(current);
+  let next = current;
+  const mutable = () => {
+    if (next === current) next = new Map(current);
+    return next;
+  };
   for (const session of frame?.sessions || []) {
     const previous = next.get(session.sessionId);
     const incomingTerminal = activitySessionTerminal(session);
@@ -148,7 +152,7 @@ export function activitySessions(current, frame, now = Date.now()) {
       && session.turnId !== previousTerminal.turnId;
     const preservesTerminal = previousTerminal && !incomingTerminal && !startsDifferentTurn;
     const turnTerminal = incomingTerminal || (preservesTerminal ? previousTerminal : null);
-    next.set(session.sessionId, {
+    mutable().set(session.sessionId, {
       ...previous,
       ...session,
       turnTerminal,
@@ -162,7 +166,7 @@ export function activitySessions(current, frame, now = Date.now()) {
     });
   }
   for (const [id, session] of next) {
-    if (session.expiresAt <= now) next.delete(id);
+    if (session.expiresAt <= now) mutable().delete(id);
   }
   return next;
 }
@@ -174,6 +178,7 @@ const PULSE_SHAPE = [
   [0, 1.28], [-30, -0.42], [-70, -0.04], [-125, 0.08], [-220, 0.18],
   [-340, 0.04], [-460, 0],
 ];
+const IDLE_PULSE_INTERVAL_MS = 2100;
 
 function clamp(value, low, high) {
   return Math.min(high, Math.max(low, value));
@@ -203,12 +208,59 @@ export function activityPulsesForFrame(frame, now = Date.now()) {
 }
 
 export function pruneActivityPulses(pulses, now = Date.now()) {
-  return (pulses || []).filter((pulse) => now - pulse.at < ACTIVITY_VISIBLE_MS + ACTIVITY_LEAD_MS);
+  const current = pulses || [];
+  const next = current.filter((pulse) => now - pulse.at < ACTIVITY_VISIBLE_MS + ACTIVITY_LEAD_MS);
+  return next.length === current.length ? current : next;
 }
 
 function waveformY(sampleTime, pulseMotion, baseline, amplitude, active) {
   const motion = clamp(baselineMotion(sampleTime, active) + pulseMotion, -1.15, 1.15);
   return baseline - motion * amplitude;
+}
+
+function pulseShapeAt(ageOffset) {
+  if (ageOffset > PULSE_SHAPE[0][0] || ageOffset < PULSE_SHAPE[PULSE_SHAPE.length - 1][0]) return 0;
+  for (let index = 0; index < PULSE_SHAPE.length - 1; index += 1) {
+    const [fromOffset, fromValue] = PULSE_SHAPE[index];
+    const [toOffset, toValue] = PULSE_SHAPE[index + 1];
+    if (ageOffset <= fromOffset && ageOffset >= toOffset) {
+      const progress = (fromOffset - ageOffset) / (fromOffset - toOffset);
+      return fromValue + (toValue - fromValue) * progress;
+    }
+  }
+  return 0;
+}
+
+function deterministicUnit(value) {
+  let hash = Math.imul(value ^ 0x9e3779b9, 0x85ebca6b);
+  hash ^= hash >>> 13;
+  hash = Math.imul(hash, 0xc2b2ae35);
+  hash ^= hash >>> 16;
+  return (hash >>> 0) / 4294967295;
+}
+
+function idlePulseMotion(sampleTime) {
+  const bucket = Math.floor(sampleTime / IDLE_PULSE_INTERVAL_MS);
+  let motion = 0;
+  for (let index = bucket - 1; index <= bucket + 1; index += 1) {
+    const position = 0.22 + deterministicUnit(index) * 0.56;
+    const peakTime = index * IDLE_PULSE_INTERVAL_MS + position * IDLE_PULSE_INTERVAL_MS;
+    const amplitude = 0.07 + deterministicUnit(index + 0x51f15e) * 0.07;
+    motion += pulseShapeAt(peakTime - sampleTime) * amplitude;
+  }
+  return motion;
+}
+
+export function waveformSampleY(pulses = [], sampleTime = Date.now(), height = 86, active = true) {
+  const baseline = height * 0.54;
+  const amplitude = height * 0.32;
+  let pulseMotion = pulses?.length ? 0 : idlePulseMotion(sampleTime);
+  if (pulses?.length) {
+    for (const pulse of pulses) {
+      pulseMotion += pulseShapeAt(Number(pulse.at) - sampleTime) * (Number(pulse.amplitude) || 1);
+    }
+  }
+  return waveformY(sampleTime, pulseMotion, baseline, amplitude, active);
 }
 
 function waveformPulseSegment(pulse, now, width, baseline, amplitude, active) {
@@ -225,7 +277,7 @@ function waveformPulseSegment(pulse, now, width, baseline, amplitude, active) {
   };
 }
 
-export function waveformPoints(pulses = [], now = Date.now(), width = 700, height = 86, active = true) {
+export function waveformCoordinates(pulses = [], now = Date.now(), width = 700, height = 86, active = true) {
   const baseline = height * 0.54;
   const amplitude = height * 0.32;
   const segments = pruneActivityPulses(pulses, now)
@@ -238,7 +290,7 @@ export function waveformPoints(pulses = [], now = Date.now(), width = 700, heigh
   while (x <= width) {
     while (segmentIndex < segments.length && segments[segmentIndex].endX < x) segmentIndex += 1;
     if (segmentIndex < segments.length && segments[segmentIndex].startX <= x) {
-      points.push(...segments[segmentIndex].points.map((point) => `${point.x.toFixed(1)},${point.y.toFixed(1)}`));
+      points.push(...segments[segmentIndex].points);
       x = Math.max(x + 2, segments[segmentIndex].endX + 2);
       segmentIndex += 1;
       continue;
@@ -246,10 +298,16 @@ export function waveformPoints(pulses = [], now = Date.now(), width = 700, heigh
     const age = ACTIVITY_VISIBLE_MS * (1 - x / width);
     const sampleTime = now - age;
     const y = waveformY(sampleTime, 0, baseline, amplitude, active);
-    points.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+    points.push({ x, y });
     x += 2;
   }
-  return points.join(" ");
+  return points;
+}
+
+export function waveformPoints(pulses = [], now = Date.now(), width = 700, height = 86, active = true) {
+  return waveformCoordinates(pulses, now, width, height, active)
+    .map((point) => `${point.x.toFixed(1)},${point.y.toFixed(1)}`)
+    .join(" ");
 }
 
 export function normalizeCompanionPosition(value) {

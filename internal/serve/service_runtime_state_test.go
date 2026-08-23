@@ -112,11 +112,11 @@ func TestServiceManagerReapsNewProcessWhenRuntimeStateWriteFails(t *testing.T) {
 	injected := errors.New("injected runtime state write failure")
 	startedPID := 0
 	manager.runtimeStateStore.writeJSON = func(_ string, value any, _ os.FileMode) error {
-		status, ok := value.(ServiceStatus)
+		persisted, ok := value.(persistedServiceRuntimeState)
 		if !ok {
-			t.Fatalf("runtime state value type = %T, want ServiceStatus", value)
+			t.Fatalf("runtime state value type = %T, want persistedServiceRuntimeState", value)
 		}
-		startedPID = status.PID
+		startedPID = persisted.PID
 		return injected
 	}
 

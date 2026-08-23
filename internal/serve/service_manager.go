@@ -110,7 +110,12 @@ type serviceFailureTransition struct {
 }
 
 type serviceRuntime struct {
-	config                ServiceConfig
+	config ServiceConfig
+	// processConfig is an immutable copy of the definition used by the
+	// currently owned process generation. config may move ahead during Apply,
+	// but stop, failure, and orphan cleanup must continue to use this snapshot.
+	processConfig         *ServiceConfig
+	processCommandDigest  string
 	status                ServiceStatus
 	process               *exec.Cmd
 	exit                  <-chan serviceProcessExit
@@ -134,6 +139,8 @@ type serviceRuntime struct {
 type serviceRuntimeConfigSnapshot struct {
 	runtime               *serviceRuntime
 	config                ServiceConfig
+	processConfig         *ServiceConfig
+	processCommandDigest  string
 	status                ServiceStatus
 	process               *exec.Cmd
 	exit                  <-chan serviceProcessExit
@@ -151,6 +158,26 @@ type serviceRuntimeConfigSnapshot struct {
 	logWriters            []*serviceLogWriter
 	terminationPending    bool
 	processOwnership      serviceProcessOwnership
+}
+
+// persistedServiceRuntimeState keeps process cleanup provenance beside the
+// public status without exposing it through ServiceStatus. The snapshot holds
+// only cleanup-relevant declarations: secret references may be present, but
+// the primary command, resolved secret values, and child environment remain
+// out of runtime state.
+type persistedServiceRuntimeState struct {
+	ServiceStatus
+	ProcessConfig *persistedServiceProcessConfig `json:"processConfig,omitempty"`
+}
+
+type persistedServiceProcessConfig struct {
+	SchemaVersion int                           `json:"schemaVersion"`
+	ID            string                        `json:"id"`
+	CommandDigest string                        `json:"commandDigest"`
+	CWD           string                        `json:"cwd,omitempty"`
+	Environment   map[string]ServiceEnvironment `json:"environment,omitempty"`
+	Exports       bool                          `json:"exports,omitempty"`
+	Cleanup       *ServiceCleanupConfig         `json:"cleanup,omitempty"`
 }
 
 type serviceFileSnapshot struct {
@@ -340,11 +367,12 @@ func (m *ServiceManager) loadStatusLocked(rt *serviceRuntime) error {
 	if err != nil {
 		return err
 	}
-	var status ServiceStatus
+	var persisted persistedServiceRuntimeState
 	decoder := json.NewDecoder(bytes.NewReader(data))
-	if err := decoder.Decode(&status); err != nil {
+	if err := decoder.Decode(&persisted); err != nil {
 		return err
 	}
+	status := persisted.ServiceStatus
 	if status.ID != rt.config.ID {
 		return fmt.Errorf("runtime state id %q does not match service %q", status.ID, rt.config.ID)
 	}
@@ -353,6 +381,31 @@ func (m *ServiceManager) loadStatusLocked(rt *serviceRuntime) error {
 	}
 	if status.Exports.Variables == nil {
 		status.Exports.Variables = map[string]string{}
+	}
+	if persisted.ProcessConfig != nil {
+		if persisted.ProcessConfig.SchemaVersion != serviceSchemaVersion {
+			return fmt.Errorf("runtime process config has unsupported schema version %d", persisted.ProcessConfig.SchemaVersion)
+		}
+		if persisted.ProcessConfig.ID != status.ID {
+			return fmt.Errorf("runtime process config id %q does not match service %q", persisted.ProcessConfig.ID, status.ID)
+		}
+		if persisted.ProcessConfig.CommandDigest == "" || persisted.ProcessConfig.CommandDigest != status.CommandDigest {
+			return errors.New("runtime process config does not match the owned process command")
+		}
+		processConfig := persisted.ProcessConfig.serviceConfig()
+		if err := validateServiceConfig(m.root, processConfig); err != nil {
+			return fmt.Errorf("runtime process config: %w", err)
+		}
+		if status.PID > 0 || status.ProcessGroup > 0 {
+			rt.processConfig = &processConfig
+			rt.processCommandDigest = persisted.ProcessConfig.CommandDigest
+		}
+	} else if (status.PID > 0 || status.ProcessGroup > 0) && status.CommandDigest != "" && serviceCommandDigest(rt.config) == status.CommandDigest {
+		// Runtime states written before processConfig was introduced remain safe
+		// to clean up when the current definition still identifies the process.
+		processConfig := cloneServiceConfig(rt.config)
+		rt.processConfig = &processConfig
+		rt.processCommandDigest = status.CommandDigest
 	}
 	rt.status = status
 	rt.exports = ServiceExportFile{SchemaVersion: serviceExportSchema, Variables: cloneStringMap(status.Exports.Variables)}
@@ -564,6 +617,20 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 		ctx = context.Background()
 	}
 	cfg := defaultServiceConfig(rt.config)
+	processConfig := cloneServiceConfig(cfg)
+	rt.processConfig = &processConfig
+	rt.processCommandDigest = serviceCommandDigest(cfg)
+	// A failed resolution must never fall back to a previous generation's
+	// resolved environment or secrets when it invokes this generation's
+	// cleanup hook.
+	rt.environment = nil
+	rt.secretValues = nil
+	rt.secretNames = nil
+	rt.exportSecrets = nil
+	rt.exportAccepted = false
+	rt.exportViolation = ""
+	rt.rejectedExportSecrets = nil
+	rt.redactor = nil
 	env, secrets, names, exports, err := m.resolveEnvironmentLocked(cfg)
 	if err != nil {
 		return m.failStartLocked(ctx, rt, err)
@@ -722,6 +789,8 @@ func (m *ServiceManager) failStartLocked(ctx context.Context, rt *serviceRuntime
 		message += "; " + cleanupMessage
 		requireAttention = true
 	}
+	rt.processConfig = nil
+	rt.processCommandDigest = ""
 	return m.transitionServiceFailureLocked(rt, serviceFailureTransition{
 		at:               transitionAt,
 		lastError:        message,
@@ -1261,7 +1330,7 @@ func (m *ServiceManager) handleProcessExitLocked(ctx context.Context, rt *servic
 		return nil
 	}
 	var exportErr error
-	if requiresInitialExport(rt.config) {
+	if rt.processConfig != nil && requiresInitialExport(*rt.processConfig) {
 		_, exportErr = m.readExportsLocked(rt)
 	}
 	for _, writer := range rt.logWriters {
@@ -1294,6 +1363,8 @@ func (m *ServiceManager) handleProcessExitLocked(ctx context.Context, rt *servic
 	transitionAt := m.now()
 	_ = m.appendEventLocked(rt, map[string]any{"type": "exited", "code": exit.code, "error": rt.status.ExitError, "time": rt.status.ExitedAt})
 	cleanupErr := m.runCleanupLocked(ctx, rt)
+	rt.processConfig = nil
+	rt.processCommandDigest = ""
 	lastError := rt.status.ExitError
 	if cleanupErr != nil {
 		lastError = security.NewRedactor(rt.secretValues...).RedactString(cleanupErr.Error())
@@ -1332,6 +1403,7 @@ func (m *ServiceManager) stopProcessLocked(ctx context.Context, rt *serviceRunti
 	if manual {
 		rt.status.ManualStop = true
 	}
+	reconstructedProcess := rt.process == nil
 	grace := m.processTerminationGrace
 	if grace <= 0 {
 		grace = defaultServiceProcessTerminationGrace
@@ -1345,7 +1417,7 @@ func (m *ServiceManager) stopProcessLocked(ctx context.Context, rt *serviceRunti
 		}
 	}
 	recoveredTermination := rt.terminationPending || rt.process == nil
-	if requiresInitialExport(rt.config) {
+	if rt.processConfig != nil && requiresInitialExport(*rt.processConfig) {
 		_, _ = m.readExportsLocked(rt)
 	}
 	for _, writer := range rt.logWriters {
@@ -1363,12 +1435,21 @@ func (m *ServiceManager) stopProcessLocked(ctx context.Context, rt *serviceRunti
 		rt.status.LastError = ""
 		rt.status.State = ServiceStateStopped
 	}
-	if err := m.runCleanupLocked(ctx, rt); err != nil {
-		rt.status.LastError = security.NewRedactor(rt.secretValues...).RedactString(err.Error())
+	var cleanupErr error
+	if reconstructedProcess {
+		cleanupErr = m.restoreProcessCleanupEnvironmentLocked(rt)
+	}
+	if cleanupErr == nil {
+		cleanupErr = m.runCleanupLocked(ctx, rt)
+	}
+	rt.processConfig = nil
+	rt.processCommandDigest = ""
+	if cleanupErr != nil {
+		rt.status.LastError = security.NewRedactor(rt.secretValues...).RedactString(cleanupErr.Error())
 		rt.status.Cleanup.LastError = rt.status.LastError
 		rt.status.State = ServiceStateAttentionRequired
 		rt.status.AttentionRequired = true
-		return errors.Join(err, m.persistStatusLocked(rt))
+		return errors.Join(cleanupErr, m.persistStatusLocked(rt))
 	}
 	return nil
 }
@@ -1437,10 +1518,11 @@ func (m *ServiceManager) runCleanupLocked(ctx context.Context, rt *serviceRuntim
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if rt.config.Cleanup == nil || len(rt.config.Cleanup.Command) == 0 {
+	if rt.processConfig == nil || rt.processConfig.Cleanup == nil || len(rt.processConfig.Cleanup.Command) == 0 {
 		return nil
 	}
-	cleanup := rt.config.Cleanup
+	processConfig := rt.processConfig
+	cleanup := processConfig.Cleanup
 	attempts := cleanup.Retries + 1
 	if attempts < 1 {
 		attempts = 1
@@ -1448,7 +1530,7 @@ func (m *ServiceManager) runCleanupLocked(ctx context.Context, rt *serviceRuntim
 	var last error
 	for attempt := 1; attempt <= attempts; attempt++ {
 		checkCtx, cancel := context.WithTimeout(ctx, cleanup.Timeout)
-		dir := serviceCWD(m.root, rt.config.CWD)
+		dir := serviceCWD(m.root, processConfig.CWD)
 		if !pathWithinResolved(m.root, dir) {
 			cancel()
 			last = errors.New("cleanup cwd escapes the workspace")
@@ -1643,6 +1725,21 @@ func (m *ServiceManager) recoverOrphanLocked(rt *serviceRuntime) error {
 	}
 	rt.processOwnership = serviceProcessOwnershipReconstructed
 	rt.status.PID, rt.status.ProcessGroup = 0, 0
+	cleanupErr := m.restoreProcessCleanupEnvironmentLocked(rt)
+	if cleanupErr == nil {
+		cleanupErr = m.runCleanupLocked(context.Background(), rt)
+	}
+	rt.processConfig = nil
+	rt.processCommandDigest = ""
+	if cleanupErr != nil {
+		message := security.NewRedactor(rt.secretValues...).RedactString(cleanupErr.Error())
+		rt.status.State = ServiceStateAttentionRequired
+		rt.status.AttentionRequired = true
+		rt.status.Readiness.Ready = false
+		rt.status.LastError = message
+		rt.status.Cleanup.LastError = message
+		return errors.Join(errors.New(message), m.persistStatusLocked(rt))
+	}
 	rt.status.State = ServiceStateStopped
 	// Successful orphan reaping resolves process ownership, not operator
 	// intent. A failed manual stop persists this bit so reconciliation remains
@@ -1650,6 +1747,23 @@ func (m *ServiceManager) recoverOrphanLocked(rt *serviceRuntime) error {
 	rt.status.AttentionRequired = false
 	rt.status.LastError = ""
 	return m.persistStatusLocked(rt)
+}
+
+func (m *ServiceManager) restoreProcessCleanupEnvironmentLocked(rt *serviceRuntime) error {
+	if rt.processConfig == nil || rt.processConfig.Cleanup == nil || len(rt.processConfig.Cleanup.Command) == 0 {
+		return nil
+	}
+	environment, secrets, names, _, err := m.resolveEnvironmentLocked(*rt.processConfig)
+	if err != nil {
+		return fmt.Errorf("restore process cleanup environment: %w", err)
+	}
+	environment = replaceEnvironmentValue(environment, serviceInstanceTokenEnvironment, rt.status.InstanceToken)
+	environment = replaceEnvironmentValue(environment, serviceCommandDigestEnvironment, rt.processCommandDigest)
+	rt.environment = environment
+	rt.secretValues = secrets
+	rt.secretNames = names
+	rt.redactor = security.NewRedactor(secrets...)
+	return nil
 }
 
 func (m *ServiceManager) failOrphanRecoveryLocked(rt *serviceRuntime, cause error) error {
@@ -1687,7 +1801,11 @@ func (m *ServiceManager) persistStatusLocked(rt *serviceRuntime) error {
 	if writeJSON == nil {
 		writeJSON = writeServiceJSON
 	}
-	if err := writeJSON(path, rt.status, 0o600); err != nil {
+	persisted := persistedServiceRuntimeState{ServiceStatus: cloneServiceStatus(rt.status)}
+	if (rt.status.PID > 0 || rt.status.ProcessGroup > 0) && rt.processConfig != nil {
+		persisted.ProcessConfig = newPersistedServiceProcessConfig(rt)
+	}
+	if err := writeJSON(path, persisted, 0o600); err != nil {
 		return fmt.Errorf("persist service %s runtime state: %w", rt.status.ID, err)
 	}
 	return nil
@@ -1827,6 +1945,17 @@ func valueFromEnvironment(values []string, key string) string {
 		}
 	}
 	return ""
+}
+
+func replaceEnvironmentValue(values []string, key, replacement string) []string {
+	prefix := key + "="
+	for index, value := range values {
+		if strings.HasPrefix(value, prefix) {
+			values[index] = prefix + replacement
+			return values
+		}
+	}
+	return append(values, prefix+replacement)
 }
 
 // List returns public status snapshots. It never exposes resolved secret
@@ -1994,9 +2123,72 @@ func (m *ServiceManager) validateBindingsForConfigsLocked(bindings ServiceBindin
 func cloneServiceConfigs(configs map[string]ServiceConfig) map[string]ServiceConfig {
 	result := make(map[string]ServiceConfig, len(configs))
 	for id, cfg := range configs {
-		result[id] = cfg
+		result[id] = cloneServiceConfig(cfg)
 	}
 	return result
+}
+
+func cloneServiceConfig(cfg ServiceConfig) ServiceConfig {
+	cfg.Command = append([]string(nil), cfg.Command...)
+	cfg.Args = append([]string(nil), cfg.Args...)
+	cfg.DependsOn = append([]string(nil), cfg.DependsOn...)
+	if cfg.Environment != nil {
+		environment := make(map[string]ServiceEnvironment, len(cfg.Environment))
+		for name, value := range cfg.Environment {
+			environment[name] = value
+		}
+		cfg.Environment = environment
+	}
+	if cfg.Readiness != nil {
+		readiness := *cfg.Readiness
+		readiness.Command = append([]string(nil), readiness.Command...)
+		cfg.Readiness = &readiness
+	}
+	if cfg.Cleanup != nil {
+		cleanup := *cfg.Cleanup
+		cleanup.Command = append([]string(nil), cleanup.Command...)
+		cfg.Cleanup = &cleanup
+	}
+	return cfg
+}
+
+func newPersistedServiceProcessConfig(rt *serviceRuntime) *persistedServiceProcessConfig {
+	if rt == nil || rt.processConfig == nil {
+		return nil
+	}
+	cfg := cloneServiceConfig(*rt.processConfig)
+	digest := rt.processCommandDigest
+	if digest == "" {
+		digest = rt.status.CommandDigest
+	}
+	return &persistedServiceProcessConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            cfg.ID,
+		CommandDigest: digest,
+		CWD:           cfg.CWD,
+		Environment:   cfg.Environment,
+		Exports:       cfg.Exports,
+		Cleanup:       cfg.Cleanup,
+	}
+}
+
+func (cfg *persistedServiceProcessConfig) serviceConfig() ServiceConfig {
+	if cfg == nil {
+		return ServiceConfig{}
+	}
+	// A harmless absolute command lets the existing service validator check
+	// the persisted cleanup CWD, environment declarations, and cleanup command.
+	// The primary process command is deliberately absent from runtime state.
+	return defaultServiceConfig(cloneServiceConfig(ServiceConfig{
+		SchemaVersion: cfg.SchemaVersion,
+		ID:            cfg.ID,
+		Enabled:       true,
+		Command:       []string{"/bin/true"},
+		CWD:           cfg.CWD,
+		Environment:   cfg.Environment,
+		Exports:       cfg.Exports,
+		Cleanup:       cfg.Cleanup,
+	}))
 }
 
 func (m *ServiceManager) validateConfigTransactionLocked(configs map[string]ServiceConfig) (serviceDependencyGraph, error) {
@@ -2181,7 +2373,9 @@ func (m *ServiceManager) ApplyAll(configs []ServiceConfig) error {
 func snapshotServiceRuntimeConfig(rt *serviceRuntime) serviceRuntimeConfigSnapshot {
 	return serviceRuntimeConfigSnapshot{
 		runtime:               rt,
-		config:                rt.config,
+		config:                cloneServiceConfig(rt.config),
+		processConfig:         cloneOptionalServiceConfig(rt.processConfig),
+		processCommandDigest:  rt.processCommandDigest,
 		status:                cloneServiceStatus(rt.status),
 		process:               rt.process,
 		exit:                  rt.exit,
@@ -2209,6 +2403,14 @@ func cloneServiceStatus(status ServiceStatus) ServiceStatus {
 	return status
 }
 
+func cloneOptionalServiceConfig(cfg *ServiceConfig) *ServiceConfig {
+	if cfg == nil {
+		return nil
+	}
+	cloned := cloneServiceConfig(*cfg)
+	return &cloned
+}
+
 func cloneServiceSecretMetadataMap(values map[string]ServiceSecretMetadata) map[string]ServiceSecretMetadata {
 	if values == nil {
 		return nil
@@ -2227,7 +2429,9 @@ func cloneServiceExportFile(export ServiceExportFile) ServiceExportFile {
 }
 
 func restoreServiceRuntimeConfig(rt *serviceRuntime, snapshot serviceRuntimeConfigSnapshot) {
-	rt.config = snapshot.config
+	rt.config = cloneServiceConfig(snapshot.config)
+	rt.processConfig = cloneOptionalServiceConfig(snapshot.processConfig)
+	rt.processCommandDigest = snapshot.processCommandDigest
 	rt.status = cloneServiceStatus(snapshot.status)
 	rt.process = snapshot.process
 	rt.exit = snapshot.exit

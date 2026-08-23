@@ -3,6 +3,7 @@ package serve
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -1095,6 +1096,293 @@ func TestServiceManagerRetriesTimedOutCleanup(t *testing.T) {
 	}
 	if restored.Cleanup.Attempts != 2 || !restored.Cleanup.Succeeded || !restored.ManualStop {
 		t.Fatalf("reloaded cleanup status = %#v", restored)
+	}
+}
+
+func TestServiceManagerApplyUsesCleanupSnapshotForEachProcess(t *testing.T) {
+	root := t.TempDir()
+	tracePath := filepath.Join(root, "cleanup-trace")
+	config := func(label string) ServiceConfig {
+		return ServiceConfig{
+			SchemaVersion: serviceSchemaVersion,
+			ID:            "worker",
+			Enabled:       true,
+			Command:       []string{"/bin/sh", "-c", "exec sleep 30"},
+			Environment: map[string]ServiceEnvironment{
+				"CLEANUP_MARK": {Literal: label + "-env"},
+			},
+			Cleanup: &ServiceCleanupConfig{
+				Command: []string{"/bin/sh", "-c", "printf '" + label + ":%s\\n' \"$CLEANUP_MARK\" >> " + shellQuote(tracePath)},
+				Timeout: time.Second,
+			},
+		}
+	}
+	writeTestService(t, root, config("old"))
+
+	manager, err := NewServiceManager(root, ServiceManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopProcessTestManager(t, &manager)
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	oldStatus := waitForServiceState(t, manager, "worker", ServiceStateReady)
+
+	if err := manager.Apply(config("new")); err != nil {
+		t.Fatal(err)
+	}
+	newStatus := waitForServiceState(t, manager, "worker", ServiceStateReady)
+	if newStatus.PID == oldStatus.PID {
+		t.Fatalf("Apply retained PID %d after changing process configuration", oldStatus.PID)
+	}
+	trace, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(trace), "old:old-env\n"; got != want {
+		t.Fatalf("cleanup trace after Apply = %q, want %q", got, want)
+	}
+	if err := manager.RestartService(context.Background(), "worker"); err != nil {
+		t.Fatal(err)
+	}
+	restartedStatus := waitForServiceState(t, manager, "worker", ServiceStateReady)
+	if restartedStatus.PID == newStatus.PID {
+		t.Fatalf("Restart retained PID %d", newStatus.PID)
+	}
+	trace, err = os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(trace), "old:old-env\nnew:new-env\n"; got != want {
+		t.Fatalf("cleanup trace after Restart = %q, want %q", got, want)
+	}
+
+	if err := manager.StopService(context.Background(), "worker"); err != nil {
+		t.Fatal(err)
+	}
+	manager = nil
+	trace, err = os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(trace), "old:old-env\nnew:new-env\nnew:new-env\n"; got != want {
+		t.Fatalf("cleanup trace after stopping replacement = %q, want %q", got, want)
+	}
+}
+
+func TestServiceManagerFailedReplacementUsesReplacementCleanupSnapshot(t *testing.T) {
+	root := t.TempDir()
+	tracePath := filepath.Join(root, "cleanup-trace")
+	config := func(label string, command []string) ServiceConfig {
+		return ServiceConfig{
+			SchemaVersion: serviceSchemaVersion,
+			ID:            "worker",
+			Enabled:       true,
+			Command:       command,
+			Environment: map[string]ServiceEnvironment{
+				"CLEANUP_MARK": {Literal: label + "-env"},
+			},
+			Cleanup: &ServiceCleanupConfig{
+				Command: []string{"/bin/sh", "-c", "printf '" + label + ":%s\\n' \"$CLEANUP_MARK\" >> " + shellQuote(tracePath)},
+				Timeout: time.Second,
+			},
+		}
+	}
+	writeTestService(t, root, config("old", []string{"/bin/sh", "-c", "exec sleep 30"}))
+	manager, err := NewServiceManager(root, ServiceManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopProcessTestManager(t, &manager)
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	waitForServiceState(t, manager, "worker", ServiceStateReady)
+
+	missing := filepath.Join(root, "missing-service")
+	if err := manager.Apply(config("new", []string{missing})); err != nil {
+		t.Fatalf("Apply returned a persisted start failure: %v", err)
+	}
+	status, err := manager.Show("worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != ServiceStateBackoff || status.PID != 0 || status.ProcessGroup != 0 {
+		t.Fatalf("status after replacement start failure = %#v", status)
+	}
+	trace, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(trace), "old:old-env\nnew:new-env\n"; got != want {
+		t.Fatalf("cleanup trace after replacement start failure = %q, want %q", got, want)
+	}
+}
+
+func TestServiceManagerApplyAllRollbackRestoresProcessCleanupSnapshot(t *testing.T) {
+	root := t.TempDir()
+	tracePath := filepath.Join(root, "cleanup-trace")
+	config := func(id, label string) ServiceConfig {
+		return ServiceConfig{
+			SchemaVersion: serviceSchemaVersion,
+			ID:            id,
+			Enabled:       true,
+			Command:       []string{"/bin/sh", "-c", "exec sleep 30"},
+			Environment: map[string]ServiceEnvironment{
+				"CLEANUP_MARK": {Literal: label + "-env"},
+			},
+			Cleanup: &ServiceCleanupConfig{
+				Command: []string{"/bin/sh", "-c", "printf '" + label + ":%s\\n' \"$CLEANUP_MARK\" >> " + shellQuote(tracePath)},
+				Timeout: time.Second,
+			},
+		}
+	}
+	oldAlpha := config("alpha", "alpha-old")
+	oldBravo := config("bravo", "bravo-old")
+	writeTestService(t, root, oldAlpha)
+	writeTestService(t, root, oldBravo)
+	manager, err := NewServiceManager(root, ServiceManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopProcessTestManager(t, &manager)
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	waitForServiceState(t, manager, "alpha", ServiceStateReady)
+	bravo := waitForServiceState(t, manager, "bravo", ServiceStateReady)
+
+	nativeWrite := manager.runtimeStateStore.writeJSON
+	injected := errors.New("injected bravo replacement state failure")
+	failed := false
+	manager.runtimeStateStore.writeJSON = func(path string, value any, mode os.FileMode) error {
+		persisted, ok := value.(persistedServiceRuntimeState)
+		if ok && !failed && persisted.ID == "bravo" && persisted.PID > 0 && persisted.PID != bravo.PID {
+			failed = true
+			return injected
+		}
+		return nativeWrite(path, value, mode)
+	}
+	applyErr := manager.ApplyAll([]ServiceConfig{config("alpha", "alpha-new"), config("bravo", "bravo-new")})
+	manager.runtimeStateStore.writeJSON = nativeWrite
+	if !errors.Is(applyErr, injected) {
+		t.Fatalf("ApplyAll error = %v, want injected bravo state failure", applyErr)
+	}
+	alpha := waitForServiceState(t, manager, "alpha", ServiceStateReady)
+	if alpha.PID <= 0 {
+		t.Fatalf("rolled-back alpha status = %#v", alpha)
+	}
+	trace, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRollback := "alpha-old:alpha-old-env\n" +
+		"bravo-old:bravo-old-env\n" +
+		"bravo-new:bravo-new-env\n" +
+		"alpha-new:alpha-new-env\n"
+	if got := string(trace); got != wantRollback {
+		t.Fatalf("cleanup trace during ApplyAll rollback = %q, want %q", got, wantRollback)
+	}
+	if err := manager.StopService(context.Background(), "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	trace, err = os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(trace), wantRollback+"alpha-old:alpha-old-env\n"; got != want {
+		t.Fatalf("cleanup trace after stopping rolled-back process = %q, want %q", got, want)
+	}
+}
+
+func TestServiceManagerReconstructedOrphanUsesPersistedCleanupSnapshot(t *testing.T) {
+	const (
+		launchSecret    = "launch-only-cleanup-secret"
+		recoveredSecret = "rotated-recovered-cleanup-secret"
+	)
+	root := t.TempDir()
+	tracePath := filepath.Join(root, "cleanup-trace")
+	config := func(label string) ServiceConfig {
+		return ServiceConfig{
+			SchemaVersion: serviceSchemaVersion,
+			ID:            "worker",
+			Enabled:       true,
+			Command:       []string{"/bin/sh", "-c", "exec sleep 30"},
+			Environment: map[string]ServiceEnvironment{
+				"CLEANUP_MARK": {SecretName: "cleanup-token"},
+			},
+			Cleanup: &ServiceCleanupConfig{
+				Command: []string{"/bin/sh", "-c", "printf '" + label + ":%s\\n' \"$CLEANUP_MARK\" >> " + shellQuote(tracePath)},
+				Timeout: time.Second,
+			},
+		}
+	}
+	writeTestService(t, root, config("old"))
+	owner, err := NewServiceManager(root, ServiceManagerOptions{
+		Resolver: EnvironmentSecretResolver{Values: map[string]string{"cleanup-token": launchSecret}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopProcessTestManager(t, &owner)
+	if err := owner.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	original := waitForServiceState(t, owner, "worker", ServiceStateReady)
+	t.Cleanup(func() { _ = terminateProcessGroup(original.ProcessGroup, true) })
+
+	statePath := filepath.Join(serviceRuntimePath(root, "worker"), "state.json")
+	state, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(state), `"processConfig"`) || !strings.Contains(string(state), "old:%s") {
+		t.Fatalf("runtime state omitted process cleanup provenance: %s", state)
+	}
+	if strings.Contains(string(state), launchSecret) {
+		t.Fatalf("runtime state persisted resolved cleanup secret: %s", state)
+	}
+
+	// Simulate a daemon exit after the replacement definition was committed but
+	// before the old process could be stopped. The surviving process still owns
+	// the old cleanup command, while the durable desired definition is new.
+	owner = nil
+	writeTestService(t, root, config("new"))
+	reconstructed, err := NewServiceManager(root, ServiceManagerOptions{
+		Resolver: EnvironmentSecretResolver{Values: map[string]string{"cleanup-token": recoveredSecret}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconstructed.processTerminationGrace = 100 * time.Millisecond
+	stopProcessTestManager(t, &reconstructed)
+	if err := reconstructed.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	replacement := waitForServiceState(t, reconstructed, "worker", ServiceStateReady)
+	if replacement.PID <= 0 || replacement.PID == original.PID {
+		t.Fatalf("replacement status = %#v, original PID %d", replacement, original.PID)
+	}
+	waitForProcessGone(t, original.PID)
+	trace, err := os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(trace), "old:"+recoveredSecret+"\n"; got != want {
+		t.Fatalf("reconstructed cleanup trace = %q, want %q", got, want)
+	}
+
+	if err := reconstructed.StopService(context.Background(), "worker"); err != nil {
+		t.Fatal(err)
+	}
+	reconstructed = nil
+	trace, err = os.ReadFile(tracePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(trace), "old:"+recoveredSecret+"\nnew:"+recoveredSecret+"\n"; got != want {
+		t.Fatalf("cleanup trace after reconstructed replacement stop = %q, want %q", got, want)
 	}
 }
 

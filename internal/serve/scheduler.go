@@ -23,6 +23,8 @@ const (
 	schedulerOutcomeAttention          = "attention_required"
 )
 
+var errNativeSchedulerUpdateTriggerRequired = errors.New("update requires a complete trigger")
+
 // NativeScheduler owns the three scheduler boundaries: portable definitions
 // plus runtime projection (Snapshot), serialized mutations (Change), and
 // deterministic due-work processing (Reconcile). It never creates a second
@@ -141,8 +143,11 @@ func (n *NativeScheduler) Change(ctx context.Context, change NativeSchedulerChan
 		if change.ID == "" || change.ExpectedRevision == 0 {
 			return app.Schedule{}, errors.New("update requires id and expectedRevision")
 		}
-		if change.Description == nil && change.Condition == nil && change.Guard == nil && change.Target == nil && change.Trigger == nil {
-			return app.Schedule{}, errors.New("update requires at least one changed field")
+		if change.Trigger == nil {
+			return app.Schedule{}, errNativeSchedulerUpdateTriggerRequired
+		}
+		if err := app.ValidateScheduleTrigger(*change.Trigger); err != nil {
+			return app.Schedule{}, err
 		}
 		return workspace.UpdateSchedule(app.UpdateScheduleInput{
 			ID:               change.ID,

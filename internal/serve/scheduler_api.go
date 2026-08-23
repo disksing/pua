@@ -157,6 +157,10 @@ func writeSchedulerChangeError(w http.ResponseWriter, err error) {
 		writeError(w, &resourceAPIError{Code: "schedule_revision_conflict", Message: conflict.Error()}, http.StatusConflict)
 		return
 	}
+	if errors.Is(err, errNativeSchedulerUpdateTriggerRequired) {
+		writeError(w, &resourceAPIError{Code: "schedule_trigger_required", Message: err.Error()}, http.StatusBadRequest)
+		return
+	}
 	writeError(w, err, http.StatusBadRequest)
 }
 

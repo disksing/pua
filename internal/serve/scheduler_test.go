@@ -3,6 +3,7 @@ package serve
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -62,7 +63,7 @@ func TestSchedulerHTTPAPIRoutesNaturalLanguageAndNativeChanges(t *testing.T) {
 	if err != nil || len(mailbox.Messages) != 2 || !strings.Contains(mailbox.Messages[1].Text, "Please update a native schedule for "+created.ID) {
 		t.Fatalf("Scheduler update compilation mailbox = %#v, %v", mailbox.Messages, err)
 	}
-	conflict := request(http.MethodPost, "/api/workspaces/workspace-scheduler/scheduler/changes", `{"operation":"update","id":"`+created.ID+`","expectedRevision":9,"description":"Changed"}`)
+	conflict := request(http.MethodPost, "/api/workspaces/workspace-scheduler/scheduler/changes", `{"operation":"update","id":"`+created.ID+`","expectedRevision":9,"description":"Changed","trigger":{"type":"at","at":"`+at+`"}}`)
 	if conflict.Code != http.StatusConflict || !strings.Contains(conflict.Body.String(), "schedule_revision_conflict") {
 		t.Fatalf("revision conflict = %d %s", conflict.Code, conflict.Body.String())
 	}
@@ -82,6 +83,224 @@ func TestSchedulerHTTPAPIRoutesNaturalLanguageAndNativeChanges(t *testing.T) {
 	if removed.Code != http.StatusOK {
 		t.Fatalf("remove = %d %s", removed.Code, removed.Body.String())
 	}
+}
+
+func TestSchedulerHTTPStructuredUpdateRequiresCompleteTrigger(t *testing.T) {
+	root := t.TempDir()
+	if _, err := app.Initialize(root, "en"); err != nil {
+		t.Fatal(err)
+	}
+	workspace := serveWorkspace{ID: "workspace-scheduler-update", Name: "Scheduler Update", Path: root}
+	s := &server{config: filepath.Join(t.TempDir(), "serve.json")}
+	if err := s.saveConfig(config{Version: agentHubConfigVersion, Workspaces: []serveWorkspace{workspace}}); err != nil {
+		t.Fatal(err)
+	}
+	s.agents = newAgentManager(s)
+	puaWorkspace, err := app.OpenWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalAt := time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)
+	original, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Review", Condition: "at the original time", Target: "workspace",
+		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: originalAt},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := func(body string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodPost, "/api/workspaces/workspace-scheduler-update/scheduler/changes", strings.NewReader(body))
+		s.handleWorkspace(recorder, r)
+		return recorder
+	}
+	assertUnchanged := func(want app.Schedule) {
+		t.Helper()
+		config, err := puaWorkspace.Scheduler()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(config.Schedules) != 1 || !reflect.DeepEqual(config.Schedules[0], want) {
+			t.Fatalf("schedule changed after rejected update: got %#v, want %#v", config.Schedules, want)
+		}
+	}
+
+	descriptionOnly := request(`{"operation":"update","id":"` + original.ID + `","expectedRevision":1,"description":"Changed"}`)
+	if descriptionOnly.Code != http.StatusBadRequest {
+		t.Fatalf("description-only update = %d %s", descriptionOnly.Code, descriptionOnly.Body.String())
+	}
+	var triggerRequired map[string]string
+	if err := json.Unmarshal(descriptionOnly.Body.Bytes(), &triggerRequired); err != nil {
+		t.Fatal(err)
+	}
+	if triggerRequired["code"] != "schedule_trigger_required" || triggerRequired["error"] != "update requires a complete trigger" {
+		t.Fatalf("description-only error = %#v", triggerRequired)
+	}
+	assertUnchanged(original)
+
+	compiled, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Migrated", Condition: "ambiguous legacy rule", Target: "workspace",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	partialCompilation := request(`{"operation":"update","id":"` + compiled.ID + `","expectedRevision":1,"condition":"still ambiguous"}`)
+	if partialCompilation.Code != http.StatusBadRequest || !strings.Contains(partialCompilation.Body.String(), "schedule_trigger_required") {
+		t.Fatalf("partial compilation = %d %s", partialCompilation.Code, partialCompilation.Body.String())
+	}
+	config, err := puaWorkspace.Scheduler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(config.Schedules) != 2 || !reflect.DeepEqual(config.Schedules[1], compiled) {
+		t.Fatalf("needs-compilation schedule changed after partial update: %#v", config.Schedules)
+	}
+
+	replacementAt := time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339Nano)
+	triggerOnly := request(`{"operation":"update","id":"` + original.ID + `","expectedRevision":1,"trigger":{"type":"at","at":"` + replacementAt + `"}}`)
+	if triggerOnly.Code != http.StatusOK {
+		t.Fatalf("trigger-only update = %d %s", triggerOnly.Code, triggerOnly.Body.String())
+	}
+	var updated app.Schedule
+	if err := json.Unmarshal(triggerOnly.Body.Bytes(), &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Revision != 2 || updated.Description != original.Description || updated.Condition != original.Condition || updated.Target != original.Target || updated.Trigger == nil || updated.Trigger.At != replacementAt {
+		t.Fatalf("trigger-only schedule = %#v", updated)
+	}
+
+	staleAt := time.Now().UTC().Add(3 * time.Hour).Format(time.RFC3339Nano)
+	stale := request(`{"operation":"update","id":"` + original.ID + `","expectedRevision":1,"description":"Stale","condition":"stale rule","target":"scheduler","trigger":{"type":"at","at":"` + staleAt + `"}}`)
+	if stale.Code != http.StatusConflict || !strings.Contains(stale.Body.String(), "schedule_revision_conflict") {
+		t.Fatalf("full stale update = %d %s", stale.Code, stale.Body.String())
+	}
+	config, err = puaWorkspace.Scheduler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(config.Schedules[0], updated) {
+		t.Fatalf("schedule changed after stale update: got %#v, want %#v", config.Schedules[0], updated)
+	}
+
+	malformed := request(`{"operation":"update","id":"` + original.ID + `","expectedRevision":2,"trigger":{"type":"at"}}`)
+	if malformed.Code != http.StatusBadRequest || !strings.Contains(malformed.Body.String(), "at trigger must contain only at") {
+		t.Fatalf("malformed trigger update = %d %s", malformed.Code, malformed.Body.String())
+	}
+	config, err = puaWorkspace.Scheduler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(config.Schedules[0], updated) {
+		t.Fatalf("schedule changed after malformed trigger: got %#v, want %#v", config.Schedules[0], updated)
+	}
+}
+
+func TestNativeSchedulerStructuredUpdateRequiresCompleteTrigger(t *testing.T) {
+	fixture := func(t *testing.T, trigger *app.ScheduleTrigger) (*NativeScheduler, *app.Workspace, app.Schedule) {
+		t.Helper()
+		root := t.TempDir()
+		if _, err := app.Initialize(root, "en"); err != nil {
+			t.Fatal(err)
+		}
+		puaWorkspace, err := app.OpenWorkspace(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		created, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+			Description: "Review", Condition: "at the original time", Target: "workspace", Trigger: trigger,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return newNativeScheduler(nil, serveWorkspace{Path: root}), puaWorkspace, created
+	}
+	readSchedule := func(t *testing.T, workspace *app.Workspace) app.Schedule {
+		t.Helper()
+		config, err := workspace.Scheduler()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(config.Schedules) != 1 {
+			t.Fatalf("schedules = %#v", config.Schedules)
+		}
+		return config.Schedules[0]
+	}
+
+	t.Run("description-only current revision is rejected atomically", func(t *testing.T) {
+		at := time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)
+		native, workspace, original := fixture(t, &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: at})
+		description := "Changed"
+		_, err := native.Change(context.Background(), NativeSchedulerChange{
+			Operation: app.ScheduleChangeUpdate, ID: original.ID, ExpectedRevision: original.Revision, Description: &description,
+		})
+		if err == nil || !errors.Is(err, errNativeSchedulerUpdateTriggerRequired) || err.Error() != "update requires a complete trigger" {
+			t.Fatalf("description-only error = %v", err)
+		}
+		if got := readSchedule(t, workspace); !reflect.DeepEqual(got, original) {
+			t.Fatalf("schedule changed after description-only update: got %#v, want %#v", got, original)
+		}
+	})
+
+	t.Run("needs-compilation partial update is rejected", func(t *testing.T) {
+		native, workspace, original := fixture(t, nil)
+		condition := "still ambiguous"
+		_, err := native.Change(context.Background(), NativeSchedulerChange{
+			Operation: app.ScheduleChangeUpdate, ID: original.ID, ExpectedRevision: original.Revision, Condition: &condition,
+		})
+		if !errors.Is(err, errNativeSchedulerUpdateTriggerRequired) {
+			t.Fatalf("partial compilation error = %v", err)
+		}
+		if got := readSchedule(t, workspace); !reflect.DeepEqual(got, original) || got.State != app.ScheduleStateNeedsCompilation {
+			t.Fatalf("needs-compilation schedule changed: got %#v, want %#v", got, original)
+		}
+	})
+
+	t.Run("trigger-only current revision succeeds", func(t *testing.T) {
+		native, _, original := fixture(t, nil)
+		replacement := app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339Nano)}
+		updated, err := native.Change(context.Background(), NativeSchedulerChange{
+			Operation: app.ScheduleChangeUpdate, ID: original.ID, ExpectedRevision: original.Revision, Trigger: &replacement,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if updated.Revision != original.Revision+1 || updated.State != app.ScheduleStateActive || updated.Description != original.Description || updated.Condition != original.Condition || updated.Target != original.Target || updated.Trigger == nil || *updated.Trigger != replacement {
+			t.Fatalf("trigger-only schedule = %#v", updated)
+		}
+	})
+
+	t.Run("valid full replacement preserves revision conflict", func(t *testing.T) {
+		at := time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)
+		native, workspace, original := fixture(t, &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: at})
+		description, condition, target := "Changed", "at the new time", "scheduler"
+		replacement := app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339Nano)}
+		_, err := native.Change(context.Background(), NativeSchedulerChange{
+			Operation: app.ScheduleChangeUpdate, ID: original.ID, ExpectedRevision: original.Revision + 1,
+			Description: &description, Condition: &condition, Target: &target, Trigger: &replacement,
+		})
+		var conflict *app.ScheduleRevisionConflictError
+		if !errors.As(err, &conflict) {
+			t.Fatalf("stale full replacement error = %v", err)
+		}
+		if got := readSchedule(t, workspace); !reflect.DeepEqual(got, original) {
+			t.Fatalf("schedule changed after stale full replacement: got %#v, want %#v", got, original)
+		}
+	})
+
+	t.Run("malformed replacement is rejected atomically", func(t *testing.T) {
+		at := time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)
+		native, workspace, original := fixture(t, &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: at})
+		malformed := app.ScheduleTrigger{Type: app.ScheduleTriggerAt}
+		_, err := native.Change(context.Background(), NativeSchedulerChange{
+			Operation: app.ScheduleChangeUpdate, ID: original.ID, ExpectedRevision: original.Revision, Trigger: &malformed,
+		})
+		if err == nil || !strings.Contains(err.Error(), "at trigger must contain only at") {
+			t.Fatalf("malformed replacement error = %v", err)
+		}
+		if got := readSchedule(t, workspace); !reflect.DeepEqual(got, original) {
+			t.Fatalf("schedule changed after malformed replacement: got %#v, want %#v", got, original)
+		}
+	})
 }
 
 func TestSchedulerNativeChangeValidatesTrailingData(t *testing.T) {

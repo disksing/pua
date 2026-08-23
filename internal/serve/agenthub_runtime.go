@@ -130,6 +130,46 @@ func agentHubInitialMessage(text string, userName string) *agentHubInboundMessag
 	return &input
 }
 
+const agentHubEphemeralEnvironmentCapability = "session.ephemeral-environment"
+
+// agentHubEnvironmentOverlay is the one-shot service-binding overlay supplied
+// when AgentHub creates or resumes a Session. LaunchEnvironment may be retained
+// by AgentHub; EphemeralEnvironment must only reach the Provider process.
+type agentHubEnvironmentOverlay struct {
+	LaunchEnvironment    map[string]string
+	EphemeralEnvironment map[string]string
+}
+
+// resolveAgentHubEnvironmentOverlay is the shared preflight for every
+// generation launch boundary. It resolves current bindings on each attempt and
+// fails closed before returning any secret when AgentHub cannot prove support
+// for the ephemeral overlay.
+func (m *agentManager) resolveAgentHubEnvironmentOverlay(ctx context.Context, client *agentHubClient, workspace serveWorkspace) (agentHubEnvironmentOverlay, error) {
+	if m == nil || m.server == nil {
+		return agentHubEnvironmentOverlay{}, nil
+	}
+	boundVariables, boundSecrets, err := m.server.serviceEnvironment(workspace)
+	if err != nil {
+		return agentHubEnvironmentOverlay{}, err
+	}
+	overlay := agentHubEnvironmentOverlay{LaunchEnvironment: boundVariables}
+	if len(boundSecrets) == 0 {
+		return overlay, nil
+	}
+	if client == nil {
+		return agentHubEnvironmentOverlay{}, errors.New("AgentHub client is unavailable for ephemeral service secrets")
+	}
+	status, err := client.Status(ctx)
+	if err != nil {
+		return agentHubEnvironmentOverlay{}, err
+	}
+	if !agentHubHasCapability(status, agentHubEphemeralEnvironmentCapability) {
+		return agentHubEnvironmentOverlay{}, errors.New("AgentHub does not support ephemeral service secrets")
+	}
+	overlay.EphemeralEnvironment = boundSecrets
+	return overlay, nil
+}
+
 // agentHubGenerationCreateRequest is the only request builder for a PUA
 // generation. Recovery must renegotiate one-shot secret support and resolve
 // bindings again instead of replaying or reconstructing a partial request from
@@ -166,24 +206,14 @@ func (m *agentManager) agentHubGenerationCreateRequest(ctx context.Context, cfg 
 	if m.server == nil {
 		return source, request, nil
 	}
-	boundVariables, boundSecrets, err := m.server.serviceEnvironment(workspace)
+	overlay, err := m.resolveAgentHubEnvironmentOverlay(ctx, client, workspace)
 	if err != nil {
 		return agentHubSource{}, agentHubCreateSessionRequest{}, err
 	}
-	for key, value := range boundVariables {
+	for key, value := range overlay.LaunchEnvironment {
 		request.LaunchEnvironment[key] = value
 	}
-	if len(boundSecrets) == 0 {
-		return source, request, nil
-	}
-	status, err := client.Status(ctx)
-	if err != nil {
-		return agentHubSource{}, agentHubCreateSessionRequest{}, err
-	}
-	if !agentHubHasCapability(status, "session.ephemeral-environment") {
-		return agentHubSource{}, agentHubCreateSessionRequest{}, errors.New("AgentHub does not support ephemeral service secrets")
-	}
-	request.EphemeralEnvironment = boundSecrets
+	request.EphemeralEnvironment = overlay.EphemeralEnvironment
 	return source, request, nil
 }
 

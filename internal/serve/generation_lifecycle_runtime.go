@@ -64,6 +64,13 @@ func (m *agentManager) resumeStoppedGenerationLocked(ctx context.Context, worksp
 	if !agentHubSessionExactlyMatchesGeneration(cfg, latest, observed) {
 		return false, true, fmt.Errorf("AgentHub Session %s does not match generation %s for Resume", observed.ID, latest.GenerationID)
 	}
+	overlay, err := m.resolveAgentHubEnvironmentOverlay(ctx, client, workspace)
+	if err != nil {
+		// Binding and capability checks happen before recording an in-flight
+		// Resume. No AgentHub effect has started, so retain the stopped boundary
+		// and its previous durable receipt for a later preflight retry.
+		return false, false, err
+	}
 
 	receipt := lifecycleResumeReceipt(plan)
 	if _, err := rt.mutateGeneration(func(current *generationRecord) {
@@ -77,26 +84,7 @@ func (m *agentManager) resumeStoppedGenerationLocked(ctx context.Context, worksp
 		return false, false, err
 	}
 
-	var launchEnvironment map[string]string
-	var ephemeralEnvironment map[string]string
-	if m.server != nil {
-		boundVariables, boundSecrets, bindingErr := m.server.serviceEnvironment(workspace)
-		if bindingErr != nil {
-			return false, false, bindingErr
-		}
-		launchEnvironment = boundVariables
-		if len(boundSecrets) > 0 {
-			status, statusErr := client.Status(ctx)
-			if statusErr != nil {
-				return false, false, statusErr
-			}
-			if !agentHubHasCapability(status, "session.ephemeral-environment") {
-				return false, false, errors.New("AgentHub does not support ephemeral service secrets")
-			}
-			ephemeralEnvironment = boundSecrets
-		}
-	}
-	resumed, resumeErr := client.ResumeWithEnvironment(ctx, observed.ID, launchEnvironment, ephemeralEnvironment)
+	resumed, resumeErr := client.ResumeWithEnvironment(ctx, observed.ID, overlay.LaunchEnvironment, overlay.EphemeralEnvironment)
 	if resumeErr != nil {
 		terminal := isTerminalResumeError(resumeErr)
 		receipt.State = GenerationReceiptUnknown

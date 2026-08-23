@@ -56,6 +56,7 @@ type runtimeFakeAgentHub struct {
 	createRequests       []agentHubCreateSessionRequest
 	actions              []string
 	resumeEnvironments   []map[string]string
+	resumeSecrets        []map[string]string
 	listCalls            int
 	getSessionCalls      int
 	stopCalls            int
@@ -285,6 +286,7 @@ func (f *runtimeFakeAgentHub) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		if action == "resume" {
 			resumeHook = f.resumeHook
 			f.resumeEnvironments = append(f.resumeEnvironments, resumeRequest.LaunchEnvironment)
+			f.resumeSecrets = append(f.resumeSecrets, resumeRequest.EphemeralEnvironment)
 			if f.failNextResume {
 				f.failNextResume = false
 				status := f.resumeErrorStatus

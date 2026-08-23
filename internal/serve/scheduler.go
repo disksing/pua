@@ -53,6 +53,18 @@ func newNativeScheduler(manager *agentManager, workspace serveWorkspace) *Native
 	return &NativeScheduler{manager: manager, workspace: workspace}
 }
 
+// requireWorkspaceOwnership is evaluated from inside the Scheduler resource
+// controller immediately before native scheduling may write portable or
+// runtime state. Direct application-layer fixtures do not have a Server, but
+// every production NativeScheduler does and must still own the Workspace at
+// this durable boundary.
+func (n *NativeScheduler) requireWorkspaceOwnership() error {
+	if n.manager == nil || n.manager.server == nil {
+		return nil
+	}
+	return n.manager.server.requireWorkspaceOwnership(n.workspace.Path)
+}
+
 func schedulerConfigDigest(config app.SchedulerConfig) (string, error) {
 	data, err := json.Marshal(config.Schedules)
 	if err != nil {
@@ -160,6 +172,9 @@ func (n *NativeScheduler) Change(ctx context.Context, change NativeSchedulerChan
 		return app.Schedule{}, err
 	}
 	if err := change.Operation.Validate(); err != nil {
+		return app.Schedule{}, err
+	}
+	if err := n.requireWorkspaceOwnership(); err != nil {
 		return app.Schedule{}, err
 	}
 	workspace, err := app.OpenWorkspace(n.workspace.Path)
@@ -313,6 +328,9 @@ func (n *NativeScheduler) Change(ctx context.Context, change NativeSchedulerChan
 // durable cursors, and returns the exact next timer deadline.
 func (n *NativeScheduler) Reconcile(ctx context.Context, now time.Time) (time.Time, error) {
 	if err := ctx.Err(); err != nil {
+		return time.Time{}, err
+	}
+	if err := n.requireWorkspaceOwnership(); err != nil {
 		return time.Time{}, err
 	}
 	workspace, err := app.OpenWorkspace(n.workspace.Path)

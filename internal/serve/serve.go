@@ -1840,11 +1840,48 @@ func (s *server) removeWorkspace(id string) error {
 	if err != nil {
 		return err
 	}
+	var removing serveWorkspace
+	for _, workspace := range cfg.Workspaces {
+		if workspace.ID == id {
+			removing = workspace
+			break
+		}
+	}
+	if removing.ID == "" {
+		return fmt.Errorf("workspace not found: %s", id)
+	}
+	expectedPath, err := canonicalWorkspacePath(removing.Path)
+	if err != nil {
+		return err
+	}
+	remove := func() error {
+		return s.removeWorkspaceLocked(id, expectedPath)
+	}
+	if s.agents == nil {
+		return remove()
+	}
+	// Ownership release is a Scheduler-controller operation. Jobs that were
+	// already queued finish while this Server still owns the Workspace; jobs
+	// behind removal revalidate ownership and fail before a durable write.
+	return s.agents.withResourceController(context.Background(), removing, app.SchedulerResourceID, remove)
+}
+
+func (s *server) removeWorkspaceLocked(id, expectedPath string) error {
+	if err := s.requireWorkspaceOwnership(expectedPath); err != nil {
+		return err
+	}
+	cfg, err := s.loadConfig()
+	if err != nil {
+		return err
+	}
 	next := cfg.Workspaces[:0]
 	removed := false
 	var removedPath string
 	for _, workspace := range cfg.Workspaces {
 		if workspace.ID == id {
+			if canonical, canonicalErr := canonicalWorkspacePath(workspace.Path); canonicalErr != nil || canonical != expectedPath {
+				return fmt.Errorf("workspace %s changed while removal was waiting", id)
+			}
 			removed = true
 			removedPath = workspace.Path
 			continue
@@ -1864,8 +1901,8 @@ func (s *server) removeWorkspace(id string) error {
 	if err := s.saveConfig(cfg); err != nil {
 		return err
 	}
-	// The Workspace is no longer managed once it leaves the persisted config;
-	// release the serve lock so another instance can take ownership.
+	// Keep the persisted removal and advisory-lock handoff in the same
+	// Scheduler-controller callback. No stale callback can cross this release.
 	if s.locks != nil {
 		s.locks.release(removedPath)
 	}

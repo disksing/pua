@@ -5520,3 +5520,238 @@ func TestNativeSchedulerTriggerEditReplacesAttentionRuntime(t *testing.T) {
 		})
 	}
 }
+
+func newSchedulerOwnershipHandoffFixture(t *testing.T) (*server, *server, serveWorkspace, *app.Workspace) {
+	t.Helper()
+	root := t.TempDir()
+	puaWorkspace, err := app.Initialize(root, "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstConfig := filepath.Join(t.TempDir(), "first-serve.json")
+	first := &server{config: firstConfig, locks: newWorkspaceLockManager("127.0.0.1:4936", firstConfig)}
+	first.agents = newAgentManager(first)
+	workspace, err := first.addWorkspace(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondConfig := filepath.Join(t.TempDir(), "second-serve.json")
+	second := &server{config: secondConfig, locks: newWorkspaceLockManager("127.0.0.1:4999", secondConfig)}
+	second.agents = newAgentManager(second)
+	t.Cleanup(func() {
+		first.agents.waitBackground()
+		second.agents.waitBackground()
+		first.locks.closeAll()
+		second.locks.closeAll()
+	})
+	return first, second, workspace, puaWorkspace
+}
+
+func holdSchedulerController(t *testing.T, manager *agentManager, workspace serveWorkspace) (*resourceController, func()) {
+	t.Helper()
+	controller, err := manager.controllerForResource(workspace, app.SchedulerResourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	if err := manager.enqueueResourceController(workspace, app.SchedulerResourceID, func() error {
+		close(started)
+		<-release
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("Scheduler controller blocker did not start")
+	}
+	closeBlocker := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(closeBlocker)
+	return controller, closeBlocker
+}
+
+func waitForSchedulerControllerQueue(t *testing.T, controller *resourceController, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		controller.mu.Lock()
+		queued := len(controller.jobs)
+		controller.mu.Unlock()
+		if queued >= want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Scheduler controller queued jobs = %d, want at least %d", queued, want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func addWorkspaceAfterSchedulerHandoff(t *testing.T, server *server, workspace serveWorkspace) serveWorkspace {
+	t.Helper()
+	added, err := server.addWorkspace(context.Background(), workspace.Path)
+	if err != nil {
+		t.Fatalf("new owner did not acquire Workspace: %v", err)
+	}
+	return added
+}
+
+func TestNativeSchedulerChangeCannotCrossWorkspaceOwnershipHandoff(t *testing.T) {
+	first, second, workspace, puaWorkspace := newSchedulerOwnershipHandoffFixture(t)
+	controller, release := holdSchedulerController(t, first.agents, workspace)
+
+	removeDone := make(chan error, 1)
+	go func() { removeDone <- first.removeWorkspace(workspace.ID) }()
+	waitForSchedulerControllerQueue(t, controller, 1)
+
+	description := "stale owner change"
+	condition := "once in the future"
+	target := "workspace"
+	trigger := app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339Nano)}
+	staleDone := make(chan error, 1)
+	go func() {
+		staleDone <- first.agents.withResourceController(context.Background(), workspace, app.SchedulerResourceID, func() error {
+			_, err := newNativeScheduler(first.agents, workspace).Change(context.Background(), NativeSchedulerChange{
+				Operation: app.ScheduleChangeCreate, Description: &description, Condition: &condition,
+				Target: &target, Trigger: &trigger,
+			})
+			return err
+		})
+	}()
+	waitForSchedulerControllerQueue(t, controller, 2)
+	release()
+	if err := <-removeDone; err != nil {
+		t.Fatalf("remove Workspace: %v", err)
+	}
+	if err := <-staleDone; err == nil || !strings.Contains(err.Error(), "not owned by this pua serve instance") {
+		t.Fatalf("stale Scheduler Change error = %v", err)
+	}
+	config, err := puaWorkspace.Scheduler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(config.Schedules) != 0 {
+		t.Fatalf("stale owner wrote schedules across handoff: %#v", config.Schedules)
+	}
+
+	workspace = addWorkspaceAfterSchedulerHandoff(t, second, workspace)
+	newDescription := "new owner change"
+	var created app.Schedule
+	err = second.agents.withResourceController(context.Background(), workspace, app.SchedulerResourceID, func() error {
+		var changeErr error
+		created, changeErr = newNativeScheduler(second.agents, workspace).Change(context.Background(), NativeSchedulerChange{
+			Operation: app.ScheduleChangeCreate, Description: &newDescription, Condition: &condition,
+			Target: &target, Trigger: &trigger,
+		})
+		return changeErr
+	})
+	if err != nil || created.Description != newDescription {
+		t.Fatalf("new owner Scheduler Change = %#v, %v", created, err)
+	}
+}
+
+func TestNativeSchedulerReconcileCannotCrossWorkspaceOwnershipHandoff(t *testing.T) {
+	first, second, workspace, puaWorkspace := newSchedulerOwnershipHandoffFixture(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	schedule, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+		Description: "future owner reconcile", Condition: "once in the future", Target: "workspace",
+		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: now.Add(2 * time.Hour).Format(time.RFC3339Nano)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller, release := holdSchedulerController(t, first.agents, workspace)
+
+	removeDone := make(chan error, 1)
+	go func() { removeDone <- first.removeWorkspace(workspace.ID) }()
+	waitForSchedulerControllerQueue(t, controller, 1)
+	staleDone := make(chan error, 1)
+	go func() {
+		staleDone <- first.agents.withResourceController(context.Background(), workspace, app.SchedulerResourceID, func() error {
+			_, err := newNativeScheduler(first.agents, workspace).Reconcile(context.Background(), now)
+			return err
+		})
+	}()
+	waitForSchedulerControllerQueue(t, controller, 2)
+	release()
+	if err := <-removeDone; err != nil {
+		t.Fatalf("remove Workspace: %v", err)
+	}
+	if err := <-staleDone; err == nil || !strings.Contains(err.Error(), "not owned by this pua serve instance") {
+		t.Fatalf("stale Scheduler Reconcile error = %v", err)
+	}
+	store, err := loadResourceMailboxStoreForRead(workspace.Path, app.SchedulerResourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, found := store.Scheduler.Schedules[schedule.ID]; found {
+		t.Fatalf("stale owner wrote Scheduler runtime across handoff: %#v", store.Scheduler.Schedules[schedule.ID])
+	}
+
+	workspace = addWorkspaceAfterSchedulerHandoff(t, second, workspace)
+	if err := second.agents.reconcileSchedulerLocked(context.Background(), workspace); err != nil {
+		t.Fatalf("new owner Scheduler Reconcile: %v", err)
+	}
+	runtime, err := newNativeScheduler(second.agents, workspace).schedulerRuntime(schedule.ID)
+	if err != nil || runtime.Revision != schedule.Revision || runtime.NextRunAt == "" {
+		t.Fatalf("new owner Scheduler runtime = %#v, %v", runtime, err)
+	}
+}
+
+func TestCancelledSchedulerWorkDrainsBeforeCleanOwnershipRelease(t *testing.T) {
+	first, second, workspace, puaWorkspace := newSchedulerOwnershipHandoffFixture(t)
+	controller, release := holdSchedulerController(t, first.agents, workspace)
+	ctx, cancel := context.WithCancel(context.Background())
+	description := "cancelled stale change"
+	condition := "once in the future"
+	target := "workspace"
+	trigger := app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339Nano)}
+	done := make(chan error, 1)
+	go func() {
+		done <- first.agents.withResourceController(ctx, workspace, app.SchedulerResourceID, func() error {
+			_, err := newNativeScheduler(first.agents, workspace).Change(ctx, NativeSchedulerChange{
+				Operation: app.ScheduleChangeCreate, Description: &description, Condition: &condition,
+				Target: &target, Trigger: &trigger,
+			})
+			return err
+		})
+	}()
+	waitForSchedulerControllerQueue(t, controller, 1)
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled Scheduler Change = %v", err)
+	}
+	release()
+	shutdownDone := make(chan struct{})
+	go func() {
+		first.agents.waitBackground()
+		first.locks.closeAll()
+		close(shutdownDone)
+	}()
+	select {
+	case <-shutdownDone:
+	case <-time.After(time.Second):
+		t.Fatal("clean shutdown did not drain the Scheduler controller")
+	}
+	config, err := puaWorkspace.Scheduler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(config.Schedules) != 0 {
+		t.Fatalf("cancelled Scheduler work wrote schedules: %#v", config.Schedules)
+	}
+
+	workspace = addWorkspaceAfterSchedulerHandoff(t, second, workspace)
+	if err := second.agents.withResourceController(context.Background(), workspace, app.SchedulerResourceID, func() error {
+		_, err := newNativeScheduler(second.agents, workspace).Change(context.Background(), NativeSchedulerChange{
+			Operation: app.ScheduleChangeCreate, Description: &description, Condition: &condition,
+			Target: &target, Trigger: &trigger,
+		})
+		return err
+	}); err != nil {
+		t.Fatalf("new owner did not proceed after clean shutdown: %v", err)
+	}
+}

@@ -257,6 +257,7 @@ func TestManagerRunsExplicitAgentAndResumes(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := testConfig()
+	manager := New(store, cfg)
 	value, err := store.Create(session.CreateInput{
 		Cwd:               t.TempDir(),
 		AgentName:         "Fast Agent",
@@ -265,7 +266,6 @@ func TestManagerRunsExplicitAgentAndResumes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager := New(store, cfg)
 	var created []*fakeSession
 	manager.factory = func(options provider.Options) (provider.Session, error) {
 		if options.Agent.Name != "Fast Agent" || options.Provider.ID != "provider" {
@@ -587,11 +587,11 @@ func TestManagerStartFailureCleansUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	manager := New(store, testConfig())
 	value, err := store.Create(session.CreateInput{Cwd: t.TempDir(), AgentName: "Fast Agent"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager := New(store, testConfig())
 	closed := false
 	startErr := errors.New("start Kimi Code ACP: session/new timed out after 2m0s waiting for the provider to respond")
 	manager.factory = func(options provider.Options) (provider.Session, error) {
@@ -1058,11 +1058,11 @@ func TestRetryableProviderErrorKeepsTurnBusyUntilCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	manager := New(store, testConfig())
 	value, err := store.Create(session.CreateInput{Cwd: t.TempDir(), AgentName: "Fast Agent"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager := New(store, testConfig())
 	var adapter *fakeSession
 	manager.factory = func(options provider.Options) (provider.Session, error) {
 		adapter = &fakeSession{hooks: options.Hooks, holdTurn: true}
@@ -1297,11 +1297,11 @@ func TestStopAndNaturalExitRaceProducesOneStoppedBoundary(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		manager := New(store, testConfig())
 		value, err := store.Create(session.CreateInput{Cwd: t.TempDir(), AgentName: "Fast Agent"})
 		if err != nil {
 			t.Fatal(err)
 		}
-		manager := New(store, testConfig())
 		var adapter *fakeSession
 		manager.factory = func(options provider.Options) (provider.Session, error) {
 			adapter = &fakeSession{hooks: options.Hooks}
@@ -1345,6 +1345,99 @@ func TestStopAndNaturalExitRaceProducesOneStoppedBoundary(t *testing.T) {
 		if got.State != session.StateStopped {
 			t.Fatalf("attempt %d did not converge: %+v", attempt, got)
 		}
+	}
+}
+
+func TestDaemonRecoveryConvergesOrphanReadyBeforeOverlayStart(t *testing.T) {
+	root := t.TempDir()
+	store, err := session.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := store.Create(session.CreateInput{
+		Cwd: t.TempDir(), AgentName: "Fast Agent",
+		LaunchEnvironment: map[string]string{"FAKE_REPORT_EPHEMERAL": "1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value.State != session.StateReady {
+		t.Fatalf("crash-boundary state = %q, want ready", value.State)
+	}
+
+	reopened, err := session.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := New(reopened, testConfig())
+	recovered, err := reopened.Get(value.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.State != session.StateStopped || recovered.StopReason != session.StopReasonDaemonRecovery ||
+		recovered.CurrentTurnID != "" || len(recovered.PendingApprovalIDs) != 0 {
+		t.Fatalf("orphan ready recovery projection = %+v", recovered)
+	}
+	events, err := reopened.EventsAfter(value.ID, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 4 || events[1].Type != "session.state" || events[2].Type != "provider.error" || events[3].Type != "session.state" {
+		t.Fatalf("orphan ready recovery events = %+v", events)
+	}
+	for index, want := range []string{session.StateStopping, session.StateStopped} {
+		var state session.StateEventData
+		if err := json.Unmarshal(events[index*2+1].Data, &state); err != nil {
+			t.Fatal(err)
+		}
+		if state.State != want || (want == session.StateStopped && state.Reason != session.StopReasonDaemonRecovery) {
+			t.Fatalf("recovery state event %d = %+v, want %q", index, state, want)
+		}
+	}
+
+	// Reconstructing again observes the durable stopped boundary and appends
+	// nothing, so recovery is idempotent before any caller can resume it.
+	_ = New(reopened, testConfig())
+	idempotentEvents, err := reopened.EventsAfter(value.ID, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(idempotentEvents) != len(events) {
+		t.Fatalf("second recovery appended events: before=%d after=%d", len(events), len(idempotentEvents))
+	}
+
+	const secretKey = "SERVICE_TOKEN"
+	const secret = "orphan-ready-overlay-secret"
+	var startedEnvironment map[string]string
+	var adapter *fakeSession
+	manager.factory = func(options provider.Options) (provider.Session, error) {
+		startedEnvironment = options.Environment
+		adapter = &fakeSession{hooks: options.Hooks}
+		return adapter, nil
+	}
+	if _, err := manager.StartWithEnvironment(value.ID, map[string]string{secretKey: secret}); err != nil {
+		t.Fatal(err)
+	}
+	if adapter == nil || adapter.resumeID != "" || startedEnvironment[secretKey] != secret {
+		t.Fatalf("first recovered Provider start = adapter %#v environment %#v", adapter, startedEnvironment)
+	}
+	projected, err := reopened.Get(value.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	history, err := reopened.EventsAfter(value.ID, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	durable, err := json.Marshal(struct {
+		Session session.Session `json:"session"`
+		Events  []session.Event `json:"events"`
+	}{projected, history})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(durable), secretKey) || strings.Contains(string(durable), secret) {
+		t.Fatalf("ephemeral overlay reached durable Session facts: %s", durable)
 	}
 }
 

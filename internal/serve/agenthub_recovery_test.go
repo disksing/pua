@@ -117,6 +117,171 @@ func TestAgentHubRecoveryDoesNotBypassEphemeralCapability(t *testing.T) {
 	}
 }
 
+func TestAgentHubRecoveryResumesRecoveredOrphanWithSecretOverlay(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	capabilities := append(append([]string(nil), requiredAgentHubCapabilities...), agentHubEphemeralEnvironmentCapability)
+	hub := httptest.NewServer(runtimeFakeAgentHubWithCapabilities(fake, capabilities))
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+	const secret = "orphan-recovery-binding-secret"
+	writeRuntimeServiceBindings(t, workspace, secret)
+	record := generationRecord{
+		ID: "gen-orphan-overlay", WorkspaceID: workspace.ID, ResourceID: "project1.task1",
+		Generation: 1, GenerationID: "gen-orphan-overlay", AgentHubAgentName: "fake-agent",
+		SourceInstanceID: "pua-runtime-test", SourceExternalID: "project1.task1/1",
+		BindingKind: "profile", BindingName: "default", ResolvedProfile: "default",
+		Title: "Recovered orphan overlay", Cwd: workspace.Path, Status: "recovering",
+		CreatedAt: "2026-08-01T00:00:01Z", UpdatedAt: "2026-08-01T00:00:01Z",
+	}
+	const sessionID = "ses-orphan-overlay"
+	seedPollerGeneration(t, fake, workspace, record, agentHubSession{
+		ID: sessionID, State: "stopped", AgentName: "fake-agent", UpdatedAt: "2026-08-01T00:00:10Z",
+		LaunchEnvironment: map[string]string{
+			"PUA_WORKSPACE_ROOT":        workspace.Path,
+			"PUA_WORKSPACE_INSTANCE_ID": record.SourceInstanceID,
+			"PUA_RESOURCE_ID":           record.ResourceID,
+		},
+	})
+	message, err := acceptMailboxMessage(workspace.Path, record.ResourceID, resourceMessageRequest{
+		Text: "deliver after AgentHub recovery", Mode: resourceMessageModeEnqueue,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageObservedAfterResume := false
+	fake.messageHook = func(id string, _ agentHubInboundMessage) {
+		fake.mu.Lock()
+		defer fake.mu.Unlock()
+		messageObservedAfterResume = id == sessionID && fake.sessions[id].State == "ready" &&
+			len(fake.resumeSecrets) == 1 && fake.resumeSecrets[0]["SERVICE_TOKEN"] == secret
+	}
+
+	if err := manager.recoverAgentHubGenerations(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	updated, found, err := mailboxMessageByID(workspace.Path, message.ID)
+	if err != nil || !found || updated.Status != resourceMessageDelivered || updated.GenerationID != record.GenerationID {
+		t.Fatalf("recovered mailbox delivery = %#v found=%v err=%v", updated, found, err)
+	}
+	current, found, err := currentResourceGeneration(workspace.Path, record.ResourceID)
+	if err != nil || !found || current.AgentHubSessionID != sessionID || current.Status != "running" {
+		t.Fatalf("recovered generation = %#v found=%v err=%v", current, found, err)
+	}
+	fake.mu.Lock()
+	resumeEnvironments := append([]map[string]string(nil), fake.resumeEnvironments...)
+	resumeSecrets := append([]map[string]string(nil), fake.resumeSecrets...)
+	messageIDs := append([]string(nil), fake.messageIDs...)
+	createCount := len(fake.createRequests)
+	resumedSession := fake.sessions[sessionID]
+	fake.mu.Unlock()
+	if !messageObservedAfterResume || len(resumeEnvironments) != 1 || len(resumeSecrets) != 1 ||
+		resumeSecrets[0]["SERVICE_TOKEN"] != secret || len(messageIDs) != 1 || createCount != 0 {
+		t.Fatalf("recovery launch order/overlay = observed %v resume=%#v secrets=%#v messages=%#v creates=%d",
+			messageObservedAfterResume, resumeEnvironments, resumeSecrets, messageIDs, createCount)
+	}
+	if resumeEnvironments[0]["PUBLIC_ENDPOINT"] != "http://service.test" ||
+		resumedSession.LaunchEnvironment["PUA_RESOURCE_ID"] != record.ResourceID {
+		t.Fatalf("recovery Resume environment = overlay %#v durable %#v", resumeEnvironments[0], resumedSession.LaunchEnvironment)
+	}
+	assertWorkspaceSecretAbsent(t, workspace.Path, secret)
+}
+
+func TestAgentHubRecoveryFailsClosedBeforeOrphanResume(t *testing.T) {
+	tests := []struct {
+		name      string
+		handler   func(*runtimeFakeAgentHub) http.Handler
+		bindings  func(*testing.T, serveWorkspace) string
+		wantError string
+	}{
+		{
+			name: "binding unavailable",
+			handler: func(fake *runtimeFakeAgentHub) http.Handler {
+				capabilities := append(append([]string(nil), requiredAgentHubCapabilities...), agentHubEphemeralEnvironmentCapability)
+				return runtimeFakeAgentHubWithCapabilities(fake, capabilities)
+			},
+			bindings: func(t *testing.T, workspace serveWorkspace) string {
+				const secret = "orphan-recovery-known-secret"
+				t.Setenv("PUA_SECRET_ORPHAN_RECOVERY_KNOWN", secret)
+				unsetResumeOverlayTestEnvironment(t, "orphan-recovery-missing")
+				unsetResumeOverlayTestEnvironment(t, "PUA_SECRET_ORPHAN_RECOVERY_MISSING")
+				if err := writeServiceJSON(serviceBindingsPath(workspace.Path), ServiceBindings{
+					SchemaVersion: serviceSchemaVersion,
+					Secrets: map[string]string{
+						"KNOWN_TOKEN":   "${secret.orphan-recovery-known}",
+						"MISSING_TOKEN": "${secret.orphan-recovery-missing}",
+					},
+				}, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return secret
+			},
+			wantError: "is unavailable",
+		},
+		{
+			name: "capability unavailable",
+			handler: func(fake *runtimeFakeAgentHub) http.Handler {
+				return runtimeFakeAgentHubWithCapabilities(fake, append([]string(nil), requiredAgentHubCapabilities...))
+			},
+			bindings: func(t *testing.T, workspace serveWorkspace) string {
+				const secret = "orphan-recovery-capability-secret"
+				writeRuntimeServiceBindings(t, workspace, secret)
+				return secret
+			},
+			wantError: "does not support ephemeral service secrets",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fake := newRuntimeFakeAgentHub()
+			hub := httptest.NewServer(test.handler(fake))
+			defer hub.Close()
+			manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+			secret := test.bindings(t, workspace)
+			record := generationRecord{
+				ID: "gen-orphan-fail-closed", WorkspaceID: workspace.ID, ResourceID: "project1.task1",
+				Generation: 1, GenerationID: "gen-orphan-fail-closed", AgentHubAgentName: "fake-agent",
+				SourceInstanceID: "pua-runtime-test", SourceExternalID: "project1.task1/1",
+				BindingKind: "profile", BindingName: "default", ResolvedProfile: "default",
+				Title: "Recovered orphan fail closed", Cwd: workspace.Path, Status: "recovering",
+				CreatedAt: "2026-08-01T00:00:01Z", UpdatedAt: "2026-08-01T00:00:01Z",
+			}
+			const sessionID = "ses-orphan-fail-closed"
+			seedPollerGeneration(t, fake, workspace, record, agentHubSession{
+				ID: sessionID, State: "stopped", AgentName: "fake-agent", UpdatedAt: "2026-08-01T00:00:10Z",
+			})
+			message, err := acceptMailboxMessage(workspace.Path, record.ResourceID, resourceMessageRequest{
+				Text: "must remain queued", Mode: resourceMessageModeEnqueue,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			recoveryErr := manager.recoverAgentHubGenerations(context.Background())
+			if recoveryErr == nil || !strings.Contains(recoveryErr.Error(), test.wantError) {
+				t.Fatalf("orphan recovery preflight error = %v, want %q", recoveryErr, test.wantError)
+			}
+			updated, found, err := mailboxMessageByID(workspace.Path, message.ID)
+			if err != nil || !found || updated.Status != resourceMessageQueued {
+				t.Fatalf("failed preflight mailbox = %#v found=%v err=%v", updated, found, err)
+			}
+			current, found, err := currentResourceGeneration(workspace.Path, record.ResourceID)
+			if err != nil || !found || current.AgentHubSessionID != sessionID || current.Status != "stopped" || !current.AgentHubStoppedObserved {
+				t.Fatalf("failed preflight generation = %#v found=%v err=%v", current, found, err)
+			}
+			fake.mu.Lock()
+			resumeCount, messageCount, createCount := len(fake.resumeEnvironments), len(fake.messageIDs), len(fake.createRequests)
+			state := fake.sessions[sessionID].State
+			fake.mu.Unlock()
+			if resumeCount != 0 || messageCount != 0 || createCount != 0 || state != "stopped" {
+				t.Fatalf("failed preflight crossed AgentHub boundary: resumes=%d messages=%d creates=%d state=%s",
+					resumeCount, messageCount, createCount, state)
+			}
+			assertWorkspaceSecretAbsent(t, workspace.Path, secret)
+		})
+	}
+}
+
 func TestAgentHubRecoveryProjectsSessionsWithoutEventsOrStreams(t *testing.T) {
 	fake := newRuntimeFakeAgentHub()
 	hub := httptest.NewServer(fake)

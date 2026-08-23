@@ -819,6 +819,7 @@ func (m *Manager) recover(value session.Session) {
 	}
 	process, open, processErr := m.store.OpenProviderProcess(value.ID)
 	needsRecovery := value.State == session.StateStarting ||
+		value.State == session.StateReady ||
 		value.State == session.StateRunning ||
 		value.State == session.StateWaitingApproval ||
 		value.State == session.StateStopping ||

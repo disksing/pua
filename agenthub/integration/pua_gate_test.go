@@ -23,6 +23,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/disksing/pua/agenthub/internal/session"
 )
 
 var (
@@ -419,6 +421,16 @@ func countType(events []eventValue, target string) int {
 	return count
 }
 
+func countFrameSourceType(frames []frameValue, target string) int {
+	count := 0
+	for _, frame := range frames {
+		if frame.Source.Type == target {
+			count++
+		}
+	}
+	return count
+}
+
 func assistantText(events []eventValue) string {
 	var result strings.Builder
 	for _, event := range events {
@@ -766,6 +778,73 @@ func TestPUAGateEphemeralEnvironmentIsOneShotAndSecret(t *testing.T) {
 	// The resume overlay is equally one-shot: it reaches only this Provider
 	// process and never becomes part of a durable session fact.
 	restarted.requireSessionSecretsAbsent(value.ID, ephemeralKey, createSecret, resumeSecret)
+}
+
+func TestPUAGateOrphanReadyRecoveryRequiresOverlayResume(t *testing.T) {
+	root := t.TempDir()
+	cwd := t.TempDir()
+	writeConfig(t, root)
+	store, err := session.Open(filepath.Join(root, "data", "sessions"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := store.Create(session.CreateInput{
+		Title: "PUA orphan ready recovery", Cwd: cwd, AgentName: "Fake ACP",
+		IdempotencyKey: "pua-orphan-ready-recovery",
+		Source: &session.Source{
+			App: "pua", InstanceID: "gate", ExternalID: "project1.task1/1",
+		},
+		LaunchEnvironment: map[string]string{"FAKE_REPORT_EPHEMERAL": "1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.State != "ready" {
+		t.Fatalf("seeded crash-boundary Session = %+v", created)
+	}
+
+	gate := startGate(t, root, cwd)
+	recovered := gate.waitSession(created.ID, func(current sessionValue) bool { return current.State == "stopped" })
+	if recovered.StopReason != "daemon_recovery" || recovered.ProviderSessionID != "" {
+		t.Fatalf("orphan ready recovery projection = %+v", recovered)
+	}
+	types := eventTypes(gate.events(created.ID))
+	requireOrdered(t, types, "session.state", "provider.error", "session.state")
+	if countFrameSourceType(gate.frames(created.ID), "provider.process.started") != 0 {
+		t.Fatalf("orphan ready recovery started a Provider: %v", types)
+	}
+
+	// A second daemon reconstruction must retain the same strict stopped
+	// boundary without adding another recovery sequence.
+	lastRecoveryEventID := recovered.LastEventID
+	gate.stop()
+	restarted := startGate(t, root, cwd)
+	recovered = restarted.session(created.ID)
+	if recovered.State != "stopped" || recovered.StopReason != "daemon_recovery" || recovered.LastEventID != lastRecoveryEventID {
+		t.Fatalf("idempotent orphan recovery projection = %+v, lastEventId want %d", recovered, lastRecoveryEventID)
+	}
+
+	const ephemeralKey = "FAKE_EPHEMERAL_SECRET"
+	const secret = "pua-orphan-resume-secret-18a94d"
+	code, resumeBody := restarted.request(http.MethodPost, "/v1/sessions/"+created.ID+"/resume", map[string]any{
+		"ephemeralEnvironment": map[string]string{ephemeralKey: secret},
+	})
+	if code != http.StatusOK {
+		t.Fatalf("overlay Resume: status=%d body=%v", code, resumeBody)
+	}
+	requireSecretsAbsent(t, "orphan Resume response", mustJSONBytes(t, resumeBody), ephemeralKey, secret)
+	if text := restarted.promptAndWait(created.ID, "observe recovered overlay"); !strings.Contains(text, "ephemeral=<redacted>") {
+		t.Fatalf("first recovered Provider start did not receive overlay: %q", text)
+	}
+	if countFrameSourceType(restarted.frames(created.ID), "provider.process.started") != 1 {
+		t.Fatalf("recovered Session did not start exactly one Provider: %v", eventTypes(restarted.events(created.ID)))
+	}
+	code, stopBody := restarted.request(http.MethodPost, "/v1/sessions/"+created.ID+"/stop", map[string]any{})
+	if code != http.StatusOK {
+		t.Fatalf("stop recovered Provider: status=%d body=%v", code, stopBody)
+	}
+	restarted.waitSession(created.ID, func(current sessionValue) bool { return current.State == "stopped" })
+	restarted.requireSessionSecretsAbsent(created.ID, ephemeralKey, secret)
 }
 
 func mustJSONBytes(t *testing.T, value any) []byte {

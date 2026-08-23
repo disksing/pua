@@ -409,6 +409,47 @@ func TestNativeSchedulerPauseResumeSkipsPausedOccurrences(t *testing.T) {
 	}
 }
 
+func TestNativeSchedulerResumeSkipsExpiredOneTimeWithoutReconcile(t *testing.T) {
+	manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+	puaWorkspace, _ := app.OpenWorkspace(workspace.Path)
+	at := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+	created, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Once", Condition: "in one hour", Target: "workspace",
+		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: at.Format(time.RFC3339Nano)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := puaWorkspace.PauseSchedule(created.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Model a stopped Server: the paused definition is not reconciled until a
+	// resume request arrives after its one-time occurrence has elapsed.
+	manager.now = func() time.Time { return at.Add(time.Minute) }
+	native := newNativeScheduler(manager, workspace)
+	resumed, err := native.Change(context.Background(), NativeSchedulerChange{Operation: "resume", ID: created.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.State != app.ScheduleStateActive {
+		t.Fatalf("resumed schedule state = %q, want active", resumed.State)
+	}
+	if err := manager.reconcileSchedulerLocked(context.Background(), workspace); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := native.Snapshot(manager.now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Schedules) != 1 || snapshot.Schedules[0].EffectiveState != app.ScheduleStateCompleted || snapshot.Schedules[0].LastOutcome != schedulerOutcomePaused || snapshot.Schedules[0].LastOccurrenceAt != at.Format(time.RFC3339Nano) {
+		t.Fatalf("resumed expired one-time snapshot = %#v", snapshot)
+	}
+	if messages := scheduleOccurrenceMessages(t, workspace.Path, "workspace"); len(messages) != 0 {
+		t.Fatalf("resume delivered an occurrence skipped while paused: %#v", messages)
+	}
+}
+
 func TestNativeSchedulerArchivedTargetRequiresAttentionUntilModified(t *testing.T) {
 	manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
 	puaWorkspace, _ := app.OpenWorkspace(workspace.Path)

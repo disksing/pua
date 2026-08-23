@@ -114,6 +114,18 @@ func (n *NativeScheduler) Change(ctx context.Context, change NativeSchedulerChan
 	case "pause":
 		return workspace.PauseSchedule(change.ID)
 	case "resume":
+		config, err := workspace.Scheduler()
+		if err != nil {
+			return app.Schedule{}, err
+		}
+		for _, schedule := range config.Schedules {
+			if schedule.ID == change.ID && schedule.State == app.ScheduleStatePaused {
+				if err := n.reconcileSchedule(ctx, schedule, n.manager.now()); err != nil {
+					return app.Schedule{}, err
+				}
+				break
+			}
+		}
 		resumed, err := workspace.ResumeSchedule(change.ID)
 		if err != nil {
 			return app.Schedule{}, err
@@ -121,6 +133,10 @@ func (n *NativeScheduler) Change(ctx context.Context, change NativeSchedulerChan
 		runtime, runtimeErr := n.schedulerRuntime(change.ID)
 		if runtimeErr != nil {
 			return app.Schedule{}, runtimeErr
+		}
+		if runtimeCompletesSameOneTimeOccurrence(runtime, resumed) && runtime.Revision != resumed.Revision {
+			runtime.Revision = resumed.Revision
+			runtimeErr = n.storeSchedulerRuntime(change.ID, runtime)
 		}
 		if runtime.EffectiveState == schedulerOutcomeAttention {
 			_, runtimeErr = mutateResourceMailboxStoreForResource(n.workspace.Path, app.SchedulerResourceID, func(store *resourceMailboxStore) error {

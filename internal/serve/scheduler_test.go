@@ -2504,6 +2504,186 @@ func TestNativeSchedulerMigrationMessagesProgressByDigest(t *testing.T) {
 	}
 }
 
+func TestNativeSchedulerRetiresLegacyTickStates(t *testing.T) {
+	manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+	retirementTime := time.Now().UTC().Truncate(time.Second)
+	manager.now = func() time.Time { return retirementTime }
+	const retiredError = "Legacy scheduler tick was cancelled during native scheduler migration"
+	tests := []struct {
+		name        string
+		messageType string
+		status      string
+		wantStatus  string
+		wantRetired bool
+	}{
+		{name: "queued", messageType: resourceMessageTypeSchedulerTick, status: resourceMessageQueued, wantStatus: resourceMessageUndeliverable, wantRetired: true},
+		{name: "delivering", messageType: resourceMessageTypeSchedulerTick, status: resourceMessageDelivering, wantStatus: resourceMessageDeliveryUnknown, wantRetired: true},
+		{name: "interrupting", messageType: resourceMessageTypeSchedulerTick, status: resourceMessageInterrupting, wantStatus: resourceMessageDeliveryUnknown, wantRetired: true},
+		{name: "delivered", messageType: resourceMessageTypeSchedulerTick, status: resourceMessageDelivered, wantStatus: resourceMessageDelivered},
+		{name: "cancelled", messageType: resourceMessageTypeSchedulerTick, status: resourceMessageCancelled, wantStatus: resourceMessageCancelled},
+		{name: "undeliverable", messageType: resourceMessageTypeSchedulerTick, status: resourceMessageUndeliverable, wantStatus: resourceMessageUndeliverable},
+		{name: "delivery unknown", messageType: resourceMessageTypeSchedulerTick, status: resourceMessageDeliveryUnknown, wantStatus: resourceMessageDeliveryUnknown},
+		{name: "ordinary queued", status: resourceMessageQueued, wantStatus: resourceMessageQueued},
+		{name: "native occurrence", messageType: resourceMessageTypeScheduleOccurrence, status: resourceMessageQueued, wantStatus: resourceMessageQueued},
+		{name: "native migration", messageType: resourceMessageTypeScheduleMigration, status: resourceMessageDelivering, wantStatus: resourceMessageDelivering},
+	}
+	stamp := manager.now().Add(-time.Minute).Format(time.RFC3339Nano)
+	if _, err := mutateResourceMailboxStoreForResource(workspace.Path, app.SchedulerResourceID, func(store *resourceMailboxStore) error {
+		for index, test := range tests {
+			store.Mailbox.NextSequence++
+			message := resourceMailboxMessage{
+				ID: "msg-legacy-state-" + strconv.Itoa(index), Sequence: store.Mailbox.NextSequence,
+				ResourceID: app.SchedulerResourceID, Text: test.name, Role: "system",
+				SubscribeResult: false, ResultSubscriptionStatus: resourceResultSubscriptionDisabled,
+				Type: test.messageType, RequestedMode: resourceMessageModeEnqueue,
+				ActualMode: resourceMessageModeEnqueue, ModeFrozen: true, Status: test.status,
+				AcceptedAt: stamp, UpdatedAt: stamp,
+			}
+			switch test.status {
+			case resourceMessageDelivered:
+				message.DeliveredAt = stamp
+				message.TerminalAt = stamp
+			case resourceMessageCancelled, resourceMessageUndeliverable, resourceMessageDeliveryUnknown:
+				message.TerminalAt = stamp
+				message.LastErrorCode = "existing_" + strings.ReplaceAll(test.name, " ", "_")
+				message.LastError = "existing terminal state"
+			}
+			store.Mailbox.Messages = append(store.Mailbox.Messages, message)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before := make(map[string]resourceMailboxMessage, len(tests))
+	for index := range tests {
+		message, found, err := mailboxMessageByID(workspace.Path, "msg-legacy-state-"+strconv.Itoa(index))
+		if err != nil || !found {
+			t.Fatalf("load initial state %d: found=%v err=%v", index, found, err)
+		}
+		before[message.ID] = message
+	}
+
+	native := newNativeScheduler(manager, workspace)
+	if err := native.cancelLegacyTicks(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for index, test := range tests {
+		id := "msg-legacy-state-" + strconv.Itoa(index)
+		message, found, err := mailboxMessageByID(workspace.Path, id)
+		if err != nil || !found {
+			t.Fatalf("load %s state: found=%v err=%v", test.name, found, err)
+		}
+		if message.Status != test.wantStatus {
+			t.Errorf("%s status = %q, want %q", test.name, message.Status, test.wantStatus)
+		}
+		if test.wantRetired {
+			if message.LastErrorCode != "scheduler_v1_retired" || message.LastError != retiredError ||
+				message.TerminalAt == "" || message.UpdatedAt != message.TerminalAt || !message.receipt {
+				t.Errorf("%s retirement receipt = %#v", test.name, message)
+			}
+		} else if !reflect.DeepEqual(message, before[id]) {
+			t.Errorf("%s changed: before=%#v after=%#v", test.name, before[id], message)
+		}
+	}
+
+	store, err := loadResourceMailboxStoreForRead(workspace.Path, app.SchedulerResourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hotBeforeRestart, err := os.ReadFile(resourceMailboxHotPath(store.Directory))
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiptsBeforeRestart, err := os.ReadFile(resourceMailboxReceiptPath(store.Directory))
+	if err != nil {
+		t.Fatal(err)
+	}
+	restartedManager := newAgentManager(manager.server)
+	restartedManager.now = func() time.Time { return manager.now().Add(time.Hour) }
+	manager.server.agents = restartedManager
+	if err := newNativeScheduler(restartedManager, workspace).cancelLegacyTicks(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	hotAfterRestart, err := os.ReadFile(resourceMailboxHotPath(store.Directory))
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiptsAfterRestart, err := os.ReadFile(resourceMailboxReceiptPath(store.Directory))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(hotAfterRestart) != string(hotBeforeRestart) || string(receiptsAfterRestart) != string(receiptsBeforeRestart) {
+		t.Fatal("repeated legacy tick cancellation rewrote stable mailbox documents")
+	}
+}
+
+func TestNativeSchedulerRetiresDeliveringTickBeforeMailboxRecovery(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	hub := httptest.NewServer(fake)
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+	retirementTime := time.Now().UTC().Truncate(time.Second)
+	manager.now = func() time.Time { return retirementTime }
+	opener := acceptTestResourceMessage(t, manager, workspace, app.SchedulerResourceID, "open scheduler session", resourceMessageModeEnqueue, nil)
+	if opener.Status != resourceMessageDelivered {
+		t.Fatalf("Scheduler opener = %#v", opener)
+	}
+	record, found, err := currentResourceGeneration(workspace.Path, app.SchedulerResourceID)
+	if err != nil || !found {
+		t.Fatalf("Scheduler generation missing: found=%v err=%v", found, err)
+	}
+	fake.mu.Lock()
+	fake.messageIDs = nil
+	fake.messageSteers = nil
+	fake.messageRoles = nil
+	fake.messageSenders = nil
+	fake.mu.Unlock()
+	stamp := manager.now().Add(-time.Minute).Format(time.RFC3339Nano)
+	const tickID = "msg-legacy-delivering-crash"
+	if _, err := mutateResourceMailboxStoreForResource(workspace.Path, app.SchedulerResourceID, func(store *resourceMailboxStore) error {
+		store.Mailbox.NextSequence++
+		store.Mailbox.Messages = append(store.Mailbox.Messages, resourceMailboxMessage{
+			ID: tickID, Sequence: store.Mailbox.NextSequence, ResourceID: app.SchedulerResourceID,
+			Text: "legacy tick crash window", Role: "system", SubscribeResult: false,
+			ResultSubscriptionStatus: resourceResultSubscriptionDisabled,
+			Type:                     resourceMessageTypeSchedulerTick, RequestedMode: resourceMessageModeEnqueue,
+			ActualMode: resourceMessageModeEnqueue, ModeFrozen: true, Status: resourceMessageDelivering,
+			AcceptedAt: stamp, UpdatedAt: stamp, GenerationID: record.GenerationID,
+			AgentHubSessionID: record.AgentHubSessionID, AttemptCount: 1, LastAttemptAt: stamp,
+		})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	hot, err := loadHotResourceMailbox(workspace.Path, app.SchedulerResourceID)
+	if err != nil || len(hot.Messages) != 1 || hot.Messages[0].ID != tickID {
+		t.Fatalf("durable delivering fixture = %#v, %v", hot.Messages, err)
+	}
+
+	if err := manager.reconcileSchedulerLocked(context.Background(), workspace); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.withResourceController(context.Background(), workspace, app.SchedulerResourceID, func() error {
+		return manager.reconcileResourceMailboxLocked(context.Background(), workspace, app.SchedulerResourceID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	retired, found, err := mailboxMessageByID(workspace.Path, tickID)
+	if err != nil || !found || retired.Status != resourceMessageDeliveryUnknown ||
+		retired.LastErrorCode != "scheduler_v1_retired" || retired.TerminalAt == "" || !retired.receipt {
+		t.Fatalf("retired delivering receipt = %#v, found=%v err=%v", retired, found, err)
+	}
+	if hotWork, err := resourceMailboxHasHotWork(workspace.Path, app.SchedulerResourceID); err != nil || hotWork {
+		t.Fatalf("retired delivering tick left hot work: hot=%v err=%v", hotWork, err)
+	}
+	fake.mu.Lock()
+	messageIDs := append([]string(nil), fake.messageIDs...)
+	fake.mu.Unlock()
+	if len(messageIDs) != 0 {
+		t.Fatalf("ordinary mailbox recovery resubmitted retired tick: %#v", messageIDs)
+	}
+}
+
 func TestNativeSchedulerPauseResumeSkipsPausedOccurrences(t *testing.T) {
 	manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
 	puaWorkspace, _ := app.OpenWorkspace(workspace.Path)

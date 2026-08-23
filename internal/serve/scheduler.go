@@ -816,8 +816,14 @@ func (n *NativeScheduler) cancelLegacyTicks(ctx context.Context) error {
 	}
 	needsCancellation := false
 	for _, message := range store.Mailbox.Messages {
-		if message.Type == resourceMessageTypeSchedulerTick && message.Status == resourceMessageQueued {
+		if message.Type != resourceMessageTypeSchedulerTick {
+			continue
+		}
+		switch message.Status {
+		case resourceMessageQueued, resourceMessageDelivering, resourceMessageInterrupting:
 			needsCancellation = true
+		}
+		if needsCancellation {
 			break
 		}
 	}
@@ -828,10 +834,17 @@ func (n *NativeScheduler) cancelLegacyTicks(ctx context.Context) error {
 		now := time.Now().Format(time.RFC3339Nano)
 		for index := range store.Mailbox.Messages {
 			message := &store.Mailbox.Messages[index]
-			if message.Type != resourceMessageTypeSchedulerTick || message.Status != resourceMessageQueued {
+			if message.Type != resourceMessageTypeSchedulerTick {
 				continue
 			}
-			message.Status = resourceMessageUndeliverable
+			switch message.Status {
+			case resourceMessageQueued:
+				message.Status = resourceMessageUndeliverable
+			case resourceMessageDelivering, resourceMessageInterrupting:
+				message.Status = resourceMessageDeliveryUnknown
+			default:
+				continue
+			}
 			message.TerminalAt, message.UpdatedAt = now, now
 			message.LastErrorCode = "scheduler_v1_retired"
 			message.LastError = "Legacy scheduler tick was cancelled during native scheduler migration"

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/disksing/pua/internal/serve"
@@ -237,7 +238,13 @@ func runServiceExports(args []string) error {
 	if jsonOutput {
 		return printJSON(response)
 	}
-	for key, value := range response.Variables {
+	variableNames := make([]string, 0, len(response.Variables))
+	for key := range response.Variables {
+		variableNames = append(variableNames, key)
+	}
+	sort.Strings(variableNames)
+	for _, key := range variableNames {
+		value := response.Variables[key]
 		fmt.Fprintf(os.Stdout, "%s=%s\n", key, value)
 	}
 	for _, secret := range response.Secrets {

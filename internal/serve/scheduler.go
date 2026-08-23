@@ -23,7 +23,10 @@ const (
 	schedulerOutcomeAttention          = "attention_required"
 )
 
-var errNativeSchedulerUpdateTriggerRequired = errors.New("update requires a complete trigger")
+var (
+	errNativeSchedulerUpdateTriggerRequired = errors.New("update requires a complete trigger")
+	errNativeSchedulerPauseCompleted        = errors.New("completed schedule cannot be paused")
+)
 
 // NativeScheduler owns the three scheduler boundaries: portable definitions
 // plus runtime projection (Snapshot), serialized mutations (Change), and
@@ -161,6 +164,26 @@ func (n *NativeScheduler) Change(ctx context.Context, change NativeSchedulerChan
 	case app.ScheduleChangePause:
 		if change.ID == "" {
 			return app.Schedule{}, errors.New("pause requires id")
+		}
+		config, err := workspace.Scheduler()
+		if err != nil {
+			return app.Schedule{}, err
+		}
+		for _, schedule := range config.Schedules {
+			if schedule.ID != change.ID || schedule.State == app.ScheduleStatePaused {
+				continue
+			}
+			if schedule.State == app.ScheduleStateCompleted {
+				return app.Schedule{}, errNativeSchedulerPauseCompleted
+			}
+			runtime, err := n.schedulerRuntime(change.ID)
+			if err != nil {
+				return app.Schedule{}, err
+			}
+			if runtimeCompletesSameOneTimeOccurrence(runtime, schedule) {
+				return app.Schedule{}, errNativeSchedulerPauseCompleted
+			}
+			break
 		}
 		return workspace.PauseSchedule(change.ID)
 	case app.ScheduleChangeResume:

@@ -1035,6 +1035,165 @@ func TestNativeSchedulerDoesNotReplayCompletedOneTimeOnSemanticEdit(t *testing.T
 	}
 }
 
+func TestNativeSchedulerRejectsPauseAfterOneTimeAcceptance(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	hub := httptest.NewServer(fake)
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)
+	created, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Run exactly once", Condition: "at the configured time", Target: "workspace",
+		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: at.Format(time.RFC3339Nano)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := at.Add(time.Second)
+	manager.now = func() time.Time { return now }
+	native := newNativeScheduler(manager, workspace)
+	if _, err := native.Reconcile(context.Background(), now); err != nil {
+		t.Fatal(err)
+	}
+
+	assertAcceptedCompletion := func(t *testing.T, scheduler *NativeScheduler) {
+		t.Helper()
+		runtime, err := scheduler.schedulerRuntime(created.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if runtime.EffectiveState != app.ScheduleStateCompleted || runtime.LastOutcome != schedulerOutcomeAccepted || runtime.LastOccurrenceAt != at.Format(time.RFC3339Nano) {
+			t.Fatalf("completed one-time runtime = %#v", runtime)
+		}
+	}
+	assertAcceptedCompletion(t, native)
+
+	before, err := puaWorkspace.Scheduler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := native.Change(context.Background(), NativeSchedulerChange{Operation: app.ScheduleChangePause, ID: created.ID}); !errors.Is(err, errNativeSchedulerPauseCompleted) || err.Error() != "completed schedule cannot be paused" {
+		t.Fatalf("pause completed one-time error = %v", err)
+	}
+	after, err := puaWorkspace.Scheduler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(after, before) || after.Schedules[0].State != app.ScheduleStateActive || after.Schedules[0].Revision != created.Revision {
+		t.Fatalf("pause mutated portable schedule: before=%#v after=%#v", before.Schedules[0], after.Schedules[0])
+	}
+	if _, err := native.Reconcile(context.Background(), now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	assertAcceptedCompletion(t, native)
+
+	restartedManager := newAgentManager(manager.server)
+	restartedManager.now = func() time.Time { return now.Add(2 * time.Minute) }
+	manager.server.agents = restartedManager
+	restarted := newNativeScheduler(restartedManager, workspace)
+	if _, err := restarted.Reconcile(context.Background(), restartedManager.now()); err != nil {
+		t.Fatal(err)
+	}
+	assertAcceptedCompletion(t, restarted)
+	snapshot, err := restarted.Snapshot(restartedManager.now())
+	if err != nil || len(snapshot.Schedules) != 1 || snapshot.Schedules[0].EffectiveState != app.ScheduleStateCompleted || snapshot.Schedules[0].LastOutcome != schedulerOutcomeAccepted || snapshot.Schedules[0].LastOccurrenceAt != at.Format(time.RFC3339Nano) {
+		t.Fatalf("restarted completed snapshot = %#v, %v", snapshot, err)
+	}
+}
+
+func TestNativeSchedulerPauseStillWorksBeforeCompletion(t *testing.T) {
+	tests := []struct {
+		name    string
+		trigger *app.ScheduleTrigger
+	}{
+		{
+			name: "repeating",
+			trigger: &app.ScheduleTrigger{
+				Type: app.ScheduleTriggerInterval, EverySeconds: 60,
+				AnchorAt: time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC).Format(time.RFC3339Nano),
+			},
+		},
+		{
+			name: "pending one-time",
+			trigger: &app.ScheduleTrigger{
+				Type: app.ScheduleTriggerAt,
+				At:   time.Date(2030, time.January, 2, 4, 4, 5, 0, time.UTC).Format(time.RFC3339Nano),
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+			manager.now = func() time.Time { return time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC) }
+			puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			created, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+				Description: "Pause safely", Condition: "before completion", Target: "workspace", Trigger: test.trigger,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			paused, err := newNativeScheduler(manager, workspace).Change(context.Background(), NativeSchedulerChange{Operation: app.ScheduleChangePause, ID: created.ID})
+			if err != nil || paused.State != app.ScheduleStatePaused || paused.Revision != created.Revision+1 {
+				t.Fatalf("pause active schedule = %#v, %v", paused, err)
+			}
+			pausedAgain, err := newNativeScheduler(manager, workspace).Change(context.Background(), NativeSchedulerChange{Operation: app.ScheduleChangePause, ID: created.ID})
+			if err != nil || !reflect.DeepEqual(pausedAgain, paused) {
+				t.Fatalf("idempotent pause = %#v, want %#v, err=%v", pausedAgain, paused, err)
+			}
+		})
+	}
+}
+
+func TestSchedulerHTTPRejectsPauseAfterOneTimeAcceptance(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	hub := httptest.NewServer(fake)
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)
+	created, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Run exactly once", Condition: "at the configured time", Target: "workspace",
+		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: at.Format(time.RFC3339Nano)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.now = func() time.Time { return at.Add(time.Second) }
+	if _, err := newNativeScheduler(manager, workspace).Reconcile(context.Background(), manager.now()); err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	manager.server.handleWorkspace(recorder, httptest.NewRequest(http.MethodPost,
+		"/api/workspaces/"+workspace.ID+"/scheduler/"+created.ID+"/pause", nil))
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("pause completed one-time HTTP status = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response map[string]string
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response["code"] != "schedule_state_conflict" || response["error"] != "completed schedule cannot be paused" {
+		t.Fatalf("pause completed one-time HTTP error = %#v", response)
+	}
+	config, err := puaWorkspace.Scheduler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Schedules[0].State != app.ScheduleStateActive || config.Schedules[0].Revision != created.Revision {
+		t.Fatalf("HTTP pause mutated completed one-time definition = %#v", config.Schedules[0])
+	}
+}
+
 func TestNativeSchedulerMigrationMessagesProgressByDigest(t *testing.T) {
 	manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
 	puaWorkspace, _ := app.OpenWorkspace(workspace.Path)

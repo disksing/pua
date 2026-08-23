@@ -359,14 +359,7 @@ func initialScheduleRuntime(schedule app.Schedule, now time.Time) (schedulerSche
 		return runtime, nil
 	}
 	if schedule.State == app.ScheduleStatePaused {
-		if schedule.Trigger.Type == app.ScheduleTriggerAt {
-			at, _ := time.Parse(time.RFC3339Nano, schedule.Trigger.At)
-			if !at.After(now) {
-				runtime.EffectiveState = app.ScheduleStateCompleted
-				runtime.LastOccurrenceAt = at.Format(time.RFC3339Nano)
-				runtime.LastOutcome = schedulerOutcomePaused
-			}
-		}
+		completeExpiredOneTimeWhilePaused(&runtime, schedule.Trigger, now)
 		return runtime, nil
 	}
 	updatedAt, err := time.Parse(time.RFC3339Nano, schedule.UpdatedAt)
@@ -392,19 +385,31 @@ func (n *NativeScheduler) reconcilePausedSchedule(schedule app.Schedule, runtime
 	changed := runtime.Prepared != nil || runtime.NextRunAt != "" || runtime.RetryAt != "" || runtime.EffectiveState != app.ScheduleStatePaused
 	runtime.Prepared, runtime.NextRunAt, runtime.RetryAt = nil, "", ""
 	runtime.EffectiveState = app.ScheduleStatePaused
-	if schedule.Trigger != nil && schedule.Trigger.Type == app.ScheduleTriggerAt {
-		at, _ := time.Parse(time.RFC3339Nano, schedule.Trigger.At)
-		if !at.After(now) {
-			runtime.EffectiveState = app.ScheduleStateCompleted
-			runtime.LastOccurrenceAt = at.Format(time.RFC3339Nano)
-			runtime.LastOutcome = schedulerOutcomePaused
-			changed = true
-		}
+	if completeExpiredOneTimeWhilePaused(&runtime, schedule.Trigger, now) {
+		changed = true
 	}
 	if !changed {
 		return nil
 	}
 	return n.storeSchedulerRuntime(schedule.ID, runtime)
+}
+
+// completeExpiredOneTimeWhilePaused applies the terminal runtime transition
+// for a one-time occurrence that became due while paused. It clears delivery
+// cursors without changing the schedule revision or trigger identity.
+func completeExpiredOneTimeWhilePaused(runtime *schedulerScheduleRuntime, trigger *app.ScheduleTrigger, now time.Time) bool {
+	if trigger == nil || trigger.Type != app.ScheduleTriggerAt {
+		return false
+	}
+	at, _ := time.Parse(time.RFC3339Nano, trigger.At)
+	if at.After(now) {
+		return false
+	}
+	runtime.EffectiveState = app.ScheduleStateCompleted
+	runtime.LastOccurrenceAt = at.Format(time.RFC3339Nano)
+	runtime.LastOutcome = schedulerOutcomePaused
+	runtime.Prepared, runtime.NextRunAt, runtime.RetryAt = nil, "", ""
+	return true
 }
 
 func (n *NativeScheduler) prepareOccurrence(schedule app.Schedule, first, last, next time.Time, count int, reason string) (schedulerPreparedOccurrence, error) {

@@ -1146,6 +1146,63 @@ func TestNativeSchedulerPauseResumeSkipsPausedOccurrences(t *testing.T) {
 	}
 }
 
+func TestExpiredOneTimePauseRuntimePathsMatch(t *testing.T) {
+	manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+	at := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	now := at.Add(time.Minute)
+	schedule := app.Schedule{
+		ID: "schedule-paused-expiry", Revision: 7, State: app.ScheduleStatePaused,
+		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: at.Format(time.RFC3339Nano)},
+	}
+	digest := mustSchedulerTriggerDigest(t, schedule.Trigger)
+	want := schedulerScheduleRuntime{
+		Revision: schedule.Revision, TriggerDigest: digest, EffectiveState: app.ScheduleStateCompleted,
+		LastOccurrenceAt: at.Format(time.RFC3339Nano), LastOutcome: schedulerOutcomePaused,
+	}
+	native := newNativeScheduler(manager, workspace)
+	tests := []struct {
+		name string
+		run  func(*testing.T) schedulerScheduleRuntime
+	}{
+		{
+			name: "initial runtime",
+			run: func(t *testing.T) schedulerScheduleRuntime {
+				runtime, err := initialScheduleRuntime(schedule, now)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return runtime
+			},
+		},
+		{
+			name: "paused reconciliation",
+			run: func(t *testing.T) schedulerScheduleRuntime {
+				runtime := schedulerScheduleRuntime{
+					Revision: schedule.Revision, TriggerDigest: digest, EffectiveState: app.ScheduleStateActive,
+					NextRunAt: now.Add(time.Minute).Format(time.RFC3339Nano),
+					RetryAt:   now.Add(2 * time.Minute).Format(time.RFC3339Nano),
+					Prepared:  &schedulerPreparedOccurrence{},
+				}
+				if err := native.reconcilePausedSchedule(schedule, runtime, now); err != nil {
+					t.Fatal(err)
+				}
+				runtime, err := native.schedulerRuntime(schedule.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return runtime
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.run(t); !reflect.DeepEqual(got, want) {
+				t.Fatalf("paused expiry runtime = %#v, want %#v", got, want)
+			}
+		})
+	}
+}
+
 func TestNativeSchedulerResumeSkipsExpiredOneTimeWithoutReconcile(t *testing.T) {
 	manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
 	puaWorkspace, _ := app.OpenWorkspace(workspace.Path)

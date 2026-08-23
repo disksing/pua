@@ -799,17 +799,61 @@ func (s *server) updateWorkspaceDefaults(w http.ResponseWriter, r *http.Request,
 		writeError(w, err, http.StatusNotFound)
 		return
 	}
-	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
-	if err != nil {
-		writeError(w, err, http.StatusBadRequest)
-		return
-	}
-	updated, err := puaWorkspace.SetResourceAgentDefaults(defaults)
+	updated, err := s.setWorkspaceDefaults(r.Context(), workspace, defaults)
 	if err != nil {
 		writeError(w, err, http.StatusBadRequest)
 		return
 	}
 	writeJSON(w, map[string]any{"resourceDefaults": updated})
+}
+
+// setWorkspaceDefaults serializes fallback changes with native Scheduler
+// reconciliation. An attention-held occurrence has no deadline, so a durable
+// material change requests a prompt pass after the Scheduler controller is
+// released. Cancelled, stale, failed, and normalized no-op requests do not
+// disturb the reconcile loop.
+func (s *server) setWorkspaceDefaults(ctx context.Context, workspace serveWorkspace, defaults app.ResourceAgentDefaults) (updated app.ResourceAgentDefaults, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if s.agents == nil {
+		if err := ctx.Err(); err != nil {
+			return app.ResourceAgentDefaults{}, err
+		}
+		if err := s.requireWorkspaceOwnership(workspace.Path); err != nil {
+			return app.ResourceAgentDefaults{}, err
+		}
+		puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+		if err != nil {
+			return app.ResourceAgentDefaults{}, err
+		}
+		return puaWorkspace.SetResourceAgentDefaults(defaults)
+	}
+
+	changed := false
+	err = s.agents.withResourceController(ctx, workspace, app.SchedulerResourceID, func() error {
+		if err := s.requireWorkspaceOwnership(workspace.Path); err != nil {
+			return err
+		}
+		puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+		if err != nil {
+			return err
+		}
+		previous, err := puaWorkspace.RuntimeConfig()
+		if err != nil {
+			return err
+		}
+		updated, err = puaWorkspace.SetResourceAgentDefaults(defaults)
+		if err != nil {
+			return err
+		}
+		changed = previous.ResourceDefaults != updated
+		return nil
+	})
+	if err == nil && changed && ctx.Err() == nil && s.ownsWorkspace(workspace.Path) {
+		s.agents.requestReconcile(reconcileScheduler)
+	}
+	return updated, err
 }
 
 func (s *server) updateWorkspaceGenerationPolicy(w http.ResponseWriter, r *http.Request, workspaceID string) {

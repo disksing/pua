@@ -2758,6 +2758,205 @@ func TestResourceBindingMutationRequestsSchedulerOnlyAfterChangedReconciliation(
 	})
 }
 
+func TestWorkspaceDefaultsMutationWakesAttentionHeldScheduler(t *testing.T) {
+	tests := []struct {
+		name     string
+		target   string
+		defaults app.ResourceAgentDefaults
+	}{
+		{
+			name:   "project fallback",
+			target: "project1",
+			defaults: app.ResourceAgentDefaults{
+				Project: app.AgentBinding{Kind: "agent", Name: "fake-agent"},
+				Task:    app.AgentBinding{Kind: "profile", Name: "fallback-missing"},
+			},
+		},
+		{
+			name:   "task fallback",
+			target: "project1.task1",
+			defaults: app.ResourceAgentDefaults{
+				Project: app.AgentBinding{Kind: "profile", Name: "fallback-missing"},
+				Task:    app.AgentBinding{Kind: "agent", Name: "fake-agent"},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fake := newRuntimeFakeAgentHub()
+			hub := httptest.NewServer(fake)
+			defer hub.Close()
+			manager, workspace, configPath := newRuntimeTestManager(t, hub.URL)
+			puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			missingFallback := app.AgentBinding{Kind: "profile", Name: "fallback-missing"}
+			if _, err := puaWorkspace.SetResourceAgentDefaults(app.ResourceAgentDefaults{
+				Project: missingFallback,
+				Task:    missingFallback,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := puaWorkspace.SetResourceAgentBinding(test.target, app.AgentBinding{
+				Kind: "profile", Name: "explicit-missing",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			rewriteSchedulerTestProfiles(t, configPath, []agentHubProfileRoute{
+				{Key: "fallback-missing", AgentName: "missing-agent"},
+			})
+
+			at := time.Date(2032, time.March, 4, 5, 6, 7, 0, time.UTC)
+			schedule, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+				Description: "Recover through Workspace defaults", Condition: "once", Target: test.target,
+				Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: at.Format(time.RFC3339Nano)},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := at.Add(time.Second)
+			manager.now = func() time.Time { return now }
+			native := newNativeScheduler(manager, workspace)
+			if deadline, reconcileErr := native.Reconcile(context.Background(), now); reconcileErr != nil || !deadline.IsZero() {
+				t.Fatalf("create defaults attention: deadline=%s err=%v", deadline, reconcileErr)
+			}
+			runtime, err := native.schedulerRuntime(schedule.ID)
+			if err != nil || runtime.EffectiveState != schedulerOutcomeAttention || runtime.Prepared == nil {
+				t.Fatalf("defaults attention runtime = %#v, %v", runtime, err)
+			}
+			prepared := *runtime.Prepared
+			_ = manager.takeReconcileRequests()
+			select {
+			case <-manager.reconcileWake:
+			default:
+			}
+
+			body, err := json.Marshal(test.defaults)
+			if err != nil {
+				t.Fatal(err)
+			}
+			recorder := httptest.NewRecorder()
+			manager.server.updateWorkspaceDefaults(recorder, httptest.NewRequest(http.MethodPut, "/defaults", bytes.NewReader(body)), workspace.ID)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("defaults restoration returned %d: %s", recorder.Code, recorder.Body.String())
+			}
+			request := manager.takeReconcileRequests()
+			if request&reconcileScheduler == 0 {
+				t.Fatalf("defaults restoration reconcile request = %08b, want Scheduler", request)
+			}
+			select {
+			case <-manager.reconcileWake:
+			default:
+				t.Fatal("defaults restoration did not wake the reconcile loop")
+			}
+
+			if err := manager.reconcileOwnedWorkspaceSchedulers(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			messages := scheduleOccurrenceMessages(t, workspace.Path, schedule.Target)
+			if len(messages) != 1 || messages[0].ID != prepared.MessageID {
+				t.Fatalf("defaults wake delivered occurrences = %#v, want %s", messages, prepared.MessageID)
+			}
+			runtime, err = native.schedulerRuntime(schedule.ID)
+			if err != nil || runtime.Prepared != nil || runtime.LastOutcome != schedulerOutcomeAccepted {
+				t.Fatalf("defaults wake acceptance checkpoint = %#v, %v", runtime, err)
+			}
+			if err := manager.reconcileOwnedWorkspaceSchedulers(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if messages := scheduleOccurrenceMessages(t, workspace.Path, schedule.Target); len(messages) != 1 || messages[0].ID != prepared.MessageID {
+				t.Fatalf("defaults wake duplicated occurrence: %#v", messages)
+			}
+		})
+	}
+}
+
+func TestWorkspaceDefaultsMutationRequestsSchedulerOnlyAfterMaterialSuccess(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		prepare    func(*testing.T, *agentManager, serveWorkspace) *http.Request
+		wantStatus int
+	}{
+		{
+			name:       "normalized no-op",
+			body:       `{"project":{"kind":"PROFILE","name":"DEFAULT"},"task":{"kind":"profile","name":"default"}}`,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "validation failure",
+			body:       `{"project":{"kind":"profile","name":"missing"},"task":{"kind":"profile","name":"default"}}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "cancelled request",
+			body: `{"project":{"kind":"agent","name":"replacement"},"task":{"kind":"profile","name":"default"}}`,
+			prepare: func(t *testing.T, _ *agentManager, _ serveWorkspace) *http.Request {
+				t.Helper()
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return httptest.NewRequest(http.MethodPut, "/defaults", nil).WithContext(ctx)
+			},
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "stale Workspace ownership",
+			body: `{"project":{"kind":"agent","name":"replacement"},"task":{"kind":"profile","name":"default"}}`,
+			prepare: func(t *testing.T, manager *agentManager, _ serveWorkspace) *http.Request {
+				t.Helper()
+				manager.server.locks = newWorkspaceLockManager("127.0.0.1:4936", manager.server.config)
+				return httptest.NewRequest(http.MethodPut, "/defaults", nil)
+			},
+			wantStatus: http.StatusNotFound,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+			_ = manager.takeReconcileRequests()
+			select {
+			case <-manager.reconcileWake:
+			default:
+			}
+			request := httptest.NewRequest(http.MethodPut, "/defaults", strings.NewReader(test.body))
+			if test.prepare != nil {
+				prepared := test.prepare(t, manager, workspace)
+				prepared.Body = request.Body
+				request = prepared
+			}
+			recorder := httptest.NewRecorder()
+			manager.server.updateWorkspaceDefaults(recorder, request, workspace.ID)
+			manager.waitBackground()
+			if recorder.Code != test.wantStatus {
+				t.Fatalf("defaults mutation returned %d: %s", recorder.Code, recorder.Body.String())
+			}
+			if request := manager.takeReconcileRequests(); request&reconcileScheduler != 0 {
+				t.Fatalf("rejected defaults mutation requested Scheduler reconciliation: %08b", request)
+			}
+			select {
+			case <-manager.reconcileWake:
+				t.Fatal("rejected defaults mutation woke the reconcile loop")
+			default:
+			}
+			puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtimeConfig, err := puaWorkspace.RuntimeConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := app.AgentBinding{Kind: "profile", Name: "default"}
+			if runtimeConfig.ResourceDefaults.Project != want || runtimeConfig.ResourceDefaults.Task != want {
+				t.Fatalf("rejected defaults mutation persisted %#v", runtimeConfig.ResourceDefaults)
+			}
+		})
+	}
+}
+
 type schedulerSettingsFakeAgentHub struct {
 	base   *runtimeFakeAgentHub
 	mu     sync.Mutex

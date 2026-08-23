@@ -165,8 +165,9 @@
 }
 
 /* chat region: messages become framed ink passes with flat registration
-   ghosts. Role coding stays on the meta row and the colored left edge of
-   each frame (the default role tokens resolve to the Riso spot inks), the
+   ghosts. Role coding stays on the meta row (sender name and role tag),
+   every bubble rail merges into the uniform black frame — the default
+   per-role left-edge colors would read as misprints against it — the
    user message gets the cyan fill with black ink text, and bubbles hug
    alternating edges like the demo instead of spanning the column. */
 :root[data-theme="riso"] {
@@ -177,9 +178,6 @@
   --chat-bubble-shadow: 3px 3px 0 rgba(26, 26, 26, 0.18);
   --chat-bubble-padding: 10px 14px;
   --chat-rail-width: 2.5px;
-  /* system messages merge their rail into the black frame; a paper-beige
-     left edge would read as a misprint against the frame */
-  --chat-role-system: #1a1a1a;
   --chat-user-bg: var(--blue);
   --chat-user-text: #1a1a1a;
   --chat-user-padding: 10px 14px;
@@ -221,6 +219,14 @@
 
 :root[data-theme="riso"] [data-component-owner="event-timeline"] .agent-message-row.user .agent-message-main {
   margin-left: auto;
+}
+
+/* uniform frames: the default theme paints each bubble's left edge with a
+   per-role rail color (blue for agent, beige for system, green for user);
+   against the black frame those read as stray ink passes, so every rail
+   merges into the frame ink */
+:root[data-theme="riso"] [data-component-owner="event-timeline"] .agent-message-bubble {
+  border-left-color: #1a1a1a;
 }
 
 /* the user meta row (name, timestamp) follows the right-aligned bubble */

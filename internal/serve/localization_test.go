@@ -23,6 +23,8 @@ func TestAutomaticMessagesRenderInRequestedLanguage(t *testing.T) {
 		{name: "task waiting schedule exhausted", text: taskWaitingScheduleExhaustedNote("en"), want: "3 automatic reminders"},
 		{name: "turn result", text: turnResultMessage("zh-CN", "project1.task1", "generation-1", turn, "", nil, false), want: "Turn 结果"},
 		{name: "delivery", text: terminalDeliveryMessage("zh-CN", delivery), want: "投递通知"},
+		{name: "stall recovery English", text: stallWatchdogRecoveryText("en"), want: "Automatic recovery detected"},
+		{name: "stall recovery Chinese", text: stallWatchdogRecoveryText("zh-CN"), want: "自动恢复检测到"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

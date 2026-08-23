@@ -153,6 +153,8 @@ Query before creating to avoid duplicates. Creating a Project or Task does not s
 pua message send --to=<resource> '<message>'
 ~~~
 
+Message text is sent verbatim; for multi-line text use real newlines or pass - to read from standard input (see "Agent collaboration").
+
 When creating a Task, use the mutually exclusive --profile=<name> or --agent=<name> option to set its initial binding. To change an existing resource's explicit binding, use:
 
 ~~~sh
@@ -183,7 +185,15 @@ pua message send --to=<resource> [--mode=steer|enqueue|interrupt] '<message>'
 pua message show --id=<message-id>
 ~~~
 
-Include the goal, necessary context, scope, and expected result in the message.
+Include the goal, necessary context, scope, and expected result in the message. Message text is sent verbatim and may use Markdown; for multi-line text use real newlines (for example $'...' quoting or a heredoc), or pass - to read the message from standard input. Do not write \n escapes inside single quotes:
+
+~~~sh
+pua message send --to=<resource> - <<'EOF'
+First line
+
+- list item
+EOF
+~~~
 
 If the current work conflicts with or may affect another agent's work, promptly message the relevant resource's agent to synchronize necessary context, scope, and progress.
 

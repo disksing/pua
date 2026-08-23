@@ -153,6 +153,8 @@ pua task archive --project=<project> --task=<task>
 pua message send --to=<resource> '<message>'
 ~~~
 
+消息文本按原样发送；需要多行文本时使用真实换行，或传 - 从标准输入读取（见“Agent 协作”一节）。
+
 创建 Task 时，可以使用互斥的 --profile=<name> 或 --agent=<name> 设置初始绑定。修改已有资源的显式绑定时使用：
 
 ~~~sh
@@ -183,7 +185,15 @@ pua message send --to=<resource> [--mode=steer|enqueue|interrupt] '<message>'
 pua message show --id=<message-id>
 ~~~
 
-消息中写清目标、必要背景、范围和希望对方返回的结果。
+消息中写清目标、必要背景、范围和希望对方返回的结果。消息文本按原样发送并支持 Markdown；需要多行文本时使用真实换行（如 $'...' 引用或 heredoc），或传 - 从标准输入读取，不要在单引号里写 \n 转义：
+
+~~~sh
+pua message send --to=<resource> - <<'EOF'
+第一行
+
+- 列表项
+EOF
+~~~
 
 发现当前工作与其他 Agent 的工作冲突或可能相互影响时，及时给相关资源的 Agent 发消息，同步必要背景、范围和进展。
 

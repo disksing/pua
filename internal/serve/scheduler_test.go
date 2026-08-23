@@ -2617,7 +2617,150 @@ func TestNativeSchedulerRetiresLegacyTickStates(t *testing.T) {
 	}
 }
 
-func TestNativeSchedulerRetiresDeliveringTickBeforeMailboxRecovery(t *testing.T) {
+func TestSchedulerMailboxRecoveryRetiresLegacyTickBeforeNativeReconcile(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	hub := httptest.NewServer(fake)
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+	legacy, err := acceptGeneratedMailboxMessage(workspace.Path, resourceMailboxMessage{
+		ID: "msg-legacy-recovery-first", ResourceID: app.SchedulerResourceID, Text: "legacy tick",
+		RequestedMode: resourceMessageModeEnqueue, ActualMode: resourceMessageModeEnqueue, ModeFrozen: true,
+		Type: resourceMessageTypeSchedulerTick,
+		Causation: &resourceMessageCausation{
+			Type: resourceMessageTypeSchedulerTick, SourceResourceID: app.SchedulerResourceID, Reason: "legacy",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Model startup recovery winning the race with NativeScheduler.Reconcile.
+	restarted := newAgentManager(manager.server)
+	restarted.now = manager.now
+	manager.server.agents = restarted
+	if err := restarted.reconcileWorkspaceMailboxes(context.Background(), workspace); err != nil {
+		t.Fatal(err)
+	}
+	retired, found, err := mailboxMessageByID(workspace.Path, legacy.ID)
+	if err != nil || !found || retired.Status != resourceMessageUndeliverable ||
+		retired.LastErrorCode != "scheduler_v1_retired" || retired.TerminalAt == "" || !retired.receipt {
+		t.Fatalf("recovery-first retired receipt = %#v, found=%v err=%v", retired, found, err)
+	}
+	fake.mu.Lock()
+	messageIDs := append([]string(nil), fake.messageIDs...)
+	fake.mu.Unlock()
+	if len(messageIDs) != 0 {
+		t.Fatalf("startup mailbox recovery dispatched a legacy tick: %#v", messageIDs)
+	}
+
+	store, err := loadResourceMailboxStoreForRead(workspace.Path, app.SchedulerResourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hotBeforeRepeat, err := os.ReadFile(resourceMailboxHotPath(store.Directory))
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiptsBeforeRepeat, err := os.ReadFile(resourceMailboxReceiptPath(store.Directory))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.reconcileWorkspaceMailboxes(context.Background(), workspace); err != nil {
+		t.Fatal(err)
+	}
+	hotAfterRepeat, err := os.ReadFile(resourceMailboxHotPath(store.Directory))
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiptsAfterRepeat, err := os.ReadFile(resourceMailboxReceiptPath(store.Directory))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(hotAfterRepeat) != string(hotBeforeRepeat) || string(receiptsAfterRepeat) != string(receiptsBeforeRepeat) {
+		t.Fatal("repeated startup recovery rewrote the retired Scheduler mailbox")
+	}
+}
+
+func TestSchedulerNaturalLanguageMessageRetiresLegacyTickBeforeDelivery(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	hub := httptest.NewServer(fake)
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := puaWorkspace.RegisterUser("Ada"); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := acceptGeneratedMailboxMessage(workspace.Path, resourceMailboxMessage{
+		ID: "msg-legacy-before-web-chat", ResourceID: app.SchedulerResourceID, Text: "legacy tick",
+		RequestedMode: resourceMessageModeEnqueue, ActualMode: resourceMessageModeEnqueue, ModeFrozen: true,
+		Type: resourceMessageTypeSchedulerTick,
+		Causation: &resourceMessageCausation{
+			Type: resourceMessageTypeSchedulerTick, SourceResourceID: app.SchedulerResourceID, Reason: "legacy",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	type deliveryObservation struct {
+		messageID  string
+		tickStatus string
+		tickCode   string
+	}
+	observed := make(chan deliveryObservation, 2)
+	fake.mu.Lock()
+	fake.messageHook = func(_ string, input agentHubInboundMessage) {
+		tick, _, loadErr := mailboxMessageByID(workspace.Path, legacy.ID)
+		if loadErr != nil {
+			observed <- deliveryObservation{messageID: input.MessageID, tickCode: loadErr.Error()}
+			return
+		}
+		observed <- deliveryObservation{messageID: input.MessageID, tickStatus: tick.Status, tickCode: tick.LastErrorCode}
+	}
+	fake.mu.Unlock()
+
+	request := httptest.NewRequest(http.MethodPost, "/api/workspaces/"+workspace.ID+"/scheduler", strings.NewReader(`{"description":"Review","condition":"tomorrow morning","target":"workspace"}`))
+	request.Header.Set(workspaceUserHeader, "Ada")
+	recorder := httptest.NewRecorder()
+	manager.server.handleWorkspace(recorder, request)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("natural Scheduler message = %d %s", recorder.Code, recorder.Body.String())
+	}
+	var response resourceMessageResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.withResourceController(context.Background(), workspace, app.SchedulerResourceID, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	var observation deliveryObservation
+	select {
+	case observation = <-observed:
+	default:
+		t.Fatal("Scheduler chat never reached the AgentHub message boundary")
+	}
+	if observation.messageID != response.MessageID || observation.tickStatus != resourceMessageUndeliverable || observation.tickCode != "scheduler_v1_retired" {
+		t.Fatalf("delivery boundary observed %#v, want retired tick before chat %q", observation, response.MessageID)
+	}
+	retired, found, err := mailboxMessageByID(workspace.Path, legacy.ID)
+	if err != nil || !found || retired.Status != resourceMessageUndeliverable || retired.LastErrorCode != "scheduler_v1_retired" {
+		t.Fatalf("Web-path retired tick = %#v, found=%v err=%v", retired, found, err)
+	}
+	chat, found, err := mailboxMessageByID(workspace.Path, response.MessageID)
+	if err != nil || !found || chat.Status != resourceMessageDelivered {
+		t.Fatalf("Web Scheduler chat = %#v, found=%v err=%v", chat, found, err)
+	}
+	fake.mu.Lock()
+	messageIDs := append([]string(nil), fake.messageIDs...)
+	fake.mu.Unlock()
+	if !reflect.DeepEqual(messageIDs, []string{response.MessageID}) {
+		t.Fatalf("AgentHub messages = %#v, want only new Scheduler chat %q", messageIDs, response.MessageID)
+	}
+}
+
+func TestSchedulerMailboxRecoveryRetiresDeliveringTickBeforeNativeReconcile(t *testing.T) {
 	fake := newRuntimeFakeAgentHub()
 	hub := httptest.NewServer(fake)
 	defer hub.Close()
@@ -2660,12 +2803,7 @@ func TestNativeSchedulerRetiresDeliveringTickBeforeMailboxRecovery(t *testing.T)
 		t.Fatalf("durable delivering fixture = %#v, %v", hot.Messages, err)
 	}
 
-	if err := manager.reconcileSchedulerLocked(context.Background(), workspace); err != nil {
-		t.Fatal(err)
-	}
-	if err := manager.withResourceController(context.Background(), workspace, app.SchedulerResourceID, func() error {
-		return manager.reconcileResourceMailboxLocked(context.Background(), workspace, app.SchedulerResourceID)
-	}); err != nil {
+	if err := manager.reconcileWorkspaceMailboxes(context.Background(), workspace); err != nil {
 		t.Fatal(err)
 	}
 	retired, found, err := mailboxMessageByID(workspace.Path, tickID)
@@ -2681,6 +2819,99 @@ func TestNativeSchedulerRetiresDeliveringTickBeforeMailboxRecovery(t *testing.T)
 	fake.mu.Unlock()
 	if len(messageIDs) != 0 {
 		t.Fatalf("ordinary mailbox recovery resubmitted retired tick: %#v", messageIDs)
+	}
+}
+
+func TestSchedulerMailboxRecoveryLeavesOtherResourcesUnaffected(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	hub := httptest.NewServer(fake)
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+	legacy, err := acceptGeneratedMailboxMessage(workspace.Path, resourceMailboxMessage{
+		ID: "msg-legacy-with-task-work", ResourceID: app.SchedulerResourceID, Text: "legacy tick",
+		RequestedMode: resourceMessageModeEnqueue, ActualMode: resourceMessageModeEnqueue, ModeFrozen: true,
+		Type: resourceMessageTypeSchedulerTick,
+		Causation: &resourceMessageCausation{
+			Type: resourceMessageTypeSchedulerTick, SourceResourceID: app.SchedulerResourceID, Reason: "legacy",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskMessage, err := acceptMailboxMessage(workspace.Path, "project1.task1", resourceMessageRequest{
+		Text: "unrelated task work", Mode: resourceMessageModeEnqueue, Role: "agent",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := manager.reconcileWorkspaceMailboxes(context.Background(), workspace); err != nil {
+		t.Fatal(err)
+	}
+	retired, found, err := mailboxMessageByID(workspace.Path, legacy.ID)
+	if err != nil || !found || retired.Status != resourceMessageUndeliverable || retired.LastErrorCode != "scheduler_v1_retired" {
+		t.Fatalf("Scheduler tick = %#v, found=%v err=%v", retired, found, err)
+	}
+	delivered, found, err := mailboxMessageByID(workspace.Path, taskMessage.ID)
+	if err != nil || !found || delivered.Status != resourceMessageDelivered {
+		t.Fatalf("unrelated task message = %#v, found=%v err=%v", delivered, found, err)
+	}
+	fake.mu.Lock()
+	messageIDs := append([]string(nil), fake.messageIDs...)
+	fake.mu.Unlock()
+	if !reflect.DeepEqual(messageIDs, []string{taskMessage.ID}) {
+		t.Fatalf("AgentHub messages = %#v, want only unrelated task %q", messageIDs, taskMessage.ID)
+	}
+}
+
+func TestSchedulerMailboxRecoveryDeliversNativeMessagesAfterTickRetirement(t *testing.T) {
+	for _, messageType := range []string{resourceMessageTypeScheduleOccurrence, resourceMessageTypeScheduleMigration} {
+		t.Run(messageType, func(t *testing.T) {
+			fake := newRuntimeFakeAgentHub()
+			hub := httptest.NewServer(fake)
+			defer hub.Close()
+			manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+			legacy, err := acceptGeneratedMailboxMessage(workspace.Path, resourceMailboxMessage{
+				ID: "msg-legacy-before-" + messageType, ResourceID: app.SchedulerResourceID, Text: "legacy tick",
+				RequestedMode: resourceMessageModeEnqueue, ActualMode: resourceMessageModeEnqueue, ModeFrozen: true,
+				Type: resourceMessageTypeSchedulerTick,
+				Causation: &resourceMessageCausation{
+					Type: resourceMessageTypeSchedulerTick, SourceResourceID: app.SchedulerResourceID, Reason: "legacy",
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			native, err := acceptGeneratedMailboxMessage(workspace.Path, resourceMailboxMessage{
+				ID: "msg-native-after-" + messageType, ResourceID: app.SchedulerResourceID, Text: "native Scheduler work",
+				RequestedMode: resourceMessageModeEnqueue, ActualMode: resourceMessageModeEnqueue, ModeFrozen: true,
+				Type: messageType,
+				Causation: &resourceMessageCausation{
+					Type: messageType, SourceResourceID: app.SchedulerResourceID, Reason: "native",
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if err := manager.reconcileWorkspaceMailboxes(context.Background(), workspace); err != nil {
+				t.Fatal(err)
+			}
+			retired, found, err := mailboxMessageByID(workspace.Path, legacy.ID)
+			if err != nil || !found || retired.Status != resourceMessageUndeliverable || retired.LastErrorCode != "scheduler_v1_retired" {
+				t.Fatalf("Scheduler tick = %#v, found=%v err=%v", retired, found, err)
+			}
+			delivered, found, err := mailboxMessageByID(workspace.Path, native.ID)
+			if err != nil || !found || delivered.Status != resourceMessageDelivered {
+				t.Fatalf("native Scheduler message = %#v, found=%v err=%v", delivered, found, err)
+			}
+			fake.mu.Lock()
+			messageIDs := append([]string(nil), fake.messageIDs...)
+			fake.mu.Unlock()
+			if !reflect.DeepEqual(messageIDs, []string{native.ID}) {
+				t.Fatalf("AgentHub messages = %#v, want only native message %q", messageIDs, native.ID)
+			}
+		})
 	}
 }
 

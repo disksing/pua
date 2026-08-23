@@ -1140,6 +1140,11 @@ func (m *agentManager) promoteWaitingMessageLocked(ctx context.Context, workspac
 
 func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, workspace serveWorkspace, resourceID string) error {
 	resourceID = normalizedResourceID(resourceID)
+	if resourceID == app.SchedulerResourceID {
+		if err := newNativeScheduler(m, workspace).cancelLegacyTicks(ctx); err != nil {
+			return err
+		}
+	}
 	_, archived, _, resourceErr := resourceExistsAndArchived(workspace.Path, resourceID)
 	if resourceErr != nil {
 		return resourceErr

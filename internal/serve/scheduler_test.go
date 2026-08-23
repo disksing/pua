@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -2590,6 +2591,246 @@ func TestResourceBindingMutationRequestsSchedulerOnlyAfterChangedReconciliation(
 			t.Fatalf("failed binding reconciliation requested Scheduler reconciliation: %08b", request)
 		}
 	})
+}
+
+type schedulerSettingsFakeAgentHub struct {
+	base   *runtimeFakeAgentHub
+	mu     sync.Mutex
+	config agentHubConfiguredConfig
+}
+
+func newSchedulerSettingsFakeAgentHub(config agentHubConfiguredConfig) *schedulerSettingsFakeAgentHub {
+	return &schedulerSettingsFakeAgentHub{base: newRuntimeFakeAgentHub(), config: config}
+}
+
+func (f *schedulerSettingsFakeAgentHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	switch {
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/status":
+		writeRuntimeFakeJSON(w, map[string]any{
+			"apiVersion": "1", "capabilities": requiredAgentHubCapabilities, "version": "test",
+		})
+		return
+	case r.URL.Path == "/v1/config":
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if r.Method == http.MethodGet {
+			writeRuntimeFakeJSON(w, map[string]any{"config": f.config})
+			return
+		}
+		if r.Method == http.MethodPut {
+			var request struct {
+				Config agentHubConfiguredConfig `json:"config"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			f.config = request.Config
+			writeRuntimeFakeJSON(w, map[string]any{"config": f.config})
+			return
+		}
+	case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/v1/config/providers/"):
+		providerID, _ := url.PathUnescape(strings.TrimPrefix(r.URL.Path, "/v1/config/providers/"))
+		var request struct {
+			Enabled bool `json:"enabled"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		for index := range f.config.AgentProviders {
+			if f.config.AgentProviders[index].ID == providerID {
+				f.config.AgentProviders[index].Enabled = request.Enabled
+				writeRuntimeFakeJSON(w, map[string]any{"provider": f.config.AgentProviders[index]})
+				return
+			}
+		}
+		w.WriteHeader(http.StatusNotFound)
+		return
+	case r.Method == http.MethodGet && r.URL.Path == "/v1/agents":
+		f.mu.Lock()
+		configured := f.config
+		f.mu.Unlock()
+		providers := make([]agentHubProvider, 0, len(configured.AgentProviders))
+		enabled := make(map[string]bool, len(configured.AgentProviders))
+		for _, provider := range configured.AgentProviders {
+			providers = append(providers, agentHubProvider{
+				ID: provider.ID, Name: provider.Name, Type: provider.Type, Enabled: provider.Enabled,
+			})
+			enabled[provider.ID] = provider.Enabled
+		}
+		agents := make([]agentHubAgent, 0, len(configured.Agents))
+		for _, agent := range configured.Agents {
+			available := enabled[agent.ProviderID]
+			reason := ""
+			if !available {
+				reason = "provider disabled"
+			}
+			agents = append(agents, agentHubAgent{
+				Name: agent.Name, ProviderID: agent.ProviderID, Available: available, UnavailableReason: reason,
+			})
+		}
+		writeRuntimeFakeJSON(w, agentHubCatalog{Providers: providers, Agents: agents, Probes: []agentHubProbe{}})
+		return
+	}
+	f.base.ServeHTTP(w, r)
+}
+
+func TestAgentHubSettingsMutationWakesAttentionHeldScheduler(t *testing.T) {
+	provider := agentHubConfiguredProvider{ID: "fake", Name: "Fake", Type: "fake", Enabled: true}
+	agent := agentHubConfiguredAgent{Name: "settings-agent", ProviderID: "fake"}
+	tests := []struct {
+		name           string
+		initialConfig  agentHubConfiguredConfig
+		initialProfile string
+		mutate         func(*testing.T, *server, string)
+	}{
+		{
+			name: "agent profile and catalog",
+			initialConfig: agentHubConfiguredConfig{
+				Version: 1, AgentProviders: []agentHubConfiguredProvider{provider}, Agents: []agentHubConfiguredAgent{},
+			},
+			initialProfile: "missing-agent",
+			mutate: func(t *testing.T, server *server, endpoint string) {
+				t.Helper()
+				body, err := json.Marshal(updateAgentHubSettingsRequest{
+					Endpoint: endpoint,
+					AgentProfiles: []agentHubProfileRoute{
+						{Key: "default", AgentName: agent.Name},
+					},
+					AgentProviders: []agentHubConfiguredProvider{provider},
+					Agents:         []agentHubConfiguredAgent{agent},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				recorder := httptest.NewRecorder()
+				server.handleAgentHubSettings(recorder, httptest.NewRequest(http.MethodPut, "/api/settings/agenthub", bytes.NewReader(body)))
+				if recorder.Code != http.StatusOK {
+					t.Fatalf("settings save returned %d: %s", recorder.Code, recorder.Body.String())
+				}
+			},
+		},
+		{
+			name: "provider toggle",
+			initialConfig: agentHubConfiguredConfig{
+				Version: 1,
+				AgentProviders: []agentHubConfiguredProvider{
+					{ID: provider.ID, Name: provider.Name, Type: provider.Type, Enabled: false},
+				},
+				Agents: []agentHubConfiguredAgent{agent},
+			},
+			initialProfile: agent.Name,
+			mutate: func(t *testing.T, server *server, _ string) {
+				t.Helper()
+				recorder := httptest.NewRecorder()
+				server.handleAgentHubProviderSettings(recorder, httptest.NewRequest(
+					http.MethodPut, "/api/settings/agenthub/providers/fake", strings.NewReader(`{"enabled":true}`),
+				), provider.ID)
+				if recorder.Code != http.StatusOK {
+					t.Fatalf("provider toggle returned %d: %s", recorder.Code, recorder.Body.String())
+				}
+			},
+		},
+		{
+			name: "catalog normalization",
+			initialConfig: agentHubConfiguredConfig{
+				Version: 1, AgentProviders: []agentHubConfiguredProvider{provider}, Agents: []agentHubConfiguredAgent{agent},
+			},
+			initialProfile: "",
+			mutate: func(t *testing.T, server *server, _ string) {
+				t.Helper()
+				recorder := httptest.NewRecorder()
+				server.handleAgentHubSettings(recorder, httptest.NewRequest(http.MethodGet, "/api/settings/agenthub", nil))
+				if recorder.Code != http.StatusOK {
+					t.Fatalf("catalog refresh returned %d: %s", recorder.Code, recorder.Body.String())
+				}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fake := newSchedulerSettingsFakeAgentHub(test.initialConfig)
+			hub := httptest.NewServer(fake)
+			defer hub.Close()
+			manager, workspace, configPath := newRuntimeTestManager(t, hub.URL)
+			rewriteSchedulerTestProfiles(t, configPath, []agentHubProfileRoute{{Key: "default", AgentName: test.initialProfile}})
+			puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			at := time.Date(2031, time.February, 3, 4, 5, 6, 0, time.UTC)
+			schedule, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+				Description: "Recover through Settings", Condition: "once", Target: "project1.task1",
+				Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: at.Format(time.RFC3339Nano)},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := at.Add(time.Second)
+			manager.now = func() time.Time { return now }
+			native := newNativeScheduler(manager, workspace)
+			if deadline, reconcileErr := native.Reconcile(context.Background(), now); reconcileErr != nil || !deadline.IsZero() {
+				t.Fatalf("create Settings attention: deadline=%s err=%v", deadline, reconcileErr)
+			}
+			runtime, err := native.schedulerRuntime(schedule.ID)
+			if err != nil || runtime.EffectiveState != schedulerOutcomeAttention || runtime.Prepared == nil {
+				t.Fatalf("Settings attention runtime = %#v, %v", runtime, err)
+			}
+			prepared := *runtime.Prepared
+			_ = manager.takeReconcileRequests()
+			select {
+			case <-manager.reconcileWake:
+			default:
+			}
+
+			test.mutate(t, manager.server, hub.URL)
+			request := manager.takeReconcileRequests()
+			if request&reconcileScheduler == 0 {
+				t.Fatalf("Settings mutation reconcile request = %08b, want Scheduler", request)
+			}
+			select {
+			case <-manager.reconcileWake:
+			default:
+				t.Fatal("Settings mutation did not wake the reconcile loop")
+			}
+			if err := manager.reconcileOwnedWorkspaceSchedulers(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			messages := scheduleOccurrenceMessages(t, workspace.Path, schedule.Target)
+			if len(messages) != 1 || messages[0].ID != prepared.MessageID {
+				t.Fatalf("Settings wake delivered occurrences = %#v, want %s", messages, prepared.MessageID)
+			}
+			runtime, err = native.schedulerRuntime(schedule.ID)
+			if err != nil || runtime.Prepared != nil || runtime.LastOutcome != schedulerOutcomeAccepted {
+				t.Fatalf("Settings wake acceptance checkpoint = %#v, %v", runtime, err)
+			}
+
+			_ = manager.takeReconcileRequests()
+			select {
+			case <-manager.reconcileWake:
+			default:
+			}
+			test.mutate(t, manager.server, hub.URL)
+			if request := manager.takeReconcileRequests(); request&reconcileScheduler != 0 {
+				t.Fatalf("no-op Settings mutation requested Scheduler reconciliation: %08b", request)
+			}
+			select {
+			case <-manager.reconcileWake:
+				t.Fatal("no-op Settings mutation woke the reconcile loop")
+			default:
+			}
+			if err := manager.reconcileOwnedWorkspaceSchedulers(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if messages := scheduleOccurrenceMessages(t, workspace.Path, schedule.Target); len(messages) != 1 || messages[0].ID != prepared.MessageID {
+				t.Fatalf("Settings wake duplicated occurrence: %#v", messages)
+			}
+		})
+	}
 }
 
 func TestNativeSchedulerTransientBindingPreflightUsesBackoff(t *testing.T) {

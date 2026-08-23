@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"reflect"
+	"strings"
 )
 
 type agentHubSettingsResponse struct {
@@ -68,6 +69,7 @@ func (s *server) readAgentHubSettings(ctx context.Context) (agentHubSettingsResp
 	if err != nil {
 		return agentHubSettingsResponse{}, err
 	}
+	configChanged := false
 	structuralProfiles, err := normalizeAgentHubProfileRoutes(cfg.AgentProfiles, agentHubCatalog{})
 	if err != nil {
 		return agentHubSettingsResponse{}, err
@@ -78,6 +80,7 @@ func (s *server) readAgentHubSettings(ctx context.Context) (agentHubSettingsResp
 			if err := writeAgentHubConfigFile(s.config, cfg); err != nil {
 				return agentHubSettingsResponse{}, err
 			}
+			configChanged = true
 		} else if !os.IsNotExist(statErr) {
 			return agentHubSettingsResponse{}, statErr
 		}
@@ -139,6 +142,10 @@ func (s *server) readAgentHubSettings(ctx context.Context) (agentHubSettingsResp
 		if err := writeAgentHubConfigFile(s.config, cfg); err != nil {
 			return agentHubSettingsResponse{}, err
 		}
+		configChanged = true
+	}
+	if configChanged {
+		s.agents.requestReconcile(reconcileScheduler)
 	}
 	response.Config = cfg
 	response.Revision = s.settingsRevisionOrEmpty()
@@ -150,6 +157,7 @@ func (s *server) saveAgentHubSettings(ctx context.Context, request updateAgentHu
 	if err != nil {
 		return agentHubSettingsResponse{}, err
 	}
+	persistedConfig := cfg
 	configured, err := normalizeAgentHubEndpoint(request.Endpoint)
 	if err != nil {
 		return agentHubSettingsResponse{}, err
@@ -177,20 +185,25 @@ func (s *server) saveAgentHubSettings(ctx context.Context, request updateAgentHu
 		return agentHubSettingsResponse{}, fmt.Errorf("validate AgentHub catalog: %w", err)
 	}
 	var configuredAgentHub agentHubConfiguredConfig
+	agentHubConfigChanged := false
 	if request.AgentProviders != nil || request.Agents != nil {
 		configuredAgentHub, err = client.Config(ctx)
 		if err != nil {
 			return agentHubSettingsResponse{}, fmt.Errorf("read AgentHub config: %w", err)
 		}
+		persistedAgentHub := configuredAgentHub
 		if request.AgentProviders != nil {
 			configuredAgentHub.AgentProviders = request.AgentProviders
 		}
 		if request.Agents != nil {
 			configuredAgentHub.Agents = request.Agents
 		}
-		configuredAgentHub, err = client.SaveConfig(ctx, configuredAgentHub)
-		if err != nil {
-			return agentHubSettingsResponse{}, fmt.Errorf("save AgentHub config: %w", err)
+		if !reflect.DeepEqual(persistedAgentHub, configuredAgentHub) {
+			configuredAgentHub, err = client.SaveConfig(ctx, configuredAgentHub)
+			if err != nil {
+				return agentHubSettingsResponse{}, fmt.Errorf("save AgentHub config: %w", err)
+			}
+			agentHubConfigChanged = !reflect.DeepEqual(persistedAgentHub, configuredAgentHub)
 		}
 	}
 	cfg.AgentHubEndpoint = configured
@@ -201,6 +214,9 @@ func (s *server) saveAgentHubSettings(ctx context.Context, request updateAgentHu
 	}
 	if err := writeAgentHubConfigFile(s.config, cfg); err != nil {
 		return agentHubSettingsResponse{}, err
+	}
+	if agentHubConfigChanged || !reflect.DeepEqual(persistedConfig, cfg) {
+		s.agents.requestReconcile(reconcileScheduler)
 	}
 	return agentHubSettingsResponse{
 		Mode:               s.agentHubMode,
@@ -268,10 +284,27 @@ func (s *server) handleAgentHubProviderSettings(w http.ResponseWriter, r *http.R
 		writeError(w, err, http.StatusBadRequest)
 		return
 	}
-	provider, err := client.SetProviderEnabled(r.Context(), providerID, *request.Enabled)
+	configuredAgentHub, err := client.Config(r.Context())
 	if err != nil {
-		writeError(w, err, http.StatusBadRequest)
+		writeError(w, fmt.Errorf("read AgentHub config: %w", err), http.StatusBadRequest)
 		return
+	}
+	provider := agentHubConfiguredProvider{}
+	changed := true
+	for _, configuredProvider := range configuredAgentHub.AgentProviders {
+		if strings.TrimSpace(configuredProvider.ID) == strings.TrimSpace(providerID) {
+			provider = configuredProvider
+			changed = configuredProvider.Enabled != *request.Enabled
+			break
+		}
+	}
+	if changed {
+		provider, err = client.SetProviderEnabled(r.Context(), providerID, *request.Enabled)
+		if err != nil {
+			writeError(w, err, http.StatusBadRequest)
+			return
+		}
+		s.agents.requestReconcile(reconcileScheduler)
 	}
 	writeJSON(w, struct {
 		Provider agentHubConfiguredProvider `json:"provider"`

@@ -194,8 +194,10 @@ func (n *NativeScheduler) Change(ctx context.Context, change NativeSchedulerChan
 		if err != nil {
 			return app.Schedule{}, err
 		}
+		resumingPaused := false
 		for _, schedule := range config.Schedules {
 			if schedule.ID == change.ID && schedule.State == app.ScheduleStatePaused {
+				resumingPaused = true
 				if err := n.reconcileSchedule(ctx, schedule, n.manager.now()); err != nil {
 					return app.Schedule{}, err
 				}
@@ -205,6 +207,13 @@ func (n *NativeScheduler) Change(ctx context.Context, change NativeSchedulerChan
 		resumed, err := workspace.ResumeSchedule(change.ID)
 		if err != nil {
 			return app.Schedule{}, err
+		}
+		if resumingPaused {
+			resumeBoundary, err := time.Parse(time.RFC3339Nano, resumed.UpdatedAt)
+			if err != nil {
+				return app.Schedule{}, err
+			}
+			return resumed, n.reconcileSchedule(ctx, resumed, resumeBoundary)
 		}
 		runtime, runtimeErr := n.schedulerRuntime(change.ID)
 		if runtimeErr != nil {
@@ -302,6 +311,13 @@ func (n *NativeScheduler) reconcileSchedule(ctx context.Context, schedule app.Sc
 	triggerChanged := runtime.TriggerDigest != triggerDigest
 	if revisionChanged || triggerChanged {
 		sameKnownTrigger := runtime.TriggerDigest != "" && !triggerChanged
+		if revisionChanged && sameKnownTrigger && runtime.EffectiveState == app.ScheduleStatePaused && schedule.State == app.ScheduleStateActive {
+			resumeBoundary, err := time.Parse(time.RFC3339Nano, schedule.UpdatedAt)
+			if err != nil {
+				return err
+			}
+			completeExpiredOneTimeWhilePaused(&runtime, schedule.Trigger, resumeBoundary)
+		}
 		if runtimeCompletesSameOneTimeOccurrence(runtime, schedule) && (sameKnownTrigger || runtime.TriggerDigest == "") {
 			runtime.Revision = schedule.Revision
 			runtime.TriggerDigest = triggerDigest

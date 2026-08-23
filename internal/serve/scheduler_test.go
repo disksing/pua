@@ -74,6 +74,38 @@ func schedulerTestScheduleByID(t *testing.T, workspace *app.Workspace, id string
 	return app.Schedule{}
 }
 
+func rewriteSchedulerTestOneTimeDeadline(t *testing.T, workspace *app.Workspace, id string, at time.Time) {
+	t.Helper()
+	config, err := workspace.Scheduler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for index := range config.Schedules {
+		schedule := &config.Schedules[index]
+		if schedule.ID != id {
+			continue
+		}
+		if schedule.Trigger == nil || schedule.Trigger.Type != app.ScheduleTriggerAt {
+			t.Fatalf("schedule %q is not one-time: %#v", id, schedule)
+		}
+		schedule.Trigger.At = at.Format(time.RFC3339Nano)
+		found = true
+		break
+	}
+	if !found {
+		t.Fatalf("schedule %q not found in %#v", id, config.Schedules)
+	}
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(filepath.Join(workspace.Root(), "scheduler", "scheduler.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSchedulerHTTPAPIRoutesNaturalLanguageAndNativeChanges(t *testing.T) {
 	root := t.TempDir()
 	if _, err := app.Initialize(root, "en"); err != nil {
@@ -1353,7 +1385,7 @@ func TestNativeSchedulerPauseResumeSkipsPausedOccurrences(t *testing.T) {
 	}
 	oneTime, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
 		Description: "Once", Condition: "in the past", Target: "workspace",
-		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: anchor.Format(time.RFC3339Nano)},
+		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1361,6 +1393,9 @@ func TestNativeSchedulerPauseResumeSkipsPausedOccurrences(t *testing.T) {
 	if _, err := puaWorkspace.PauseSchedule(oneTime.ID); err != nil {
 		t.Fatal(err)
 	}
+	// Mutation validation requires a future one-time trigger. Rewrite the
+	// already-paused persisted fixture to model a deadline expiring while paused.
+	rewriteSchedulerTestOneTimeDeadline(t, puaWorkspace, oneTime.ID, anchor)
 	current := time.Now().UTC()
 	manager.now = func() time.Time { return current }
 	if err := manager.reconcileSchedulerLocked(context.Background(), workspace); err != nil {
@@ -1393,7 +1428,7 @@ func TestNativeSchedulerPauseResumeSkipsPausedOccurrences(t *testing.T) {
 func TestExpiredOneTimePauseRuntimePathsMatch(t *testing.T) {
 	manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
 	at := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
-	now := at.Add(time.Minute)
+	now := at
 	schedule := app.Schedule{
 		ID: "schedule-paused-expiry", Revision: 7, State: app.ScheduleStatePaused,
 		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: at.Format(time.RFC3339Nano)},
@@ -1485,6 +1520,168 @@ func TestNativeSchedulerResumeSkipsExpiredOneTimeWithoutReconcile(t *testing.T) 
 	}
 	if messages := scheduleOccurrenceMessages(t, workspace.Path, "workspace"); len(messages) != 0 {
 		t.Fatalf("resume delivered an occurrence skipped while paused: %#v", messages)
+	}
+}
+
+func TestNativeSchedulerResumeUsesPersistedTransitionBoundary(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	hub := httptest.NewServer(fake)
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Once", Condition: "after resume", Target: "workspace",
+		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := puaWorkspace.PauseSchedule(created.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Move the persisted deadline behind the wall clock without sleeping. The
+	// Scheduler clock still reports an instant just before that deadline, so
+	// the pre-resume paused reconciliation cannot classify the occurrence.
+	at := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	rewriteSchedulerTestOneTimeDeadline(t, puaWorkspace, created.ID, at)
+	manager.now = func() time.Time { return at.Add(-time.Nanosecond) }
+
+	native := newNativeScheduler(manager, workspace)
+	resumed, err := native.Change(context.Background(), NativeSchedulerChange{Operation: app.ScheduleChangeResume, ID: created.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumeBoundary := generationTime(resumed.UpdatedAt)
+	if resumed.State != app.ScheduleStateActive || resumeBoundary.Before(at) {
+		t.Fatalf("resume transition = %#v, want boundary at or after %s", resumed, at)
+	}
+	snapshot, err := native.Snapshot(resumeBoundary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Schedules) != 1 || snapshot.Schedules[0].State != app.ScheduleStateActive || snapshot.Schedules[0].EffectiveState != app.ScheduleStateCompleted || snapshot.Schedules[0].LastOutcome != schedulerOutcomePaused || snapshot.Schedules[0].LastOccurrenceAt != at.Format(time.RFC3339Nano) || snapshot.Schedules[0].NextRunAt != "" || snapshot.NextWakeAt != "" {
+		t.Fatalf("resume race snapshot = %#v", snapshot)
+	}
+	if messages := scheduleOccurrenceMessages(t, workspace.Path, "workspace"); len(messages) != 0 {
+		t.Fatalf("resume race delivered paused occurrence: %#v", messages)
+	}
+	if _, err := native.Reconcile(context.Background(), resumeBoundary); err != nil {
+		t.Fatal(err)
+	}
+	afterReconcile, err := native.Snapshot(resumeBoundary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(afterReconcile, snapshot) {
+		t.Fatalf("post-resume reconcile changed terminal snapshot: before=%#v after=%#v", snapshot, afterReconcile)
+	}
+	if messages := scheduleOccurrenceMessages(t, workspace.Path, "workspace"); len(messages) != 0 {
+		t.Fatalf("post-resume reconcile delivered paused occurrence: %#v", messages)
+	}
+}
+
+func TestNativeSchedulerPersistedResumeBoundarySurvivesRestartWindow(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	hub := httptest.NewServer(fake)
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Once", Condition: "across restart", Target: "workspace",
+		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	paused, err := puaWorkspace.PauseSchedule(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	rewriteSchedulerTestOneTimeDeadline(t, puaWorkspace, created.ID, at)
+	beforeDeadline := at.Add(-time.Nanosecond)
+	native := newNativeScheduler(manager, workspace)
+	if _, err := native.Reconcile(context.Background(), beforeDeadline); err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := native.schedulerRuntime(created.ID)
+	if err != nil || runtime.Revision != paused.Revision || runtime.EffectiveState != app.ScheduleStatePaused {
+		t.Fatalf("pre-resume paused runtime = %#v, %v", runtime, err)
+	}
+
+	// Model a crash after the portable transition commits and before Change can
+	// refresh the runtime checkpoint.
+	resumed, err := puaWorkspace.ResumeSchedule(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumeBoundary := generationTime(resumed.UpdatedAt)
+	if resumeBoundary.Before(at) {
+		t.Fatalf("persisted resume boundary = %s, want at or after %s", resumeBoundary, at)
+	}
+	restartedManager := newAgentManager(manager.server)
+	restarted := newNativeScheduler(restartedManager, workspace)
+	if _, err := restarted.Reconcile(context.Background(), resumeBoundary); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := restarted.Snapshot(resumeBoundary)
+	if err != nil || len(snapshot.Schedules) != 1 || snapshot.Schedules[0].EffectiveState != app.ScheduleStateCompleted || snapshot.Schedules[0].LastOutcome != schedulerOutcomePaused || snapshot.Schedules[0].NextRunAt != "" || snapshot.NextWakeAt != "" {
+		t.Fatalf("restart-window snapshot = %#v, %v", snapshot, err)
+	}
+	if messages := scheduleOccurrenceMessages(t, workspace.Path, "workspace"); len(messages) != 0 {
+		t.Fatalf("restart window delivered paused occurrence: %#v", messages)
+	}
+}
+
+func TestNativeSchedulerResumeDeliversOneTimeStrictlyAfterTransition(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	hub := httptest.NewServer(fake)
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+	created, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Once", Condition: "after resume", Target: "workspace",
+		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: at.Format(time.RFC3339Nano)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := puaWorkspace.PauseSchedule(created.ID); err != nil {
+		t.Fatal(err)
+	}
+	manager.now = func() time.Time { return at.Add(-time.Minute) }
+
+	native := newNativeScheduler(manager, workspace)
+	resumed, err := native.Change(context.Background(), NativeSchedulerChange{Operation: app.ScheduleChangeResume, ID: created.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !at.After(generationTime(resumed.UpdatedAt)) {
+		t.Fatalf("deadline %s is not strictly after resume transition %#v", at, resumed)
+	}
+	if _, err := native.Reconcile(context.Background(), at); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := native.Snapshot(at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Schedules) != 1 || snapshot.Schedules[0].EffectiveState != app.ScheduleStateCompleted || snapshot.Schedules[0].LastOutcome != schedulerOutcomeAccepted || snapshot.Schedules[0].LastOccurrenceAt != at.Format(time.RFC3339Nano) || snapshot.Schedules[0].NextRunAt != "" {
+		t.Fatalf("future-after-resume snapshot = %#v", snapshot)
+	}
+	if messages := scheduleOccurrenceMessages(t, workspace.Path, "workspace"); len(messages) != 1 {
+		t.Fatalf("future-after-resume messages = %#v, want one", messages)
 	}
 }
 

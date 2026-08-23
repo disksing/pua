@@ -1544,18 +1544,28 @@ test("multiline send restores single-line Enter and explicitly resumes timeline 
   await expect.poll(() => timeline.evaluate((log) => log.scrollHeight - log.scrollTop - log.clientHeight)).toBeGreaterThan(32);
 
   const input = page.locator("#chatInput");
+  await input.fill("delete the newline");
+  await input.press("Shift+Enter");
+  await expect(input).toHaveValue("delete the newline\n");
+  await input.press("Backspace");
+  await expect(input).toHaveValue("delete the newline");
+  await input.press("Enter");
+  await expect.poll(() => harness.inputBodies.length).toBe(1);
+  expect(harness.inputBodies[0]).toMatchObject({ text: "delete the newline" });
+  await expect(input).toHaveValue("");
+
   await input.fill("first line\nsecond line");
   await input.press("Control+Enter");
-  await expect.poll(() => harness.inputBodies.length).toBe(1);
-  expect(harness.inputBodies[0]).toMatchObject({ text: "first line\nsecond line" });
+  await expect.poll(() => harness.inputBodies.length).toBe(2);
+  expect(harness.inputBodies[1]).toMatchObject({ text: "first line\nsecond line" });
   await expect(input).toHaveValue("");
   await expect.poll(() => timeline.evaluate((log) => log.scrollHeight - log.scrollTop - log.clientHeight)).toBeLessThanOrEqual(1);
   await expect.poll(() => page.evaluate(() => window.getSelection()?.toString() || "")).toBe("");
 
   await input.fill("next single-line message");
   await input.press("Enter");
-  await expect.poll(() => harness.inputBodies.length).toBe(2);
-  expect(harness.inputBodies[1]).toMatchObject({ text: "next single-line message" });
+  await expect.poll(() => harness.inputBodies.length).toBe(3);
+  expect(harness.inputBodies[2]).toMatchObject({ text: "next single-line message" });
 });
 
 test("shows waiting messages above the composer and inserts one through steer", async ({ page }) => {

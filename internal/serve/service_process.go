@@ -106,6 +106,13 @@ type serviceLogSink struct {
 	maxFiles int
 	file     *os.File
 	size     int64
+	fileOps  serviceLogFileOps
+}
+
+type serviceLogFileOps struct {
+	openFile func(string, int, os.FileMode) (*os.File, error)
+	remove   func(string) error
+	rename   func(string, string) error
 }
 
 // runServiceGroupCommand runs a bounded supervisor hook in its own process
@@ -310,7 +317,16 @@ func newServiceLogSink(path string, rotation ServiceLogRotationConfig) *serviceL
 	if rotation.MaxFiles <= 0 {
 		rotation.MaxFiles = defaultLogMaxFiles
 	}
-	return &serviceLogSink{path: path, maxBytes: rotation.MaxBytes, maxFiles: rotation.MaxFiles}
+	return &serviceLogSink{
+		path:     path,
+		maxBytes: rotation.MaxBytes,
+		maxFiles: rotation.MaxFiles,
+		fileOps: serviceLogFileOps{
+			openFile: os.OpenFile,
+			remove:   os.Remove,
+			rename:   os.Rename,
+		},
+	}
 }
 
 func (s *serviceLogSink) Write(data []byte) (int, error) {
@@ -332,6 +348,14 @@ func (s *serviceLogSink) Write(data []byte) (int, error) {
 		chunk := data[written:]
 		if s.maxBytes > 0 {
 			remaining := s.maxBytes - s.size
+			if remaining <= 0 {
+				return written, fmt.Errorf(
+					"service log %q remains at size %d after rotation (limit %d)",
+					s.path,
+					s.size,
+					s.maxBytes,
+				)
+			}
 			if int64(len(chunk)) > remaining {
 				chunk = chunk[:remaining]
 			}
@@ -361,38 +385,54 @@ func (s *serviceLogSink) ensureFileLocked() error {
 	} else if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	file, err := os.OpenFile(s.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	file, err := s.fileOps.openFile(s.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}
-	info, statErr := file.Stat()
-	if statErr == nil {
-		s.size = info.Size()
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return fmt.Errorf("stat service log %q: %w", s.path, err)
 	}
+	s.size = info.Size()
 	s.file = file
 	return nil
 }
 
 func (s *serviceLogSink) rotateLocked() error {
 	if s.file != nil {
-		_ = s.file.Close()
+		if err := s.file.Close(); err != nil {
+			s.file = nil
+			return fmt.Errorf("close service log %q for rotation: %w", s.path, err)
+		}
 		s.file = nil
 	}
 	for index := s.maxFiles - 1; index >= 1; index-- {
 		old := fmt.Sprintf("%s.%d", s.path, index)
 		next := fmt.Sprintf("%s.%d", s.path, index+1)
 		if index+1 >= s.maxFiles {
-			_ = os.Remove(next)
+			if err := s.fileOps.remove(next); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("remove service log backup %q: %w", next, err)
+			}
 		}
-		_ = os.Rename(old, next)
+		if err := s.fileOps.rename(old, next); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("rotate service log backup %q to %q: %w", old, next, err)
+		}
 	}
 	if s.maxFiles > 1 {
-		_ = os.Rename(s.path, s.path+".1")
+		next := s.path + ".1"
+		if err := s.fileOps.rename(s.path, next); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("rotate service log %q to %q: %w", s.path, next, err)
+		}
 	} else {
-		_ = os.Remove(s.path)
+		if err := s.fileOps.remove(s.path); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove service log %q for rotation: %w", s.path, err)
+		}
 	}
-	s.size = 0
-	return s.ensureFileLocked()
+	if err := s.ensureFileLocked(); err != nil {
+		return fmt.Errorf("open service log %q after rotation: %w", s.path, err)
+	}
+	return nil
 }
 
 func (s *serviceLogSink) Close() error {

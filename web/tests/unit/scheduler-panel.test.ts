@@ -1,8 +1,11 @@
 import { mount, tick, unmount } from "svelte";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import DetailPanel from "../../src/components/DetailPanel.svelte";
 import SchedulerPanel from "../../src/components/SchedulerPanel.svelte";
-import type { SchedulerConfigRecord } from "../../src/models/workspace";
+import { createModelChannel } from "../../src/components/model-channel";
+import type { DetailPanelModel } from "../../src/components/models";
+import type { ScheduleRecord, SchedulerConfigRecord } from "../../src/models/workspace";
 
 const mounted: Array<ReturnType<typeof mount>> = [];
 
@@ -11,6 +14,63 @@ const config: SchedulerConfigRecord = {
   agentBinding: { kind: "profile", name: "default" },
   schedules: [],
 };
+
+const schedule: ScheduleRecord = {
+  id: "schedule-0123456789abcdef01234567",
+  revision: 1,
+  description: "Recover target",
+  condition: "once",
+  target: "project1.task1",
+  state: "active",
+  trigger: { type: "at", at: "2026-08-23T09:00:00Z" },
+  createdAt: "2026-08-23T08:00:00Z",
+  updatedAt: "2026-08-23T08:00:00Z",
+  effectiveState: "active",
+};
+
+function schedulerModel(workspaceId: string, onRefreshScheduler: () => Promise<void>, onToast: (message: string) => void): DetailPanelModel {
+  return {
+    identity: `${workspaceId}:scheduler:scheduler`,
+    workspaceId,
+    workspaceName: workspaceId,
+    resourceId: "scheduler",
+    resourceType: "scheduler",
+    resourceTitle: "Scheduler",
+    parent: null,
+    loading: false,
+    detail: { id: "scheduler", type: "scheduler", title: "Scheduler", path: "scheduler", scheduler: { ...config, schedules: [schedule] } },
+    wiki: null,
+    workspaceAgents: null,
+    workspaceDefaults: { project: { kind: "profile", name: "default" }, task: { kind: "profile", name: "default" } },
+    workspaceUsers: [],
+    currentUserName: "User",
+    generationPolicy: { enabled: true, maxTurns: 20, maxAccumulatedTurnMinutes: 120 },
+    stallWatchdogPolicy: { enabled: true, timeoutMinutes: 30 },
+    agentBinding: { kind: "profile", name: "default" },
+    agentProfiles: [],
+    agents: [],
+    resolveResourceTitle: (resourceId) => resourceId === "project1.task1" ? "Target task" : null,
+    onNavigate: vi.fn(),
+    onCreateTask: vi.fn(),
+    onArchive: vi.fn(),
+    onSaveWorkspaceAgents: vi.fn(async () => ({ path: "AGENTS.md", content: "", contentHash: "saved" })),
+    onSaveMarkdownFile: vi.fn(async (path, content) => ({ path, content, contentHash: "saved" })),
+    onDeleteArtifact: vi.fn(async () => undefined),
+    onSaveAgentBinding: vi.fn(async () => undefined),
+    onRenameResource: vi.fn(async () => undefined),
+    onSaveDescription: vi.fn(async () => undefined),
+    onSaveWorkspaceDefaults: vi.fn(async () => undefined),
+    onSaveWorkspaceUserPreference: vi.fn(async () => undefined),
+    onSwitchWorkspaceUser: vi.fn(async () => undefined),
+    onAddWorkspaceUser: vi.fn(async () => undefined),
+    onDeleteWorkspaceUser: vi.fn(async () => undefined),
+    onSaveGenerationPolicy: vi.fn(async () => undefined),
+    onSaveStallWatchdogPolicy: vi.fn(async () => undefined),
+    onSaveTaskDefault: vi.fn(async () => undefined),
+    onRefreshScheduler,
+    onToast,
+  };
+}
 
 function mountPanel(panelConfig = config) {
   const target = document.createElement("section");
@@ -41,7 +101,52 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-describe("SchedulerPanel target validation", () => {
+describe("SchedulerPanel", () => {
+  it("rejects a late pause acknowledgement after the Workspace changes", async () => {
+    const pending = new Map<string, (response: Response) => void>();
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => new Promise<Response>((resolve) => pending.set(String(input), resolve))));
+    const oldChanged = vi.fn(async () => undefined);
+    const oldToast = vi.fn();
+    const currentChanged = vi.fn(async () => undefined);
+    const currentToast = vi.fn();
+    const oldModel = schedulerModel("workspace-old", oldChanged, oldToast);
+    const channel = createModelChannel(oldModel);
+    const target = document.createElement("section");
+    document.body.append(target);
+    mounted.push(mount(DetailPanel, { target, props: { channel } }));
+    await tick();
+
+    const pauseButton = () => Array.from(target.querySelectorAll<HTMLButtonElement>("button"))
+      .find((button) => button.textContent?.trim() === "Pause")!;
+    pauseButton().click();
+    await vi.waitFor(() => expect(pending.has("/api/workspaces/workspace-old/scheduler/schedule-0123456789abcdef01234567/pause")).toBe(true));
+
+    channel.publish(schedulerModel("workspace-current", currentChanged, currentToast));
+    await tick();
+    pauseButton().click();
+    await vi.waitFor(() => expect(pending.has("/api/workspaces/workspace-current/scheduler/schedule-0123456789abcdef01234567/pause")).toBe(true));
+
+    pending.get("/api/workspaces/workspace-old/scheduler/schedule-0123456789abcdef01234567/pause")!(new Response(JSON.stringify({}), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await tick();
+
+    expect(oldChanged).not.toHaveBeenCalled();
+    expect(oldToast).not.toHaveBeenCalled();
+    expect(currentChanged).not.toHaveBeenCalled();
+    expect(currentToast).not.toHaveBeenCalled();
+    expect(pauseButton().disabled).toBe(true);
+
+    pending.get("/api/workspaces/workspace-current/scheduler/schedule-0123456789abcdef01234567/pause")!(new Response(JSON.stringify({}), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    await vi.waitFor(() => expect(currentChanged).toHaveBeenCalledOnce());
+    expect(currentToast).toHaveBeenCalledWith("Schedule paused.");
+  });
+
   it("marks an unknown target invalid and prevents the schedule request", async () => {
     const fetch = vi.fn();
     vi.stubGlobal("fetch", fetch);
@@ -99,15 +204,7 @@ describe("SchedulerPanel target validation", () => {
     const target = mountPanel({
       ...config,
       schedules: [{
-        id: "schedule-0123456789abcdef01234567",
-        revision: 1,
-        description: "Recover target",
-        condition: "once",
-        target: "project1.task1",
-        state: "active",
-        trigger: { type: "at", at: "2026-08-23T09:00:00Z" },
-        createdAt: "2026-08-23T08:00:00Z",
-        updatedAt: "2026-08-23T08:00:00Z",
+        ...schedule,
         effectiveState: "attention_required",
         lastOutcome: "attention_required",
       }],

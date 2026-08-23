@@ -73,6 +73,7 @@ type providerMessageContext struct {
 	OpenerRole     string                 `json:"openerRole"`
 	OpenerSender   *agentHubMessageSender `json:"openerSender,omitempty"`
 	OpenerResponse string                 `json:"openerResponse"`
+	OpenerUnknown  bool                   `json:"openerUnknown,omitempty"`
 }
 
 // resourceMailboxMessage is the durable PUA-side ownership record for one

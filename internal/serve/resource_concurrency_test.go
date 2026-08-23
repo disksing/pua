@@ -183,7 +183,8 @@ func TestAcceptedMessageDoesNotBlockAnotherWorkspaceStatus(t *testing.T) {
 	messageStarted := make(chan struct{})
 	releaseMessage := make(chan struct{})
 	fake.messageHook = func(sessionID string, message agentHubInboundMessage) {
-		if sessionID != recordA.AgentHubSessionID || message.Text != "blocked A" {
+		payload, ok := decodePUAMessagePayload(message.Payload)
+		if sessionID != recordA.AgentHubSessionID || !ok || payload.Text != "blocked A" {
 			return
 		}
 		close(messageStarted)

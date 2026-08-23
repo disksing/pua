@@ -87,6 +87,20 @@ func TestProviderMessageTextDescribesLocalizedResponseAndInsertedConversation(t 
 			steer: true,
 			want:  "Inserted message from agent \"Display only\" (Current conversation: user \"disksing\" [sender receives: progress + final reply]):\nnote",
 		},
+		{
+			name: "unknown opener keeps delivery independent from context lookup",
+			message: resourceMailboxMessage{Text: "note", Role: "agent", Sender: &agentHubMessageSender{ID: "project1.task347"},
+				ProviderContext: &providerMessageContext{Language: "en", OpenerUnknown: true}},
+			steer: true,
+			want:  "Inserted message from agent \"project1.task347\" (Reply via `pua message send --to=project1.task347 '<reply>'`):\nnote",
+		},
+		{
+			name: "Chinese unknown opener without reply target stays compact",
+			message: resourceMailboxMessage{Text: "通知", Role: "system",
+				ProviderContext: &providerMessageContext{Language: "zh-CN", OpenerUnknown: true}},
+			steer: true,
+			want:  "来自系统的插入消息：\n通知",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

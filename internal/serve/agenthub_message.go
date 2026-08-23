@@ -3,7 +3,9 @@ package serve
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"reflect"
 	"strconv"
 	"strings"
@@ -129,7 +131,10 @@ func chineseProviderMessageSource(party, kind string) string {
 	if strings.HasPrefix(party, "Agent") {
 		return "来自 " + party + " 的" + kind
 	}
-	return "来自" + party + " 的" + kind
+	if strings.Contains(party, " ") {
+		return "来自" + party + " 的" + kind
+	}
+	return "来自" + party + "的" + kind
 }
 
 func providerMessageReplyTarget(role string, sender *agentHubMessageSender) (string, bool) {
@@ -201,6 +206,19 @@ func providerMessageTextWithContext(message resourceMailboxMessage, steer bool) 
 			return chineseProviderMessageSource(from, "消息") + " " + providerResponseLabel(language, context.OpenerResponse) + "：\n" + message.Text
 		}
 		return "Message from " + from + " " + providerResponseLabel(language, context.OpenerResponse) + ":\n" + message.Text
+	}
+	if context.OpenerUnknown {
+		replyTarget, canReply := providerMessageReplyTarget(message.Role, message.Sender)
+		if language == localize.SimplifiedChinese {
+			if canReply {
+				return chineseProviderMessageSource(from, "插入消息") + "（回复请使用 `pua message send --to=" + replyTarget + " '<reply>'`）：\n" + message.Text
+			}
+			return chineseProviderMessageSource(from, "插入消息") + "：\n" + message.Text
+		}
+		if canReply {
+			return "Inserted message from " + from + " (Reply via `pua message send --to=" + replyTarget + " '<reply>'`):\n" + message.Text
+		}
+		return "Inserted message from " + from + ":\n" + message.Text
 	}
 	if sameProviderMessageParty(message.Role, message.Sender, context.OpenerRole, context.OpenerSender) {
 		if language == localize.SimplifiedChinese {
@@ -285,29 +303,37 @@ func (m *agentManager) ensureProviderMessageContext(ctx context.Context, workspa
 		OpenerSender: normalizedMessageSender(message.Sender), OpenerResponse: providerOpenerResponse(message.Role, &message),
 	}
 	if message.ActualMode == resourceMessageModeSteer {
+		contextValue.OpenerUnknown = true
 		turnID := strings.TrimSpace(message.TurnID)
 		if turnID == "" {
 			turnID = strings.TrimSpace(session.CurrentTurnID)
 		}
-		if turnID == "" {
-			return resourceMailboxMessage{}, fmt.Errorf("prepare inserted message %s: active Turn id is empty", message.ID)
-		}
 		contextValue.TurnID = turnID
-		openerMessage := providerContextMailboxOpener(workspace.Path, message.ResourceID, generationID, session.ID, turnID, message.Sequence)
-		if openerMessage == nil {
-			turn, _, turnErr := client.SessionTurn(ctx, session.ID, turnID)
-			if turnErr != nil {
-				return resourceMailboxMessage{}, fmt.Errorf("prepare inserted message %s Turn context: %w", message.ID, turnErr)
+		if turnID != "" {
+			openerMessage := providerContextMailboxOpener(workspace.Path, message.ResourceID, generationID, session.ID, turnID, message.Sequence)
+			if openerMessage == nil {
+				turn, _, turnErr := client.SessionTurn(ctx, session.ID, turnID)
+				if turnErr != nil {
+					var upstream *agentHubAPIError
+					if !errors.As(turnErr, &upstream) || upstream.StatusCode != http.StatusNotFound {
+						return resourceMailboxMessage{}, fmt.Errorf("prepare inserted message %s Turn context: %w", message.ID, turnErr)
+					}
+				} else {
+					_, openerRole, openerSender := puaMessagePresentation(turn.TriggerPreview, turn.TriggerRole, turn.TriggerSender, turn.TriggerPayload)
+					contextValue.OpenerRole = normalizedProviderMessageRole(openerRole)
+					contextValue.OpenerSender = normalizedMessageSender(openerSender)
+					openerMessage = providerContextOpenerMessage(workspace.Path, message.ResourceID, session.ID, turnID, turn.TriggerMessageID)
+					contextValue.OpenerUnknown = false
+				}
+			} else {
+				contextValue.OpenerRole = normalizedProviderMessageRole(openerMessage.Role)
+				contextValue.OpenerSender = normalizedMessageSender(openerMessage.Sender)
+				contextValue.OpenerUnknown = false
 			}
-			_, openerRole, openerSender := puaMessagePresentation(turn.TriggerPreview, turn.TriggerRole, turn.TriggerSender, turn.TriggerPayload)
-			contextValue.OpenerRole = normalizedProviderMessageRole(openerRole)
-			contextValue.OpenerSender = normalizedMessageSender(openerSender)
-			openerMessage = providerContextOpenerMessage(workspace.Path, message.ResourceID, session.ID, turnID, turn.TriggerMessageID)
-		} else {
-			contextValue.OpenerRole = normalizedProviderMessageRole(openerMessage.Role)
-			contextValue.OpenerSender = normalizedMessageSender(openerMessage.Sender)
+			if !contextValue.OpenerUnknown {
+				contextValue.OpenerResponse = providerOpenerResponse(contextValue.OpenerRole, openerMessage)
+			}
 		}
-		contextValue.OpenerResponse = providerOpenerResponse(contextValue.OpenerRole, openerMessage)
 	}
 	return updateMailboxMessage(workspace.Path, message.ID, func(current *resourceMailboxMessage) {
 		if current.ProviderContext == nil {

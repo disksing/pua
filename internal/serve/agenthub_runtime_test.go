@@ -1293,7 +1293,7 @@ func TestAgentHubManualMessagesCarryBrowserUserProvenance(t *testing.T) {
 		}
 	}
 	if initial.Type == "" || initialMessage.SchemaVersion != agentHubOpaqueMessageSchema ||
-		initialMessage.Text != "Message from user \"Ada Lovelace\":\nhello" || initialPayload.Role != "user" ||
+		initialMessage.Text != "Message from user \"Ada Lovelace\" [sender receives: progress + final reply]:\nhello" || initialPayload.Role != "user" ||
 		initialPayload.Sender == nil || initialPayload.Sender.Name != "Ada Lovelace" {
 		t.Fatalf("initial opaque message = message %#v payload %#v; events=%#v", initialMessage, initialPayload, initialEvents)
 	}

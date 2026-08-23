@@ -35,7 +35,29 @@ PUA_SERVE_CONFIG    serve configuration file path
 
 项目、任务、日志、归档、文件预览、Wiki、diff 和模板路由都以显式 Workspace ID 为作用域。结构化模板由 `internal/app` 校验和渲染；`POST .../tasks/preview` 返回最终标题、Markdown 和模板来源/digest，创建时可提交 `expectedTemplateDigest` 防止预览后模板发生变化。
 
-Scheduler API 同样委托 `internal/app`，提供 `GET/POST .../scheduler`、`PUT/DELETE .../scheduler/{scheduleId}` 与 `PUT .../scheduler/settings`。Server 不解析自然语言 condition；Web 界面使用这些接口维护调度项、独立绑定和唤醒间隔。
+The owner Server exposes the Scheduler API at these Workspace-scoped paths:
+
+```text
+GET    /api/workspaces/{workspaceId}/scheduler
+POST   /api/workspaces/{workspaceId}/scheduler
+POST   /api/workspaces/{workspaceId}/scheduler/changes
+PUT    /api/workspaces/{workspaceId}/scheduler/{scheduleId}
+DELETE /api/workspaces/{workspaceId}/scheduler/{scheduleId}
+POST   /api/workspaces/{workspaceId}/scheduler/{scheduleId}/pause
+POST   /api/workspaces/{workspaceId}/scheduler/{scheduleId}/resume
+```
+
+`GET .../scheduler` returns the portable definitions combined with the
+`NativeScheduler` runtime projection, including effective state, next run, and
+the latest occurrence outcome. `POST .../scheduler/changes` is the structured
+mutation boundary for create and revision-checked update operations; direct
+pause, resume, and remove routes are also serialized by the owner Server. Web
+create and edit forms do not mutate definitions directly: `POST .../scheduler`
+and `PUT .../scheduler/{scheduleId}` enqueue ordinary user messages for the
+Scheduler resource, whose Agent compiles the natural-language request and asks
+for clarification before changing an ambiguous definition. There is no
+Scheduler settings or wake-interval endpoint; scheduling deadlines come from
+the structured rules and persisted runtime checkpoint.
 
 ## Resource generation and AgentHub facts
 

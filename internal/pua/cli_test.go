@@ -51,27 +51,85 @@ func TestVersion(t *testing.T) {
 	}
 }
 
-func TestSchedulerCommandsManageNaturalLanguageSchedules(t *testing.T) {
+func TestSchedulerCommandsUseOwningServerForNativeSchedules(t *testing.T) {
 	withTempCwd(t, func(root string) {
 		run(t, "init")
-		createdOutput := run(t, "scheduler", "add", "--description", "Review release", "--condition", "when the release branch is green", "--target", "workspace")
+		workspace, err := app.OpenWorkspace(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/scheduler"):
+				config, readErr := workspace.Scheduler()
+				if readErr != nil {
+					t.Error(readErr)
+					http.Error(w, readErr.Error(), http.StatusInternalServerError)
+					return
+				}
+				snapshot := app.SchedulerSnapshot{SchemaVersion: config.SchemaVersion, AgentBinding: config.AgentBinding, Schedules: make([]app.ScheduleSnapshot, 0, len(config.Schedules))}
+				for _, schedule := range config.Schedules {
+					snapshot.Schedules = append(snapshot.Schedules, app.ScheduleSnapshot{Schedule: schedule, EffectiveState: schedule.State})
+				}
+				_ = json.NewEncoder(w).Encode(snapshot)
+			case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/scheduler/changes"):
+				var body schedulerChangePayload
+				if decodeErr := json.NewDecoder(r.Body).Decode(&body); decodeErr != nil {
+					t.Error(decodeErr)
+					http.Error(w, decodeErr.Error(), http.StatusBadRequest)
+					return
+				}
+				var schedule app.Schedule
+				var changeErr error
+				switch body.Operation {
+				case "create":
+					schedule, changeErr = workspace.AddSchedule(app.CreateScheduleInput{Description: *body.Description, Condition: *body.Condition, Target: *body.Target, Trigger: body.Trigger})
+				case "update":
+					schedule, changeErr = workspace.UpdateSchedule(app.UpdateScheduleInput{ID: body.ID, ExpectedRevision: body.ExpectedRevision, Description: body.Description, Condition: body.Condition, Guard: body.Guard, Target: body.Target, Trigger: body.Trigger})
+				case "pause":
+					schedule, changeErr = workspace.PauseSchedule(body.ID)
+				case "resume":
+					schedule, changeErr = workspace.ResumeSchedule(body.ID)
+				case "remove":
+					schedule, changeErr = workspace.RemoveSchedule(body.ID)
+				}
+				if changeErr != nil {
+					http.Error(w, changeErr.Error(), http.StatusBadRequest)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(schedule)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+		lock, err := json.Marshal(map[string]any{"pid": os.Getpid(), "address": server.URL, "workspacePath": root})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, ".pua", "serve.lock"), lock, 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		at := time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)
+		createdOutput := run(t, "scheduler", "add", "--description", "Review release", "--condition", "at the agreed review time", "--target", "workspace", "--at", at)
 		var created app.Schedule
 		if err := json.Unmarshal([]byte(createdOutput), &created); err != nil {
 			t.Fatal(err)
 		}
-		if created.ID == "" || created.Description != "Review release" || created.Target != "workspace" {
+		if created.ID == "" || created.Revision != 1 || created.Trigger == nil || created.Target != "workspace" {
 			t.Fatalf("created schedule = %#v", created)
 		}
 		listed := run(t, "scheduler", "list")
-		if !strings.Contains(listed, created.ID+"\tReview release\twhen the release branch is green\tworkspace") {
+		if !strings.Contains(listed, created.ID+"\t1\tactive\tat ") {
 			t.Fatalf("schedule list = %q", listed)
 		}
-		updatedOutput := run(t, "scheduler", "update", "--id="+created.ID, "--condition=after 10:00 when the release branch is green", "--target=scheduler")
+		updatedOutput := run(t, "scheduler", "update", "--id="+created.ID, "--revision=1", "--condition=at the agreed time when the release branch is green", "--target=scheduler")
 		var updated app.Schedule
 		if err := json.Unmarshal([]byte(updatedOutput), &updated); err != nil {
 			t.Fatal(err)
 		}
-		if updated.Condition != "after 10:00 when the release branch is green" || updated.Target != app.SchedulerResourceID || updated.CreatedAt != created.CreatedAt {
+		if updated.Revision != 2 || updated.Condition != "at the agreed time when the release branch is green" || updated.Target != app.SchedulerResourceID || updated.CreatedAt != created.CreatedAt {
 			t.Fatalf("updated schedule = %#v", updated)
 		}
 		shown := run(t, "scheduler", "show", "--id", created.ID)
@@ -79,7 +137,7 @@ func TestSchedulerCommandsManageNaturalLanguageSchedules(t *testing.T) {
 			t.Fatalf("schedule show = %s", shown)
 		}
 		jsonList := run(t, "scheduler", "list", "--json")
-		if !strings.Contains(jsonList, `"wakeIntervalMinutes": 30`) || !strings.Contains(jsonList, created.ID) {
+		if strings.Contains(jsonList, "wakeIntervalMinutes") || !strings.Contains(jsonList, created.ID) {
 			t.Fatalf("JSON schedule list = %s", jsonList)
 		}
 		removed := run(t, "scheduler", "remove", "--id="+created.ID)
@@ -90,6 +148,31 @@ func TestSchedulerCommandsManageNaturalLanguageSchedules(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+}
+
+func TestSchedulerTriggerOptionsAreStructuredAndUnambiguous(t *testing.T) {
+	interval, present, err := schedulerTriggerFromOptions(map[string]string{"every": "5m", "anchor": "2026-08-23T09:00:00+08:00"})
+	if err != nil || !present || interval.Type != app.ScheduleTriggerInterval || interval.EverySeconds != 300 {
+		t.Fatalf("interval trigger = %#v, present=%v, err=%v", interval, present, err)
+	}
+	cron, present, err := schedulerTriggerFromOptions(map[string]string{"cron": "0 0 9 * * *", "timezone": "Asia/Shanghai"})
+	if err != nil || !present || cron.Type != app.ScheduleTriggerCron {
+		t.Fatalf("cron trigger = %#v, present=%v, err=%v", cron, present, err)
+	}
+	for name, values := range map[string]map[string]string{
+		"mixed forms":       {"at": "2026-08-23T09:00:00Z", "cron": "0 0 9 * * *", "timezone": "UTC"},
+		"missing anchor":    {"every": "5m"},
+		"sub-minute":        {"every": "59s", "anchor": "2026-08-23T09:00:00Z"},
+		"implicit timezone": {"cron": "0 0 9 * * *", "timezone": "Local"},
+	} {
+		if _, _, err := schedulerTriggerFromOptions(values); err == nil {
+			t.Fatalf("%s unexpectedly accepted", name)
+		}
+	}
+	parsed, err := parseSchedulerOptions([]string{"--guard="}, map[string]bool{"guard": true})
+	if err != nil || parsed["guard"] != "" {
+		t.Fatalf("empty guard cannot clear optional predicate: %#v, %v", parsed, err)
+	}
 }
 
 func TestUserListShowsWorkspaceProfiles(t *testing.T) {

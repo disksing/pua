@@ -46,6 +46,14 @@
     target = "workspace";
   }
 
+  function triggerLabel(schedule: ScheduleRecord): string {
+    const trigger = schedule.trigger;
+    if (!trigger) return "Needs compilation";
+    if (trigger.type === "at") return `At ${trigger.at}`;
+    if (trigger.type === "interval") return `Every ${trigger.everySeconds}s from ${trigger.anchorAt}`;
+    return `${trigger.cron} (${trigger.timeZone})`;
+  }
+
   async function saveSchedule(): Promise<void> {
     if (!description.trim() || !condition.trim() || targetError || saving) return;
     saving = true;
@@ -58,7 +66,7 @@
       });
       clearForm();
       await onChanged();
-      onToast(wasEditing ? "Schedule updated." : "Schedule added.");
+      onToast(wasEditing ? "Schedule update request sent." : "Schedule request sent.");
     } catch (reason) {
       onToast(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -77,10 +85,20 @@
       onToast(reason instanceof Error ? reason.message : String(reason));
     }
   }
+
+  async function setPaused(schedule: ScheduleRecord, paused: boolean): Promise<void> {
+    try {
+      await client.request(`/api/workspaces/${encodeURIComponent(workspaceId)}/scheduler/${encodeURIComponent(schedule.id)}/${paused ? "pause" : "resume"}`, { method: "POST" });
+      await onChanged();
+      onToast(paused ? "Schedule paused." : "Schedule resumed.");
+    } catch (reason) {
+      onToast(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
 </script>
 
 <div class="schedule-editor">
-  <div class="schedule-editor-heading"><div><strong>{editingId ? "Edit schedule" : "Add schedule"}</strong><span>Conditions are natural language interpreted by the Scheduler Agent.</span></div>{#if editingId}<button type="button" class="secondary-button" onclick={clearForm}>Cancel edit</button>{/if}</div>
+  <div class="schedule-editor-heading"><div><strong>{editingId ? "Edit schedule" : "Add schedule"}</strong><span>The Scheduler Agent compiles this natural-language request into a native trigger and asks when timing or timezone is ambiguous.</span></div>{#if editingId}<button type="button" class="secondary-button" onclick={clearForm}>Cancel edit</button>{/if}</div>
   <label><span>Description</span><input bind:value={description} placeholder="What should the Scheduler understand?" /></label>
   <label><span>Condition</span><textarea bind:value={condition} rows="3" placeholder="For example: when the release branch is green after 09:00 Shanghai time"></textarea></label>
   <label><span>Target resource ID</span><input bind:value={target} placeholder="workspace, scheduler, project1, or project1.task1" aria-invalid={Boolean(targetError)} aria-describedby={targetError ? "schedule-target-error" : undefined} />{#if targetError}<small id="schedule-target-error" class="schedule-field-error" role="alert">{targetError}</small>{/if}</label>
@@ -91,11 +109,11 @@
   {#if config.schedules.length}
     {#each config.schedules as schedule (schedule.id)}
       <article class:editing={editingId === schedule.id}>
-        <header><div><strong>{schedule.description}</strong><code>{schedule.id}</code></div><div><button type="button" class="secondary-button" onclick={() => edit(schedule)}><Icon name="pencil" /><span>Edit</span></button><button type="button" class="danger-button" onclick={() => remove(schedule)}><Icon name="trash-2" /><span>Remove</span></button></div></header>
-        <dl><div><dt>Condition</dt><dd>{schedule.condition}</dd></div><div><dt>Target</dt><dd><code>{schedule.target}</code></dd></div></dl>
+        <header><div><strong>{schedule.description}</strong><code>{schedule.id} · r{schedule.revision}</code></div><div><button type="button" class="secondary-button" onclick={() => edit(schedule)}><Icon name="pencil" /><span>Edit</span></button>{#if schedule.effectiveState === "paused" || schedule.effectiveState === "attention_required"}<button type="button" class="secondary-button" onclick={() => setPaused(schedule, false)}><span>Resume</span></button>{:else if schedule.effectiveState === "active"}<button type="button" class="secondary-button" onclick={() => setPaused(schedule, true)}><span>Pause</span></button>{/if}<button type="button" class="danger-button" onclick={() => remove(schedule)}><Icon name="trash-2" /><span>Remove</span></button></div></header>
+        <dl><div><dt>Trigger</dt><dd>{triggerLabel(schedule)}</dd></div><div><dt>Condition</dt><dd>{schedule.condition}</dd></div>{#if schedule.guard}<div><dt>Guard</dt><dd>{schedule.guard}</dd></div>{/if}<div><dt>Target</dt><dd><code>{schedule.target}</code></dd></div><div><dt>State</dt><dd>{schedule.effectiveState}</dd></div>{#if schedule.nextRunAt}<div><dt>Next run</dt><dd>{schedule.nextRunAt}</dd></div>{/if}{#if schedule.lastOutcome}<div><dt>Last outcome</dt><dd>{schedule.lastOutcome}</dd></div>{/if}{#if schedule.lastError}<div><dt>Error</dt><dd>{schedule.lastError}</dd></div>{/if}</dl>
       </article>
     {/each}
   {:else}
-    <div class="empty-list-row"><Icon name="calendar-clock" /><span>No schedules. The Server will not create empty Scheduler Turns.</span></div>
+    <div class="empty-list-row"><Icon name="calendar-clock" /><span>No schedules. Native Scheduler timing is idle.</span></div>
   {/if}
 </div>

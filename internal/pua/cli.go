@@ -557,28 +557,32 @@ Commands:
 
 func printSchedulerHelp() {
 	fmt.Print(`Usage:
-  pua scheduler list [--json]
-  pua scheduler show --id=<schedule>
-  pua scheduler add --description=<text> --condition=<text> --target=<resource>
-  pua scheduler update --id=<schedule> [--description=<text>] [--condition=<text>] [--target=<resource>]
-  pua scheduler remove --id=<schedule>
+  pua scheduler list [--json] [--server=<url>]
+  pua scheduler show --id=<schedule> [--server=<url>]
+  pua scheduler add --description=<text> --condition=<text> --target=<resource> [--guard=<text>] (--at=<rfc3339>|--every=<duration> --anchor=<rfc3339>|--cron=<six-fields> --timezone=<iana>) [--server=<url>]
+  pua scheduler update --id=<schedule> --revision=<n> [fields and optional trigger] [--server=<url>]
+  pua scheduler pause|resume|remove --id=<schedule> [--server=<url>]
 
 Commands:
-  pua scheduler list [--json]
-    List schedules. Use --json for structured output.
+  pua scheduler list [--json] [--server=<url>]
+    List schedules with runtime state, next run, and last outcome.
 
-  pua scheduler show --id=<schedule>
-    Print one schedule as JSON.
+  pua scheduler show --id=<schedule> [--server=<url>]
+    Print one portable definition and its runtime projection as JSON.
 
-  pua scheduler add --description=<text> --condition=<text> --target=<resource>
-    Create a natural-language schedule. <resource> is a stable resource id such
-    as workspace or project1.task1.
+  pua scheduler add ...
+    Create a native one-time, fixed-interval, or six-field cron schedule.
+    Cron timezones must be explicit IANA names; repeating rules run no more
+    frequently than once per 60 seconds.
 
-  pua scheduler update --id=<schedule> [--description=<text>] [--condition=<text>] [--target=<resource>]
-    Update one or more fields of an existing schedule.
+  pua scheduler update ...
+    Compare-and-swap an existing definition using its current revision.
 
-  pua scheduler remove --id=<schedule>
-    Remove a schedule.
+  pua scheduler pause|resume|remove ...
+    Deterministically change lifecycle state or remove a definition.
+
+All reads and mutations go through the owning pua serve process. If owner
+discovery fails, start the Server or pass --server explicitly.
 `)
 }
 

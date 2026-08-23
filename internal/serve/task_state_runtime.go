@@ -142,18 +142,14 @@ func markTaskTurnCompletionHandled(rt *agentRuntime, marker string) error {
 	return err
 }
 
-func taskHasTargetSchedule(puaWorkspace *app.Workspace, resourceID string) (bool, error) {
-	config, err := puaWorkspace.Scheduler()
-	if err != nil {
-		return false, err
-	}
+func taskHasTargetSchedule(snapshot app.SchedulerSnapshot, resourceID string) bool {
 	resourceID = normalizedResourceID(resourceID)
-	for _, schedule := range config.Schedules {
-		if normalizedResourceID(schedule.Target) == resourceID {
-			return true, nil
+	for _, schedule := range snapshot.Schedules {
+		if schedule.EffectiveState == app.ScheduleStateActive && schedule.Trigger != nil && normalizedResourceID(schedule.Target) == resourceID {
+			return true
 		}
 	}
-	return false, nil
+	return false
 }
 
 // taskCompletionSupersededByWork distinguishes a genuinely quiescent terminal
@@ -207,11 +203,11 @@ func (m *agentManager) handleTaskTurnCompletionLocked(ctx context.Context, rt *a
 		return err
 	}
 	if detail.State == app.TaskStateWaiting {
-		scheduled, scheduleErr := taskHasTargetSchedule(puaWorkspace, record.ResourceID)
+		snapshot, scheduleErr := newNativeScheduler(m, rt.workspace).Snapshot(m.now())
 		if scheduleErr != nil {
 			return scheduleErr
 		}
-		if scheduled {
+		if taskHasTargetSchedule(snapshot, record.ResourceID) {
 			return markTaskTurnCompletionHandled(rt, marker)
 		}
 	}

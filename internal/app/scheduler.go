@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/disksing/pua/internal/localize"
+	"github.com/robfig/cron/v3"
 )
 
 var scheduleIDPattern = regexp.MustCompile(`^schedule-[0-9a-f]{24}$`)
@@ -23,57 +24,113 @@ const (
 	schedulerDir                = "scheduler"
 	schedulerJSONFile           = "scheduler.json"
 	schedulerMarkdownFile       = "scheduler.md"
-	schedulerSchemaVersion      = 1
-	defaultSchedulerWakeMinutes = 30
-	minimumSchedulerWakeMinutes = 1
-	maximumSchedulerWakeMinutes = 7 * 24 * 60
+	schedulerSchemaVersion      = 2
+	minimumScheduleEverySeconds = 60
+	maximumScheduleEverySeconds = int64(^uint64(0)>>1) / int64(time.Second)
 	maximumScheduleTextLength   = 64 * 1024
+	maximumCronOccurrences      = 100000
 )
 
-// SchedulerConfig is the portable, Workspace-owned configuration and natural
-// language schedule list for the special Scheduler resource.
+const (
+	ScheduleStateActive           = "active"
+	ScheduleStatePaused           = "paused"
+	ScheduleStateCompleted        = "completed"
+	ScheduleStateNeedsCompilation = "needs_compilation"
+
+	ScheduleTriggerAt       = "at"
+	ScheduleTriggerInterval = "interval"
+	ScheduleTriggerCron     = "cron"
+)
+
+// SchedulerConfig is the portable, Workspace-owned Scheduler definition. It
+// deliberately excludes execution cursors and delivery results, which belong
+// to the Server runtime checkpoint.
 type SchedulerConfig struct {
-	SchemaVersion       int          `json:"schemaVersion"`
-	AgentBinding        AgentBinding `json:"agentBinding"`
-	WakeIntervalMinutes int          `json:"wakeIntervalMinutes"`
-	Schedules           []Schedule   `json:"schedules"`
+	SchemaVersion int          `json:"schemaVersion"`
+	AgentBinding  AgentBinding `json:"agentBinding"`
+	Schedules     []Schedule   `json:"schedules"`
 }
 
-// Schedule deliberately contains no execution projection. The Scheduler Agent
-// interprets Condition and keeps optional execution context in scheduler.md.
+// Schedule is the portable schedule definition. Trigger is absent only for a
+// migrated v1 definition waiting for Scheduler Agent compilation.
 type Schedule struct {
-	ID          string `json:"id"`
-	Description string `json:"description"`
-	Condition   string `json:"condition"`
-	Target      string `json:"target"`
-	CreatedAt   string `json:"createdAt"`
-	UpdatedAt   string `json:"updatedAt"`
+	ID          string           `json:"id"`
+	Revision    uint64           `json:"revision"`
+	Description string           `json:"description"`
+	Condition   string           `json:"condition"`
+	Guard       string           `json:"guard,omitempty"`
+	Target      string           `json:"target"`
+	State       string           `json:"state"`
+	Trigger     *ScheduleTrigger `json:"trigger,omitempty"`
+	CreatedAt   string           `json:"createdAt"`
+	UpdatedAt   string           `json:"updatedAt"`
+}
+
+// ScheduleTrigger is a tagged union. Only fields belonging to Type may be
+// populated.
+type ScheduleTrigger struct {
+	Type         string `json:"type"`
+	At           string `json:"at,omitempty"`
+	EverySeconds int64  `json:"everySeconds,omitempty"`
+	AnchorAt     string `json:"anchorAt,omitempty"`
+	Cron         string `json:"cron,omitempty"`
+	TimeZone     string `json:"timeZone,omitempty"`
 }
 
 type CreateScheduleInput struct {
 	Description string
 	Condition   string
+	Guard       string
 	Target      string
+	Trigger     *ScheduleTrigger
 }
 
 type UpdateScheduleInput struct {
-	ID          string
-	Description *string
-	Condition   *string
-	Target      *string
+	ID               string
+	ExpectedRevision uint64
+	Description      *string
+	Condition        *string
+	Guard            *string
+	Target           *string
+	Trigger          *ScheduleTrigger
 }
 
 type SchedulerSettingsInput struct {
-	AgentBinding        AgentBinding
-	WakeIntervalMinutes int
+	AgentBinding AgentBinding
+}
+
+type SchedulerSnapshot struct {
+	SchemaVersion int                `json:"schemaVersion"`
+	AgentBinding  AgentBinding       `json:"agentBinding"`
+	Schedules     []ScheduleSnapshot `json:"schedules"`
+	NextWakeAt    string             `json:"nextWakeAt,omitempty"`
+}
+
+type ScheduleSnapshot struct {
+	Schedule
+	EffectiveState   string `json:"effectiveState"`
+	NextRunAt        string `json:"nextRunAt,omitempty"`
+	LastOccurrenceAt string `json:"lastOccurrenceAt,omitempty"`
+	LastOutcome      string `json:"lastOutcome,omitempty"`
+	LastError        string `json:"lastError,omitempty"`
+}
+
+// ScheduleRevisionConflictError is returned by compare-and-swap updates.
+type ScheduleRevisionConflictError struct {
+	ScheduleID string
+	Expected   uint64
+	Actual     uint64
+}
+
+func (e *ScheduleRevisionConflictError) Error() string {
+	return fmt.Sprintf("schedule_revision_conflict: schedule %s revision is %d, expected %d", e.ScheduleID, e.Actual, e.Expected)
 }
 
 func defaultSchedulerConfig() SchedulerConfig {
 	return SchedulerConfig{
-		SchemaVersion:       schedulerSchemaVersion,
-		AgentBinding:        AgentBinding{Kind: "profile", Name: "default"},
-		WakeIntervalMinutes: defaultSchedulerWakeMinutes,
-		Schedules:           []Schedule{},
+		SchemaVersion: schedulerSchemaVersion,
+		AgentBinding:  AgentBinding{Kind: "profile", Name: "default"},
+		Schedules:     []Schedule{},
 	}
 }
 
@@ -251,6 +308,70 @@ func readSchedulerJSON(path string) (SchedulerConfig, error) {
 	return config, nil
 }
 
+type schedulerV1Config struct {
+	SchemaVersion       int          `json:"schemaVersion"`
+	AgentBinding        AgentBinding `json:"agentBinding"`
+	WakeIntervalMinutes int          `json:"wakeIntervalMinutes"`
+	Schedules           []scheduleV1 `json:"schedules"`
+}
+
+type scheduleV1 struct {
+	ID          string `json:"id"`
+	Description string `json:"description"`
+	Condition   string `json:"condition"`
+	Target      string `json:"target"`
+	CreatedAt   string `json:"createdAt"`
+	UpdatedAt   string `json:"updatedAt"`
+}
+
+// migrateSchedulerJSONLocked upgrades the only historical Scheduler schema.
+// Definitions remain byte-for-byte equivalent at the semantic fields and are
+// explicitly inert until a Scheduler Agent compiles a native trigger.
+func migrateSchedulerJSONLocked(root string) error {
+	path := schedulerJSONPath(root)
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var header struct {
+		SchemaVersion int `json:"schemaVersion"`
+	}
+	if err := json.Unmarshal(data, &header); err != nil {
+		return fmt.Errorf("read Scheduler configuration: %w", err)
+	}
+	if header.SchemaVersion == schedulerSchemaVersion {
+		return nil
+	}
+	if header.SchemaVersion != 1 {
+		return fmt.Errorf("unsupported Scheduler schemaVersion %d; expected 1 or %d", header.SchemaVersion, schedulerSchemaVersion)
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	var legacy schedulerV1Config
+	if err := decoder.Decode(&legacy); err != nil {
+		return fmt.Errorf("read Scheduler configuration: %w", err)
+	}
+	if err := ensureJSONEOF(decoder); err != nil {
+		return fmt.Errorf("read Scheduler configuration: %w", err)
+	}
+	config := SchedulerConfig{SchemaVersion: schedulerSchemaVersion, AgentBinding: legacy.AgentBinding, Schedules: make([]Schedule, 0, len(legacy.Schedules))}
+	for _, old := range legacy.Schedules {
+		config.Schedules = append(config.Schedules, Schedule{
+			ID: old.ID, Revision: 1, Description: old.Description,
+			Condition: old.Condition, Target: old.Target,
+			State:     ScheduleStateNeedsCompilation,
+			CreatedAt: old.CreatedAt, UpdatedAt: old.UpdatedAt,
+		})
+	}
+	if err := validateSchedulerConfig(config); err != nil {
+		return err
+	}
+	return writeSchedulerJSON(path, config)
+}
+
 func ensureJSONEOF(decoder *json.Decoder) error {
 	var extra any
 	if err := decoder.Decode(&extra); err == io.EOF {
@@ -267,9 +388,6 @@ func validateSchedulerConfig(config SchedulerConfig) error {
 	}
 	if _, err := NormalizeAgentBinding(config.AgentBinding); err != nil {
 		return fmt.Errorf("invalid Scheduler agent binding: %w", err)
-	}
-	if config.WakeIntervalMinutes < minimumSchedulerWakeMinutes || config.WakeIntervalMinutes > maximumSchedulerWakeMinutes {
-		return fmt.Errorf("Scheduler wake interval must be between %d and %d minutes", minimumSchedulerWakeMinutes, maximumSchedulerWakeMinutes)
 	}
 	seen := make(map[string]bool, len(config.Schedules))
 	for _, schedule := range config.Schedules {
@@ -288,10 +406,14 @@ func validateSchedule(schedule Schedule) error {
 	if !scheduleIDPattern.MatchString(schedule.ID) {
 		return errors.New("id must be a stable schedule-* identifier")
 	}
+	if schedule.Revision < 1 {
+		return errors.New("revision must be at least 1")
+	}
 	for name, value := range map[string]string{
 		"description": schedule.Description,
 		"condition":   schedule.Condition,
 		"target":      schedule.Target,
+		"state":       schedule.State,
 		"createdAt":   schedule.CreatedAt,
 		"updatedAt":   schedule.UpdatedAt,
 	} {
@@ -309,7 +431,156 @@ func validateSchedule(schedule Schedule) error {
 	if _, err := time.Parse(time.RFC3339Nano, schedule.UpdatedAt); err != nil {
 		return errors.New("updatedAt must be RFC3339")
 	}
+	if strings.ContainsRune(schedule.Guard, '\x00') || len(schedule.Guard) > maximumScheduleTextLength {
+		return errors.New("guard is invalid")
+	}
+	switch schedule.State {
+	case ScheduleStateActive, ScheduleStatePaused, ScheduleStateCompleted:
+		if schedule.Trigger == nil {
+			return errors.New("trigger is required")
+		}
+		if err := ValidateScheduleTrigger(*schedule.Trigger); err != nil {
+			return err
+		}
+	case ScheduleStateNeedsCompilation:
+		if schedule.Trigger != nil {
+			return errors.New("needs_compilation schedule must not have a trigger")
+		}
+	default:
+		return fmt.Errorf("unsupported state %q", schedule.State)
+	}
 	return nil
+}
+
+// ValidateScheduleTrigger validates a complete trigger without consulting the
+// host's local timezone.
+func ValidateScheduleTrigger(trigger ScheduleTrigger) error {
+	switch trigger.Type {
+	case ScheduleTriggerAt:
+		if trigger.At == "" || trigger.EverySeconds != 0 || trigger.AnchorAt != "" || trigger.Cron != "" || trigger.TimeZone != "" {
+			return errors.New("at trigger must contain only at")
+		}
+		if _, err := time.Parse(time.RFC3339Nano, trigger.At); err != nil {
+			return fmt.Errorf("at must be RFC3339 with an explicit offset: %w", err)
+		}
+	case ScheduleTriggerInterval:
+		if trigger.EverySeconds < minimumScheduleEverySeconds || trigger.EverySeconds > maximumScheduleEverySeconds || trigger.AnchorAt == "" || trigger.At != "" || trigger.Cron != "" || trigger.TimeZone != "" {
+			return fmt.Errorf("interval trigger requires everySeconds between %d and %d and anchorAt only", minimumScheduleEverySeconds, maximumScheduleEverySeconds)
+		}
+		if _, err := time.Parse(time.RFC3339Nano, trigger.AnchorAt); err != nil {
+			return fmt.Errorf("anchorAt must be RFC3339 with an explicit offset: %w", err)
+		}
+	case ScheduleTriggerCron:
+		if trigger.Cron == "" || trigger.TimeZone == "" || trigger.At != "" || trigger.EverySeconds != 0 || trigger.AnchorAt != "" {
+			return errors.New("cron trigger requires only cron and timeZone")
+		}
+		if strings.Contains(trigger.Cron, "TZ=") || strings.Contains(trigger.Cron, "CRON_TZ=") || strings.ContainsAny(trigger.Cron, "@") {
+			return errors.New("cron descriptors and embedded timezones are not supported")
+		}
+		if len(strings.Fields(trigger.Cron)) != 6 {
+			return errors.New("cron must contain exactly six fields including seconds")
+		}
+		if trigger.TimeZone == "Local" {
+			return errors.New("timeZone must be an explicit IANA timezone, not Local")
+		}
+		location, err := time.LoadLocation(trigger.TimeZone)
+		if err != nil {
+			return fmt.Errorf("invalid IANA timeZone %q: %w", trigger.TimeZone, err)
+		}
+		parsed, err := parseScheduleCron(trigger)
+		if err != nil {
+			return fmt.Errorf("invalid six-field cron expression: %w", err)
+		}
+		probe := time.Date(2000, time.January, 1, 0, 0, 0, 0, location).Add(-time.Nanosecond)
+		first, second := parsed.Next(probe), time.Time{}
+		if !first.IsZero() {
+			second = parsed.Next(first)
+		}
+		if first.IsZero() || second.IsZero() {
+			return errors.New("cron must produce recurring occurrences")
+		}
+		if second.Sub(first) < time.Duration(minimumScheduleEverySeconds)*time.Second {
+			return fmt.Errorf("cron occurrences must be at least %d seconds apart", minimumScheduleEverySeconds)
+		}
+	default:
+		return fmt.Errorf("unsupported trigger type %q", trigger.Type)
+	}
+	return nil
+}
+
+func scheduleCronParser() cron.Parser {
+	return cron.NewParser(cron.Second | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+}
+
+func parseScheduleCron(trigger ScheduleTrigger) (cron.Schedule, error) {
+	return scheduleCronParser().Parse("CRON_TZ=" + trigger.TimeZone + " " + trigger.Cron)
+}
+
+// NextScheduleOccurrence returns the first nominal occurrence strictly after
+// after. The at trigger is returned only when it is still in the future.
+func NextScheduleOccurrence(trigger ScheduleTrigger, after time.Time) (time.Time, error) {
+	if err := ValidateScheduleTrigger(trigger); err != nil {
+		return time.Time{}, err
+	}
+	switch trigger.Type {
+	case ScheduleTriggerAt:
+		at, _ := time.Parse(time.RFC3339Nano, trigger.At)
+		if at.After(after) {
+			return at, nil
+		}
+		return time.Time{}, nil
+	case ScheduleTriggerInterval:
+		anchor, _ := time.Parse(time.RFC3339Nano, trigger.AnchorAt)
+		if anchor.After(after) {
+			return anchor, nil
+		}
+		every := time.Duration(trigger.EverySeconds) * time.Second
+		steps := after.Sub(anchor)/every + 1
+		return anchor.Add(steps * every), nil
+	case ScheduleTriggerCron:
+		schedule, err := parseScheduleCron(trigger)
+		if err != nil {
+			return time.Time{}, err
+		}
+		return schedule.Next(after), nil
+	default:
+		return time.Time{}, errors.New("unsupported trigger")
+	}
+}
+
+// CoalescedScheduleOccurrence finds the first overdue nominal occurrence, the
+// last overdue nominal occurrence, and the first future occurrence. Cron
+// enumeration is deliberately bounded during long downtime.
+func CoalescedScheduleOccurrence(trigger ScheduleTrigger, first, now time.Time) (last, next time.Time, count int, truncated bool, err error) {
+	if err := ValidateScheduleTrigger(trigger); err != nil {
+		return time.Time{}, time.Time{}, 0, false, err
+	}
+	if first.After(now) {
+		return time.Time{}, first, 0, false, nil
+	}
+	last, count = first, 1
+	if trigger.Type == ScheduleTriggerAt {
+		return last, time.Time{}, count, false, nil
+	}
+	if trigger.Type == ScheduleTriggerInterval {
+		every := time.Duration(trigger.EverySeconds) * time.Second
+		missed := int(now.Sub(first)/every) + 1
+		return first.Add(time.Duration(missed-1) * every), first.Add(time.Duration(missed) * every), missed, false, nil
+	}
+	parsed, err := parseScheduleCron(trigger)
+	if err != nil {
+		return time.Time{}, time.Time{}, 0, false, err
+	}
+	cursor := first
+	for count < maximumCronOccurrences {
+		candidate := parsed.Next(cursor)
+		if candidate.After(now) {
+			return last, candidate, count, false, nil
+		}
+		last, cursor, count = candidate, candidate, count+1
+	}
+	next = parsed.Next(now)
+	return last, next, count, true, nil
 }
 
 func writeSchedulerJSON(path string, config SchedulerConfig) error {
@@ -387,11 +658,15 @@ func (w *Workspace) schedulerResourceDetail() (ResourceDetailView, error) {
 		}
 		files = append(files, ResourceFile{Name: name, Path: relPath(w.root, path), Content: string(data), ContentHash: markdownContentHash(data)})
 	}
+	snapshot := SchedulerSnapshot{SchemaVersion: config.SchemaVersion, AgentBinding: config.AgentBinding, Schedules: make([]ScheduleSnapshot, 0, len(config.Schedules))}
+	for _, schedule := range config.Schedules {
+		snapshot.Schedules = append(snapshot.Schedules, ScheduleSnapshot{Schedule: schedule, EffectiveState: schedule.State})
+	}
 	return ResourceDetailView{
 		ID: SchedulerResourceID, Type: SchedulerResourceID, Title: "Scheduler",
 		CreatedAt: timestamp, UpdatedAt: timestamp, Path: schedulerDir,
 		AgentBinding: config.AgentBinding, Files: files,
-		Artifacts: []FileTreeEntry{}, Worktrees: []FileTreeEntry{}, Scheduler: &config,
+		Artifacts: []FileTreeEntry{}, Worktrees: []FileTreeEntry{}, Scheduler: &snapshot,
 	}, nil
 }
 
@@ -405,16 +680,30 @@ func (w *Workspace) AddSchedule(input CreateScheduleInput) (Schedule, error) {
 		if err != nil {
 			return err
 		}
-		description, condition, target, err := w.normalizeScheduleFields(input.Description, input.Condition, input.Target)
+		description, condition, target, err := w.normalizeScheduleFields(input.Description, input.Condition, input.Target, true)
 		if err != nil {
 			return err
+		}
+		guard := strings.TrimSpace(input.Guard)
+		if len(guard) > maximumScheduleTextLength || strings.ContainsRune(guard, '\x00') {
+			return errors.New("schedule guard is invalid")
+		}
+		state := ScheduleStateNeedsCompilation
+		var trigger *ScheduleTrigger
+		if input.Trigger != nil {
+			copy := *input.Trigger
+			if err := ValidateScheduleTrigger(copy); err != nil {
+				return err
+			}
+			trigger = &copy
+			state = ScheduleStateActive
 		}
 		id, err := newScheduleID()
 		if err != nil {
 			return err
 		}
 		now := time.Now().Format(time.RFC3339Nano)
-		created = Schedule{ID: id, Description: description, Condition: condition, Target: target, CreatedAt: now, UpdatedAt: now}
+		created = Schedule{ID: id, Revision: 1, Description: description, Condition: condition, Guard: guard, Target: target, State: state, Trigger: trigger, CreatedAt: now, UpdatedAt: now}
 		config.Schedules = append(config.Schedules, created)
 		return writeSchedulerJSON(schedulerJSONPath(w.root), config)
 	})
@@ -429,8 +718,11 @@ func (w *Workspace) UpdateSchedule(input UpdateScheduleInput) (Schedule, error) 
 		return Schedule{}, err
 	}
 	input.ID = strings.TrimSpace(input.ID)
-	if input.ID == "" || (input.Description == nil && input.Condition == nil && input.Target == nil) {
+	if input.ID == "" || (input.Description == nil && input.Condition == nil && input.Guard == nil && input.Target == nil && input.Trigger == nil) {
 		return Schedule{}, &APIError{Operation: "update schedule", Kind: "scheduler", Workspace: w.root, Err: errors.New("schedule id and at least one updated field are required")}
+	}
+	if input.ExpectedRevision == 0 {
+		return Schedule{}, &APIError{Operation: "update schedule", Kind: "scheduler", Workspace: w.root, Err: errors.New("expectedRevision is required")}
 	}
 	var updated Schedule
 	err := withWorkspaceMutationLock(w.root, func() error {
@@ -443,6 +735,9 @@ func (w *Workspace) UpdateSchedule(input UpdateScheduleInput) (Schedule, error) 
 			return fmt.Errorf("schedule not found: %s", input.ID)
 		}
 		updated = config.Schedules[index]
+		if input.ExpectedRevision != updated.Revision {
+			return &ScheduleRevisionConflictError{ScheduleID: input.ID, Expected: input.ExpectedRevision, Actual: updated.Revision}
+		}
 		description, condition, target := updated.Description, updated.Condition, updated.Target
 		if input.Description != nil {
 			description = *input.Description
@@ -453,12 +748,35 @@ func (w *Workspace) UpdateSchedule(input UpdateScheduleInput) (Schedule, error) 
 		if input.Target != nil {
 			target = *input.Target
 		}
-		description, condition, target, err = w.normalizeScheduleFields(description, condition, target)
+		description, condition, target, err = w.normalizeScheduleFields(description, condition, target, input.Target != nil)
 		if err != nil {
 			return err
 		}
-		updated.Description, updated.Condition, updated.Target = description, condition, target
+		guard := updated.Guard
+		if input.Guard != nil {
+			guard = strings.TrimSpace(*input.Guard)
+			if len(guard) > maximumScheduleTextLength || strings.ContainsRune(guard, '\x00') {
+				return errors.New("schedule guard is invalid")
+			}
+		}
+		trigger := updated.Trigger
+		if input.Trigger != nil {
+			copy := *input.Trigger
+			if err := ValidateScheduleTrigger(copy); err != nil {
+				return err
+			}
+			trigger = &copy
+		}
+		updated.Description, updated.Condition, updated.Guard, updated.Target = description, condition, guard, target
+		updated.Trigger = trigger
+		if updated.State == ScheduleStateNeedsCompilation && trigger != nil {
+			updated.State = ScheduleStateActive
+		}
+		updated.Revision++
 		updated.UpdatedAt = time.Now().Format(time.RFC3339Nano)
+		if err := validateSchedule(updated); err != nil {
+			return err
+		}
 		config.Schedules[index] = updated
 		return writeSchedulerJSON(schedulerJSONPath(w.root), config)
 	})
@@ -493,6 +811,51 @@ func (w *Workspace) RemoveSchedule(id string) (Schedule, error) {
 	return removed, nil
 }
 
+func (w *Workspace) PauseSchedule(id string) (Schedule, error) {
+	return w.changeScheduleState(id, ScheduleStatePaused)
+}
+
+func (w *Workspace) ResumeSchedule(id string) (Schedule, error) {
+	return w.changeScheduleState(id, ScheduleStateActive)
+}
+
+func (w *Workspace) changeScheduleState(id, state string) (Schedule, error) {
+	if err := w.require(); err != nil {
+		return Schedule{}, err
+	}
+	id = strings.TrimSpace(id)
+	var updated Schedule
+	err := withWorkspaceMutationLock(w.root, func() error {
+		config, err := readSchedulerJSON(schedulerJSONPath(w.root))
+		if err != nil {
+			return err
+		}
+		index := scheduleIndex(config.Schedules, id)
+		if index < 0 {
+			return fmt.Errorf("schedule not found: %s", id)
+		}
+		updated = config.Schedules[index]
+		if updated.State == state {
+			return nil
+		}
+		if updated.State == ScheduleStateCompleted {
+			return errors.New("completed schedule cannot change state")
+		}
+		if updated.Trigger == nil {
+			return errors.New("schedule requires compilation before it can change state")
+		}
+		updated.State = state
+		updated.Revision++
+		updated.UpdatedAt = time.Now().Format(time.RFC3339Nano)
+		config.Schedules[index] = updated
+		return writeSchedulerJSON(schedulerJSONPath(w.root), config)
+	})
+	if err != nil {
+		return Schedule{}, &APIError{Operation: state + " schedule", Kind: "scheduler", Workspace: w.root, Err: err}
+	}
+	return updated, nil
+}
+
 func (w *Workspace) SetSchedulerSettings(input SchedulerSettingsInput) (SchedulerConfig, error) {
 	if err := w.require(); err != nil {
 		return SchedulerConfig{}, err
@@ -501,9 +864,6 @@ func (w *Workspace) SetSchedulerSettings(input SchedulerSettingsInput) (Schedule
 	if err != nil {
 		return SchedulerConfig{}, err
 	}
-	if input.WakeIntervalMinutes < minimumSchedulerWakeMinutes || input.WakeIntervalMinutes > maximumSchedulerWakeMinutes {
-		return SchedulerConfig{}, fmt.Errorf("Scheduler wake interval must be between %d and %d minutes", minimumSchedulerWakeMinutes, maximumSchedulerWakeMinutes)
-	}
 	var result SchedulerConfig
 	err = withWorkspaceMutationLock(w.root, func() error {
 		config, err := readSchedulerJSON(schedulerJSONPath(w.root))
@@ -511,7 +871,6 @@ func (w *Workspace) SetSchedulerSettings(input SchedulerSettingsInput) (Schedule
 			return err
 		}
 		config.AgentBinding = binding
-		config.WakeIntervalMinutes = input.WakeIntervalMinutes
 		if err := writeSchedulerJSON(schedulerJSONPath(w.root), config); err != nil {
 			return err
 		}
@@ -521,7 +880,7 @@ func (w *Workspace) SetSchedulerSettings(input SchedulerSettingsInput) (Schedule
 	return result, err
 }
 
-func (w *Workspace) normalizeScheduleFields(description, condition, target string) (string, string, string, error) {
+func (w *Workspace) normalizeScheduleFields(description, condition, target string, validateTarget bool) (string, string, string, error) {
 	description = strings.TrimSpace(description)
 	condition = strings.TrimSpace(condition)
 	target = strings.TrimSpace(target)
@@ -532,7 +891,7 @@ func (w *Workspace) normalizeScheduleFields(description, condition, target strin
 		strings.ContainsRune(description, '\x00') || strings.ContainsRune(condition, '\x00') || strings.ContainsRune(target, '\x00') {
 		return "", "", "", errors.New("schedule field is invalid")
 	}
-	if target != "workspace" && target != SchedulerResourceID {
+	if validateTarget && target != "workspace" && target != SchedulerResourceID {
 		if _, _, err := loadOpenResource(w.root, target); err != nil {
 			return "", "", "", fmt.Errorf("target must be an open resource in the current Workspace: %w", err)
 		}

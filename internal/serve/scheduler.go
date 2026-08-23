@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -14,10 +15,33 @@ import (
 )
 
 const (
-	schedulerTickReasonInterval = "interval"
-	schedulerTickReasonChanged  = "schedule_changed"
-	schedulerTickReasonRecovery = "server_recovery"
+	schedulerOccurrenceReasonTime      = "scheduled_time"
+	schedulerOccurrenceReasonCoalesced = "coalesced_after_downtime"
+	schedulerOutcomeAccepted           = "mailbox_accepted"
+	schedulerOutcomeBusy               = "skipped_target_busy"
+	schedulerOutcomePaused             = "skipped_while_paused"
+	schedulerOutcomeAttention          = "attention_required"
 )
+
+// NativeScheduler owns the three scheduler boundaries: portable definitions
+// plus runtime projection (Snapshot), serialized mutations (Change), and
+// deterministic due-work processing (Reconcile). It never creates a second
+// execution protocol; occurrences are ordinary resource mailbox messages.
+type NativeScheduler struct {
+	manager   *agentManager
+	workspace serveWorkspace
+}
+
+type NativeSchedulerChange struct {
+	Operation string
+	ID        string
+	Create    app.CreateScheduleInput
+	Update    app.UpdateScheduleInput
+}
+
+func newNativeScheduler(manager *agentManager, workspace serveWorkspace) *NativeScheduler {
+	return &NativeScheduler{manager: manager, workspace: workspace}
+}
 
 func schedulerConfigDigest(config app.SchedulerConfig) (string, error) {
 	data, err := json.Marshal(config.Schedules)
@@ -28,354 +52,559 @@ func schedulerConfigDigest(config app.SchedulerConfig) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-func schedulerTickMessage(language, reason, messageID string) string {
-	return strings.TrimSuffix(localize.MustRender(language, "scheduler-tick.md", map[string]string{
-		"MessageID": messageID, "Reason": reason,
-	}), "\n")
-}
-
-func pendingSchedulerTick(mailbox resourceMailbox) bool {
-	for _, message := range mailbox.Messages {
-		if message.ResourceID == app.SchedulerResourceID && message.Type == resourceMessageTypeSchedulerTick &&
-			(message.Status == resourceMessageQueued || message.Status == resourceMessageDelivering || message.Status == resourceMessageInterrupting) {
-			return true
-		}
-	}
-	return false
-}
-
-func latestSchedulerTick(mailbox resourceMailbox) (resourceMailboxMessage, bool) {
-	var latest resourceMailboxMessage
-	found := false
-	for _, message := range mailbox.Messages {
-		if message.ResourceID != app.SchedulerResourceID || message.Type != resourceMessageTypeSchedulerTick {
-			continue
-		}
-		if !found || message.Sequence > latest.Sequence {
-			latest, found = message, true
-		}
-	}
-	return latest, found
-}
-
-func cancelPendingSchedulerTicks(ctx context.Context, workspacePath string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	store, err := loadResourceMailboxStoreForRead(workspacePath, app.SchedulerResourceID)
+func (n *NativeScheduler) Snapshot(now time.Time) (app.SchedulerSnapshot, error) {
+	workspace, err := app.OpenWorkspace(n.workspace.Path)
 	if err != nil {
-		return err
+		return app.SchedulerSnapshot{}, err
 	}
-	needsMutation := false
-	for _, message := range store.Mailbox.Messages {
-		if message.ResourceID == app.SchedulerResourceID && message.Type == resourceMessageTypeSchedulerTick && message.Status == resourceMessageQueued {
-			needsMutation = true
+	config, err := workspace.Scheduler()
+	if err != nil {
+		return app.SchedulerSnapshot{}, err
+	}
+	store, err := loadResourceMailboxStoreForRead(n.workspace.Path, app.SchedulerResourceID)
+	if err != nil {
+		return app.SchedulerSnapshot{}, err
+	}
+	result := app.SchedulerSnapshot{SchemaVersion: config.SchemaVersion, AgentBinding: config.AgentBinding, Schedules: make([]app.ScheduleSnapshot, 0, len(config.Schedules))}
+	var earliest time.Time
+	for _, schedule := range config.Schedules {
+		runtime := store.Scheduler.Schedules[schedule.ID]
+		effective := schedule.State
+		projection := app.ScheduleSnapshot{Schedule: schedule, EffectiveState: effective}
+		if runtime.Revision == schedule.Revision && runtime.EffectiveState != "" {
+			effective = runtime.EffectiveState
+			projection.EffectiveState = effective
+			projection.NextRunAt = runtime.NextRunAt
+			projection.LastOccurrenceAt = runtime.LastOccurrenceAt
+			projection.LastOutcome = runtime.LastOutcome
+			projection.LastError = runtime.LastError
+			deadline := schedulerRuntimeDeadline(runtime, now)
+			if !deadline.IsZero() && (earliest.IsZero() || deadline.Before(earliest)) {
+				earliest = deadline
+			}
+		}
+		result.Schedules = append(result.Schedules, projection)
+	}
+	if !earliest.IsZero() {
+		if earliest.Before(now) {
+			earliest = now
+		}
+		result.NextWakeAt = earliest.Format(time.RFC3339Nano)
+	}
+	return result, nil
+}
+
+func (n *NativeScheduler) Change(ctx context.Context, change NativeSchedulerChange) (app.Schedule, error) {
+	if err := ctx.Err(); err != nil {
+		return app.Schedule{}, err
+	}
+	workspace, err := app.OpenWorkspace(n.workspace.Path)
+	if err != nil {
+		return app.Schedule{}, err
+	}
+	switch change.Operation {
+	case "create":
+		if change.Create.Trigger == nil {
+			return app.Schedule{}, errors.New("native schedule create requires a trigger")
+		}
+		return workspace.AddSchedule(change.Create)
+	case "update":
+		change.Update.ID = change.ID
+		return workspace.UpdateSchedule(change.Update)
+	case "pause":
+		return workspace.PauseSchedule(change.ID)
+	case "resume":
+		resumed, err := workspace.ResumeSchedule(change.ID)
+		if err != nil {
+			return app.Schedule{}, err
+		}
+		runtime, runtimeErr := n.schedulerRuntime(change.ID)
+		if runtimeErr != nil {
+			return app.Schedule{}, runtimeErr
+		}
+		if runtime.EffectiveState == schedulerOutcomeAttention {
+			_, runtimeErr = mutateResourceMailboxStoreForResource(n.workspace.Path, app.SchedulerResourceID, func(store *resourceMailboxStore) error {
+				delete(store.Scheduler.Schedules, change.ID)
+				return nil
+			})
+		}
+		return resumed, runtimeErr
+	case "remove":
+		return workspace.RemoveSchedule(change.ID)
+	default:
+		return app.Schedule{}, fmt.Errorf("unsupported Scheduler change %q", change.Operation)
+	}
+}
+
+// Reconcile recovers any frozen occurrence, prepares due work, advances
+// durable cursors, and returns the exact next timer deadline.
+func (n *NativeScheduler) Reconcile(ctx context.Context, now time.Time) (time.Time, error) {
+	if err := ctx.Err(); err != nil {
+		return time.Time{}, err
+	}
+	workspace, err := app.OpenWorkspace(n.workspace.Path)
+	if err != nil {
+		return time.Time{}, err
+	}
+	config, err := workspace.Scheduler()
+	if err != nil {
+		return time.Time{}, err
+	}
+	if err := n.cancelLegacyTicks(ctx); err != nil {
+		return time.Time{}, err
+	}
+	if err := n.reconcileMigration(ctx, config); err != nil {
+		return time.Time{}, err
+	}
+	known := make(map[string]bool, len(config.Schedules))
+	for _, schedule := range config.Schedules {
+		known[schedule.ID] = true
+		if err := n.reconcileSchedule(ctx, schedule, now); err != nil {
+			return time.Time{}, fmt.Errorf("reconcile schedule %s: %w", schedule.ID, err)
+		}
+	}
+	store, err := loadResourceMailboxStoreForRead(n.workspace.Path, app.SchedulerResourceID)
+	if err != nil {
+		return time.Time{}, err
+	}
+	stale := false
+	for id := range store.Scheduler.Schedules {
+		if !known[id] {
+			stale = true
 			break
 		}
 	}
-	if !needsMutation {
-		return nil
-	}
-	_, err = mutateResourceMailboxStoreForResource(workspacePath, app.SchedulerResourceID, func(store *resourceMailboxStore) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		now := time.Now().Format(time.RFC3339Nano)
-		for index := range store.Mailbox.Messages {
-			message := &store.Mailbox.Messages[index]
-			if message.ResourceID != app.SchedulerResourceID || message.Type != resourceMessageTypeSchedulerTick || message.Status != resourceMessageQueued {
-				continue
+	if stale {
+		_, err = mutateResourceMailboxStoreForResource(n.workspace.Path, app.SchedulerResourceID, func(store *resourceMailboxStore) error {
+			for id := range store.Scheduler.Schedules {
+				if !known[id] {
+					delete(store.Scheduler.Schedules, id)
+				}
 			}
-			message.Status = resourceMessageUndeliverable
-			message.TerminalAt = now
-			message.UpdatedAt = now
-			message.LastErrorCode = "scheduler_empty"
-			message.LastError = "Scheduler tick was cancelled because the schedule list is empty"
+			return nil
+		})
+		if err != nil {
+			return time.Time{}, err
 		}
-		store.Scheduler = schedulerCheckpointFromMessages(app.SchedulerResourceID, store.Mailbox.Messages)
-		return nil
-	})
-	return err
+	}
+	snapshot, err := n.Snapshot(now)
+	if err != nil || snapshot.NextWakeAt == "" {
+		return time.Time{}, err
+	}
+	return time.Parse(time.RFC3339Nano, snapshot.NextWakeAt)
 }
 
-func markSchedulerTickTerminal(workspacePath string, message resourceMailboxMessage, turn agentHubTurn) error {
-	terminalAt := strings.TrimSpace(turn.EndedAt)
-	if terminalAt == "" {
-		terminalAt = strings.TrimSpace(turn.CompletedAt)
+func (n *NativeScheduler) reconcileSchedule(ctx context.Context, schedule app.Schedule, now time.Time) error {
+	runtime, err := n.schedulerRuntime(schedule.ID)
+	if err != nil {
+		return err
 	}
-	if terminalAt == "" {
-		terminalAt = time.Now().Format(time.RFC3339Nano)
+	if runtime.Revision != schedule.Revision {
+		if runtimeCompletesSameOneTimeOccurrence(runtime, schedule) {
+			runtime.Revision = schedule.Revision
+		} else if runtime.EffectiveState == schedulerOutcomeAttention && runtime.AttentionTarget == schedule.Target && schedule.State == app.ScheduleStateActive {
+			runtime.Revision = schedule.Revision
+		} else {
+			runtime, err = initialScheduleRuntime(schedule, now)
+			if err != nil {
+				return err
+			}
+		}
+		if err := n.storeSchedulerRuntime(schedule.ID, runtime); err != nil {
+			return err
+		}
 	}
-	_, err := mutateResourceMailboxStoreForResource(workspacePath, app.SchedulerResourceID, func(store *resourceMailboxStore) error {
-		for index := range store.Mailbox.Messages {
-			if store.Mailbox.Messages[index].ID == message.ID {
-				store.Mailbox.Messages[index].TurnTerminalAt = terminalAt
-				if strings.TrimSpace(turn.TurnID) != "" {
-					store.Mailbox.Messages[index].TurnID = turn.TurnID
+	if schedule.State == app.ScheduleStateNeedsCompilation || schedule.State == app.ScheduleStateCompleted {
+		return nil
+	}
+	if schedule.State == app.ScheduleStatePaused {
+		return n.reconcilePausedSchedule(schedule, runtime, now)
+	}
+	if runtime.EffectiveState == app.ScheduleStateCompleted || runtime.EffectiveState == schedulerOutcomeAttention {
+		return nil
+	}
+	if retry := generationTime(runtime.RetryAt); !retry.IsZero() && now.Before(retry) {
+		return nil
+	}
+	if runtime.Prepared != nil {
+		return n.deliverPrepared(ctx, schedule, runtime, now)
+	}
+	due := generationTime(runtime.NextRunAt)
+	if due.IsZero() || due.After(now) {
+		return nil
+	}
+	last, next, count, truncated, err := app.CoalescedScheduleOccurrence(*schedule.Trigger, due, now)
+	if err != nil {
+		return n.recordScheduleError(schedule.ID, runtime, now, err)
+	}
+	reason := schedulerOccurrenceReasonTime
+	if count > 1 || truncated {
+		reason = schedulerOccurrenceReasonCoalesced
+	}
+	prepared, err := n.prepareOccurrence(schedule, due, last, next, count, reason)
+	if err != nil {
+		return n.recordScheduleError(schedule.ID, runtime, now, err)
+	}
+	runtime.Prepared = &prepared
+	runtime.RetryAt = ""
+	runtime.LastError = ""
+	if err := n.storeSchedulerRuntime(schedule.ID, runtime); err != nil {
+		return err
+	}
+	return n.deliverPrepared(ctx, schedule, runtime, now)
+}
+
+func runtimeCompletesSameOneTimeOccurrence(runtime schedulerScheduleRuntime, schedule app.Schedule) bool {
+	if runtime.EffectiveState != app.ScheduleStateCompleted || schedule.Trigger == nil || schedule.Trigger.Type != app.ScheduleTriggerAt || runtime.LastOccurrenceAt == "" {
+		return false
+	}
+	completedAt, completedErr := time.Parse(time.RFC3339Nano, runtime.LastOccurrenceAt)
+	triggerAt, triggerErr := time.Parse(time.RFC3339Nano, schedule.Trigger.At)
+	return completedErr == nil && triggerErr == nil && completedAt.Equal(triggerAt)
+}
+
+func initialScheduleRuntime(schedule app.Schedule, now time.Time) (schedulerScheduleRuntime, error) {
+	runtime := schedulerScheduleRuntime{Revision: schedule.Revision, EffectiveState: schedule.State}
+	if schedule.Trigger == nil {
+		return runtime, nil
+	}
+	if schedule.State == app.ScheduleStatePaused {
+		if schedule.Trigger.Type == app.ScheduleTriggerAt {
+			at, _ := time.Parse(time.RFC3339Nano, schedule.Trigger.At)
+			if !at.After(now) {
+				runtime.EffectiveState = app.ScheduleStateCompleted
+				runtime.LastOccurrenceAt = at.Format(time.RFC3339Nano)
+				runtime.LastOutcome = schedulerOutcomePaused
+			}
+		}
+		return runtime, nil
+	}
+	updatedAt, err := time.Parse(time.RFC3339Nano, schedule.UpdatedAt)
+	if err != nil {
+		return runtime, err
+	}
+	if schedule.Trigger.Type == app.ScheduleTriggerAt {
+		at, _ := time.Parse(time.RFC3339Nano, schedule.Trigger.At)
+		runtime.NextRunAt = at.Format(time.RFC3339Nano)
+		return runtime, nil
+	}
+	next, err := app.NextScheduleOccurrence(*schedule.Trigger, updatedAt)
+	if err != nil {
+		return runtime, err
+	}
+	if !next.IsZero() {
+		runtime.NextRunAt = next.Format(time.RFC3339Nano)
+	}
+	return runtime, nil
+}
+
+func (n *NativeScheduler) reconcilePausedSchedule(schedule app.Schedule, runtime schedulerScheduleRuntime, now time.Time) error {
+	changed := runtime.Prepared != nil || runtime.NextRunAt != "" || runtime.RetryAt != "" || runtime.EffectiveState != app.ScheduleStatePaused
+	runtime.Prepared, runtime.NextRunAt, runtime.RetryAt = nil, "", ""
+	runtime.EffectiveState = app.ScheduleStatePaused
+	if schedule.Trigger != nil && schedule.Trigger.Type == app.ScheduleTriggerAt {
+		at, _ := time.Parse(time.RFC3339Nano, schedule.Trigger.At)
+		if !at.After(now) {
+			runtime.EffectiveState = app.ScheduleStateCompleted
+			runtime.LastOccurrenceAt = at.Format(time.RFC3339Nano)
+			runtime.LastOutcome = schedulerOutcomePaused
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return n.storeSchedulerRuntime(schedule.ID, runtime)
+}
+
+func (n *NativeScheduler) prepareOccurrence(schedule app.Schedule, first, last, next time.Time, count int, reason string) (schedulerPreparedOccurrence, error) {
+	instanceID, err := workspaceInstanceID(n.workspace.Path)
+	if err != nil {
+		return schedulerPreparedOccurrence{}, err
+	}
+	language, err := workspaceContentLanguage(n.workspace.Path)
+	if err != nil {
+		return schedulerPreparedOccurrence{}, err
+	}
+	revision := fmt.Sprintf("%d", schedule.Revision)
+	occurrenceID := notificationMessageID("schedule-occurrence", instanceID, schedule.ID, revision, first.Format(time.RFC3339Nano))
+	messageID := notificationMessageID(resourceMessageTypeScheduleOccurrence, instanceID, schedule.ID, revision, first.Format(time.RFC3339Nano))
+	causation := &resourceMessageCausation{
+		Type: resourceMessageTypeScheduleOccurrence, SourceWorkspaceInstanceID: instanceID,
+		SourceResourceID: app.SchedulerResourceID, Reason: reason,
+		ScheduleID: schedule.ID, ScheduleRevision: schedule.Revision,
+		OccurrenceID: occurrenceID, ScheduledFor: first.Format(time.RFC3339Nano),
+		CoalescedFrom: first.Format(time.RFC3339Nano), CoalescedThrough: last.Format(time.RFC3339Nano), CoalescedCount: count,
+	}
+	prepared := schedulerPreparedOccurrence{
+		ScheduleID: schedule.ID, ScheduleRevision: schedule.Revision,
+		OccurrenceID: occurrenceID, MessageID: messageID, Target: schedule.Target,
+		ScheduledFor: first.Format(time.RFC3339Nano), CoalescedThrough: last.Format(time.RFC3339Nano),
+		CoalescedCount: count, Reason: reason, Causation: causation,
+	}
+	if !next.IsZero() {
+		prepared.NextRunAt = next.Format(time.RFC3339Nano)
+	}
+	prepared.Text = strings.TrimSuffix(localize.MustRender(language, "scheduler-occurrence.md", map[string]any{
+		"OccurrenceID": occurrenceID, "ScheduleID": schedule.ID, "Revision": schedule.Revision,
+		"ScheduledFor": prepared.ScheduledFor, "CoalescedThrough": prepared.CoalescedThrough,
+		"CoalescedCount": count, "Action": schedule.Description, "Guard": schedule.Guard,
+		"HasGuard": schedule.Guard != "", "Condition": schedule.Condition,
+		"HasNext": prepared.NextRunAt != "", "NextRunAt": prepared.NextRunAt,
+	}), "\n")
+	return prepared, nil
+}
+
+func (n *NativeScheduler) deliverPrepared(ctx context.Context, schedule app.Schedule, runtime schedulerScheduleRuntime, now time.Time) error {
+	prepared := runtime.Prepared
+	if prepared == nil {
+		return nil
+	}
+	exists, archived, _, targetErr := resourceExistsAndArchived(n.workspace.Path, prepared.Target)
+	if targetErr != nil && !errors.Is(targetErr, app.ErrResourceNotFound) {
+		return n.recordScheduleError(schedule.ID, runtime, now, targetErr)
+	}
+	if targetErr != nil || !exists || archived {
+		reason := "target resource is unavailable"
+		if targetErr != nil {
+			reason = targetErr.Error()
+		} else if archived {
+			reason = "target resource is archived"
+		}
+		runtime.Prepared = nil
+		runtime.NextRunAt = ""
+		runtime.RetryAt = ""
+		runtime.EffectiveState = schedulerOutcomeAttention
+		runtime.LastOutcome = schedulerOutcomeAttention
+		runtime.LastError = reason
+		runtime.AttentionTarget = prepared.Target
+		return n.storeSchedulerRuntime(schedule.ID, runtime)
+	}
+
+	deliver := func() error {
+		if schedule.Trigger.Type != app.ScheduleTriggerAt {
+			_, alreadyAccepted, err := mailboxMessageByID(n.workspace.Path, prepared.MessageID)
+			if err != nil {
+				return err
+			}
+			if !alreadyAccepted {
+				busy, err := n.targetBusy(prepared.Target)
+				if err != nil {
+					return err
+				}
+				if busy {
+					runtime.Prepared = nil
+					runtime.NextRunAt = prepared.NextRunAt
+					runtime.RetryAt = ""
+					runtime.RetryCount = 0
+					runtime.LastOccurrenceAt = prepared.CoalescedThrough
+					runtime.LastOutcome = schedulerOutcomeBusy
+					runtime.LastError = ""
+					runtime.AttentionTarget = ""
+					return n.storeSchedulerRuntime(schedule.ID, runtime)
 				}
 			}
 		}
-		store.Scheduler = schedulerCheckpointFromMessages(app.SchedulerResourceID, store.Mailbox.Messages)
-		store.Scheduler.TurnTerminalAt = terminalAt
-		store.Scheduler.TurnStatus = strings.TrimSpace(turn.Status)
-		return nil
-	})
-	return err
-}
-
-func checkpointSchedulerTickMessage(workspacePath string, message resourceMailboxMessage) error {
-	_, err := mutateResourceMailboxStoreForResource(workspacePath, app.SchedulerResourceID, func(store *resourceMailboxStore) error {
-		store.Scheduler = schedulerCheckpointFromMessages(app.SchedulerResourceID, store.Mailbox.Messages)
-		if store.Scheduler.LastTickMessageID == "" {
-			store.Scheduler.LastTickMessageID = message.ID
-			store.Scheduler.GenerationID = message.GenerationID
-			store.Scheduler.AgentHubSessionID = message.AgentHubSessionID
-			store.Scheduler.TurnID = message.TurnID
-			if message.Causation != nil {
-				store.Scheduler.ConfigDigest = message.Causation.ScheduleDigest
-				store.Scheduler.Reason = message.Causation.Reason
-			}
-			store.Scheduler.AcceptedAt = message.AcceptedAt
+		message := resourceMailboxMessage{
+			ID: prepared.MessageID, ResourceID: prepared.Target, Text: prepared.Text,
+			RequestedMode: resourceMessageModeEnqueue, ActualMode: resourceMessageModeEnqueue, ModeFrozen: true,
+			Type: resourceMessageTypeScheduleOccurrence, Causation: cloneMailboxCausation(prepared.Causation),
+			SenderWorkspaceInstanceID: prepared.Causation.SourceWorkspaceInstanceID,
 		}
-		return nil
-	})
-	return err
-}
-
-func schedulerTickTerminal(ctx context.Context, workspacePath string, message resourceMailboxMessage, client *agentHubClient) (agentHubTurn, bool, error) {
-	if message.Status == resourceMessageUndeliverable || message.Status == resourceMessageDeliveryUnknown {
-		_ = markSchedulerTickTerminal(workspacePath, message, agentHubTurn{Status: message.Status, Closed: true, EndedAt: message.TerminalAt})
-		return agentHubTurn{Status: message.Status, Closed: true, EndedAt: message.TerminalAt}, true, nil
-	}
-	if message.Status != resourceMessageDelivered || strings.TrimSpace(message.GenerationID) == "" {
-		return agentHubTurn{}, false, nil
-	}
-	if strings.TrimSpace(message.TurnTerminalAt) != "" {
-		return agentHubTurn{TurnID: message.TurnID, Status: "completed", Closed: true, EndedAt: message.TurnTerminalAt}, true, nil
-	}
-	record, found, err := generationRecordByID(workspacePath, message.GenerationID)
-	if err != nil {
-		return agentHubTurn{}, false, err
-	}
-	if !found {
-		return agentHubTurn{}, true, nil
-	}
-	if strings.TrimSpace(message.TurnID) == "" {
-		turn, turnFound, turnErr := findSchedulerTickTurn(ctx, client, record.AgentHubSessionID, message)
-		if turnErr != nil {
-			return agentHubTurn{}, false, turnErr
-		}
-		if turnFound {
-			_, _ = updateMailboxMessage(workspacePath, message.ID, func(current *resourceMailboxMessage) {
-				current.TurnID = turn.TurnID
-			})
-			if turn.Closed {
-				_ = markSchedulerTickTerminal(workspacePath, message, turn)
-			}
-			return turn, turn.Closed, nil
-		}
-		if !isLiveAgentStatus(record.Status) {
-			terminal := agentHubTurn{Status: record.Status, Closed: true, EndedAt: record.UpdatedAt}
-			_ = markSchedulerTickTerminal(workspacePath, message, terminal)
-			return terminal, true, nil
-		}
-		return agentHubTurn{}, false, nil
-	}
-	turn, _, turnErr := client.SessionTurn(ctx, record.AgentHubSessionID, message.TurnID)
-	if turnErr == nil {
-		if turn.Closed {
-			_ = markSchedulerTickTerminal(workspacePath, message, turn)
-		}
-		return turn, turn.Closed, nil
-	}
-	if record.CompletionMarker != "" && record.CompletionTurnID == message.TurnID {
-		terminal := agentHubTurn{TurnID: message.TurnID, Status: record.CompletionState, Closed: true, EndedAt: record.CompletionAt}
-		_ = markSchedulerTickTerminal(workspacePath, message, terminal)
-		return terminal, true, nil
-	}
-	if !isLiveAgentStatus(record.Status) {
-		terminal := agentHubTurn{TurnID: message.TurnID, Status: record.Status, Closed: true, EndedAt: record.UpdatedAt}
-		_ = markSchedulerTickTerminal(workspacePath, message, terminal)
-		return terminal, true, nil
-	}
-	return agentHubTurn{}, false, turnErr
-}
-
-func findSchedulerTickTurn(ctx context.Context, client *agentHubClient, sessionID string, message resourceMailboxMessage) (agentHubTurn, bool, error) {
-	canonical, canonicalFound, canonicalErr := findCanonicalAgentHubMessage(ctx, client, sessionID, message, 0)
-	if canonicalErr != nil {
-		return agentHubTurn{}, false, canonicalErr
-	}
-	if canonicalFound && strings.TrimSpace(canonical.TurnID) != "" {
-		turn, _, err := client.SessionTurn(ctx, sessionID, canonical.TurnID)
+		accepted, err := acceptGeneratedMailboxMessage(n.workspace.Path, message)
 		if err != nil {
-			return agentHubTurn{}, false, err
+			return err
 		}
-		return turn, true, nil
-	}
-	// Compatibility fallback for historical materialized Turns whose opener
-	// predates stable message IDs.
-	page, err := client.SessionTurns(ctx, sessionID, 0, true, 50)
-	if err != nil {
-		return agentHubTurn{}, false, err
-	}
-	var best agentHubTurn
-	found := false
-	for _, turn := range page.Turns {
-		matches := false
-		for _, item := range turn.Items {
-			if item.Role == "system" && strings.TrimSpace(item.Text) == message.Text {
-				matches = true
-				break
+		runtime.Prepared = nil
+		runtime.NextRunAt = prepared.NextRunAt
+		runtime.RetryAt = ""
+		runtime.RetryCount = 0
+		runtime.LastOccurrenceAt = prepared.CoalescedThrough
+		runtime.LastOutcome = schedulerOutcomeAccepted
+		runtime.LastError = ""
+		runtime.AttentionTarget = ""
+		if prepared.NextRunAt == "" {
+			runtime.EffectiveState = app.ScheduleStateCompleted
+		}
+		if err := n.storeSchedulerRuntime(schedule.ID, runtime); err != nil {
+			return err
+		}
+		if accepted.Status == resourceMessageQueued || accepted.Status == resourceMessageDelivering || accepted.Status == resourceMessageInterrupting {
+			if err := n.manager.reconcileResourceMailboxLocked(ctx, n.workspace, prepared.Target); err != nil {
+				recordMailboxFailure(n.workspace.Path, accepted.ID, err)
+				n.manager.requestReconcile(reconcileMailboxes)
 			}
 		}
-		preview := strings.TrimSpace(turn.TriggerPreview)
-		if !matches && turn.TriggerRole == "system" && preview != "" && strings.HasPrefix(message.Text, preview) {
-			matches = true
-		}
-		if matches && (!found || turn.StartEventID > best.StartEventID) {
-			best, found = turn, true
-		}
+		return nil
 	}
-	if found && strings.TrimSpace(best.TurnID) == "" {
-		best.TurnID = strings.TrimSpace(best.ID)
+
+	var err error
+	if prepared.Target == app.SchedulerResourceID {
+		err = deliver()
+	} else {
+		err = n.manager.withResourceController(ctx, n.workspace, prepared.Target, deliver)
 	}
-	return best, found && best.TurnID != "", nil
+	if err == nil {
+		return nil
+	}
+	return n.recordScheduleError(schedule.ID, runtime, now, err)
 }
 
-// reconcileSchedulerLocked serializes Scheduler reconciliation with the
-// Scheduler resource controller. It converts elapsed Server time and durable
-// Scheduler configuration changes into ordinary enqueue-only mailbox
-// messages. AgentHub remains the canonical Turn owner.
-func (m *agentManager) reconcileSchedulerLocked(ctx context.Context, workspace serveWorkspace, client *agentHubClient) error {
-	return m.withResourceController(ctx, workspace, app.SchedulerResourceID, func() error {
-		return m.reconcileScheduler(ctx, workspace, client)
+func (n *NativeScheduler) targetBusy(resourceID string) (bool, error) {
+	record, found, err := currentResourceGeneration(n.workspace.Path, resourceID)
+	if err != nil {
+		return false, err
+	}
+	if found && generationHasActiveTurn(record) {
+		return true, nil
+	}
+	return mailboxPendingForResource(n.workspace.Path, resourceID)
+}
+
+func (n *NativeScheduler) recordScheduleError(id string, runtime schedulerScheduleRuntime, now time.Time, cause error) error {
+	runtime.RetryCount++
+	delay := 5 * time.Second
+	for index := 1; index < runtime.RetryCount && delay < 30*time.Minute; index++ {
+		delay *= 2
+	}
+	if delay > 30*time.Minute {
+		delay = 30 * time.Minute
+	}
+	runtime.RetryAt = now.Add(delay).Format(time.RFC3339Nano)
+	runtime.LastError = cause.Error()
+	if err := n.storeSchedulerRuntime(id, runtime); err != nil {
+		return errors.Join(cause, err)
+	}
+	return nil
+}
+
+func (n *NativeScheduler) schedulerRuntime(id string) (schedulerScheduleRuntime, error) {
+	store, err := loadResourceMailboxStoreForRead(n.workspace.Path, app.SchedulerResourceID)
+	if err != nil {
+		return schedulerScheduleRuntime{}, err
+	}
+	return store.Scheduler.Schedules[id], nil
+}
+
+func (n *NativeScheduler) storeSchedulerRuntime(id string, runtime schedulerScheduleRuntime) error {
+	_, err := mutateResourceMailboxStoreForResource(n.workspace.Path, app.SchedulerResourceID, func(store *resourceMailboxStore) error {
+		if store.Scheduler.Schedules == nil {
+			store.Scheduler.Schedules = make(map[string]schedulerScheduleRuntime)
+		}
+		store.Scheduler.Schedules[id] = runtime
+		return nil
 	})
+	return err
 }
 
-func (m *agentManager) reconcileScheduler(ctx context.Context, workspace serveWorkspace, client *agentHubClient) error {
-	if err := ctx.Err(); err != nil {
-		return err
+func schedulerRuntimeDeadline(runtime schedulerScheduleRuntime, now time.Time) time.Time {
+	if runtime.EffectiveState == app.ScheduleStatePaused || runtime.EffectiveState == app.ScheduleStateCompleted || runtime.EffectiveState == schedulerOutcomeAttention {
+		return time.Time{}
 	}
-	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+	if runtime.RetryAt != "" {
+		return generationTime(runtime.RetryAt)
+	}
+	if runtime.Prepared != nil {
+		return now
+	}
+	return generationTime(runtime.NextRunAt)
+}
+
+func (n *NativeScheduler) cancelLegacyTicks(ctx context.Context) error {
+	store, err := loadResourceMailboxStoreForRead(n.workspace.Path, app.SchedulerResourceID)
 	if err != nil {
 		return err
 	}
-	config, err := puaWorkspace.Scheduler()
-	if err != nil {
-		return err
+	needsCancellation := false
+	for _, message := range store.Mailbox.Messages {
+		if message.Type == resourceMessageTypeSchedulerTick && message.Status == resourceMessageQueued {
+			needsCancellation = true
+			break
+		}
+	}
+	if !needsCancellation {
+		return nil
+	}
+	_, err = mutateResourceMailboxStoreForResource(n.workspace.Path, app.SchedulerResourceID, func(store *resourceMailboxStore) error {
+		now := time.Now().Format(time.RFC3339Nano)
+		for index := range store.Mailbox.Messages {
+			message := &store.Mailbox.Messages[index]
+			if message.Type != resourceMessageTypeSchedulerTick || message.Status != resourceMessageQueued {
+				continue
+			}
+			message.Status = resourceMessageUndeliverable
+			message.TerminalAt, message.UpdatedAt = now, now
+			message.LastErrorCode = "scheduler_v1_retired"
+			message.LastError = "Legacy scheduler tick was cancelled during native scheduler migration"
+		}
+		return ctx.Err()
+	})
+	return err
+}
+
+func (n *NativeScheduler) reconcileMigration(ctx context.Context, config app.SchedulerConfig) error {
+	pending := make([]app.Schedule, 0)
+	for _, schedule := range config.Schedules {
+		if schedule.State == app.ScheduleStateNeedsCompilation {
+			pending = append(pending, schedule)
+		}
+	}
+	if len(pending) == 0 {
+		return nil
 	}
 	digest, err := schedulerConfigDigest(config)
 	if err != nil {
 		return err
 	}
-	previousDigest, observedBefore := m.schedulerDigests[workspace.Path]
-	m.schedulerDigests[workspace.Path] = digest
-	if len(config.Schedules) == 0 {
-		return cancelPendingSchedulerTicks(ctx, workspace.Path)
+	store, err := loadResourceMailboxStoreForRead(n.workspace.Path, app.SchedulerResourceID)
+	if err != nil || store.Scheduler.MigrationDigest == digest {
+		return err
 	}
-	mailbox, err := loadResourceMailboxForResource(workspace.Path, app.SchedulerResourceID)
+	instanceID, err := workspaceInstanceID(n.workspace.Path)
 	if err != nil {
 		return err
 	}
-	hot := resourceMailbox{Version: mailbox.Version, NextSequence: mailbox.NextSequence, Messages: []resourceMailboxMessage{}}
-	for _, message := range mailbox.Messages {
-		if !message.receipt {
-			hot.Messages = append(hot.Messages, message)
-		}
-	}
-	if pendingSchedulerTick(hot) {
-		return nil
-	}
-	last, found := latestSchedulerTick(mailbox)
-	store, storeErr := loadResourceMailboxStoreForRead(workspace.Path, app.SchedulerResourceID)
-	if storeErr != nil {
-		return storeErr
-	}
-	if !found && strings.TrimSpace(store.Scheduler.LastTickMessageID) != "" {
-		checkpoint := store.Scheduler
-		last = resourceMailboxMessage{
-			ID: checkpoint.LastTickMessageID, ResourceID: app.SchedulerResourceID,
-			Status: resourceMessageDelivered, AcceptedAt: checkpoint.AcceptedAt,
-			GenerationID: checkpoint.GenerationID, AgentHubSessionID: checkpoint.AgentHubSessionID, TurnID: checkpoint.TurnID,
-			TurnTerminalAt: checkpoint.TurnTerminalAt,
-			Causation:      &resourceMessageCausation{Type: resourceMessageTypeSchedulerTick, SourceWorkspaceInstanceID: mailboxInstanceID(workspace.Path), SourceResourceID: app.SchedulerResourceID, Reason: checkpoint.Reason, ScheduleDigest: checkpoint.ConfigDigest},
-		}
-		found = true
-	}
-	reason, basis := "", ""
-	if !found {
-		if observedBefore && previousDigest != digest {
-			reason = schedulerTickReasonChanged
-		} else {
-			reason = schedulerTickReasonRecovery
-		}
-		basis = digest
-	} else if last.Causation == nil || last.Causation.ScheduleDigest != digest {
-		reason, basis = schedulerTickReasonChanged, last.ID
-	} else {
-		turn, terminal, terminalErr := schedulerTickTerminal(ctx, workspace.Path, last, client)
-		if terminalErr != nil {
-			return terminalErr
-		}
-		if !terminal {
-			return nil
-		}
-		basis = last.ID
-		if strings.TrimSpace(turn.Status) != "completed" {
-			reason = schedulerTickReasonRecovery
-		} else {
-			terminalAt := strings.TrimSpace(turn.EndedAt)
-			if terminalAt == "" {
-				terminalAt = strings.TrimSpace(turn.CompletedAt)
-			}
-			endedAt, parseErr := time.Parse(time.RFC3339Nano, terminalAt)
-			if parseErr != nil {
-				return fmt.Errorf("Scheduler tick %s has invalid terminal time: %w", last.ID, parseErr)
-			}
-			if m.now().Before(endedAt.Add(time.Duration(config.WakeIntervalMinutes) * time.Minute)) {
-				return nil
-			}
-			reason = schedulerTickReasonInterval
-		}
-	}
-	instanceID, err := workspaceInstanceID(workspace.Path)
+	language, err := workspaceContentLanguage(n.workspace.Path)
 	if err != nil {
 		return err
 	}
-	language, err := workspaceContentLanguage(workspace.Path)
-	if err != nil {
-		return err
+	ids := make([]string, 0, len(pending))
+	for _, schedule := range pending {
+		ids = append(ids, schedule.ID)
 	}
-	messageID := notificationMessageID(resourceMessageTypeSchedulerTick, instanceID, reason, digest, basis)
+	messageID := notificationMessageID(resourceMessageTypeScheduleMigration, instanceID, digest)
+	text := strings.TrimSuffix(localize.MustRender(language, "scheduler-migration.md", map[string]any{
+		"MessageID": messageID, "ScheduleIDs": strings.Join(ids, ", "), "Count": len(ids),
+	}), "\n")
 	message := resourceMailboxMessage{
-		ID:         messageID,
-		ResourceID: app.SchedulerResourceID, Text: schedulerTickMessage(language, reason, messageID),
+		ID: messageID, ResourceID: app.SchedulerResourceID, Text: text,
 		RequestedMode: resourceMessageModeEnqueue, ActualMode: resourceMessageModeEnqueue, ModeFrozen: true,
-		Type: resourceMessageTypeSchedulerTick,
-		Causation: &resourceMessageCausation{
-			Type: resourceMessageTypeSchedulerTick, SourceWorkspaceInstanceID: instanceID,
-			SourceResourceID: app.SchedulerResourceID, Reason: reason, ScheduleDigest: digest,
-		},
+		Type:      resourceMessageTypeScheduleMigration,
+		Causation: &resourceMessageCausation{Type: resourceMessageTypeScheduleMigration, SourceWorkspaceInstanceID: instanceID, SourceResourceID: app.SchedulerResourceID, Reason: "compile_migrated_schedules", ScheduleDigest: digest},
 	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	accepted, err := acceptGeneratedMailboxMessage(workspace.Path, message)
+	accepted, err := acceptGeneratedMailboxMessage(n.workspace.Path, message)
 	if err != nil {
 		return err
 	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err := checkpointSchedulerTickMessage(workspace.Path, accepted); err != nil {
+	_, err = mutateResourceMailboxStoreForResource(n.workspace.Path, app.SchedulerResourceID, func(store *resourceMailboxStore) error {
+		store.Scheduler.MigrationDigest = digest
+		return nil
+	})
+	if err != nil {
 		return err
 	}
 	if accepted.Status == resourceMessageQueued || accepted.Status == resourceMessageDelivering || accepted.Status == resourceMessageInterrupting {
-		if err := m.reconcileResourceMailboxLocked(ctx, workspace, app.SchedulerResourceID); err != nil {
-			recordMailboxFailure(workspace.Path, accepted.ID, err)
-			return err
+		if err := n.manager.reconcileResourceMailboxLocked(ctx, n.workspace, app.SchedulerResourceID); err != nil {
+			recordMailboxFailure(n.workspace.Path, accepted.ID, err)
+			n.manager.requestReconcile(reconcileMailboxes)
 		}
 	}
 	return nil
+}
+
+func (m *agentManager) reconcileSchedulerLocked(ctx context.Context, workspace serveWorkspace) error {
+	return m.withResourceController(ctx, workspace, app.SchedulerResourceID, func() error {
+		_, err := newNativeScheduler(m, workspace).Reconcile(ctx, m.now())
+		return err
+	})
 }

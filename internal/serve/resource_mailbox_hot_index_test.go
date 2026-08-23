@@ -184,7 +184,7 @@ func TestHotMailboxMarkerDropsSettledAgentMessages(t *testing.T) {
 	}
 }
 
-func TestHotMailboxKeepsOnlyLatestUnfinishedSchedulerTick(t *testing.T) {
+func TestHotMailboxCompactsDeliveredLegacySchedulerTicks(t *testing.T) {
 	root := t.TempDir()
 	if _, err := app.Initialize(root, "en"); err != nil {
 		t.Fatal(err)
@@ -209,19 +209,14 @@ func TestHotMailboxKeepsOnlyLatestUnfinishedSchedulerTick(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(hot.Messages) != 1 || hot.Messages[0].ID != "tick-3" {
-		t.Fatalf("hot scheduler messages = %#v, want only tick-3", hot.Messages)
+	if len(hot.Messages) != 0 {
+		t.Fatalf("delivered legacy Scheduler ticks remained hot: %#v", hot.Messages)
 	}
-	for _, id := range []string{"tick-1", "tick-2"} {
+	for _, id := range []string{"tick-1", "tick-2", "tick-3"} {
 		message, found, err := mailboxMessageByID(root, id)
 		if err != nil || !found || !message.receipt {
 			t.Fatalf("historical tick %s was not retained as a receipt: found=%v err=%v message=%#v", id, found, err, message)
 		}
-	}
-	if _, err := updateMailboxMessage(root, "tick-3", func(message *resourceMailboxMessage) {
-		message.TurnTerminalAt = stamp
-	}); err != nil {
-		t.Fatal(err)
 	}
 	ids, err := listHotResourceMailboxResourceIDs(root)
 	if err != nil {

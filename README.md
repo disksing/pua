@@ -14,7 +14,7 @@ The workspace is the source of truth. Contracts are Markdown, structured state i
 - **Explicit file ownership.** Generated agent instructions allow writes only in the starting resource and its task worktrees, while keeping other Workspace resources read-only.
 - **Interactive agents through AgentHub.** The PUA web UI uses AgentHub as its only execution and conversation surface, including streaming chat, resumable history, file uploads, approvals, and mid-turn user intervention.
 - **A workspace-oriented UI.** Switch between workspaces, browse projects and tasks, inspect Markdown and artifacts, preview Wiki pages, review worktree diffs, monitor resource runtime state, and use the details/chat layout on desktop or mobile. The layout adapts to the window width: three columns (sidebar, details, chat) on wide screens, two columns with a tabbed details/chat pane below 1440px, and a single-column mobile layout below 980px. The Appearance tab in System Settings lets users override the responsive choice manually — auto, three columns, tabbed two columns, or a split view that collapses the sidebar into a drawer with details and chat side by side — and scale the text of the sidebar, details, and chat columns independently; both preferences are stored in the browser.
-- **Agent-interpreted scheduling.** Every Workspace has a PUA-managed Scheduler resource that evaluates natural-language conditions and sends ordinary resource messages without introducing a second execution protocol.
+- **Native structured scheduling.** Every Workspace has a PUA-managed Scheduler resource that compiles natural-language requests once, while the Server executes durable one-time, interval, and timezone-aware cron rules through ordinary resource mailboxes.
 
 ## Design
 
@@ -211,18 +211,20 @@ The Web sidebar has a server-owned Activity panel below the resource tree with i
 
 ### Scheduler
 
-`pua init` and `pua migrate` non-destructively create the special `scheduler/` resource. Its formatted `scheduler.json` contains `schemaVersion`, an independent Agent/Profile binding, `wakeIntervalMinutes` (30 by default), and a `schedules` array. A schedule intentionally has only `id`, `description`, `condition`, `target`, `createdAt`, and `updatedAt`; conditions are natural language, not cron expressions. `scheduler.md` is optional durable judgment context maintained by the Scheduler Agent, while `AGENTS.md` explains the parent instructions, allowed files, duplicate-message behavior, and required target-message fields.
+`pua init` creates the special `scheduler/` resource with portable schema v2 definitions. Each schedule has a revision, lifecycle state, original condition, optional guard, target, and exactly one native trigger: an offset-bearing one-time timestamp, a fixed interval plus anchor, or a six-field cron expression plus an explicit IANA timezone. Repeating rules are limited to one occurrence per 60 seconds. `pua migrate` preserves every v1 action/condition/target as an inert `needs_compilation` definition until the Scheduler Agent compiles it without guessing ambiguous timing or timezone details.
 
-The Server sends enqueue-only `scheduler_tick` system messages. It does not interpret conditions itself. An empty schedule list produces no Turn; adding or changing a schedule requests an immediate coalesced tick. Otherwise the interval is measured from the end of the previous completed Server-triggered Scheduler Turn, so user chat with the Scheduler does not postpone its next wake. Restart recovery checks durable mailbox and canonical AgentHub Turn state before deciding whether one recovery tick is needed. Messages to schedule targets may repeat, and receivers use the schedule ID to handle duplicates.
+Normal execution does not wake the Scheduler Agent. The Server persists a per-schedule cursor and immutable prepared occurrence in the Scheduler runtime checkpoint, sets one dynamic timer to the earliest Workspace deadline, and delivers due work through the existing target resource mailbox. Restart and sleep catch-up coalesces missed repeating occurrences into one message; one-time work is delivered once. Repeating work skips an occurrence when the target already has an active Turn or hot mailbox, while one-time work remains queued. Occurrence causation includes stable schedule/revision/occurrence IDs and coalescing bounds, so targets can make external side effects idempotent.
 
-The Scheduler may target only `workspace`, `scheduler`, or an open Project/Task in the same Workspace. Use the fixed web UI entry to bind its Agent/Profile, change the interval, maintain schedules, inspect context, and chat. The CLI exposes schedule data only:
+The Scheduler Agent is the natural-language compilation and management entry point. The Web form sends it an ordinary user message; direct pause, resume, and remove operations remain structural. A guard is checked by the target Agent at occurrence time and is never interpreted by the Scheduler. The CLI requires the owning Server and uses revision compare-and-swap for updates:
 
 ```text
-pua scheduler list [--json]
-pua scheduler show --id=<schedule>
-pua scheduler add --description=<text> --condition=<text> --target=<resource>
-pua scheduler update --id=<schedule> [--description=<text>] [--condition=<text>] [--target=<resource>]
-pua scheduler remove --id=<schedule>
+pua scheduler list [--json] [--server=<url>]
+pua scheduler show --id=<schedule> [--server=<url>]
+pua scheduler add --description=<text> --condition=<text> --target=<resource> --at=<rfc3339>
+pua scheduler add --description=<text> --condition=<text> --target=<resource> --every=5m --anchor=<rfc3339>
+pua scheduler add --description=<text> --condition=<text> --target=<resource> --cron='0 0 9 * * *' --timezone=Asia/Shanghai
+pua scheduler update --id=<schedule> --revision=<n> [fields and optional trigger]
+pua scheduler pause|resume|remove --id=<schedule>
 ```
 
 Commands address Workspace, Project, and Task directly without exposing a separate Agent subject or requiring run/Session IDs:
@@ -330,13 +332,13 @@ AgentWorkspace/
     hot.json                         unresolved complete mailbox messages only
     receipts.json                    bounded terminal receipts and expired-ID index
     outbox.json                      recoverable notification operations
-    scheduler.json                   latest Scheduler tick checkpoint
+    scheduler.json                   native schedule cursors and prepared occurrences
     commit.json                      mailbox multi-document recovery marker
   .pua/runtime/resources/.message-locations/       rebuildable message lookup index
   wiki/
     index.md                  long-lived workspace knowledge
   scheduler/
-    scheduler.json            formatted configuration and natural-language schedules
+    scheduler.json            portable native schedule definitions
     scheduler.md              Scheduler Agent durable judgment context
     AGENTS.md                 generated Scheduler resource instructions
   repos/
@@ -393,11 +395,10 @@ pua project archive [--project=<project>]
 pua project binding set [--project=<project>] (--profile=<name>|--agent=<name>) [--server=<url>]
 pua template list|show|validate|render|create|migrate ...
 
-pua scheduler list [--json]
-pua scheduler show --id=<schedule>
-pua scheduler add --description=<text> --condition=<text> --target=<resource>
-pua scheduler update --id=<schedule> [--description=<text>] [--condition=<text>] [--target=<resource>]
-pua scheduler remove --id=<schedule>
+pua scheduler list|show ... [--server=<url>]
+pua scheduler add ... (--at=<rfc3339>|--every=<duration> --anchor=<rfc3339>|--cron=<six-fields> --timezone=<iana>) [--server=<url>]
+pua scheduler update --id=<schedule> --revision=<n> ... [--server=<url>]
+pua scheduler pause|resume|remove --id=<schedule> [--server=<url>]
 
 pua agent list [--server=<url>] [--json]
 pua user list [--json]

@@ -342,7 +342,7 @@ func TestResourceIdleSleepRetriesAmbiguousStopWithoutDuplicateAfterConvergence(t
 	}
 }
 
-func TestResourceIdleSleepSchedulerTickResumesCurrentGeneration(t *testing.T) {
+func TestResourceIdleSleepSchedulerMigrationResumesCurrentGeneration(t *testing.T) {
 	fake := newRuntimeFakeAgentHub()
 	hub := httptest.NewServer(fake)
 	defer hub.Close()
@@ -372,7 +372,7 @@ func TestResourceIdleSleepSchedulerTickResumesCurrentGeneration(t *testing.T) {
 			return false
 		}
 		for _, message := range mailbox.Messages {
-			if message.ResourceID == app.SchedulerResourceID && message.Type == resourceMessageTypeSchedulerTick &&
+			if message.ResourceID == app.SchedulerResourceID && message.Type == resourceMessageTypeScheduleMigration &&
 				message.Status == resourceMessageDelivered && message.GenerationID == record.GenerationID {
 				tick = message
 				return true
@@ -382,7 +382,7 @@ func TestResourceIdleSleepSchedulerTickResumesCurrentGeneration(t *testing.T) {
 	})
 	if tick.Role != "system" || tick.SubscribeResult || tick.RequestedMode != resourceMessageModeEnqueue ||
 		tick.ActualMode != resourceMessageModeEnqueue || !tick.ModeFrozen {
-		t.Fatalf("Scheduler tick mode mapping = %#v", tick)
+		t.Fatalf("Scheduler migration mode mapping = %#v", tick)
 	}
 	current, found, err := currentResourceGeneration(workspace.Path, app.SchedulerResourceID)
 	if err != nil || !found || current.Generation != record.Generation || current.GenerationID != tick.GenerationID {

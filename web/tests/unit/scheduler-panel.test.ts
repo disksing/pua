@@ -7,20 +7,19 @@ import type { SchedulerConfigRecord } from "../../src/models/workspace";
 const mounted: Array<ReturnType<typeof mount>> = [];
 
 const config: SchedulerConfigRecord = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   agentBinding: { kind: "profile", name: "default" },
-  wakeIntervalMinutes: 30,
   schedules: [],
 };
 
-function mountPanel() {
+function mountPanel(panelConfig = config) {
   const target = document.createElement("section");
   document.body.append(target);
   const component = mount(SchedulerPanel, {
     target,
     props: {
       workspaceId: "ws-test",
-      config,
+      config: panelConfig,
       resolveResourceTitle: (resourceId: string) => resourceId === "project1.task1" ? "Target task" : resourceId === "workspace" ? "Test workspace" : null,
       onChanged: vi.fn(async () => undefined),
       onToast: vi.fn(),
@@ -89,5 +88,37 @@ describe("SchedulerPanel target validation", () => {
       condition: "when the release is ready",
       target: "project1.task1",
     });
+  });
+
+  it("offers direct recovery for a schedule requiring attention", async () => {
+    const fetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({}), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    vi.stubGlobal("fetch", fetch);
+    const target = mountPanel({
+      ...config,
+      schedules: [{
+        id: "schedule-0123456789abcdef01234567",
+        revision: 1,
+        description: "Recover target",
+        condition: "once",
+        target: "project1.task1",
+        state: "active",
+        trigger: { type: "at", at: "2026-08-23T09:00:00Z" },
+        createdAt: "2026-08-23T08:00:00Z",
+        updatedAt: "2026-08-23T08:00:00Z",
+        effectiveState: "attention_required",
+        lastOutcome: "attention_required",
+      }],
+    });
+    await tick();
+
+    const resume = Array.from(target.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.trim() === "Resume");
+    expect(resume).toBeDefined();
+    resume!.click();
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+    expect(String(fetch.mock.calls[0][0])).toContain("/scheduler/schedule-0123456789abcdef01234567/resume");
+    expect(fetch.mock.calls[0][1]?.method).toBe("POST");
   });
 });

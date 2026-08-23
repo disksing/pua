@@ -36,11 +36,13 @@ const (
 	resourceResultSubscriptionNone     = "none"
 	resourceResultSubscriptionComplete = "complete"
 
-	resourceMessageTypeTurnResult        = "turn_result"
-	resourceMessageTypeDeliveryTerminal  = "delivery_terminal_notice"
-	resourceMessageTypeSchedulerTick     = "scheduler_tick"
-	resourceMessageTypeTaskContinuation  = "task_state_continuation"
-	resourceMessageTypeTurnStallRecovery = "turn_stall_recovery"
+	resourceMessageTypeTurnResult         = "turn_result"
+	resourceMessageTypeDeliveryTerminal   = "delivery_terminal_notice"
+	resourceMessageTypeSchedulerTick      = "scheduler_tick"
+	resourceMessageTypeScheduleOccurrence = "schedule_occurrence"
+	resourceMessageTypeScheduleMigration  = "schedule_migration"
+	resourceMessageTypeTaskContinuation   = "task_state_continuation"
+	resourceMessageTypeTurnStallRecovery  = "turn_stall_recovery"
 
 	resourceNotificationWaiting   = "waiting"
 	resourceNotificationAccepted  = "accepted"
@@ -159,6 +161,13 @@ type resourceMessageCausation struct {
 	TerminalCode              string   `json:"terminalCode,omitempty"`
 	Reason                    string   `json:"reason,omitempty"`
 	ScheduleDigest            string   `json:"scheduleDigest,omitempty"`
+	ScheduleID                string   `json:"scheduleId,omitempty"`
+	ScheduleRevision          uint64   `json:"scheduleRevision,omitempty"`
+	OccurrenceID              string   `json:"occurrenceId,omitempty"`
+	ScheduledFor              string   `json:"scheduledFor,omitempty"`
+	CoalescedFrom             string   `json:"coalescedFrom,omitempty"`
+	CoalescedThrough          string   `json:"coalescedThrough,omitempty"`
+	CoalescedCount            int      `json:"coalescedCount,omitempty"`
 }
 
 type resourceNotificationReceipt struct {

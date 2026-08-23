@@ -192,6 +192,7 @@ func TestWaitingTaskWithTargetScheduleNeedsNoReminder(t *testing.T) {
 	}
 	if _, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
 		Description: "Resume Task", Condition: "when the external event occurs", Target: "project1.task1",
+		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerInterval, EverySeconds: 300, AnchorAt: time.Now().Add(time.Minute).Format(time.RFC3339Nano)},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -218,6 +219,20 @@ func TestWaitingTaskWithTargetScheduleNeedsNoReminder(t *testing.T) {
 	mailbox, err := loadHotResourceMailbox(workspace.Path, record.ResourceID)
 	if err != nil || len(mailbox.Messages) != 0 {
 		t.Fatalf("scheduled waiting Task received a reminder: mailbox=%#v err=%v", mailbox, err)
+	}
+}
+
+func TestTaskTargetScheduleUsesRuntimeEffectiveState(t *testing.T) {
+	schedule := app.ScheduleSnapshot{
+		Schedule:       app.Schedule{Target: "project1.task1", State: app.ScheduleStateActive, Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: "2026-08-23T09:00:00Z"}},
+		EffectiveState: app.ScheduleStateCompleted,
+	}
+	if taskHasTargetSchedule(app.SchedulerSnapshot{Schedules: []app.ScheduleSnapshot{schedule}}, "project1.task1") {
+		t.Fatal("completed one-time schedule still satisfies waiting Task requirement")
+	}
+	schedule.EffectiveState = app.ScheduleStateActive
+	if !taskHasTargetSchedule(app.SchedulerSnapshot{Schedules: []app.ScheduleSnapshot{schedule}}, "project1.task1") {
+		t.Fatal("active target schedule was not recognized")
 	}
 }
 

@@ -1951,7 +1951,6 @@ func resourceRuntimeGenerationNewer(left, right generationRecord) bool {
 }
 
 func (s *server) resource(ctx context.Context, id string, resourceID string) (app.ResourceDetailView, error) {
-	_ = ctx
 	workspace, err := s.workspace(id)
 	if err != nil {
 		return app.ResourceDetailView{}, err
@@ -1960,7 +1959,23 @@ func (s *server) resource(ctx context.Context, id string, resourceID string) (ap
 	if err != nil {
 		return app.ResourceDetailView{}, err
 	}
-	return puaWorkspace.Resource(resourceID)
+	detail, err := puaWorkspace.Resource(resourceID)
+	if err != nil {
+		return app.ResourceDetailView{}, err
+	}
+	if normalizedResourceID(resourceID) == app.SchedulerResourceID && s.agents != nil {
+		var snapshot app.SchedulerSnapshot
+		err = s.agents.withResourceController(ctx, workspace, app.SchedulerResourceID, func() error {
+			var snapshotErr error
+			snapshot, snapshotErr = newNativeScheduler(s.agents, workspace).Snapshot(s.agents.now())
+			return snapshotErr
+		})
+		if err != nil {
+			return app.ResourceDetailView{}, err
+		}
+		detail.Scheduler = &snapshot
+	}
+	return detail, nil
 }
 
 func (s *server) loadUIState(id string, userNames ...string) (uiState, error) {

@@ -24,6 +24,10 @@ type resourceControllerJob struct {
 }
 
 func (c *resourceController) enqueue(ctx context.Context, fn func() error) <-chan error {
+	return c.enqueueWithStart(ctx, fn, func(run func()) { go run() })
+}
+
+func (c *resourceController) enqueueWithStart(ctx context.Context, fn func() error, startWorker func(func())) <-chan error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -36,7 +40,7 @@ func (c *resourceController) enqueue(ctx context.Context, fn func() error) <-cha
 	}
 	c.mu.Unlock()
 	if start {
-		go c.run()
+		startWorker(c.run)
 	}
 	return done
 }
@@ -65,7 +69,11 @@ func (c *resourceController) run() {
 }
 
 func (c *resourceController) do(ctx context.Context, fn func() error) error {
-	done := c.enqueue(ctx, fn)
+	return c.doWithStart(ctx, fn, func(run func()) { go run() })
+}
+
+func (c *resourceController) doWithStart(ctx context.Context, fn func() error, startWorker func(func())) error {
+	done := c.enqueueWithStart(ctx, fn, startWorker)
 	if ctx == nil {
 		return <-done
 	}
@@ -119,7 +127,10 @@ func (m *agentManager) withResourceController(ctx context.Context, workspace ser
 	if err != nil {
 		return err
 	}
-	return controller.do(ctx, fn)
+	// Track even synchronously requested workers. They can enqueue asynchronous
+	// follow-up jobs before the caller returns; keeping the worker registered
+	// until its FIFO is empty prevents shutdown from racing those follow-ups.
+	return controller.doWithStart(ctx, fn, m.runBackground)
 }
 
 func (m *agentManager) enqueueResourceController(workspace serveWorkspace, resourceID string, fn func() error) error {
@@ -127,11 +138,11 @@ func (m *agentManager) enqueueResourceController(workspace serveWorkspace, resou
 	if err != nil {
 		return err
 	}
-	done := controller.enqueue(context.Background(), fn)
-	// Keep fire-and-forget controller work observable by orderly shutdown and
-	// tests. The waiter does not occupy the resource controller, so jobs remain
-	// free to enqueue follow-up work for the same resource.
-	m.runBackground(func() { <-done })
+	// Register a newly started controller worker before it can run. Besides
+	// making fire-and-forget work observable during shutdown, this ordering
+	// lets a tracked worker enqueue follow-up work without racing the final
+	// background wait.
+	controller.enqueueWithStart(context.Background(), fn, m.runBackground)
 	return nil
 }
 

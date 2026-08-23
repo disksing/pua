@@ -210,7 +210,6 @@ type agentManager struct {
 	resourceControllers   map[string]*resourceController
 	runtimes              map[string]*agentRuntime
 	subscribers           map[string]map[chan agentStreamMessage]bool
-	schedulerDigests      map[string]string
 	reconcileWake         chan struct{}
 	reconcilePending      reconcileRequest
 	now                   func() time.Time
@@ -248,7 +247,6 @@ func newAgentManager(s *server) *agentManager {
 		resourceControllers:  make(map[string]*resourceController),
 		runtimes:             make(map[string]*agentRuntime),
 		subscribers:          make(map[string]map[chan agentStreamMessage]bool),
-		schedulerDigests:     make(map[string]string),
 		reconcileWake:        make(chan struct{}, 1),
 		now:                  time.Now,
 		idleSleepAfter:       defaultResourceIdleSleepAfter,

@@ -22,7 +22,7 @@ func TestInitializeCreatesSchedulerResource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.SchemaVersion != 1 || config.AgentBinding.Kind != "profile" || config.AgentBinding.Name != "default" || config.WakeIntervalMinutes != 30 || len(config.Schedules) != 0 {
+	if config.SchemaVersion != 2 || config.AgentBinding.Kind != "profile" || config.AgentBinding.Name != "default" || len(config.Schedules) != 0 {
 		t.Fatalf("default Scheduler configuration = %#v", config)
 	}
 	tree, err := workspace.Tree()
@@ -43,11 +43,11 @@ func TestInitializeCreatesSchedulerResource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(agents), "../AGENTS.md") || !strings.Contains(string(agents), "schedule ID") || !strings.Contains(string(agents), "不要把它当作长期历史") {
+	if !strings.Contains(string(agents), "../AGENTS.md") || !strings.Contains(string(agents), "needs_compilation") || !strings.Contains(string(agents), "不得直接覆写") {
 		t.Fatalf("Scheduler guidance is incomplete:\n%s", agents)
 	}
 	schedulerMarkdown, err := os.ReadFile(filepath.Join(workspace.Root(), "scheduler", "scheduler.md"))
-	if err != nil || !strings.Contains(string(schedulerMarkdown), "后续调度判断所需的最小上下文") {
+	if err != nil || !strings.Contains(string(schedulerMarkdown), "完成调度编译或澄清所需的最小上下文") {
 		t.Fatalf("Scheduler context guidance is incomplete: %v\n%s", err, schedulerMarkdown)
 	}
 	inside, err := workspace.IsSchedulerPath(filepath.Join(workspace.Root(), "scheduler", "nested"))
@@ -147,7 +147,7 @@ func TestScheduleLifecycleValidatesTargets(t *testing.T) {
 	}
 	condition := "when the build is green"
 	target := app.SchedulerResourceID
-	updated, err := workspace.UpdateSchedule(app.UpdateScheduleInput{ID: created.ID, Condition: &condition, Target: &target})
+	updated, err := workspace.UpdateSchedule(app.UpdateScheduleInput{ID: created.ID, ExpectedRevision: created.Revision, Condition: &condition, Target: &target})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,13 +179,12 @@ func TestSchedulerSettingsAndConcurrentScheduleWrites(t *testing.T) {
 		t.Fatal(err)
 	}
 	config, err := workspace.SetSchedulerSettings(app.SchedulerSettingsInput{
-		AgentBinding:        app.AgentBinding{Kind: "agent", Name: "reviewer"},
-		WakeIntervalMinutes: 45,
+		AgentBinding: app.AgentBinding{Kind: "agent", Name: "reviewer"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.AgentBinding.Kind != "agent" || config.AgentBinding.Name != "reviewer" || config.WakeIntervalMinutes != 45 {
+	if config.AgentBinding.Kind != "agent" || config.AgentBinding.Name != "reviewer" {
 		t.Fatalf("Scheduler settings = %#v", config)
 	}
 	binding := app.AgentBinding{Kind: "profile", Name: "fast"}
@@ -193,7 +192,7 @@ func TestSchedulerSettingsAndConcurrentScheduleWrites(t *testing.T) {
 		t.Fatalf("set Scheduler resource binding = %#v, %v", got, err)
 	}
 	config, err = workspace.Scheduler()
-	if err != nil || config.AgentBinding != binding || config.WakeIntervalMinutes != 45 {
+	if err != nil || config.AgentBinding != binding {
 		t.Fatalf("resource binding update drifted Scheduler settings = %#v, %v", config, err)
 	}
 	const count = 16

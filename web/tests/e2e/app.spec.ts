@@ -191,14 +191,20 @@ async function installMockApi(page: Page, lastResourceId = "project1.task1", wit
   let savedTaskBrief: { content: string; contentHash: string } | null = null;
   let users = [{ version: 1, name: "User", preference: "" }];
   let schedulerConfig = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     agentBinding: { kind: "profile" as const, name: "fast" },
-    wakeIntervalMinutes: 30,
     schedules: [] as Array<{
       id: string;
+      revision: number;
       description: string;
       condition: string;
+      guard?: string;
       target: string;
+      state: "active" | "paused" | "completed" | "needs_compilation";
+      effectiveState: string;
+      trigger?: { type: "at"; at: string };
+      nextRunAt?: string;
+      lastOutcome?: string;
       createdAt: string;
       updatedAt: string;
     }>,
@@ -330,24 +336,19 @@ async function installMockApi(page: Page, lastResourceId = "project1.task1", wit
       scheduleSequence += 1;
       const schedule = {
         id: `schedule-${String(scheduleSequence).padStart(24, "0")}`,
+        revision: 1,
         description: String(body.description || ""),
         condition: String(body.condition || ""),
         target: String(body.target || ""),
+        state: "active" as const,
+        effectiveState: "active",
+        trigger: { type: "at" as const, at: "2026-08-24T09:00:00+08:00" },
+        nextRunAt: "2026-08-24T09:00:00+08:00",
         createdAt: now,
         updatedAt: now,
       };
       schedulerConfig = { ...schedulerConfig, schedules: [...schedulerConfig.schedules, schedule] };
-      return json(route, schedule, 201);
-    }
-    if (path === "/api/workspaces/ws-test/scheduler/settings" && method === "PUT") {
-      const body = request.postDataJSON() as Record<string, unknown>;
-      harness.schedulerBodies.push({ method, path, body });
-      schedulerConfig = {
-        ...schedulerConfig,
-        agentBinding: body.agentBinding as typeof schedulerConfig.agentBinding,
-        wakeIntervalMinutes: Number(body.wakeIntervalMinutes),
-      };
-      return json(route, schedulerConfig);
+      return json(route, { messageId: `msg-schedule-${scheduleSequence}`, resourceId: "scheduler", requestedMode: "enqueue", actualMode: "enqueue", status: "waiting" }, 202);
     }
     const scheduleMutation = path.match(/^\/api\/workspaces\/ws-test\/scheduler\/(schedule-[0-9]+)$/);
     if (scheduleMutation && method === "PUT") {
@@ -358,9 +359,28 @@ async function installMockApi(page: Page, lastResourceId = "project1.task1", wit
         ...schedulerConfig,
         schedules: schedulerConfig.schedules.map((schedule, scheduleIndex) => scheduleIndex === index ? {
           ...schedule,
+          revision: schedule.revision + 1,
           description: body.description === undefined ? schedule.description : String(body.description),
           condition: body.condition === undefined ? schedule.condition : String(body.condition),
           target: body.target === undefined ? schedule.target : String(body.target),
+          updatedAt: now,
+        } : schedule),
+      };
+      return json(route, schedulerConfig.schedules[index]);
+    }
+    const scheduleStateMutation = path.match(/^\/api\/workspaces\/ws-test\/scheduler\/(schedule-[0-9]+)\/(pause|resume)$/);
+    if (scheduleStateMutation && method === "POST") {
+      harness.schedulerBodies.push({ method, path });
+      const paused = scheduleStateMutation[2] === "pause";
+      const index = schedulerConfig.schedules.findIndex((schedule) => schedule.id === scheduleStateMutation[1]);
+      schedulerConfig = {
+        ...schedulerConfig,
+        schedules: schedulerConfig.schedules.map((schedule, scheduleIndex) => scheduleIndex === index ? {
+          ...schedule,
+          revision: schedule.revision + 1,
+          state: paused ? "paused" : "active",
+          effectiveState: paused ? "paused" : "active",
+          nextRunAt: paused ? undefined : schedule.nextRunAt,
           updatedAt: now,
         } : schedule),
       };
@@ -1191,7 +1211,7 @@ test("manages natural-language schedules from the fixed Scheduler resource", asy
   await expect(page.getByRole("heading", { name: /Scheduler/ }).first()).toBeVisible();
   await expect(page.locator(".details-tabs [role=\"tab\"]")).toHaveText(["Schedules", "Context", "Settings"]);
   await expect(page.getByRole("tab", { name: "Schedules" })).toHaveAttribute("aria-selected", "true");
-  await expect(page.getByText("No schedules. The Server will not create empty Scheduler Turns.")).toBeVisible();
+  await expect(page.getByText("No schedules. Native Scheduler timing is idle.")).toBeVisible();
 
   await page.getByLabel("Description").fill("Notify when the release is ready");
   await page.getByLabel("Condition").fill("When the release branch is green after 09:00 Shanghai time");
@@ -1208,13 +1228,6 @@ test("manages natural-language schedules from the fixed Scheduler resource", asy
   await expect(page.locator(".schedule-list article")).toContainText("Notify when the release is ready");
   await expect(page.locator(".schedule-list article")).toContainText("project1.task1");
 
-  await page.getByRole("tab", { name: "Settings" }).click();
-  const interval = page.getByLabel("Scheduler wake interval in minutes");
-  await interval.fill("45");
-  await page.locator(".resource-settings-interval").getByRole("button", { name: "Save" }).click();
-  await expect(interval).toHaveValue("45");
-  await page.getByRole("tab", { name: "Schedules" }).click();
-
   await page.locator(".schedule-list article").getByRole("button", { name: "Edit" }).click();
   await page.getByLabel("Description").fill("Notify after release verification");
   await page.getByRole("button", { name: "Update schedule" }).click();
@@ -1223,13 +1236,12 @@ test("manages natural-language schedules from the fixed Scheduler resource", asy
   await page.locator(".schedule-list article").getByRole("button", { name: "Remove" }).click();
   await page.getByRole("alertdialog", { name: "Remove schedule" }).getByRole("button", { name: "Remove" }).click();
   await expect(page.locator(".schedule-list article")).toHaveCount(0);
-  expect(harness.schedulerBodies.map(({ method }) => method)).toEqual(["POST", "PUT", "PUT", "DELETE"]);
+  expect(harness.schedulerBodies.map(({ method }) => method)).toEqual(["POST", "PUT", "DELETE"]);
   expect(harness.schedulerBodies[0].body).toEqual({
     description: "Notify when the release is ready",
     condition: "When the release branch is green after 09:00 Shanghai time",
     target: "project1.task1",
   });
-  expect(harness.schedulerBodies[1].body).toMatchObject({ wakeIntervalMinutes: 45 });
 });
 
 test("keeps Scheduler schedules content inside a 440px viewport", async ({ page }) => {
@@ -2473,8 +2485,8 @@ test("keeps the Workspace Generation lifecycle Save target at 44px in a 440px vi
   expect(documentOverflow).toBeLessThanOrEqual(1);
 });
 
-test("keeps Scheduler Settings controls at a 44px touch size in a 440px viewport", async ({ page }) => {
-  const harness = await installMockApi(page);
+test("keeps Scheduler Agent settings at a 44px touch size in a 440px viewport", async ({ page }) => {
+  await installMockApi(page);
   await page.setViewportSize({ width: 440, height: 844 });
   await page.goto("/w/ws-test/r/scheduler");
 
@@ -2484,18 +2496,14 @@ test("keeps Scheduler Settings controls at a 44px touch size in a 440px viewport
   const content = panel.locator("#detailsContent");
   const contentBox = (await content.boundingBox())!;
   const binding = panel.getByRole("button", { name: "Scheduler Agent binding", exact: true });
-  const interval = panel.getByRole("spinbutton", { name: "Scheduler wake interval in minutes" });
-  const save = panel.locator(".resource-settings-interval").getByRole("button", { name: "Save", exact: true });
 
   await expect(binding).toHaveAttribute("type", "button");
   await expect(binding).toHaveAttribute("aria-haspopup", "listbox");
   await expect(binding).toHaveAttribute("aria-expanded", "false");
-  await expect(interval).toHaveAttribute("type", "number");
-  await expect(interval).toHaveAttribute("aria-label", "Scheduler wake interval in minutes");
-  await expect(save).toHaveAttribute("type", "button");
-  await expect(save).toBeDisabled();
+  await expect(panel.getByText("Native timing runs in the Server.")).toBeVisible();
+  await expect(panel.getByRole("spinbutton", { name: "Scheduler wake interval in minutes" })).toHaveCount(0);
 
-  for (const control of [binding, interval, save]) {
+  for (const control of [binding]) {
     const box = await control.boundingBox();
     expect(box).not.toBeNull();
     expect(box!.height).toBeGreaterThanOrEqual(44);
@@ -2511,18 +2519,6 @@ test("keeps Scheduler Settings controls at a 44px touch size in a 440px viewport
   await page.keyboard.press("Escape");
   await expect(menu).toHaveCount(0);
   await expect(binding).toHaveAttribute("aria-expanded", "false");
-
-  await interval.fill("45");
-  await expect(save).toBeEnabled();
-  await save.click();
-  await expect.poll(() => harness.schedulerBodies.length).toBe(1);
-  expect(harness.schedulerBodies[0]).toMatchObject({
-    method: "PUT",
-    path: "/api/workspaces/ws-test/scheduler/settings",
-    body: { agentBinding: { kind: "profile", name: "fast" }, wakeIntervalMinutes: 45 },
-  });
-  await expect(interval).toHaveValue("45");
-  await expect(save).toBeDisabled();
 
   const detailsSize = await content.evaluate((node) => ({ clientWidth: node.clientWidth, scrollWidth: node.scrollWidth }));
   expect(detailsSize.scrollWidth).toBeLessThanOrEqual(detailsSize.clientWidth);

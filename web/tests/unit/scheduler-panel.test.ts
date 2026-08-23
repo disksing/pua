@@ -140,6 +140,36 @@ describe("SchedulerPanel", () => {
     expect(setPaused).toHaveBeenCalledWith("schedule-0123456789abcdef01234567", false);
   });
 
+  it("renders the last occurrence and outcome together", () => {
+    const lastOccurrenceAt = "2026-08-23T09:00:00.123456789Z";
+    const { target } = mountPanel({
+      ...config,
+      schedules: [{
+        ...schedule,
+        lastOccurrenceAt,
+        lastOutcome: "completed",
+      }],
+    });
+
+    const details = Object.fromEntries(Array.from(target.querySelectorAll("dl > div"), (row) => [
+      row.querySelector("dt")?.textContent,
+      row.querySelector("dd")?.textContent,
+    ]));
+    expect(details["Last occurrence"]).toBe(lastOccurrenceAt);
+    expect(details["Last outcome"]).toBe("completed");
+  });
+
+  it("omits the last occurrence row when no occurrence is recorded", () => {
+    const { target } = mountPanel({
+      ...config,
+      schedules: [{ ...schedule, lastOutcome: "pending" }],
+    });
+
+    const labels = Array.from(target.querySelectorAll("dt"), (label) => label.textContent);
+    expect(labels).not.toContain("Last occurrence");
+    expect(labels).toContain("Last outcome");
+  });
+
   it("keeps a schedule row pending while its callback is unresolved", async () => {
     let resolve!: (completed: boolean) => void;
     const setPaused = vi.fn(() => new Promise<boolean>((done) => { resolve = done; }));

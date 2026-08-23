@@ -30,6 +30,12 @@ func readOptionalServiceTransactionFile(t *testing.T, path string) []byte {
 func stableServiceTransactionStatus(status ServiceStatus) ServiceStatus {
 	status.UpdatedAt = ""
 	status.Exports.UpdatedAt = ""
+	if status.Exports.Variables == nil {
+		status.Exports.Variables = map[string]string{}
+	}
+	for index := range status.Exports.Secrets {
+		status.Exports.Secrets[index].UpdatedAt = ""
+	}
 	return status
 }
 
@@ -562,5 +568,358 @@ func TestServiceManagerRemoveRejectsBindingsBeforeStopping(t *testing.T) {
 	}
 	if _, err := manager.Bindings(); err != nil {
 		t.Fatalf("binding became invalid after rejected Remove: %v", err)
+	}
+}
+
+func TestServiceManagerApplyPersistenceFailureIsAtomic(t *testing.T) {
+	for _, running := range []bool{false, true} {
+		for _, failurePoint := range []string{"write", "rename"} {
+			name := failurePoint + "_"
+			if running {
+				name += "running"
+			} else {
+				name += "stopped"
+			}
+			t.Run(name, func(t *testing.T) {
+				root := t.TempDir()
+				cfg, starts, stops := serviceTransactionProcessConfig(root, "worker")
+				cfg.Enabled = running
+				writeTestService(t, root, cfg)
+				manager, err := NewServiceManager(root, ServiceManagerOptions{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				stopProcessTestManager(t, &manager)
+				if err := manager.Start(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				if running {
+					waitForTestPath(t, starts, "start")
+				}
+
+				definitionPath := serviceConfigPath(root, cfg.ID)
+				statusPath := filepath.Join(serviceRuntimePath(root, cfg.ID), "state.json")
+				eventsPath := filepath.Join(serviceRuntimePath(root, cfg.ID), "events.jsonl")
+				definitionBefore := readOptionalServiceTransactionFile(t, definitionPath)
+				persistedStatusBefore := readOptionalServiceTransactionFile(t, statusPath)
+				eventsBefore := readOptionalServiceTransactionFile(t, eventsPath)
+				visibleBefore, err := manager.Show(cfg.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				configBefore := manager.configs[cfg.ID]
+				graphBefore := manager.graph
+				processBefore := manager.runtimes[cfg.ID].process
+				runtimeStatusBefore := manager.runtimes[cfg.ID].status
+
+				injected := errors.New("injected definition " + failurePoint + " failure")
+				switch failurePoint {
+				case "write":
+					manager.definitionStore.writeJSON = func(string, any, os.FileMode, func(string, string) error) error {
+						return injected
+					}
+				case "rename":
+					manager.definitionStore.rename = func(string, string) error { return injected }
+				}
+				replacement := cfg
+				replacement.Args = []string{"replacement"}
+				if err := manager.Apply(replacement); !errors.Is(err, injected) {
+					t.Fatalf("Apply error = %v, want injected %s failure", err, failurePoint)
+				}
+
+				visibleAfter, err := manager.Show(cfg.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got, want := stableServiceTransactionStatus(visibleAfter), stableServiceTransactionStatus(visibleBefore); !reflect.DeepEqual(got, want) {
+					t.Fatalf("status after failed Apply = %#v, want %#v", visibleAfter, visibleBefore)
+				}
+				if got := manager.runtimes[cfg.ID].status; !reflect.DeepEqual(got, runtimeStatusBefore) {
+					t.Fatalf("runtime status after failed Apply = %#v, want %#v", got, runtimeStatusBefore)
+				}
+				if got := manager.configs[cfg.ID]; !reflect.DeepEqual(got, configBefore) {
+					t.Fatalf("config after failed Apply = %#v, want %#v", got, configBefore)
+				}
+				if !reflect.DeepEqual(manager.graph, graphBefore) {
+					t.Fatalf("graph after failed Apply = %#v, want %#v", manager.graph, graphBefore)
+				}
+				if manager.runtimes[cfg.ID].process != processBefore {
+					t.Fatal("failed Apply replaced the live process")
+				}
+				if data := readOptionalServiceTransactionFile(t, definitionPath); !bytes.Equal(data, definitionBefore) {
+					t.Fatalf("definition changed after failed Apply:\n%s", data)
+				}
+				if data := readOptionalServiceTransactionFile(t, statusPath); !bytes.Equal(data, persistedStatusBefore) {
+					t.Fatalf("persisted status changed after failed Apply:\n%s", data)
+				}
+				if data := readOptionalServiceTransactionFile(t, eventsPath); !bytes.Equal(data, eventsBefore) {
+					t.Fatalf("events changed after failed Apply:\n%s", data)
+				}
+				wantStarts := 0
+				if running {
+					wantStarts = 1
+				}
+				if count := serviceTransactionMarkerCount(t, starts, "start"); count != wantStarts {
+					t.Fatalf("service starts after failed Apply = %d, want %d", count, wantStarts)
+				}
+				if count := serviceTransactionMarkerCount(t, stops, "stop"); count != 0 {
+					t.Fatalf("service stops after failed Apply = %d, want 0", count)
+				}
+				temps, err := filepath.Glob(filepath.Join(filepath.Dir(definitionPath), ".service-*.tmp"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(temps) != 0 {
+					t.Fatalf("failed Apply left temporary files: %v", temps)
+				}
+
+				reconstructed, err := NewServiceManager(root, ServiceManagerOptions{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := reconstructed.configs[cfg.ID]; !reflect.DeepEqual(got, configBefore) {
+					t.Fatalf("reconstructed config = %#v, want %#v", got, configBefore)
+				}
+				reconstructedStatus, err := reconstructed.Show(cfg.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got, want := stableServiceTransactionStatus(reconstructedStatus), stableServiceTransactionStatus(visibleAfter); !reflect.DeepEqual(got, want) {
+					t.Fatalf("reconstructed status = %#v, want %#v", reconstructedStatus, visibleAfter)
+				}
+			})
+		}
+	}
+}
+
+func TestServiceManagerApplyValidatesBindingsBeforePersistence(t *testing.T) {
+	root := t.TempDir()
+	cfg, starts, stops := serviceTransactionProcessConfig(root, "worker")
+	writeTestService(t, root, cfg)
+	manager, err := NewServiceManager(root, ServiceManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopProcessTestManager(t, &manager)
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	waitForTestPath(t, starts, "start")
+	if err := writeServiceJSON(serviceBindingsPath(root), ServiceBindings{
+		SchemaVersion: serviceSchemaVersion,
+		Variables:     map[string]string{"ENDPOINT": "${service.missing.URL}"},
+	}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	definitionPath := serviceConfigPath(root, cfg.ID)
+	eventsPath := filepath.Join(serviceRuntimePath(root, cfg.ID), "events.jsonl")
+	definitionBefore := readOptionalServiceTransactionFile(t, definitionPath)
+	eventsBefore := readOptionalServiceTransactionFile(t, eventsPath)
+	replacement := cfg
+	replacement.Args = []string{"replacement"}
+	applyErr := manager.Apply(replacement)
+	if applyErr == nil || !strings.Contains(applyErr.Error(), `unknown service "missing"`) {
+		t.Fatalf("Apply error = %v, want binding validation failure", applyErr)
+	}
+	if data := readOptionalServiceTransactionFile(t, definitionPath); !bytes.Equal(data, definitionBefore) {
+		t.Fatalf("definition changed after rejected Apply:\n%s", data)
+	}
+	if data := readOptionalServiceTransactionFile(t, eventsPath); !bytes.Equal(data, eventsBefore) {
+		t.Fatalf("events changed after rejected Apply:\n%s", data)
+	}
+	if count := serviceTransactionMarkerCount(t, starts, "start"); count != 1 {
+		t.Fatalf("service starts after rejected Apply = %d, want 1", count)
+	}
+	if count := serviceTransactionMarkerCount(t, stops, "stop"); count != 0 {
+		t.Fatalf("service stops after rejected Apply = %d, want 0", count)
+	}
+}
+
+func TestServiceManagerApplyPersistsRestartFailure(t *testing.T) {
+	const secret = "private-apply-secret"
+	root := t.TempDir()
+	cfg, starts, stops := serviceTransactionProcessConfig(root, "worker")
+	cfg.Environment = map[string]ServiceEnvironment{"TOKEN": {SecretName: "token"}}
+	writeTestService(t, root, cfg)
+	manager, err := NewServiceManager(root, ServiceManagerOptions{
+		Resolver: EnvironmentSecretResolver{Values: map[string]string{"token": secret}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopProcessTestManager(t, &manager)
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	waitForTestPath(t, starts, "start")
+
+	replacement := cfg
+	replacement.Command = []string{filepath.Join(root, secret, "missing-service")}
+	if err := manager.Apply(replacement); err != nil {
+		t.Fatalf("Apply returned a reconciled start failure: %v", err)
+	}
+	if count := serviceTransactionMarkerCount(t, starts, "start"); count != 1 {
+		t.Fatalf("service starts after replacement failure = %d, want 1", count)
+	}
+	if count := serviceTransactionMarkerCount(t, stops, "stop"); count != 1 {
+		t.Fatalf("old service stops after replacement failure = %d, want 1", count)
+	}
+	persistedConfig, err := LoadServiceConfig(serviceConfigPath(root, cfg.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(persistedConfig, manager.configs[cfg.ID]) || !reflect.DeepEqual(manager.runtimes[cfg.ID].config, manager.configs[cfg.ID]) {
+		t.Fatalf("disk and memory disagree after restart failure: disk=%#v configs=%#v runtime=%#v", persistedConfig, manager.configs[cfg.ID], manager.runtimes[cfg.ID].config)
+	}
+	status, err := manager.Show(cfg.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != ServiceStateBackoff || status.FailureCount != 1 || status.AttentionRequired || status.PID != 0 || status.ProcessGroup != 0 || status.ManualStop {
+		t.Fatalf("status after replacement start failure = %#v", status)
+	}
+	if strings.Contains(status.LastError, secret) || !strings.Contains(status.LastError, "<redacted>") {
+		t.Fatalf("restart failure was not safely redacted: %#v", status)
+	}
+	events := readOptionalServiceTransactionFile(t, filepath.Join(serviceRuntimePath(root, cfg.ID), "events.jsonl"))
+	if !bytes.Contains(events, []byte(`"type":"start_failed"`)) || bytes.Contains(events, []byte(secret)) {
+		t.Fatalf("unsafe restart failure events: %s", events)
+	}
+	persistedStatus := readPersistedServiceStatus(t, root, cfg.ID)
+	if got, want := stableServiceTransactionStatus(persistedStatus), stableServiceTransactionStatus(status); !reflect.DeepEqual(got, want) {
+		t.Fatalf("persisted restart failure status = %#v, want %#v", got, want)
+	}
+
+	reconstructed, err := NewServiceManager(root, ServiceManagerOptions{
+		Resolver: EnvironmentSecretResolver{Values: map[string]string{"token": secret}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(reconstructed.configs[cfg.ID], persistedConfig) {
+		t.Fatalf("reconstructed config = %#v, want %#v", reconstructed.configs[cfg.ID], persistedConfig)
+	}
+	reconstructedStatus, err := reconstructed.Show(cfg.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := stableServiceTransactionStatus(reconstructedStatus), stableServiceTransactionStatus(status); !reflect.DeepEqual(got, want) {
+		t.Fatalf("reconstructed restart failure status = %#v, want %#v", got, want)
+	}
+}
+
+func TestServiceManagerApplyKeepsReconcileOutsideTransaction(t *testing.T) {
+	root := t.TempDir()
+	cfg, starts, stops := serviceTransactionProcessConfig(root, "worker")
+	writeTestService(t, root, cfg)
+	manager, err := NewServiceManager(root, ServiceManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopProcessTestManager(t, &manager)
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	waitForTestPath(t, starts, "start")
+
+	persisted := make(chan struct{})
+	releaseWrite := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseWrite) }) }
+	defer release()
+	writeJSON := manager.definitionStore.writeJSON
+	manager.definitionStore.writeJSON = func(path string, value any, mode os.FileMode, rename func(string, string) error) error {
+		if err := writeJSON(path, value, mode, rename); err != nil {
+			return err
+		}
+		close(persisted)
+		<-releaseWrite
+		return nil
+	}
+	replacement := cfg
+	replacement.Args = []string{"replacement"}
+	applyResult := make(chan error, 1)
+	go func() { applyResult <- manager.Apply(replacement) }()
+	select {
+	case <-persisted:
+	case <-time.After(time.Second):
+		t.Fatal("Apply did not persist the desired definition")
+	}
+	persistedConfig, err := LoadServiceConfig(serviceConfigPath(root, cfg.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(persistedConfig.Args, replacement.Args) {
+		t.Fatalf("persisted Apply args = %#v, want %#v", persistedConfig.Args, replacement.Args)
+	}
+	reconcileAttempted := make(chan struct{})
+	reconcileResult := make(chan error, 1)
+	go func() {
+		close(reconcileAttempted)
+		reconcileResult <- manager.Reconcile(context.Background())
+	}()
+	<-reconcileAttempted
+	select {
+	case err := <-reconcileResult:
+		t.Fatalf("Reconcile observed an intermediate Apply state: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	release()
+	if err := <-applyResult; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-reconcileResult; err != nil {
+		t.Fatal(err)
+	}
+	if count := serviceTransactionMarkerCount(t, starts, "start"); count != 2 {
+		t.Fatalf("service starts after committed Apply = %d, want 2", count)
+	}
+	if count := serviceTransactionMarkerCount(t, stops, "stop"); count != 1 {
+		t.Fatalf("service stops after committed Apply = %d, want 1", count)
+	}
+}
+
+func TestServiceManagerApplyPreservesManualStop(t *testing.T) {
+	root := t.TempDir()
+	cfg, starts, stops := serviceTransactionProcessConfig(root, "worker")
+	writeTestService(t, root, cfg)
+	manager, err := NewServiceManager(root, ServiceManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopProcessTestManager(t, &manager)
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	waitForTestPath(t, starts, "start")
+	if err := manager.StopService(context.Background(), cfg.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	replacement := cfg
+	replacement.Args = []string{"replacement"}
+	if err := manager.Apply(replacement); err != nil {
+		t.Fatal(err)
+	}
+	status, err := manager.Show(cfg.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != ServiceStateStopped || !status.ManualStop || !status.Enabled || status.PID != 0 || status.ProcessGroup != 0 {
+		t.Fatalf("status after Apply to manually stopped service = %#v", status)
+	}
+	if count := serviceTransactionMarkerCount(t, starts, "start"); count != 1 {
+		t.Fatalf("manual stop allowed Apply restart count = %d, want 1", count)
+	}
+	if count := serviceTransactionMarkerCount(t, stops, "stop"); count != 1 {
+		t.Fatalf("manual stop count after Apply = %d, want 1", count)
+	}
+	persistedConfig, err := LoadServiceConfig(serviceConfigPath(root, cfg.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(persistedConfig, manager.configs[cfg.ID]) {
+		t.Fatalf("manual-stop Apply disk config = %#v, want %#v", persistedConfig, manager.configs[cfg.ID])
 	}
 }

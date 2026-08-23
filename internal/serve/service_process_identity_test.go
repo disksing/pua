@@ -271,8 +271,22 @@ func TestServiceManagerRetainsUnsupportedReconstructedOwnership(t *testing.T) {
 	if err := manager.Apply(replacement); err == nil {
 		t.Fatal("replacement accepted unresolved reconstructed ownership")
 	}
-	if got := manager.configs[cfg.ID].Command[0]; got != cfg.Command[0] {
-		t.Fatalf("blocked replacement changed command to %q", got)
+	if got := manager.configs[cfg.ID].Command[0]; got != replacement.Command[0] {
+		t.Fatalf("post-persist replacement command = %q, want %q", got, replacement.Command[0])
+	}
+	persistedReplacement, err := LoadServiceConfig(serviceConfigPath(root, cfg.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := persistedReplacement.Command[0]; got != replacement.Command[0] {
+		t.Fatalf("persisted replacement command = %q, want %q", got, replacement.Command[0])
+	}
+	retained, err = manager.Show(cfg.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retained.State != ServiceStateAttentionRequired || !retained.AttentionRequired || retained.PID != status.PID || retained.ProcessGroup != status.ProcessGroup {
+		t.Fatalf("post-persist replacement ownership = %#v", retained)
 	}
 	if err := manager.Remove(context.Background(), cfg.ID); err == nil {
 		t.Fatal("remove accepted unresolved reconstructed ownership")

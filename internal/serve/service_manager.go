@@ -1868,40 +1868,36 @@ func (m *ServiceManager) Apply(cfg ServiceConfig) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	cfg = defaultServiceConfig(cfg)
-	next := make(map[string]ServiceConfig, len(m.configs)+1)
-	for id, existing := range m.configs {
-		next[id] = existing
-	}
+	next := cloneServiceConfigs(m.configs)
 	next[cfg.ID] = cfg
-	graph, err := validatedServiceDependencyGraph(m.root, next)
+	graph, err := m.validateConfigTransactionLocked(next)
 	if err != nil {
 		return err
 	}
-	if !pathWithinResolved(filepath.Join(m.root, ".pua"), filepath.Join(m.root, ".pua", serviceConfigDir)) {
-		return errors.New("service directory must remain inside the workspace control directory")
+	rt := m.runtimes[cfg.ID]
+	changed := rt == nil || serviceConfigDigest(rt.config) != serviceConfigDigest(cfg)
+	if err := m.persistDefinitionLocked(cfg); err != nil {
+		return serviceDefinitionOperationError(rt, err)
 	}
-	if rt := m.runtimes[cfg.ID]; rt != nil && (rt.process != nil || rt.status.ProcessGroup > 0) && serviceConfigDigest(rt.config) != serviceConfigDigest(cfg) {
-		if err := m.stopProcessLocked(context.Background(), rt, false); err != nil {
-			return err
-		}
-	}
-	if err := writeServiceJSON(serviceConfigPath(m.root, cfg.ID), cfg, 0o600); err != nil {
-		return err
-	}
-	m.configs[cfg.ID] = cfg
+	m.configs = next
 	m.graph = graph
-	if m.runtimes[cfg.ID] == nil {
-		rt := &serviceRuntime{config: cfg, status: initialServiceStatus(cfg)}
+	if rt == nil {
+		rt = &serviceRuntime{config: cfg, status: initialServiceStatus(cfg)}
 		rt.status.Dependencies = append([]string(nil), graph[cfg.ID]...)
 		m.runtimes[cfg.ID] = rt
 		m.persistStatusLocked(rt)
 	} else {
-		rt := m.runtimes[cfg.ID]
 		rt.config = cfg
 		rt.status.Enabled = cfg.Enabled
 		rt.status.Dependencies = append([]string(nil), graph[cfg.ID]...)
 		rt.status.Readiness.Configured = cfg.Readiness != nil
 		rt.status.Cleanup.Configured = cfg.Cleanup != nil
+		if changed && (rt.process != nil || rt.status.ProcessGroup > 0) {
+			if err := m.stopProcessLocked(context.Background(), rt, false); err != nil {
+				return err
+			}
+			rt.status.Readiness.Ready = false
+		}
 		if rt.process == nil {
 			if cfg.Enabled {
 				if rt.status.State == ServiceStateDisabled {
@@ -1912,6 +1908,9 @@ func (m *ServiceManager) Apply(cfg ServiceConfig) error {
 			}
 		}
 		m.persistStatusLocked(rt)
+	}
+	if changed && m.started && !m.stopping {
+		return m.reconcileOneLocked(context.Background(), rt, graph[cfg.ID])
 	}
 	return nil
 }

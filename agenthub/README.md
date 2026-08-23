@@ -159,7 +159,11 @@ access. Its activity waveform is driven by the global AgentHub activity SSE
 stream. Each Session creates one pulse per one-second frame regardless of its
 underlying event count; concurrent Session pulses enter at the right, share the
 same four 250ms subdivisions as their activity beeps, and scroll smoothly to
-the left. One to four active Sessions use deterministic density patterns;
+the left. Both are delayed by 300ms to keep sound aligned with the visual peak.
+Each Session ID is stably bound to one of four tuned 400ms pulse shapes. The
+strip uses two alternating Canvas tiles: deterministic baseline motion and new
+pulses are drawn while offscreen, and visible pixels only translate until they
+leave the viewport. One to four active Sessions use deterministic density patterns;
 additional chord tones stack on rotating subdivisions instead of shortening
 the grid. Active Session labels use one full-width row each and brighten on new
 activity before fading back over ten seconds. A successfully finished Turn

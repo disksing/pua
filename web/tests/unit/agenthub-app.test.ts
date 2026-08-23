@@ -1,11 +1,12 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { sessionsQuery } from "../../src/agenthub/core/archive";
 import { buildCreatePayload } from "../../src/agenthub/core/new-session";
-import { activitySessions, applyBalanceTotals, filterQuotaSnapshot, pruneActivityPulses, quotaVisibilityKey, SessionToneAllocator, TERMINAL_TONE_HOLD_MS, waveformSampleY } from "../../src/agenthub/companion/model";
+import { TonePlayer } from "../../src/agenthub/companion/audio";
+import { ACTIVITY_LEAD_MS, ACTIVITY_WAVEFORMS, activityPulsesForFrame, activitySessions, activityWaveformIndex, activityWaveformPatchRange, applyBalanceTotals, filterQuotaSnapshot, pruneActivityPulses, quotaVisibilityKey, SessionToneAllocator, TERMINAL_TONE_HOLD_MS, waveformSampleY } from "../../src/agenthub/companion/model";
 import { activityPlaybackPlan } from "../../src/agenthub/companion/schedule";
 import { buildProviderSwitches } from "../../src/agenthub/settings/provider-switches";
 
@@ -52,6 +53,50 @@ describe("AgentHub audit application", () => {
     expect([allocator.assign("a"), allocator.assign("b"), allocator.assign("a")]).toEqual([0, 1, 0]);
   });
 
+  it("delays audio-aligned pulses by 300ms and stably binds Sessions to tuned waveforms", () => {
+    const now = 40_000;
+    const frame = { sequence: 1, sessions: [{ sessionId: "alpha", toneSlot: 0 }, { sessionId: "beta", toneSlot: 1 }] };
+    const pulses = (activityPulsesForFrame as any)(frame, now);
+    expect(ACTIVITY_LEAD_MS).toBe(300);
+    expect(pulses[0].at).toBe(now + ACTIVITY_LEAD_MS);
+    expect(pulses[0]).toMatchObject({ amplitude: 1, waveformIndex: (activityWaveformIndex as any)("alpha") });
+    expect((activityPulsesForFrame as any)(frame, now + 10_000).map((pulse: any) => pulse.waveformIndex))
+      .toEqual(pulses.map((pulse: any) => pulse.waveformIndex));
+    expect(ACTIVITY_WAVEFORMS).toHaveLength(4);
+    expect(ACTIVITY_WAVEFORMS.map((shape: any) => [shape[0], shape.at(-1)])).toEqual([
+      [[200, 0], [-200, 0]],
+      [[200, 0], [-200, 0]],
+      [[200, 0], [-200, 0]],
+      [[200, 0], [-200, 0]],
+    ]);
+    expect(ACTIVITY_WAVEFORMS.map((shape: any) => Math.max(...shape.map((point: any) => point[1])))).toEqual([1.28, 1.12, 1.309, 1.38]);
+  });
+
+  it("clips pulse patches to the offscreen write fence", () => {
+    expect((activityWaveformPatchRange as any)(1300, 1000, 0, 9000)).toEqual({ from: 1100, to: 1500 });
+    expect((activityWaveformPatchRange as any)(900, 1000, 0, 9000)).toEqual({ from: 1000, to: 1100 });
+    expect((activityWaveformPatchRange as any)(700, 1000, 0, 9000)).toBeNull();
+  });
+
+  it("delays completion playback until the synchronized visual peak", () => {
+    vi.useFakeTimers();
+    const play = vi.fn(() => Promise.resolve());
+    class FakeAudio {
+      volume = 0;
+      constructor(_url: string) {}
+      addEventListener() {}
+      play() { return play(); }
+    }
+    const player = new TonePlayer(undefined, FakeAudio as any);
+    player.completion("smile", 0.4, ACTIVITY_LEAD_MS / 1000);
+    expect(play).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(ACTIVITY_LEAD_MS - 1);
+    expect(play).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(play).toHaveBeenCalledOnce();
+    vi.useRealTimers();
+  });
+
   it("applies balance totals and persisted quota visibility preferences", () => {
     const snapshot = { providers: [{ provider: "deepseek", label: "DeepSeek", quotas: [{ kind: "balance", label: "Credit", value: 40, remainingPercent: 40 }] }] };
     const quota = (applyBalanceTotals as any)(snapshot, { deepseek: 200 });
@@ -62,12 +107,12 @@ describe("AgentHub audit application", () => {
 
   it("combines simultaneous activity into one waveform and adds deterministic idle peaks", () => {
     const sampleTime = 10_000;
-    const baselinePulse = [{ sessionId: "future", at: sampleTime + 10_000, amplitude: 1 }];
+    const baselinePulse = [{ sessionId: "future", at: sampleTime + 10_000, amplitude: 1, waveformIndex: 0 }];
     const baseline = (waveformSampleY as any)(baselinePulse, sampleTime, 86, true);
-    const one = (waveformSampleY as any)([{ sessionId: "one", at: sampleTime, amplitude: 0.25 }], sampleTime, 86, true);
+    const one = (waveformSampleY as any)([{ sessionId: "one", at: sampleTime, amplitude: 0.25, waveformIndex: 0 }], sampleTime, 86, true);
     const two = (waveformSampleY as any)([
-      { sessionId: "one", at: sampleTime, amplitude: 0.25 },
-      { sessionId: "two", at: sampleTime, amplitude: 0.25 },
+      { sessionId: "one", at: sampleTime, amplitude: 0.25, waveformIndex: 0 },
+      { sessionId: "two", at: sampleTime, amplitude: 0.25, waveformIndex: 0 },
     ], sampleTime, 86, true);
     expect(Math.abs(two - baseline)).toBeGreaterThan(Math.abs(one - baseline) * 1.8);
 
@@ -75,6 +120,8 @@ describe("AgentHub audit application", () => {
     const idleAgain = Array.from({ length: 40 }, (_, index) => (waveformSampleY as any)([], sampleTime + index * 100, 86, true));
     expect(idleAgain).toEqual(idle);
     expect(new Set(idle.map((value) => value.toFixed(2))).size).toBeGreaterThan(8);
+    expect((waveformSampleY as any)([], sampleTime, 86, false)).toBe((waveformSampleY as any)([], sampleTime, 86, true));
+    expect((waveformSampleY as any)(baselinePulse, sampleTime, 86, true)).toBe((waveformSampleY as any)([], sampleTime, 86, true));
   });
 
   it("keeps inventory controls visible and restores the full-screen animated Beeper contract", () => {
@@ -94,17 +141,21 @@ describe("AgentHub audit application", () => {
     expect(inventory).not.toContain("Agent activity and history");
     expect(companion).toContain("{#each activeList as session (session.sessionId)}");
     expect(companion).toContain("{#key session.lastActiveAt}");
-    expect(waveform).toContain("<canvas");
+    expect(waveform.match(/<canvas/g)).toHaveLength(2);
     expect(waveform).not.toContain("$state");
     expect(waveform).toContain("context.lineTo");
-    expect(waveform).toContain("canvas.animate(");
-    expect(waveform).toContain("futureBufferMs = ACTIVITY_VISIBLE_MS");
-    expect(waveform).toContain("drawRange(range.from, range.to)");
-    expect(waveform).toContain("ranges.sort(");
-    expect(waveform).not.toContain("!currentKeys.size && knownPulses.size");
+    expect(waveform).toContain("track.animate(");
+    expect(waveform).toContain("activityWaveformPatchRange");
+    expect(waveform).toContain("const writeFence = visibleRightTime() + pixelFenceMs");
+    expect(waveform).toContain("track.append(expired.canvas)");
+    expect(waveform).toContain("context.lineWidth = 1.9");
+    expect(waveform).toContain("context.shadowBlur = 12");
+    expect(waveform).not.toContain("live;");
     expect(waveform).not.toContain("requestAnimationFrame");
     expect(waveform).toContain("document.hidden");
     expect(companion).toContain("Open Beeper in a new window");
+    expect(companion).toContain("delay + ACTIVITY_LEAD_MS / 1000");
+    expect(companion).toContain("preferences.beepVolume, synchronizedDelay");
     expect(companion).toContain("Collapse Companion");
     expect(companion).toContain("projectedSingleContentHeight > quotaScroll.clientHeight");
     expect(companion).toContain("class:dense={quotaDense}");

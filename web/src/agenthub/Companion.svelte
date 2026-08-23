@@ -5,7 +5,7 @@
   import ActivityWaveform from "./ActivityWaveform.svelte";
   import { activityPlaybackPlan, COMPLETION_SOUNDS, TonePlayer } from "./companion/audio";
   import { DEFAULT_BEEP_CHORD, nextProgressionFrame, noteForToneSlot } from "./companion/chords";
-  import { activityPulsesForFrame, activitySessionHoldsTone, activitySessionNeedsTone, activitySessions, activitySessionTerminal, applyBalanceTotals, filterQuotaSnapshot, formatDuration, pruneActivityPulses, quotaCycleItems, SessionToneAllocator } from "./companion/model";
+  import { ACTIVITY_LEAD_MS, activityPulsesForFrame, activitySessionHoldsTone, activitySessionNeedsTone, activitySessions, activitySessionTerminal, applyBalanceTotals, filterQuotaSnapshot, formatDuration, pruneActivityPulses, quotaCycleItems, SessionToneAllocator } from "./companion/model";
   import { loadCompanionPreferences, saveCompanionPreferences, subscribeCompanionPreferences } from "./companion/preferences";
   import { agentHubPath, api } from "./core/api";
 
@@ -142,8 +142,9 @@
         sessions = (activitySessions as any)(sessions, assigned, now);
         pulses = (pruneActivityPulses as any)([...pulses, ...(activityPulsesForFrame as any)(assigned, now)], now);
         if (preferences.enableBeeping) (activityPlaybackPlan as any)(incoming, frame.sequence).forEach(({ item, delay, gain }: any) => {
-          if (activitySessionTerminal(item)) player.completion(preferences.completionSound, preferences.beepVolume);
-          else player.pulse(item.toneSlot, activityChord, preferences.beepVolume * gain, delay);
+          const synchronizedDelay = delay + ACTIVITY_LEAD_MS / 1000;
+          if (activitySessionTerminal(item)) player.completion(preferences.completionSound, preferences.beepVolume, synchronizedDelay);
+          else player.pulse(item.toneSlot, activityChord, preferences.beepVolume * gain, synchronizedDelay);
         });
         audioBlocked = preferences.enableBeeping && player.status() !== "running";
       } catch { activityState = "connecting"; }

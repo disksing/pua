@@ -70,24 +70,28 @@ export class TonePlayer {
     )));
   }
 
-  completion(sound = "completed-voice", volume = 0.28) {
-    if (!this.AudioClass) return this.fallbackCompletion(volume);
+  completion(sound = "completed-voice", volume = 0.28, delay = 0) {
+    if (!this.AudioClass) return this.fallbackCompletion(volume, delay);
     const player = new this.AudioClass(completionSoundURL(sound));
     player.volume = Math.max(0, Math.min(1, volume));
     const cleanup = () => this.completionPlayers.delete(player);
     player.addEventListener?.("ended", cleanup, { once: true });
     player.addEventListener?.("error", cleanup, { once: true });
     this.completionPlayers.add(player);
-    try {
-      const playback = player.play();
-      playback?.catch(() => {
+    const play = () => {
+      try {
+        const playback = player.play();
+        playback?.catch(() => {
+          cleanup();
+          this.fallbackCompletion(volume);
+        });
+      } catch {
         cleanup();
         this.fallbackCompletion(volume);
-      });
-    } catch {
-      cleanup();
-      return this.fallbackCompletion(volume);
-    }
+      }
+    };
+    if (delay > 0) globalThis.setTimeout(play, delay * 1000);
+    else play();
     return player;
   }
 
@@ -106,11 +110,11 @@ export class TonePlayer {
     return this.mediaPrimed;
   }
 
-  fallbackCompletion(volume) {
+  fallbackCompletion(volume, delay = 0) {
     return [
-      this.playFrequency(659.25, volume, 0, 0.16),
-      this.playFrequency(987.77, volume, 0.11, 0.16),
-      this.playFrequency(1318.51, volume, 0.22, 0.16),
+      this.playFrequency(659.25, volume, delay, 0.16),
+      this.playFrequency(987.77, volume, delay + 0.11, 0.16),
+      this.playFrequency(1318.51, volume, delay + 0.22, 0.16),
     ];
   }
 

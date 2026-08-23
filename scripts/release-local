@@ -105,8 +105,6 @@ echo "Building frontends..."
 npm --prefix "$root/web" ci
 npm --prefix "$root/web" run check
 npm --prefix "$root/web" run build
-npm --prefix "$root/agenthub/frontend" ci
-npm --prefix "$root/agenthub/frontend" run build
 
 build_target() {
 	os=$1

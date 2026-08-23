@@ -360,6 +360,9 @@ func (s *Store) Filter(filter ListFilter) []Session {
 		values = append(values, value)
 	}
 	sort.Slice(values, func(i, j int) bool {
+		if values[i].UpdatedAt.Equal(values[j].UpdatedAt) {
+			return values[i].ID > values[j].ID
+		}
 		return values[i].UpdatedAt.After(values[j].UpdatedAt)
 	})
 	return values

@@ -26,7 +26,5 @@ cd "$root"
 npm --prefix web ci
 npm --prefix web run check
 npm --prefix web run build
-npm --prefix agenthub/frontend ci
-npm --prefix agenthub/frontend run build
 go build -tags embed_frontend -ldflags "$ldflags" -o "$out_path/pua" ./cli/cmd/pua
 go build -tags embed_frontend -ldflags "$ldflags" -o "$out_path/agenthub" ./agenthub/cmd/agenthub

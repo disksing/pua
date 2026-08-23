@@ -33,7 +33,7 @@ if [ ! -f "$root/web/static/assets/pua-app.js" ]; then
 	npm --prefix "$root/web" run build
 fi
 if [ ! -f "$root/agenthub/web/static/index.html" ]; then
-	npm --prefix "$root/agenthub/frontend" run build
+	npm --prefix "$root/web" run build:agenthub
 fi
 
 go -C "$root" build -o "$binary_path" ./cli/cmd/pua

@@ -7,10 +7,13 @@
     "node": "^20.19.0 || >=22.12.0"
   },
   "scripts": {
-    "build": "vite build",
+    "build": "npm run build:pua && npm run build:agenthub",
+    "build:pua": "vite build",
+    "build:agenthub": "vite build --config vite.agenthub.config.ts && node ../agenthub/frontend/scripts/embed-client.mjs && node ../agenthub/frontend/scripts/prepare-sites-build.mjs",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "dev": "vite --host 127.0.0.1",
-    "test": "vitest run",
+    "test": "vitest run && npm run test:sites",
+    "test:sites": "node ../agenthub/frontend/tests/sites-worker.test.mjs",
     "test:perf": "vitest run --config vitest.perf.config.ts",
     "test:watch": "vitest",
     "test:e2e": "playwright test"

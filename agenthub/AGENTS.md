@@ -1,6 +1,6 @@
 # AgentHub Instructions
 
-The Go daemon, filesystem Session Store, HTTP/SSE API, and CLI are the primary product. The Web UI under `frontend/src/` is currently an auxiliary prototype.
+The Go daemon, filesystem Session Store, HTTP/SSE API, and CLI are the primary product. AgentHub's Svelte UI lives under `../web/src/agenthub/` in the unified frontend project, with its own Vite entry and embedded output.
 
 - Keep the daemon as the only writer of Session data.
 - Keep `events.jsonl` as the Session source of truth; `session.json` must remain a rebuildable projection.
@@ -17,4 +17,6 @@ The standalone `/beeper` monitor is a full-viewport dark surface without an oute
 
 When implementing from a selected generated mock, treat that image as the source of truth for layout, component anatomy, density, spacing, color, typography, visible content, and hierarchy.
 
-Build app UI in `frontend/src/`. Keep `frontend/worker/index.js`, `frontend/scripts/prepare-sites-build.mjs`, and `frontend/tests/sites-worker.test.mjs` intact so the same local prototype can be handed to Sites. Before a Sites handoff, run `npm run build` and `npm run test:sites` in `frontend/`; the build must leave `frontend/dist/client/index.html` and `frontend/dist/server/index.js`.
+Build AgentHub app UI in `../web/src/agenthub/` and shared UI primitives in `../web/src/components/`. Keep `frontend/worker/index.js`, `frontend/scripts/prepare-sites-build.mjs`, and `frontend/tests/sites-worker.test.mjs` intact so the same app can be handed to Sites. Before a Sites handoff, run `npm run build:agenthub` and `npm run test:sites` in `../web/`; the build must leave `frontend/dist/client/index.html` and `frontend/dist/server/index.js`.
+
+The main AgentHub surface is a Session inventory/audit view. Archived Sessions are hidden by default and use a separate Archived scope. Desktop Session details open in a right-side inspector; mobile uses the full viewport. The inspector sections are Overview, Conversation, and Turns & Events. Keep the floating Companion default-collapsed and preserve the independent Beeper route. Do not add AgentHub APIs to fill visual gaps; omit unsupported fields and features, except that cursor pagination on the Session list is an approved API addition.

@@ -40,6 +40,10 @@ var ErrScheduleOccurrenceOutOfRange = errors.New("schedule occurrence is outside
 // incremented without wrapping the persisted uint64 value.
 var ErrScheduleRevisionExhausted = errors.New("schedule revision is exhausted")
 
+// ErrScheduleTargetScheduler identifies an execution target that would wake
+// the Scheduler management/compiler resource for ordinary scheduled work.
+var ErrScheduleTargetScheduler = errors.New("the Scheduler resource cannot be a schedule target")
+
 const (
 	SchedulerResourceID         = "scheduler"
 	schedulerDir                = "scheduler"
@@ -534,6 +538,9 @@ func validateSchedule(schedule Schedule) error {
 	}
 	switch schedule.State {
 	case ScheduleStateActive, ScheduleStatePaused, ScheduleStateCompleted:
+		if err := ValidateScheduleTarget(schedule.Target); err != nil {
+			return err
+		}
 		if schedule.Trigger == nil {
 			return errors.New("trigger is required")
 		}
@@ -546,6 +553,16 @@ func validateSchedule(schedule Schedule) error {
 		}
 	default:
 		return fmt.Errorf("unsupported state %q", schedule.State)
+	}
+	return nil
+}
+
+// ValidateScheduleTarget rejects the special Scheduler management/compiler
+// resource as an occurrence execution target. Resource existence is validated
+// separately against the owning Workspace.
+func ValidateScheduleTarget(target string) error {
+	if strings.TrimSpace(target) == SchedulerResourceID {
+		return ErrScheduleTargetScheduler
 	}
 	return nil
 }
@@ -1070,9 +1087,14 @@ func (w *Workspace) normalizeScheduleFields(description, condition, target strin
 		strings.ContainsRune(description, '\x00') || strings.ContainsRune(condition, '\x00') || strings.ContainsRune(target, '\x00') {
 		return "", "", "", errors.New("schedule field is invalid")
 	}
-	if validateTarget && target != "workspace" && target != SchedulerResourceID {
-		if _, _, err := loadOpenResource(w.root, target); err != nil {
-			return "", "", "", fmt.Errorf("target must be an open resource in the current Workspace: %w", err)
+	if validateTarget {
+		if err := ValidateScheduleTarget(target); err != nil {
+			return "", "", "", err
+		}
+		if target != "workspace" {
+			if _, _, err := loadOpenResource(w.root, target); err != nil {
+				return "", "", "", fmt.Errorf("target must be an open resource in the current Workspace: %w", err)
+			}
 		}
 	}
 	return description, condition, target, nil

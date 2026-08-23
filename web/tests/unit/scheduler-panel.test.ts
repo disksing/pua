@@ -31,7 +31,8 @@ function schedulerActions(overrides: Partial<SchedulerMutationCallbacks> = {}): 
     validateTarget: (resourceId) => {
       const target = resourceId.trim();
       if (!target) return "Target resource is required.";
-      return target === "workspace" || target === "scheduler" || target === "project1.task1"
+      if (target === "scheduler") return "The Scheduler resource cannot be a schedule target.";
+      return target === "workspace" || target === "project1.task1"
         ? ""
         : "Target must be an open resource in the current Workspace.";
     },
@@ -93,6 +94,23 @@ describe("SchedulerPanel", () => {
     expect(target.querySelector("#schedule-target-error")?.textContent).toContain("open resource in the current Workspace");
     expect(target.querySelector<HTMLButtonElement>(".schedule-editor > button")?.disabled).toBe(true);
 
+    target.querySelector<HTMLButtonElement>(".schedule-editor > button")!.click();
+    expect(actions.save).not.toHaveBeenCalled();
+  });
+
+  it("rejects the Scheduler management resource as an execution target", async () => {
+    const { target, actions } = mountPanel();
+    await tick();
+
+    inputValue(target.querySelector<HTMLInputElement>("input[placeholder^='What should']")!, "Review the release");
+    inputValue(target.querySelector<HTMLTextAreaElement>("textarea")!, "when the release is ready");
+    const targetInput = target.querySelector<HTMLInputElement>("input[placeholder^='workspace']")!;
+    inputValue(targetInput, "scheduler");
+    await tick();
+
+    expect(targetInput.getAttribute("aria-invalid")).toBe("true");
+    expect(target.querySelector("#schedule-target-error")?.textContent).toContain("cannot be a schedule target");
+    expect(target.querySelector<HTMLButtonElement>(".schedule-editor > button")?.disabled).toBe(true);
     target.querySelector<HTMLButtonElement>(".schedule-editor > button")!.click();
     expect(actions.save).not.toHaveBeenCalled();
   });

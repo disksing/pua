@@ -142,6 +142,10 @@ func TestSchedulerCommandsUseOwningServerForNativeSchedules(t *testing.T) {
 				args: []string{"scheduler", "update", "--id=" + created.ID, "--revision=1", "--at=" + at, "--cron=0 0 9 * * *", "--timezone=UTC"},
 				want: "exactly one trigger form is required",
 			},
+			"Scheduler self-target": {
+				args: []string{"scheduler", "update", "--id=" + created.ID, "--revision=1", "--target=scheduler", "--at=" + at},
+				want: app.ErrScheduleTargetScheduler.Error(),
+			},
 		} {
 			t.Run(name, func(t *testing.T) {
 				if _, err := runErr(t, test.args...); err == nil || !strings.Contains(err.Error(), test.want) {
@@ -154,12 +158,12 @@ func TestSchedulerCommandsUseOwningServerForNativeSchedules(t *testing.T) {
 		}
 
 		updatedAt := time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339Nano)
-		updatedOutput := run(t, "scheduler", "update", "--id="+created.ID, "--revision=1", "--condition=at the agreed time when the release branch is green", "--target=scheduler", "--at="+updatedAt)
+		updatedOutput := run(t, "scheduler", "update", "--id="+created.ID, "--revision=1", "--condition=at the agreed time when the release branch is green", "--target=workspace", "--at="+updatedAt)
 		var updated app.Schedule
 		if err := json.Unmarshal([]byte(updatedOutput), &updated); err != nil {
 			t.Fatal(err)
 		}
-		if updated.Revision != 2 || updated.Condition != "at the agreed time when the release branch is green" || updated.Target != app.SchedulerResourceID || updated.CreatedAt != created.CreatedAt || updated.Trigger == nil || updated.Trigger.At != updatedAt {
+		if updated.Revision != 2 || updated.Condition != "at the agreed time when the release branch is green" || updated.Target != "workspace" || updated.CreatedAt != created.CreatedAt || updated.Trigger == nil || updated.Trigger.At != updatedAt {
 			t.Fatalf("updated schedule = %#v", updated)
 		}
 		triggerOnlyAt := time.Now().UTC().Add(3 * time.Hour).Format(time.RFC3339Nano)
@@ -172,7 +176,7 @@ func TestSchedulerCommandsUseOwningServerForNativeSchedules(t *testing.T) {
 			t.Fatalf("trigger-only update changed unrelated fields = %#v", triggerOnly)
 		}
 		shown := run(t, "scheduler", "show", "--id", created.ID)
-		if !strings.Contains(shown, `"target": "scheduler"`) {
+		if !strings.Contains(shown, `"target": "workspace"`) {
 			t.Fatalf("schedule show = %s", shown)
 		}
 		jsonList := run(t, "scheduler", "list", "--json")
@@ -269,10 +273,12 @@ func TestSchedulerValidatesCommandsBeforeOwnerDiscovery(t *testing.T) {
 			{name: "unknown list flag", args: []string{"scheduler", "list", "--yaml"}, want: "usage: pua scheduler list [--json] [--server=<url>]"},
 			{name: "missing show id", args: []string{"scheduler", "show"}, want: schedulerShowUsage},
 			{name: "unknown add option", args: []string{"scheduler", "add", "--description=Review", "--condition=At review time", "--target=workspace", "--at=" + validAt, "--yaml=true"}, want: schedulerAddUsage},
+			{name: "Scheduler self-target add", args: []string{"scheduler", "add", "--description=Review", "--condition=At review time", "--target=scheduler", "--at=" + validAt}, want: app.ErrScheduleTargetScheduler.Error()},
 			{name: "incomplete add trigger", args: []string{"scheduler", "add", "--description=Review", "--condition=At review time", "--target=workspace", "--every=5m"}, want: "--every and --anchor are required together"},
 			{name: "missing update revision", args: []string{"scheduler", "update", "--id=schedule-1", "--at=" + validAt}, want: schedulerUpdateUsage},
 			{name: "zero update revision", args: []string{"scheduler", "update", "--id=schedule-1", "--revision=0", "--at=" + validAt}, want: schedulerUpdateUsage},
 			{name: "missing update trigger", args: []string{"scheduler", "update", "--id=schedule-1", "--revision=1"}, want: schedulerUpdateUsage},
+			{name: "Scheduler self-target update", args: []string{"scheduler", "update", "--id=schedule-1", "--revision=1", "--target=scheduler", "--at=" + validAt}, want: app.ErrScheduleTargetScheduler.Error()},
 			{name: "incomplete update trigger", args: []string{"scheduler", "update", "--id=schedule-1", "--revision=1", "--cron=0 0 9 * * *"}, want: "--cron and --timezone are required together"},
 			{name: "missing pause id", args: []string{"scheduler", "pause"}, want: "usage: pua scheduler pause --id=<schedule> [--server=<url>]"},
 			{name: "missing resume id", args: []string{"scheduler", "resume"}, want: "usage: pua scheduler resume --id=<schedule> [--server=<url>]"},

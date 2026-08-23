@@ -9,6 +9,6 @@
 - 在 `condition` 中保留用户原始的时间表述。非时间谓词放入 `guard`；到点后由目标 Agent 检查，Scheduler 本身不解释 guard。
 - 更新必须携带当前 `revision`。遇到 `schedule_revision_conflict` 时重新读取并重新判断，不得覆盖并发修改。
 - 时间、重复方式或时区有歧义时，在当前 Turn 中询问用户。在答案明确前原子保持旧 schedule 不变，绝不猜测机器本地时区。
-- 迁移得到的 `needs_compilation` schedule 不会执行。逐项编译；除非用户要求语义修改，否则保留原 description、condition 和 target。
+- 迁移得到的 `needs_compilation` schedule 不会执行。逐项编译；除非用户要求语义修改，否则保留原 description、condition 和 target。`scheduler` 管理资源自身不能作为执行 target；若迁移定义原来以它为 target，先请用户选择另一个开放资源，在此之前保持定义未编译。
 - `scheduler.md` 只保存完成当前澄清所需的最少上下文，不是运行游标或执行历史。
 - 调度项结构化变化是允许的跨资源操作，不授予你写入目标资源文件的权限。

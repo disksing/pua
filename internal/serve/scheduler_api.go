@@ -162,6 +162,10 @@ func writeSchedulerChangeError(w http.ResponseWriter, err error) {
 		writeError(w, &resourceAPIError{Code: "schedule_revision_exhausted", Message: err.Error()}, http.StatusConflict)
 		return
 	}
+	if errors.Is(err, app.ErrScheduleTargetScheduler) {
+		writeSchedulerTargetError(w)
+		return
+	}
 	if errors.Is(err, errNativeSchedulerUpdateTriggerRequired) {
 		writeError(w, &resourceAPIError{Code: "schedule_trigger_required", Message: err.Error()}, http.StatusBadRequest)
 		return
@@ -171,6 +175,12 @@ func writeSchedulerChangeError(w http.ResponseWriter, err error) {
 		return
 	}
 	writeError(w, err, http.StatusBadRequest)
+}
+
+func writeSchedulerTargetError(w http.ResponseWriter) {
+	writeError(w, &resourceAPIError{
+		Code: "schedule_target_invalid", Message: app.ErrScheduleTargetScheduler.Error(),
+	}, http.StatusBadRequest)
 }
 
 func (s *server) handleNaturalLanguageScheduleRequest(w http.ResponseWriter, r *http.Request, workspace serveWorkspace, operation app.ScheduleChangeOperation, id string) {
@@ -183,8 +193,13 @@ func (s *server) handleNaturalLanguageScheduleRequest(w http.ResponseWriter, r *
 		writeError(w, err, http.StatusBadRequest)
 		return
 	}
-	if strings.TrimSpace(body.Description) == "" || strings.TrimSpace(body.Condition) == "" || strings.TrimSpace(body.Target) == "" {
+	description, condition, target := strings.TrimSpace(body.Description), strings.TrimSpace(body.Condition), strings.TrimSpace(body.Target)
+	if description == "" || condition == "" || target == "" {
 		writeError(w, errors.New("description, condition, and target are required"), http.StatusBadRequest)
+		return
+	}
+	if err := app.ValidateScheduleTarget(target); err != nil {
+		writeSchedulerTargetError(w)
 		return
 	}
 	userName, err := s.workspaceUserName(r, workspace.Path)
@@ -196,7 +211,7 @@ func (s *server) handleNaturalLanguageScheduleRequest(w http.ResponseWriter, r *
 	if id != "" {
 		text += " for " + id
 	}
-	text += fmt.Sprintf(".\n\nDescription: %s\nCondition: %s\nTarget: %s\n\nCompile this request into a structured trigger with the Scheduler CLI. If the timing, recurrence, or IANA timezone is ambiguous, ask me in this Turn and do not modify the existing definition.", strings.TrimSpace(body.Description), strings.TrimSpace(body.Condition), strings.TrimSpace(body.Target))
+	text += fmt.Sprintf(".\n\nDescription: %s\nCondition: %s\nTarget: %s\n\nCompile this request into a structured trigger with the Scheduler CLI. If the timing, recurrence, or IANA timezone is ambiguous, ask me in this Turn and do not modify the existing definition.", description, condition, target)
 	role, sender := agentHubMessageProvenance(userName)
 	var message resourceMailboxMessage
 	acceptErr := s.agents.withResourceController(r.Context(), workspace, app.SchedulerResourceID, func() error {

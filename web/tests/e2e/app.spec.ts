@@ -1378,7 +1378,7 @@ test("keeps Scheduler schedule controls at a 44px touch size on a 440px viewport
   await expect(description).toHaveAttribute("placeholder", "What should the Scheduler understand?");
   await expect(condition).toHaveAttribute("placeholder", "For example: when the release branch is green after 09:00 Shanghai time");
   await expect(condition).toHaveAttribute("rows", "3");
-  await expect(target).toHaveAttribute("placeholder", "workspace, scheduler, project1, or project1.task1");
+  await expect(target).toHaveAttribute("placeholder", "workspace, project1, or project1.task1");
   await expect(addSchedule).toHaveAttribute("type", "button");
   await expect(addSchedule).toBeDisabled();
 

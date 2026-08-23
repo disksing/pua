@@ -142,11 +142,23 @@ func TestSchedulerHTTPAPIRoutesNaturalLanguageAndNativeChanges(t *testing.T) {
 	if err != nil || len(mailbox.Messages) != 1 || mailbox.Messages[0].Role != "user" || mailbox.Messages[0].Sender == nil || mailbox.Messages[0].Sender.Name != "Ada" || !strings.Contains(mailbox.Messages[0].Text, "IANA timezone") {
 		t.Fatalf("Scheduler compilation mailbox = %#v, %v", mailbox.Messages, err)
 	}
+	selfTargetNatural := request(http.MethodPost, "/api/workspaces/workspace-scheduler/scheduler", `{"description":"Review","condition":"tomorrow morning","target":"scheduler"}`)
+	if selfTargetNatural.Code != http.StatusBadRequest || !strings.Contains(selfTargetNatural.Body.String(), `"code":"schedule_target_invalid"`) || !strings.Contains(selfTargetNatural.Body.String(), app.ErrScheduleTargetScheduler.Error()) {
+		t.Fatalf("natural-language self-target = %d %s", selfTargetNatural.Code, selfTargetNatural.Body.String())
+	}
+	mailbox, err = loadResourceMailboxForResource(root, app.SchedulerResourceID)
+	if err != nil || len(mailbox.Messages) != 1 {
+		t.Fatalf("rejected self-target mutated Scheduler mailbox: %#v, %v", mailbox.Messages, err)
+	}
 
 	at := time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)
 	invalid := request(http.MethodPost, "/api/workspaces/workspace-scheduler/scheduler/changes", `{"operation":"restart"}`)
 	if invalid.Code != http.StatusBadRequest || !strings.Contains(invalid.Body.String(), `unsupported Scheduler change \"restart\"`) {
 		t.Fatalf("invalid native change = %d %s", invalid.Code, invalid.Body.String())
+	}
+	selfTargetCreate := request(http.MethodPost, "/api/workspaces/workspace-scheduler/scheduler/changes", `{"operation":"create","description":"Review","condition":"tomorrow at 09:00 UTC","target":"scheduler","trigger":{"type":"at","at":"`+at+`"}}`)
+	if selfTargetCreate.Code != http.StatusBadRequest || !strings.Contains(selfTargetCreate.Body.String(), `"code":"schedule_target_invalid"`) || !strings.Contains(selfTargetCreate.Body.String(), app.ErrScheduleTargetScheduler.Error()) {
+		t.Fatalf("native self-target create = %d %s", selfTargetCreate.Code, selfTargetCreate.Body.String())
 	}
 	createdResponse := request(http.MethodPost, "/api/workspaces/workspace-scheduler/scheduler/changes", `{"operation":"create","description":"Review","condition":"tomorrow at 09:00 UTC","target":"workspace","trigger":{"type":"at","at":"`+at+`"}}`)
 	if createdResponse.Code != http.StatusOK {
@@ -155,6 +167,14 @@ func TestSchedulerHTTPAPIRoutesNaturalLanguageAndNativeChanges(t *testing.T) {
 	var created app.Schedule
 	if err := json.Unmarshal(createdResponse.Body.Bytes(), &created); err != nil || created.Revision != 1 || created.Trigger == nil {
 		t.Fatalf("created schedule = %#v, %v", created, err)
+	}
+	selfTargetUpdateAt := time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339Nano)
+	selfTargetUpdate := request(http.MethodPost, "/api/workspaces/workspace-scheduler/scheduler/changes", `{"operation":"update","id":"`+created.ID+`","expectedRevision":1,"target":"scheduler","trigger":{"type":"at","at":"`+selfTargetUpdateAt+`"}}`)
+	if selfTargetUpdate.Code != http.StatusBadRequest || !strings.Contains(selfTargetUpdate.Body.String(), `"code":"schedule_target_invalid"`) {
+		t.Fatalf("native self-target update = %d %s", selfTargetUpdate.Code, selfTargetUpdate.Body.String())
+	}
+	if got := schedulerTestScheduleByID(t, puaWorkspace, created.ID); !reflect.DeepEqual(got, created) {
+		t.Fatalf("rejected self-target update changed schedule: got %#v, want %#v", got, created)
 	}
 	naturalUpdate := request(http.MethodPut, "/api/workspaces/workspace-scheduler/scheduler/"+created.ID, `{"description":"Review later","condition":"next week","target":"workspace"}`)
 	if naturalUpdate.Code != http.StatusAccepted {
@@ -589,6 +609,47 @@ func TestNativeSchedulerStructuredUpdateRequiresCompleteTrigger(t *testing.T) {
 		}
 		if got := readSchedule(t, workspace); !reflect.DeepEqual(got, original) || got.State != app.ScheduleStateNeedsCompilation {
 			t.Fatalf("needs-compilation schedule changed: got %#v, want %#v", got, original)
+		}
+	})
+
+	t.Run("historical Scheduler self-target requires retargeting", func(t *testing.T) {
+		root := t.TempDir()
+		if _, err := app.Initialize(root, "en"); err != nil {
+			t.Fatal(err)
+		}
+		workspace, err := app.OpenWorkspace(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		migrated := migrateSchedulerV1ForTest(t, workspace, schedulerV1TestDefinition{
+			ID:          "schedule-444444444444444444444444",
+			Description: "Historical self-target",
+			Condition:   "at the original time",
+			Target:      app.SchedulerResourceID,
+			CreatedAt:   "2026-08-01T00:00:00Z",
+			UpdatedAt:   "2026-08-01T00:00:00Z",
+		})[0]
+		native := newNativeScheduler(nil, serveWorkspace{Path: root})
+		replacement := app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339Nano)}
+		_, err = native.Change(context.Background(), NativeSchedulerChange{
+			Operation: app.ScheduleChangeUpdate, ID: migrated.ID, ExpectedRevision: migrated.Revision, Trigger: &replacement,
+		})
+		if !errors.Is(err, app.ErrScheduleTargetScheduler) {
+			t.Fatalf("self-target compilation error = %v", err)
+		}
+		if got := readSchedule(t, workspace); !reflect.DeepEqual(got, migrated) {
+			t.Fatalf("rejected self-target compilation changed schedule: got %#v, want %#v", got, migrated)
+		}
+		target := "workspace"
+		compiled, err := native.Change(context.Background(), NativeSchedulerChange{
+			Operation: app.ScheduleChangeUpdate, ID: migrated.ID, ExpectedRevision: migrated.Revision,
+			Target: &target, Trigger: &replacement,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if compiled.State != app.ScheduleStateActive || compiled.Target != target || compiled.Trigger == nil || *compiled.Trigger != replacement {
+			t.Fatalf("retargeted compilation = %#v", compiled)
 		}
 	})
 
@@ -1285,12 +1346,24 @@ func setPreparedReceiptRetentionForTest(t *testing.T, receiptCount int, receiptW
 
 func TestNativeSchedulerPreparedPinsAcceptedReceipt(t *testing.T) {
 	setPreparedReceiptRetentionForTest(t, 2, time.Hour, 2, 24*time.Hour)
-	for _, target := range []string{"workspace", app.SchedulerResourceID} {
-		t.Run(target, func(t *testing.T) {
+	for _, targetKind := range []string{"workspace", "task"} {
+		t.Run(targetKind, func(t *testing.T) {
 			manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
 			puaWorkspace, err := app.OpenWorkspace(workspace.Path)
 			if err != nil {
 				t.Fatal(err)
+			}
+			target := "workspace"
+			if targetKind == "task" {
+				project, err := puaWorkspace.CreateProject("Receipt target", "receipt-target")
+				if err != nil {
+					t.Fatal(err)
+				}
+				task, err := puaWorkspace.CreateTask(app.CreateTaskInput{ProjectID: project.ID, Title: "Receipt target", Slug: "receipt-target"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				target = task.ID
 			}
 			at := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
 			schedule, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
@@ -2533,7 +2606,7 @@ func TestNativeSchedulerMigrationMessagesProgressByDigest(t *testing.T) {
 			ID:          "schedule-555555555555555555555555",
 			Description: "Second",
 			Condition:   "next week",
-			Target:      "workspace",
+			Target:      app.SchedulerResourceID,
 			CreatedAt:   "2026-08-02T00:00:00Z",
 			UpdatedAt:   "2026-08-02T00:00:00Z",
 		},
@@ -2559,6 +2632,19 @@ func TestNativeSchedulerMigrationMessagesProgressByDigest(t *testing.T) {
 	}
 	if got := countMigrationMessages(); got != 1 {
 		t.Fatalf("migration messages = %d, want 1", got)
+	}
+	mailbox, err := loadResourceMailboxForResource(workspace.Path, app.SchedulerResourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundRetargetGuidance := false
+	for _, message := range mailbox.Messages {
+		if message.Type == resourceMessageTypeScheduleMigration && strings.Contains(message.Text, "cannot be an execution target") {
+			foundRetargetGuidance = true
+		}
+	}
+	if !foundRetargetGuidance {
+		t.Fatalf("migration message omitted Scheduler self-target guidance: %#v", mailbox.Messages)
 	}
 	cancelled, found, err := mailboxMessageByID(workspace.Path, legacy.ID)
 	if err != nil || !found || cancelled.Status != resourceMessageUndeliverable || cancelled.LastErrorCode != "scheduler_v1_retired" {

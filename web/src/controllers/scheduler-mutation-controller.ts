@@ -53,7 +53,8 @@ export function createSchedulerMutationController(dependencies: SchedulerMutatio
 		const resourceId = value.trim();
 		if (!resourceId) return "Target resource is required.";
 		if (!identityIsCurrent(identity)) return "Target must be an open resource in the current Workspace.";
-		if (resourceId === "workspace" || resourceId === "scheduler") return "";
+		if (resourceId === "scheduler") return "The Scheduler resource cannot be a schedule target.";
+		if (resourceId === "workspace") return "";
 		return dependencies.resolveResourceTitle(resourceId)
 			? ""
 			: "Target must be an open resource in the current Workspace.";

@@ -2,6 +2,7 @@ package app_test
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -44,7 +45,7 @@ func TestInitializeCreatesSchedulerResource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(agents), "../AGENTS.md") || !strings.Contains(string(agents), "needs_compilation") || !strings.Contains(string(agents), "不得直接覆写") {
+	if !strings.Contains(string(agents), "../AGENTS.md") || !strings.Contains(string(agents), "needs_compilation") || !strings.Contains(string(agents), "不得直接覆写") || !strings.Contains(string(agents), "不能作为执行 target") {
 		t.Fatalf("Scheduler guidance is incomplete:\n%s", agents)
 	}
 	schedulerMarkdown, err := os.ReadFile(filepath.Join(workspace.Root(), "scheduler", "scheduler.md"))
@@ -149,12 +150,26 @@ func TestScheduleLifecycleValidatesTargets(t *testing.T) {
 	}
 	condition := "when the build is green"
 	target := app.SchedulerResourceID
+	if _, err := workspace.UpdateSchedule(app.UpdateScheduleInput{ID: created.ID, ExpectedRevision: created.Revision, Condition: &condition, Target: &target}); !errors.Is(err, app.ErrScheduleTargetScheduler) || err.Error() != "update schedule: "+app.ErrScheduleTargetScheduler.Error() {
+		t.Fatalf("Scheduler self-target update error = %v", err)
+	}
+	config, err := workspace.Scheduler()
+	if err != nil || len(config.Schedules) != 1 || config.Schedules[0].Revision != created.Revision || config.Schedules[0].Condition != created.Condition || config.Schedules[0].Target != created.Target {
+		t.Fatalf("rejected self-target changed Scheduler configuration: %#v, %v", config, err)
+	}
+	target = "workspace"
 	updated, err := workspace.UpdateSchedule(app.UpdateScheduleInput{ID: created.ID, ExpectedRevision: created.Revision, Condition: &condition, Target: &target})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if updated.Condition != condition || updated.Target != target || updated.CreatedAt != created.CreatedAt {
 		t.Fatalf("updated schedule = %#v", updated)
+	}
+	if _, err := workspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Self target", Condition: "later", Target: app.SchedulerResourceID,
+		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)},
+	}); !errors.Is(err, app.ErrScheduleTargetScheduler) || err.Error() != "add schedule: "+app.ErrScheduleTargetScheduler.Error() {
+		t.Fatalf("Scheduler self-target create error = %v", err)
 	}
 	if _, err := workspace.AddSchedule(app.CreateScheduleInput{
 		Description: "Bad", Condition: "now", Target: "project999.task999",
@@ -175,7 +190,7 @@ func TestScheduleLifecycleValidatesTargets(t *testing.T) {
 	if err != nil || removed.ID != created.ID {
 		t.Fatalf("removed schedule = %#v, %v", removed, err)
 	}
-	config, err := workspace.Scheduler()
+	config, err = workspace.Scheduler()
 	if err != nil || len(config.Schedules) != 0 {
 		t.Fatalf("Scheduler after removal = %#v, %v", config, err)
 	}

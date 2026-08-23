@@ -43,6 +43,9 @@ describe("SchedulerMutationController", () => {
 
 		expect(operations.validateTarget("project1.task1")).toBe("");
 		expect(operations.validateTarget("missing-task")).toBe("Target must be an open resource in the current Workspace.");
+		expect(operations.validateTarget("scheduler")).toBe("The Scheduler resource cannot be a schedule target.");
+		await expect(operations.save({ ...input, target: "scheduler" })).resolves.toBeNull();
+		expect(request).not.toHaveBeenCalled();
 		await release(operations.save(input));
 		await release(operations.save({ ...input, scheduleId: "schedule/one" }));
 		await release(operations.setPaused("schedule/one", false));

@@ -62,7 +62,7 @@ func TestSchedulerV1MigrationPreservesDefinitionsForCompilation(t *testing.T) {
 		ID:          "schedule-0123456789abcdef01234567",
 		Description: "Keep action",
 		Condition:   "tomorrow morning when green",
-		Target:      "workspace",
+		Target:      app.SchedulerResourceID,
 		CreatedAt:   "2026-08-01T00:00:00Z",
 		UpdatedAt:   "2026-08-02T00:00:00Z",
 	})
@@ -71,7 +71,7 @@ func TestSchedulerV1MigrationPreservesDefinitionsForCompilation(t *testing.T) {
 	}
 	schedule := schedules[0]
 	if schedule.Revision != 1 || schedule.State != app.ScheduleStateNeedsCompilation || schedule.Trigger != nil ||
-		schedule.Description != "Keep action" || schedule.Condition != "tomorrow morning when green" || schedule.Target != "workspace" ||
+		schedule.Description != "Keep action" || schedule.Condition != "tomorrow morning when green" || schedule.Target != app.SchedulerResourceID ||
 		schedule.CreatedAt != "2026-08-01T00:00:00Z" || schedule.UpdatedAt != "2026-08-02T00:00:00Z" {
 		t.Fatalf("migrated schedule = %#v", schedule)
 	}
@@ -80,12 +80,20 @@ func TestSchedulerV1MigrationPreservesDefinitionsForCompilation(t *testing.T) {
 		t.Fatal("migration did not atomically replace the v1 definition")
 	}
 	trigger := app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: "9999-08-30T12:00:00Z"}
-	compiled, err := workspace.UpdateSchedule(app.UpdateScheduleInput{ID: schedule.ID, ExpectedRevision: schedule.Revision, Trigger: &trigger})
+	if _, err := workspace.UpdateSchedule(app.UpdateScheduleInput{ID: schedule.ID, ExpectedRevision: schedule.Revision, Trigger: &trigger}); !errors.Is(err, app.ErrScheduleTargetScheduler) {
+		t.Fatalf("historical Scheduler self-target compilation error = %v", err)
+	}
+	config, err := workspace.Scheduler()
+	if err != nil || len(config.Schedules) != 1 || !reflect.DeepEqual(config.Schedules[0], schedule) {
+		t.Fatalf("rejected self-target compilation changed migrated definition: %#v, %v", config.Schedules, err)
+	}
+	target := "workspace"
+	compiled, err := workspace.UpdateSchedule(app.UpdateScheduleInput{ID: schedule.ID, ExpectedRevision: schedule.Revision, Target: &target, Trigger: &trigger})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if compiled.Revision != 2 || compiled.State != app.ScheduleStateActive || compiled.Trigger == nil || *compiled.Trigger != trigger ||
-		compiled.Description != schedule.Description || compiled.Condition != schedule.Condition || compiled.Target != schedule.Target {
+		compiled.Description != schedule.Description || compiled.Condition != schedule.Condition || compiled.Target != target {
 		t.Fatalf("compiled migrated schedule = %#v", compiled)
 	}
 }
@@ -208,7 +216,7 @@ func TestScheduleAtMutationRequiresFutureOnlyWhenChanged(t *testing.T) {
 		t.Fatal(err)
 	}
 	rejectedDescription := "Must stay unchanged"
-	rejectedTarget := app.SchedulerResourceID
+	rejectedTarget := "workspace"
 	_, err = workspace.UpdateSchedule(app.UpdateScheduleInput{
 		ID: retargeted.ID, ExpectedRevision: retargeted.Revision, Description: &rejectedDescription, Target: &rejectedTarget, Trigger: &changedPastTrigger,
 	})

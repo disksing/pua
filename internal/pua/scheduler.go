@@ -173,6 +173,9 @@ func parseSchedulerAddPayload(args []string) (schedulerChangePayload, error) {
 		}
 		return schedulerChangePayload{}, errors.New(schedulerAddUsage)
 	}
+	if err := app.ValidateScheduleTarget(values["target"]); err != nil {
+		return schedulerChangePayload{}, err
+	}
 	description, condition, target := values["description"], values["condition"], values["target"]
 	payload := schedulerChangePayload{Operation: app.ScheduleChangeCreate, Description: &description, Condition: &condition, Target: &target, Trigger: trigger}
 	if guard, ok := values["guard"]; ok {
@@ -208,6 +211,11 @@ func parseSchedulerUpdatePayload(args []string) (schedulerChangePayload, error) 
 	}
 	if !triggerPresent {
 		return schedulerChangePayload{}, errors.New(schedulerUpdateUsage)
+	}
+	if target, ok := values["target"]; ok {
+		if err := app.ValidateScheduleTarget(target); err != nil {
+			return schedulerChangePayload{}, err
+		}
 	}
 	payload := schedulerChangePayload{Operation: app.ScheduleChangeUpdate, ID: values["id"], ExpectedRevision: revision, Trigger: trigger}
 	for name, target := range map[string]**string{"description": &payload.Description, "condition": &payload.Condition, "guard": &payload.Guard, "target": &payload.Target} {

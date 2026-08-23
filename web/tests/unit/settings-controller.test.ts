@@ -17,6 +17,10 @@ describe("SettingsController", () => {
 			request: async <T>(path: string): Promise<T> => {
 				if (path === "/api/workspaces") return base as T;
 				if (path === "/api/settings/agenthub") return {} as T;
+				if (path === "/api/settings/system") return {
+					pua: { address: "127.0.0.1", port: "4936", configPath: "/tmp/pua/serve.json", workspaces: [], buildBranch: "master", buildCommit: "pua-commit" },
+					agentHub: { mode: "embedded", address: "127.0.0.1", port: "4936", endpoint: "http://127.0.0.1:4936/agenthub", connected: true, compatible: true, version: "hub-commit", paths: { config: "", sessions: "", archive: "", logs: "" }, error: "" },
+				} as T;
 				throw new Error(`Unexpected request: ${path}`);
 			},
 			publish,
@@ -56,6 +60,8 @@ describe("SettingsController", () => {
 		await controller.open();
 
 		expect(published.at(-1)?.activeWorkspaceId).toBe("workspace-a");
+		expect(published.at(-1)?.initialTab).toBe("system");
+		expect(published.at(-1)?.system?.pua.configPath).toBe("/tmp/pua/serve.json");
 	});
 
 	it("keeps the routed Workspace marker aligned when route and persisted fallback match", async () => {
@@ -227,6 +233,10 @@ describe("SettingsController", () => {
 				return { provider } as T;
 			}
 			if (path === "/api/settings/agenthub") return hub as T;
+			if (path === "/api/settings/system") return {
+				pua: { address: "", port: "", configPath: "", workspaces: [], buildBranch: "", buildCommit: "" },
+				agentHub: { mode: "", address: "", port: "", endpoint: "", connected: false, compatible: false, version: "", paths: { config: "", sessions: "", archive: "", logs: "" }, error: "" },
+			} as T;
 			throw new Error(`Unexpected request: ${path}`);
 		};
 		const controller = createSettingsController(dependencies);

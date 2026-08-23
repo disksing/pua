@@ -1,4 +1,4 @@
-import type { AgentHubConfigAgent, AgentHubConfigProvider, AgentOption, AppearanceSettings, NotificationPreferences, SettingsDraft, SettingsModel, WorkspaceOption } from "../components/models";
+import type { AgentHubConfigAgent, AgentHubConfigProvider, AgentOption, AppearanceSettings, NotificationPreferences, SettingsDraft, SettingsModel, SystemInfo, WorkspaceOption } from "../components/models";
 import { confirmDialog } from "./confirm-dialog-controller";
 import type { AgentConfig, AgentProfile, WorkspaceConfig } from "../models/workspace";
 
@@ -36,6 +36,7 @@ interface SettingsData {
 	agents?: SettingsAgent[];
 	agentProfiles?: SettingsProfile[];
 	agentHub?: AgentHubData;
+	system?: SystemInfo;
 	suggestedUserName?: string;
 }
 
@@ -111,7 +112,7 @@ export function createSettingsController(dependencies: SettingsControllerDepende
 		open: false,
 		identity: 0,
 		dataVersion: 0,
-		tab: "workspace",
+		tab: "system",
 		data: null,
 		agentDirty: false,
 		workspacePath: "",
@@ -145,6 +146,7 @@ export function createSettingsController(dependencies: SettingsControllerDepende
 			workspaceIcons: dependencies.workspaceIcons,
 			workspaceIconSavingId: state.workspaceIconSavingId,
 			suggestedUserName: String(data.suggestedUserName || config.suggestedUserName || ""),
+			system: data.system || null,
 			appearance: dependencies.appearance(),
 			agentHub: {
 				mode: hub.mode || "embedded",
@@ -195,7 +197,7 @@ export function createSettingsController(dependencies: SettingsControllerDepende
 		});
 	}
 
-	async function open(tab: SettingsDraft["tab"] = "workspace"): Promise<void> {
+	async function open(tab: SettingsDraft["tab"] = "system"): Promise<void> {
 		state.open = true;
 		state.identity = ++identity;
 		state.tab = tab;
@@ -215,11 +217,12 @@ export function createSettingsController(dependencies: SettingsControllerDepende
 	}
 
 	async function refresh(): Promise<void> {
-		const [base, agentHub] = await Promise.all([
+		const [base, agentHub, system] = await Promise.all([
 			dependencies.request<PUASettingsConfig>("/api/workspaces"),
-			dependencies.request<AgentHubData>("/api/settings/agenthub")
+			dependencies.request<AgentHubData>("/api/settings/agenthub"),
+			dependencies.request<SystemInfo>("/api/settings/system")
 		]);
-		state.data = { ...base, agentHub };
+		state.data = { ...base, agentHub, system };
 		state.dataVersion++;
 	}
 

@@ -17,12 +17,16 @@ afterEach(async () => {
     open: true,
     identity: "settings-1",
     dataVersion: 1,
-    initialTab: "workspace",
+    initialTab: "system",
     workspaces: [{ id: "workspace-a", name: "Workspace A", path: "/tmp/a" }],
     activeWorkspaceId: "workspace-a",
     workspaceIcons: [{ id: "", label: "PUA default", src: "/favicon.svg" }],
     workspaceIconSavingId: "",
     suggestedUserName: "ServerUser",
+    system: {
+      pua: { address: "127.0.0.1", port: "4936", configPath: "/tmp/pua/serve.json", workspaces: [{ name: "Workspace A", path: "/tmp/a" }], buildBranch: "master", buildCommit: "pua-commit" },
+      agentHub: { mode: "embedded", address: "127.0.0.1", port: "4936", endpoint: "http://127.0.0.1:4936/agenthub", connected: true, compatible: true, version: "hub-commit", paths: { config: "/tmp/agenthub/config.json", sessions: "/tmp/agenthub/sessions", archive: "/tmp/agenthub/sessions/Archive", logs: "/tmp/agenthub/logs" }, error: "" },
+    },
     appearance: { layout: "auto", fontScales: { sidebar: 1, details: 1, chat: 1 }, theme: "default", themeOptions: [{ id: "default", label: "Default", description: "The standard PUA appearance" }] },
     agentHub: {
       mode: "external",
@@ -76,7 +80,10 @@ describe("SettingsModal coordination", () => {
     expect(close.parentElement?.classList.contains("settings-header")).toBe(true);
     expect(close.closest(".settings-body")).toBeNull();
     const body = target.querySelector(".settings-body")!;
-    expect(body.querySelector("h2")?.textContent).toBe("Workspaces");
+    expect(body.querySelector("h2")?.textContent).toBe("System Information");
+    expect(body.querySelectorAll("input, select, textarea, [type=submit]")).toHaveLength(0);
+    expect(body.textContent).toContain("/tmp/pua/serve.json");
+    expect(body.textContent).toContain("/tmp/agenthub/sessions");
   });
 
   it("composes all domain panels and preserves a dirty focused draft across data refreshes", async () => {
@@ -89,7 +96,7 @@ describe("SettingsModal coordination", () => {
     await tick();
 
     const tabs = [...target.querySelectorAll<HTMLButtonElement>(".settings-tab")];
-    expect(tabs.map((tab) => tab.textContent?.trim())).toEqual(["Workspace", "Appearance", "Agents", "Profiles", "Notifications"]);
+    expect(tabs.map((tab) => tab.textContent?.trim())).toEqual(["System", "Workspace", "Appearance", "Agents", "Profiles", "Notifications"]);
     tabs.find((tab) => tab.textContent?.includes("Agents"))!.click();
     await tick();
 

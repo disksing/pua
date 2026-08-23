@@ -172,6 +172,20 @@ async function json(route: Route, body: unknown, status = 200) {
   await route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 }
 
+function mockSystemInfo(workspaces: Array<{ name: string; path: string }>) {
+  return {
+    pua: {
+      address: "127.0.0.1", port: "4936", configPath: "/tmp/pua/serve.json", workspaces,
+      buildBranch: "master", buildCommit: "pua-commit",
+    },
+    agentHub: {
+      mode: "embedded", address: "127.0.0.1", port: "4936", endpoint: "http://127.0.0.1:4936/agenthub",
+      connected: true, compatible: true, version: "hub-commit", error: "",
+      paths: { config: "/tmp/agenthub/config.json", sessions: "/tmp/agenthub/sessions", archive: "/tmp/agenthub/sessions/Archive", logs: "/tmp/agenthub/logs" },
+    },
+  };
+}
+
 async function installMockApi(page: Page, lastResourceId = "project1.task1", withWaitingMessage = false, initialTurnRunning = false, startWithoutRuntime = false, extraAgents: string[] = [], initialIdleStatus: "idle" | "idle-suspended" = "idle", settingsRefreshDelayMs = 0, conversationFixture: ConversationFixture = "default"): Promise<Harness> {
   const harness: Harness = { inputBodies: [], taskBodies: [], previewBodies: [], settingsBodies: [], uploadNames: [], streamRequests: [], treeRequests: 0, agentsBodies: [], uiStateBodies: [], steeredMessageIds: [], schedulerBodies: [], bindingBodies: [], resourceStateBodies: [], markdownBodies: [], finishTurn: () => undefined };
   let waitingMessages = withWaitingMessage ? [{ messageId: "msg-waiting", resourceId: "project1.task1", text: "Review the mailbox change now", status: "waiting", acceptedAt: now, requestedMode: "enqueue", actualMode: "enqueue" }] : [];
@@ -216,6 +230,9 @@ async function installMockApi(page: Page, lastResourceId = "project1.task1", wit
         workspaces: [{ id: "ws-test", name: "Isolated E2E", path: "/tmp/pua-e2e" }],
         agentProfiles: [{ key: "default", agentName: "test-agent" }, { key: "fast", agentName: "test-agent" }, { key: "review", agentName: "other-agent" }],
       });
+    }
+    if (path === "/api/settings/system" && method === "GET") {
+      return json(route, mockSystemInfo([{ name: "Isolated E2E", path: "/tmp/pua-e2e" }]));
     }
     if (path === "/api/doctor") {
       if (method === "POST") return route.fulfill({ status: 202 });
@@ -583,6 +600,9 @@ async function installShellMockApi(page: Page): Promise<ShellHarness> {
     }
     if (path === "/api/settings/agenthub") {
       return json(route, { config: { agentProfiles: [] }, connected: false, compatible: false, catalog: { providers: [], agents: [], probes: [] } });
+    }
+    if (path === "/api/settings/system" && method === "GET") {
+      return json(route, mockSystemInfo([{ name: "Workspace A", path: "/tmp/ws-a" }, { name: "Workspace B", path: "/tmp/ws-b" }]));
     }
     if (/^\/api\/workspaces\/ws-[ab]\/users$/.test(path)) {
       if (method === "POST") return json(route, { version: 1, name: "User", preference: "" });
@@ -2537,6 +2557,39 @@ test("keeps Scheduler Settings controls at a 44px touch size in a 440px viewport
   expect(documentSize.scrollWidth).toBeLessThanOrEqual(documentSize.clientWidth);
 });
 
+test("opens read-only System information by default", async ({ page }) => {
+  await installMockApi(page, "project1");
+  await page.goto("/w/ws-test/r/project1");
+
+  await page.locator("#systemSettingsButton").click();
+  const settings = page.getByRole("dialog", { name: "System Settings" });
+  await expect(settings.getByRole("button", { name: "System" })).toHaveAttribute("aria-current", "page");
+  const panel = settings.locator('[data-component-owner="system-info-panel"]');
+  await expect(panel.getByRole("heading", { name: "System Information" })).toBeVisible();
+  await expect(panel).toContainText("/tmp/pua/serve.json");
+  await expect(panel).toContainText("/tmp/pua-e2e");
+  await expect(panel).toContainText("/tmp/agenthub/sessions");
+  await expect(panel.locator("input, select, textarea, [type=submit]")).toHaveCount(0);
+});
+
+test("shows an unavailable AgentHub without hiding PUA system information", async ({ page }) => {
+  await installMockApi(page, "project1");
+  await page.route("**/api/settings/system", (route) => json(route, {
+    ...mockSystemInfo([{ name: "Isolated E2E", path: "/tmp/pua-e2e" }]),
+    agentHub: {
+      mode: "external", address: "127.0.0.1", port: "4646", endpoint: "http://127.0.0.1:4646/agenthub",
+      connected: false, compatible: false, version: "", paths: { config: "", sessions: "", archive: "", logs: "" }, error: "connection refused",
+    },
+  }));
+  await page.goto("/w/ws-test/r/project1");
+
+  await page.locator("#systemSettingsButton").click();
+  const panel = page.locator('[data-component-owner="system-info-panel"]');
+  await expect(panel).toContainText("Unavailable");
+  await expect(panel).toContainText("connection refused");
+  await expect(panel).toContainText("/tmp/pua/serve.json");
+});
+
 test("keeps every System Settings tab reachable without horizontal scrolling in a 390px mobile viewport", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await installMockApi(page, "project1");
@@ -2547,7 +2600,7 @@ test("keeps every System Settings tab reachable without horizontal scrolling in 
   const settings = page.getByRole("dialog", { name: "System Settings" });
   const tabs = settings.locator(".settings-tabs");
   await expect(tabs).toBeVisible();
-  await expect(tabs.locator(".settings-tab")).toHaveText(["Workspace", "User", "Appearance", "Agents", "Profiles", "Notifications"]);
+  await expect(tabs.locator(".settings-tab")).toHaveText(["System", "Workspace", "Appearance", "Agents", "Profiles", "Notifications"]);
 
   // The tab strip itself must not overflow the modal horizontally.
   const tabStrip = await tabs.evaluate((node) => ({ client: node.clientWidth, scroll: node.scrollWidth }));
@@ -2577,11 +2630,12 @@ test("keeps the System Settings close control in the dialog header at a 220px vi
   const settings = page.getByRole("dialog", { name: "System Settings" });
   const close = settings.locator(".settings-close");
   await expect(close).toBeVisible();
-  const heading = settings.locator("h2", { hasText: "Workspaces" });
+  const heading = settings.locator("h2", { hasText: "System Information" });
   await expect(heading).toBeVisible();
 
   // The close control keeps its own header row above the content heading
   // instead of sharing the heading's line (the 220px regression).
+  await expect.poll(async () => Math.round((await close.boundingBox())?.width || 0)).toBe(44);
   const closeBox = (await close.boundingBox())!;
   const headingBox = (await heading.boundingBox())!;
   expect(closeBox.width).toBe(44);
@@ -2592,6 +2646,8 @@ test("keeps the System Settings close control in the dialog header at a 220px vi
   const modalBox = (await settings.boundingBox())!;
   expect(closeBox.x).toBeGreaterThanOrEqual(modalBox.x);
   expect(closeBox.x + closeBox.width).toBeLessThanOrEqual(modalBox.x + modalBox.width + 1);
+  const contentOverflow = await settings.locator(".settings-content").evaluate((node) => node.scrollWidth - node.clientWidth);
+  expect(contentOverflow).toBeLessThanOrEqual(0);
 
   // Scrolling the panel content does not move the close control.
   await settings.locator(".settings-body").evaluate((node) => node.scrollTo(0, 400));

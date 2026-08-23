@@ -9,6 +9,7 @@
   let { activeTab, dirty, onSelect }: { activeTab: SettingsTab; dirty: boolean; onSelect: (tab: SettingsTab) => void } = $props();
 
   const tabs: Array<{ id: SettingsTab; icon: string; label: string; sharesAgentDraft: boolean }> = [
+    { id: "system", icon: "info", label: "System", sharesAgentDraft: false },
     { id: "workspace", icon: "hard-drive", label: "Workspace", sharesAgentDraft: false },
     { id: "appearance", icon: "palette", label: "Appearance", sharesAgentDraft: false },
     { id: "agenthub", icon: "network", label: "Agents", sharesAgentDraft: true },

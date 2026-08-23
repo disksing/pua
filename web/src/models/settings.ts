@@ -84,8 +84,30 @@ export interface AppearanceSettings {
   themeOptions: ThemeOption[];
 }
 
+export interface SystemInfo {
+  pua: {
+    address: string;
+    port: string;
+    configPath: string;
+    workspaces: Array<{ name: string; path: string }>;
+    buildBranch: string;
+    buildCommit: string;
+  };
+  agentHub: {
+    mode: string;
+    address: string;
+    port: string;
+    endpoint: string;
+    connected: boolean;
+    compatible: boolean;
+    version: string;
+    paths: { config: string; sessions: string; archive: string; logs: string };
+    error: string;
+  };
+}
+
 export interface SettingsDraft {
-  tab: "workspace" | "appearance" | "agenthub" | "profiles" | "notifications";
+  tab: "system" | "workspace" | "appearance" | "agenthub" | "profiles" | "notifications";
   workspacePath: string;
   createWorkspace: boolean;
   workspaceLanguage: "en" | "zh-CN";
@@ -107,6 +129,7 @@ export interface SettingsModel {
   workspaceIcons: Array<{ id: string; label: string; src: string }>;
   workspaceIconSavingId: string;
   suggestedUserName: string;
+  system: SystemInfo | null;
   appearance: AppearanceSettings;
   agentHub: AgentHubSettings;
   profiles: ProfileDraft[];

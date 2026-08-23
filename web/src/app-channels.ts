@@ -41,7 +41,7 @@ export function createPUAAppChannels(): PUAAppChannels {
       onClose: noop, onPreview: noopAsync, onSubmit: noopAsync, previewRequestKey: () => "", onConfirmTemplateSwitch: async () => true,
     }),
     settings: createModelChannel<SettingsModel>({
-      open: false, identity: "", dataVersion: 0, initialTab: "workspace", workspaces: [], activeWorkspaceId: "", workspaceIcons: [{ id: "", label: "PUA default", src: "/favicon.svg" }], workspaceIconSavingId: "", suggestedUserName: "",
+      open: false, identity: "", dataVersion: 0, initialTab: "system", workspaces: [], activeWorkspaceId: "", workspaceIcons: [{ id: "", label: "PUA default", src: "/favicon.svg" }], workspaceIconSavingId: "", suggestedUserName: "", system: null,
       appearance: { layout: "auto", fontScales: { sidebar: 1, details: 1, chat: 1 }, theme: "default", themeOptions: [{ id: "default", label: "Default", description: "The standard PUA appearance" }] },
       agentHub: { mode: "embedded", configuredEndpoint: "", connected: false, compatible: false, error: "", apiVersion: "", version: "", capabilities: [], providers: [], agents: [], probes: [] }, profiles: [], agents: [],
       notifications: { browser: false, sound: false, permission: "default", permissionError: "", soundError: "" },

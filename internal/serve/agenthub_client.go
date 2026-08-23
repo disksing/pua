@@ -83,7 +83,15 @@ type agentHubStatus struct {
 	Version      string          `json:"version"`
 	StartedAt    string          `json:"startedAt,omitempty"`
 	Uptime       int64           `json:"uptimeSeconds,omitempty"`
+	Paths        agentHubPaths   `json:"paths"`
 	Runtime      json.RawMessage `json:"runtime,omitempty"`
+}
+
+type agentHubPaths struct {
+	Config   string `json:"config"`
+	Sessions string `json:"sessions"`
+	Archive  string `json:"archive"`
+	Logs     string `json:"logs"`
 }
 
 type agentHubProvider struct {

@@ -12,6 +12,7 @@
   import ProfilesSettingsPanel from "./ProfilesSettingsPanel.svelte";
   import { createSettingsDraft } from "./settings-draft";
   import SettingsNavigation from "./SettingsNavigation.svelte";
+  import SystemInfoPanel from "./SystemInfoPanel.svelte";
   import WorkspaceSettingsPanel from "./WorkspaceSettingsPanel.svelte";
 
   let { channel }: { channel: ModelChannel<SettingsModel> } = $props();
@@ -63,7 +64,9 @@
         <button type="button" class="settings-close" title="Close" aria-label="Close" onclick={() => model.onClose(draft.dirty)}><Icon name="x" /></button>
       </div>
       <div class="settings-body">
-      {#if draft.tab === "workspace"}
+      {#if draft.tab === "system"}
+        <SystemInfoPanel system={model.system} />
+      {:else if draft.tab === "workspace"}
         <WorkspaceSettingsPanel workspaces={model.workspaces} activeWorkspaceId={model.activeWorkspaceId} workspaceIcons={model.workspaceIcons} bind:draft bind:pending onAddWorkspace={model.onAddWorkspace} onRemoveWorkspace={model.onRemoveWorkspace} onWorkspaceIcon={model.onWorkspaceIcon} onSaveWorkspaceName={model.onSaveWorkspaceName} onToast={model.onToast} />
       {:else if draft.tab === "appearance"}
         <AppearanceSettingsPanel appearance={model.appearance} onLayoutPreference={model.onLayoutPreference} onFontScale={model.onFontScale} onResetFontScales={model.onResetFontScales} onThemePreference={model.onThemePreference} />

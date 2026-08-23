@@ -2244,7 +2244,7 @@ function configuredAgentProfileName(profiles: AgentProfile[] | undefined, key: s
 	const profile = (profiles || []).find((item) => String(item.key || "").trim().toLowerCase() === normalizedKey);
 	return String(profile?.agentName || "").trim();
 }
-async function openSettings(tab: SettingsModel["initialTab"] = "workspace"): Promise<void> {
+async function openSettings(tab: SettingsModel["initialTab"] = "system"): Promise<void> {
 	return settingsController.open(tab);
 }
 function closeSettings(dirty = false): void {

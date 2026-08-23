@@ -2420,15 +2420,27 @@ func (m *ServiceManager) LogsContext(ctx context.Context, id, stream string, fol
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return &followLogReader{file: file, ctx: ctx}, nil
+	return &followLogReader{
+		file:         file,
+		path:         path,
+		boundary:     filepath.Join(m.root, ".pua"),
+		ctx:          ctx,
+		pollInterval: 200 * time.Millisecond,
+	}, nil
 }
 
 type followLogReader struct {
-	file *os.File
-	ctx  context.Context
+	file         *os.File
+	path         string
+	boundary     string
+	ctx          context.Context
+	pollInterval time.Duration
 }
 
 func (r *followLogReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
 	for {
 		n, err := r.file.Read(p)
 		if n > 0 {
@@ -2437,11 +2449,96 @@ func (r *followLogReader) Read(p []byte) (int, error) {
 		if err != io.EOF {
 			return n, err
 		}
+		retry, refreshErr := r.refreshAtEOF()
+		if refreshErr != nil {
+			return 0, refreshErr
+		}
+		if retry {
+			continue
+		}
 		select {
 		case <-r.ctx.Done():
 			return 0, io.EOF
-		case <-time.After(200 * time.Millisecond):
+		case <-time.After(r.pollInterval):
 		}
 	}
 }
+
+// refreshAtEOF follows the active log pathname after rotation and rewinds a
+// file that was truncated in place. When rotation replaces the active inode,
+// the old descriptor is drained before it is closed so writes completed just
+// before the rename are not skipped.
+func (r *followLogReader) refreshAtEOF() (bool, error) {
+	offset, err := r.file.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return false, err
+	}
+	currentInfo, err := r.file.Stat()
+	if err != nil {
+		return false, err
+	}
+	if currentInfo.Size() > offset {
+		return true, nil
+	}
+
+	activeInfo, err := os.Lstat(r.path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if activeInfo.Mode()&os.ModeSymlink != 0 || !pathWithinResolved(r.boundary, r.path) {
+		return false, fmt.Errorf("refusing unsafe service log %s", r.path)
+	}
+	if os.SameFile(currentInfo, activeInfo) {
+		if currentInfo.Size() < offset {
+			_, err = r.file.Seek(0, io.SeekStart)
+			return err == nil, err
+		}
+		return false, nil
+	}
+
+	replacement, err := os.Open(r.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	replacementInfo, err := replacement.Stat()
+	if err != nil {
+		_ = replacement.Close()
+		return false, err
+	}
+	activeInfo, err = os.Lstat(r.path)
+	if err != nil || activeInfo.Mode()&os.ModeSymlink != 0 ||
+		!os.SameFile(replacementInfo, activeInfo) || !pathWithinResolved(r.boundary, r.path) {
+		_ = replacement.Close()
+		if err != nil && !os.IsNotExist(err) {
+			return false, err
+		}
+		return false, nil
+	}
+
+	// The coordinated sink closes its writer before renaming, so once the
+	// replacement is visible this final size check accounts for all data on the
+	// old inode.
+	currentInfo, err = r.file.Stat()
+	if err != nil {
+		_ = replacement.Close()
+		return false, err
+	}
+	if currentInfo.Size() > offset {
+		_ = replacement.Close()
+		return true, nil
+	}
+	old := r.file
+	r.file = replacement
+	if err := old.Close(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (r *followLogReader) Close() error { return r.file.Close() }

@@ -1,7 +1,7 @@
 import type { AgentEvent, AgentPanelHeaderModel, ComposerContext, ComposerModel, EventTimelineModel, ResourceMessageStatus, TimelineItem, UploadDialogModel } from "./models/chat";
 import type { ToastModel } from "./models/common";
 import type { CreateDialogModel, TaskTemplate } from "./models/create";
-import type { DetailPanelModel } from "./models/detail";
+import type { DetailPanelModel, SchedulerMutationCallbacks } from "./models/detail";
 import type { SettingsModel } from "./models/settings";
 import type { AppShellModel, DoctorSnapshotModel, ShellActivityItem, ShellActivityLists, ShellDragTarget, ShellInboxMessage, ShellResourceItem, ShellStatusPresentation } from "./models/shell";
 import type { AgentConfig, AgentProfile, DiffRecord, ResourceRecord, WorkspaceConfig, WorkspaceFileRecord, WorkspaceTree, WorkspaceUser } from "./models/workspace";
@@ -16,6 +16,7 @@ import { createPaneLayoutController } from "./controllers/pane-layout-controller
 import { createThemeController } from "./controllers/theme-controller";
 import { createResourceDetailController } from "./controllers/resource-detail-controller";
 import { createRouteController } from "./controllers/route-controller";
+import { createSchedulerMutationController, type SchedulerMutationLease } from "./controllers/scheduler-mutation-controller";
 import { createSettingsController, type AgentHubData } from "./controllers/settings-controller";
 import { createShellProjection } from "./controllers/shell-projection";
 import {
@@ -223,13 +224,16 @@ const resourceDetailController = createResourceDetailController({
 	nextDetailRequestVersion: () => ++controllerState.detailRequestVersion,
 	isCurrentWorkspace: (workspaceId, navigationVersion) => isCurrentWorkspaceView(workspaceId, navigationVersion),
 	request: (path, init) => api(path, init),
-	scheduler: {
-		resolveResourceTitle: (resourceId) => resolveResourceTitle(resourceId),
-		reloadTree: () => loadTree({ updateURL: false }),
-		reloadDetail: async () => { await loadDetail("scheduler", { force: true }); },
-		publish: () => publishViewModels(),
-		toast: (message) => toast(message),
-	},
+});
+const schedulerMutationController = createSchedulerMutationController({
+	context: () => ({
+		workspaceId: controllerState.activeWorkspaceId,
+		navigationVersion: controllerState.navigationVersion,
+		selectedId: controllerState.selectedId,
+	}),
+	isCurrentWorkspace: (workspaceId, navigationVersion) => isCurrentWorkspaceView(workspaceId, navigationVersion),
+	resolveResourceTitle: (resourceId) => resolveResourceTitle(resourceId),
+	request: (path, init) => api(path, init),
 });
 const createDialogController = createCreateDialogController({
 	workspaceId: () => controllerState.activeWorkspaceId,
@@ -522,7 +526,7 @@ function selectWorkspaceUser(name: string): string {
 
 function beginWorkspaceUserTransition(name: string): void {
 	controllerState.navigationVersion++;
-	resourceDetailController.invalidateSchedulerOperations();
+	schedulerMutationController.invalidate();
 	controllerState.autoRefreshVersion++;
 	controllerState.treeRequestVersion++;
 	controllerState.detailRequestVersion++;
@@ -566,7 +570,7 @@ async function resolveWorkspaceIdentity(workspaceId = controllerState.activeWork
 	if (controllerState.currentUserName) {
 		await saveUIState().catch((err) => console.warn("failed to save UI state before clearing user", err));
 		controllerState.navigationVersion++;
-		resourceDetailController.invalidateSchedulerOperations();
+		schedulerMutationController.invalidate();
 		controllerState.autoRefreshVersion++;
 		controllerState.treeRequestVersion++;
 		controllerState.detailRequestVersion++;
@@ -1154,7 +1158,7 @@ async function switchWorkspace(id: string): Promise<void> {
 	setMobileSidebar(false);
 	flushAgentDraft();
 	controllerState.navigationVersion++;
-	resourceDetailController.invalidateSchedulerOperations();
+	schedulerMutationController.invalidate();
 	controllerState.autoRefreshVersion++;
 	controllerState.treeRequestVersion++;
 	controllerState.detailRequestVersion++;
@@ -1306,7 +1310,7 @@ async function selectResource(id: string, options: SelectResourceOptions = {}): 
 	const forceDetail = selectionChanged || Boolean(options.forceDetail);
 	if (forceDetail) {
 		controllerState.navigationVersion++;
-		resourceDetailController.invalidateSchedulerOperations();
+		schedulerMutationController.invalidate();
 		controllerState.autoRefreshVersion++;
 		controllerState.treeRequestVersion++;
 		controllerState.detailRequestVersion++;
@@ -1366,6 +1370,42 @@ async function toggleProject(id: string): Promise<void> {
 		renderAppShell();
 		throw err;
 	}
+}
+async function finishSchedulerMutation(operation: Promise<SchedulerMutationLease | null>, successMessage: string): Promise<boolean> {
+	let lease: SchedulerMutationLease | null = null;
+	try {
+		lease = await operation;
+		if (!lease?.isCurrent()) return false;
+		await loadTree({ updateURL: false });
+		if (!lease.isCurrent()) return false;
+		await loadDetail("scheduler", { force: true });
+		if (!lease.isCurrent()) return false;
+		publishViewModels();
+		if (!lease.isCurrent()) return false;
+		toast(successMessage);
+		return true;
+	} catch (reason) {
+		if (lease && !lease.isCurrent()) return false;
+		toast(reason instanceof Error ? reason.message : String(reason));
+		return false;
+	} finally {
+		lease?.release();
+	}
+}
+function schedulerMutationCallbacks(): SchedulerMutationCallbacks {
+	const operations = schedulerMutationController.operations();
+	return {
+		validateTarget: operations.validateTarget,
+		save: (input) => finishSchedulerMutation(
+			operations.save(input),
+			input.scheduleId ? "Schedule update request sent." : "Schedule request sent."
+		),
+		setPaused: (scheduleId, paused) => finishSchedulerMutation(
+			operations.setPaused(scheduleId, paused),
+			paused ? "Schedule paused." : "Schedule resumed."
+		),
+		remove: (scheduleId) => finishSchedulerMutation(operations.remove(scheduleId), "Schedule removed."),
+	};
 }
 function detailPanelModel(): DetailPanelModel {
 	const workspaceId = controllerState.activeWorkspaceId || "";
@@ -1498,7 +1538,7 @@ function detailPanelModel(): DetailPanelModel {
 			publishViewModels();
 			toast(binding ? "Project Task default saved." : "Project Task default reset to inherit.");
 		},
-		schedulerActions: controllerState.selectedId === "scheduler" ? resourceDetailController.schedulerActions() : undefined,
+		schedulerActions: controllerState.selectedId === "scheduler" ? schedulerMutationCallbacks() : undefined,
 		onToast: toast
 	};
 	if (!controllerState.tree) return base;
@@ -2375,7 +2415,7 @@ export function stopPUAApp(): void {
 	notificationController = null;
 	userSettingsController = null;
 	agentOperations.reset();
-	resourceDetailController.invalidateSchedulerOperations();
+	schedulerMutationController.invalidate();
 	clearAgentRenderTimer();
 	createDialogController.dispose();
 	lifecycle?.dispose();
@@ -2392,7 +2432,7 @@ async function handleHistoryNavigation(pathname: string): Promise<void> {
 	const previousSelectedId = controllerState.selectedId;
 	flushAgentDraft();
 	controllerState.navigationVersion++;
-	resourceDetailController.invalidateSchedulerOperations();
+	schedulerMutationController.invalidate();
 	controllerState.autoRefreshVersion++;
 	controllerState.treeRequestVersion++;
 	controllerState.detailRequestVersion++;

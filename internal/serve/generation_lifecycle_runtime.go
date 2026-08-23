@@ -82,6 +82,20 @@ func (m *agentManager) resumeStoppedGenerationLocked(ctx context.Context, worksp
 			observed.ID,
 		)
 	}
+	if removed := removedOwnedLaunchEnvironmentName(
+		ownedServiceBindingVariableNames(latest, observed.LaunchEnvironment),
+		overlay.LaunchEnvironment,
+		observed.LaunchEnvironment,
+	); removed != "" {
+		// AgentHub's Resume contract overlays durable launch entries and cannot
+		// delete a missing key. Rotate this stopped PUA-owned generation instead
+		// of reviving a Provider with a public service binding that no longer
+		// exists. Unowned Session launch keys are intentionally ignored.
+		return false, true, fmt.Errorf(
+			"AgentHub Session %s retains removed service binding variable %s",
+			observed.ID, removed,
+		)
+	}
 
 	receipt := lifecycleResumeReceipt(plan)
 	if _, err := rt.mutateGeneration(func(current *generationRecord) {
@@ -89,6 +103,8 @@ func (m *agentManager) resumeStoppedGenerationLocked(ctx context.Context, worksp
 			return
 		}
 		current.LifecycleReceipt = &receipt
+		current.ServiceBindingVariableNames = sortedEnvironmentNames(overlay.LaunchEnvironment)
+		current.ServiceBindingVariableNamesKnown = true
 		current.Status = "starting"
 		current.AgentHubStoppedObserved = false
 	}); err != nil {

@@ -50,11 +50,18 @@ type generationRecord struct {
 	// AgentHubProviderID, AgentHubProviderName, and AgentHubModel are immutable
 	// launch-time catalog snapshots. History must not re-resolve them from the
 	// current AgentHub catalog after a binding or provider configuration change.
-	AgentHubProviderID      string `json:"agentHubProviderId,omitempty"`
-	AgentHubProviderName    string `json:"agentHubProviderName,omitempty"`
-	AgentHubModel           string `json:"agentHubModel,omitempty"`
-	SourceExternalID        string `json:"sourceExternalId,omitempty"`
-	AgentHubStoppedObserved bool   `json:"agentHubStoppedObserved,omitempty"`
+	AgentHubProviderID   string `json:"agentHubProviderId,omitempty"`
+	AgentHubProviderName string `json:"agentHubProviderName,omitempty"`
+	AgentHubModel        string `json:"agentHubModel,omitempty"`
+	// ServiceBindingVariableNames records only the public service-binding keys
+	// that PUA owned at the latest Provider launch boundary. It deliberately
+	// excludes provenance, Agent configuration, and other client-owned launch
+	// environment so binding removal can rotate a stopped Session without
+	// claiming ownership of unrelated keys.
+	ServiceBindingVariableNames      []string `json:"serviceBindingVariableNames,omitempty"`
+	ServiceBindingVariableNamesKnown bool     `json:"serviceBindingVariableNamesKnown,omitempty"`
+	SourceExternalID                 string   `json:"sourceExternalId,omitempty"`
+	AgentHubStoppedObserved          bool     `json:"agentHubStoppedObserved,omitempty"`
 	// IdleSinceAt and IdleDeadlineAt are the durable ready-boundary clock for
 	// automatic resource Session sleep. They are never derived from the
 	// generation projection's UpdatedAt, because ordinary polling must not
@@ -764,6 +771,7 @@ func (rt *agentRuntime) mutateRuntime(mutate func(*agentRuntime)) (generationRec
 
 func cloneGenerationRecord(record generationRecord) generationRecord {
 	cloned := record
+	cloned.ServiceBindingVariableNames = append([]string(nil), record.ServiceBindingVariableNames...)
 	if record.LifecycleReceipt != nil {
 		receipt := *record.LifecycleReceipt
 		cloned.LifecycleReceipt = &receipt

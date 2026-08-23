@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -130,7 +131,12 @@ func agentHubInitialMessage(text string, userName string) *agentHubInboundMessag
 	return &input
 }
 
-const agentHubEphemeralEnvironmentCapability = "session.ephemeral-environment"
+const (
+	agentHubEphemeralEnvironmentCapability   = "session.ephemeral-environment"
+	agentHubWorkspaceRootEnvironmentName     = "PUA_WORKSPACE_ROOT"
+	agentHubWorkspaceInstanceEnvironmentName = "PUA_WORKSPACE_INSTANCE_ID"
+	agentHubResourceEnvironmentName          = "PUA_RESOURCE_ID"
+)
 
 // agentHubEnvironmentOverlay is the one-shot service-binding overlay supplied
 // when AgentHub creates or resumes a Session. LaunchEnvironment may be retained
@@ -186,9 +192,9 @@ func (m *agentManager) agentHubGenerationCreateRequest(ctx context.Context, cfg 
 		Title: record.Title, Cwd: record.Cwd, AgentName: record.AgentHubAgentName,
 		Source: &source,
 		LaunchEnvironment: map[string]string{
-			"PUA_WORKSPACE_ROOT":        workspace.Path,
-			"PUA_WORKSPACE_INSTANCE_ID": source.InstanceID,
-			"PUA_RESOURCE_ID":           resourceKey,
+			agentHubWorkspaceRootEnvironmentName:     workspace.Path,
+			agentHubWorkspaceInstanceEnvironmentName: source.InstanceID,
+			agentHubResourceEnvironmentName:          resourceKey,
 		},
 		InitialMessage: agentHubInitialMessage(record.PendingInitialMessage, ""),
 	}
@@ -210,11 +216,60 @@ func (m *agentManager) agentHubGenerationCreateRequest(ctx context.Context, cfg 
 	if err != nil {
 		return agentHubSource{}, agentHubCreateSessionRequest{}, err
 	}
+	request.serviceBindingVariableNames = sortedEnvironmentNames(overlay.LaunchEnvironment)
 	for key, value := range overlay.LaunchEnvironment {
 		request.LaunchEnvironment[key] = value
 	}
 	request.EphemeralEnvironment = overlay.EphemeralEnvironment
 	return source, request, nil
+}
+
+func sortedEnvironmentNames(environment map[string]string) []string {
+	if len(environment) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(environment))
+	for name := range environment {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func ownedServiceBindingVariableNames(record generationRecord, persisted map[string]string) []string {
+	if record.ServiceBindingVariableNamesKnown {
+		return append([]string(nil), record.ServiceBindingVariableNames...)
+	}
+	// Generations written before serviceBindingVariableNames was introduced
+	// were created through the same PUA request builder: their durable Session
+	// launch environment contains exactly these three provenance entries plus
+	// public service bindings. Agent configuration environment is a separate
+	// AgentHub layer. Recover only that established legacy ownership contract;
+	// marker-bearing generations never infer ownership from arbitrary keys.
+	legacyOwned := make(map[string]string, len(persisted))
+	for name, value := range persisted {
+		switch name {
+		case agentHubWorkspaceRootEnvironmentName,
+			agentHubWorkspaceInstanceEnvironmentName,
+			agentHubResourceEnvironmentName:
+			continue
+		default:
+			legacyOwned[name] = value
+		}
+	}
+	return sortedEnvironmentNames(legacyOwned)
+}
+
+func removedOwnedLaunchEnvironmentName(previous []string, current, persisted map[string]string) string {
+	for _, name := range previous {
+		if _, stillOwned := current[name]; stillOwned {
+			continue
+		}
+		if _, stillPersisted := persisted[name]; stillPersisted {
+			return name
+		}
+	}
+	return ""
 }
 
 func (m *agentManager) findOrCreateAgentHubSession(ctx context.Context, client *agentHubClient, source agentHubSource, request agentHubCreateSessionRequest) (agentHubSession, error) {
@@ -670,6 +725,12 @@ func (m *agentManager) recoverAgentHubGenerationLocked(ctx context.Context, cfg 
 		if requestErr != nil {
 			m.markGenerationRecovering(workspace, record)
 			return requestErr
+		}
+		record.ServiceBindingVariableNames = append([]string(nil), request.serviceBindingVariableNames...)
+		record.ServiceBindingVariableNamesKnown = true
+		if persistErr := saveGenerationRecord(workspace.Path, record); persistErr != nil {
+			m.markGenerationRecovering(workspace, record)
+			return fmt.Errorf("persist service binding ownership before AgentHub create: %w", persistErr)
 		}
 		recovered, createErr := m.findOrCreateAgentHubSession(ctx, client, source, request)
 		if createErr != nil {

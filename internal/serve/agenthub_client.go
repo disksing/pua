@@ -215,6 +215,9 @@ type agentHubCreateSessionRequest struct {
 	Source               *agentHubSource         `json:"source,omitempty"`
 	IdempotencyKey       string                  `json:"idempotencyKey,omitempty"`
 	InitialMessage       *agentHubInboundMessage `json:"initialMessage,omitempty"`
+	// serviceBindingVariableNames is local ownership metadata for the durable
+	// generation record. It never crosses the AgentHub wire boundary.
+	serviceBindingVariableNames []string
 }
 
 type agentHubApprovalReply struct {

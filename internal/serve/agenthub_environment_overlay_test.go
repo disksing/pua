@@ -67,6 +67,44 @@ func unsetResumeOverlayTestEnvironment(t *testing.T, key string) {
 	})
 }
 
+func TestOwnedServiceBindingVariableComparison(t *testing.T) {
+	persisted := map[string]string{
+		"OWNED_ENDPOINT":                         "http://old.service.test",
+		"UNOWNED_ENVIRONMENT":                    "keep-user-value",
+		agentHubWorkspaceRootEnvironmentName:     "/workspace",
+		agentHubWorkspaceInstanceEnvironmentName: "ws-test",
+		agentHubResourceEnvironmentName:          "project1.task1",
+	}
+	marked := generationRecord{
+		ServiceBindingVariableNames: []string{"OWNED_ENDPOINT"}, ServiceBindingVariableNamesKnown: true,
+	}
+	markedNames := ownedServiceBindingVariableNames(marked, persisted)
+	if removed := removedOwnedLaunchEnvironmentName(
+		markedNames,
+		map[string]string{"OWNED_ENDPOINT": "http://changed.service.test"},
+		persisted,
+	); removed != "" {
+		t.Fatalf("changed owned value was treated as removed: %q", removed)
+	}
+	if removed := removedOwnedLaunchEnvironmentName(markedNames, nil, persisted); removed != "OWNED_ENDPOINT" {
+		t.Fatalf("removed owned value = %q, want OWNED_ENDPOINT", removed)
+	}
+	if len(markedNames) != 1 || markedNames[0] != "OWNED_ENDPOINT" {
+		t.Fatalf("marked generation claimed unrelated environment: %#v", markedNames)
+	}
+
+	legacyPersisted := map[string]string{
+		"LEGACY_SERVICE_ENDPOINT":                "http://legacy.service.test",
+		agentHubWorkspaceRootEnvironmentName:     "/workspace",
+		agentHubWorkspaceInstanceEnvironmentName: "ws-test",
+		agentHubResourceEnvironmentName:          "project1.task1",
+	}
+	legacyNames := ownedServiceBindingVariableNames(generationRecord{}, legacyPersisted)
+	if !reflect.DeepEqual(legacyNames, []string{"LEGACY_SERVICE_ENDPOINT"}) {
+		t.Fatalf("legacy PUA ownership reconstruction = %#v", legacyNames)
+	}
+}
+
 func TestResumeEnvironmentOverlayPreflightPreservesStoppedBoundary(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -176,7 +214,7 @@ func TestResumeEnvironmentOverlayPreflightPreservesStoppedBoundary(t *testing.T)
 	}
 }
 
-func TestResumeEnvironmentOverlayMatchesCreate(t *testing.T) {
+func TestResumeEnvironmentOverlayUpdatesChangedPublicBindingInPlace(t *testing.T) {
 	fake := newRuntimeFakeAgentHub()
 	capabilities := append(append([]string(nil), requiredAgentHubCapabilities...), agentHubEphemeralEnvironmentCapability)
 	hub := httptest.NewServer(runtimeFakeAgentHubWithCapabilities(fake, capabilities))
@@ -196,6 +234,9 @@ func TestResumeEnvironmentOverlayMatchesCreate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fake.mu.Lock()
+	createdPublicEndpoint := fake.createRequests[0].LaunchEnvironment["PUBLIC_ENDPOINT"]
+	fake.mu.Unlock()
 	rt := manager.runtimeByID(record.ID)
 	if rt == nil {
 		t.Fatal("created generation has no runtime")
@@ -217,6 +258,13 @@ func TestResumeEnvironmentOverlayMatchesCreate(t *testing.T) {
 	session.State = "stopped"
 	fake.sessions[session.ID] = session
 	fake.mu.Unlock()
+	if err := writeServiceJSON(serviceBindingsPath(workspace.Path), ServiceBindings{
+		SchemaVersion: serviceSchemaVersion,
+		Variables:     map[string]string{"PUBLIC_ENDPOINT": "http://changed.service.test"},
+		Secrets:       map[string]string{"SERVICE_TOKEN": "${secret.recovery-token}"},
+	}, 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	resumed, terminal, err := manager.resumeStoppedGenerationLocked(
 		context.Background(), workspace, record, rt, client, resumeOverlayTestPlan(record),
@@ -234,9 +282,10 @@ func TestResumeEnvironmentOverlayMatchesCreate(t *testing.T) {
 		t.Fatalf("overlay requests = create %d, resume %d/%d", len(createRequests), len(resumeEnvironments), len(resumeEphemeralEnvironments))
 	}
 	created := createRequests[0]
-	if created.LaunchEnvironment["PUBLIC_ENDPOINT"] != "http://service.test" ||
-		resumeEnvironments[0]["PUBLIC_ENDPOINT"] != created.LaunchEnvironment["PUBLIC_ENDPOINT"] {
-		t.Fatalf("durable service overlay diverged: create=%#v resume=%#v", created.LaunchEnvironment, resumeEnvironments[0])
+	if createdPublicEndpoint != "http://service.test" ||
+		resumeEnvironments[0]["PUBLIC_ENDPOINT"] != "http://changed.service.test" ||
+		resumedSession.LaunchEnvironment["PUBLIC_ENDPOINT"] != "http://changed.service.test" {
+		t.Fatalf("changed public binding did not update in place: create=%q resume=%#v durable=%#v", createdPublicEndpoint, resumeEnvironments[0], resumedSession.LaunchEnvironment)
 	}
 	if created.EphemeralEnvironment["SERVICE_TOKEN"] != secret ||
 		resumeEphemeralEnvironments[0]["SERVICE_TOKEN"] != created.EphemeralEnvironment["SERVICE_TOKEN"] {
@@ -338,6 +387,132 @@ func TestRemovedSecretBindingReplacesEphemeralSessionBeforeResume(t *testing.T) 
 	}
 	if len(requests) != 2 || len(requests[0].EphemeralEnvironment) == 0 || len(requests[1].EphemeralEnvironment) != 0 {
 		t.Fatalf("create overlays did not follow binding removal: %#v", requests)
+	}
+	assertWorkspaceSecretAbsent(t, workspace.Path, secret)
+}
+
+func TestRemovedPublicBindingReplacesStoppedSessionBeforeResume(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	capabilities := append(append([]string(nil), requiredAgentHubCapabilities...), agentHubEphemeralEnvironmentCapability)
+	hub := httptest.NewServer(runtimeFakeAgentHubWithCapabilities(fake, capabilities))
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+	const secret = "public-binding-replacement-secret"
+	t.Setenv("PUA_SECRET_PUBLIC_BINDING_TOKEN", secret)
+	if err := writeServiceJSON(serviceBindingsPath(workspace.Path), ServiceBindings{
+		SchemaVersion: serviceSchemaVersion,
+		Variables: map[string]string{
+			"KEEP_ENDPOINT":   "http://keep.service.test",
+			"PUBLIC_ENDPOINT": "http://removed.service.test",
+		},
+		Secrets: map[string]string{"SERVICE_TOKEN": "${secret.public-binding-token}"},
+	}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, client, err := manager.agentHubRuntimeConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := manager.resolveResourceAgent(workspace, "project1.task1", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := manager.createResourceGeneration(
+		context.Background(), workspace, "project1.task1", workspace.Path, cfg, client, resolved,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalRuntime := manager.runtimeByID(original.ID)
+	if originalRuntime == nil {
+		t.Fatal("created generation has no runtime")
+	}
+	if !original.ServiceBindingVariableNamesKnown || len(original.ServiceBindingVariableNames) != 2 {
+		t.Fatalf("created generation did not record public binding ownership: %#v", original.ServiceBindingVariableNames)
+	}
+	// Model a rolling upgrade from a generation record written before public
+	// service-binding ownership was persisted. The legacy request contract is
+	// reconstructed from the exact PUA Session launch environment.
+	original, err = originalRuntime.mutateGeneration(func(current *generationRecord) {
+		current.ServiceBindingVariableNames = nil
+		current.ServiceBindingVariableNamesKnown = false
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopped, err := client.Stop(context.Background(), original.AgentHubSessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalRuntime.applyAgentHubSessionState(manager, stopped)
+	original = originalRuntime.snapshotGeneration()
+	if stopped.State != "stopped" || !stopped.EphemeralEnvironmentRequired {
+		t.Fatalf("mixed-overlay Session did not reach the required stopped boundary: %#v", stopped)
+	}
+
+	if err := writeServiceJSON(serviceBindingsPath(workspace.Path), ServiceBindings{
+		SchemaVersion: serviceSchemaVersion,
+		Variables:     map[string]string{"KEEP_ENDPOINT": "http://keep.service.test"},
+		Secrets:       map[string]string{"SERVICE_TOKEN": "${secret.public-binding-token}"},
+	}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	message, err := acceptMailboxMessage(workspace.Path, original.ResourceID, resourceMessageRequest{
+		Text: "continue without removed public binding", Mode: resourceMessageModeEnqueue,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.withResourceController(context.Background(), workspace, original.ResourceID, func() error {
+		return manager.reconcileResourceMailboxLocked(context.Background(), workspace, original.ResourceID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	current, found, err := currentResourceGeneration(workspace.Path, original.ResourceID)
+	if err != nil || !found {
+		t.Fatalf("replacement generation lookup: found=%v err=%v", found, err)
+	}
+	updated, found, err := mailboxMessageByID(workspace.Path, message.ID)
+	if err != nil || !found {
+		t.Fatalf("replacement mailbox lookup: found=%v err=%v", found, err)
+	}
+	if current.Generation <= original.Generation || current.AgentHubSessionID == original.AgentHubSessionID {
+		t.Fatalf("stale public Session was not replaced: original=%#v current=%#v", original, current)
+	}
+	if updated.Status != resourceMessageDelivered || updated.GenerationID != current.GenerationID {
+		t.Fatalf("queued work did not progress on replacement: %#v", updated)
+	}
+	fake.mu.Lock()
+	originalSession := fake.sessions[original.AgentHubSessionID]
+	replacementSession := fake.sessions[current.AgentHubSessionID]
+	resumeAttempts := len(fake.resumeEnvironments)
+	requests := append([]agentHubCreateSessionRequest(nil), fake.createRequests...)
+	sessionCount := len(fake.sessions)
+	fake.mu.Unlock()
+	if resumeAttempts != 0 {
+		t.Fatalf("stale public Session received %d Resume attempts before replacement", resumeAttempts)
+	}
+	if originalSession.State != "archived" {
+		t.Fatalf("old stale public Session was not retired: %#v", originalSession)
+	}
+	if !replacementSession.EphemeralEnvironmentRequired {
+		t.Fatalf("replacement lost the unchanged ephemeral requirement: %#v", replacementSession)
+	}
+	if sessionCount != 2 || len(requests) != 2 {
+		t.Fatalf("replacement created duplicate Sessions: sessions=%d requests=%#v", sessionCount, requests)
+	}
+	_, replacementRequestRetainedRemoved := requests[1].LaunchEnvironment["PUBLIC_ENDPOINT"]
+	_, replacementSessionRetainedRemoved := replacementSession.LaunchEnvironment["PUBLIC_ENDPOINT"]
+	if requests[0].LaunchEnvironment["PUBLIC_ENDPOINT"] != "http://removed.service.test" ||
+		replacementRequestRetainedRemoved || replacementSessionRetainedRemoved ||
+		requests[1].LaunchEnvironment["KEEP_ENDPOINT"] != "http://keep.service.test" ||
+		replacementSession.LaunchEnvironment["KEEP_ENDPOINT"] != "http://keep.service.test" {
+		t.Fatalf("replacement public overlay retained stale data: %#v", requests)
+	}
+	if requests[0].EphemeralEnvironment["SERVICE_TOKEN"] != secret ||
+		requests[1].EphemeralEnvironment["SERVICE_TOKEN"] != secret {
+		t.Fatalf("replacement ephemeral overlay diverged: %#v", requests)
 	}
 	assertWorkspaceSecretAbsent(t, workspace.Path, secret)
 }

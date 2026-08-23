@@ -277,6 +277,14 @@ func (m *agentManager) createResourceGeneration(ctx context.Context, workspace s
 		rt.setRecoveryError(m, err)
 		return rt.snapshotGeneration(), err
 	}
+	record, err = rt.mutateGeneration(func(record *generationRecord) {
+		record.ServiceBindingVariableNames = append([]string(nil), request.serviceBindingVariableNames...)
+		record.ServiceBindingVariableNamesKnown = true
+	})
+	if err != nil {
+		rt.setRecoveryError(m, err)
+		return rt.snapshotGeneration(), err
+	}
 	session, err := m.findOrCreateAgentHubSession(ctx, client, source, request)
 	if err != nil {
 		rt.setRecoveryError(m, err)

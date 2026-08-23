@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -13,6 +14,13 @@ import (
 )
 
 const maxTaskStateRecoveryAttempts = 3
+
+type taskStateChainKind string
+
+const (
+	taskStateChainKindOrdinary           taskStateChainKind = "ordinary"
+	taskStateChainKindScheduleOccurrence taskStateChainKind = "schedule_occurrence"
+)
 
 func taskStateContinuationText(language string) string {
 	return strings.TrimSpace(localize.MustRender(language, "task-continuation.md", nil))
@@ -59,12 +67,51 @@ func isScheduleOccurrenceMessage(message resourceMailboxMessage) bool {
 		normalizedResourceID(message.Causation.SourceResourceID) == app.SchedulerResourceID
 }
 
-func taskWorkChainStartedByScheduleOccurrence(workspacePath string, record generationRecord) (bool, error) {
-	opener, found, err := mailboxMessageByID(workspacePath, record.TaskStateChainID)
-	if err != nil || !found {
-		return false, err
+func taskStateChainKindForOpener(message resourceMailboxMessage) taskStateChainKind {
+	if isScheduleOccurrenceMessage(message) {
+		return taskStateChainKindScheduleOccurrence
 	}
-	return isScheduleOccurrenceMessage(opener), nil
+	return taskStateChainKindOrdinary
+}
+
+// taskWorkChainKind returns the durable classification when present. Records
+// written before TaskStateChainKind existed retain a bounded compatibility
+// lookup while their opener receipt is available; a successful inference is
+// checkpointed so later receipt compaction cannot change terminal behavior.
+func taskWorkChainKind(workspacePath string, rt *agentRuntime, record generationRecord) (taskStateChainKind, error) {
+	switch record.TaskStateChainKind {
+	case taskStateChainKindOrdinary, taskStateChainKindScheduleOccurrence:
+		return record.TaskStateChainKind, nil
+	case "":
+	default:
+		// Unknown future values must preserve ordinary continuation behavior.
+		return taskStateChainKindOrdinary, nil
+	}
+
+	opener, found, err := mailboxMessageByID(workspacePath, record.TaskStateChainID)
+	if err != nil {
+		var apiErr *resourceAPIError
+		if !errors.As(err, &apiErr) || apiErr.Code != "message_receipt_expired" {
+			return "", err
+		}
+	}
+	if !found {
+		// An old record whose bounded receipt is already gone cannot be
+		// classified further. Ordinary is the compatibility-safe fallback.
+		return taskStateChainKindOrdinary, nil
+	}
+
+	kind := taskStateChainKindForOpener(opener)
+	if rt != nil {
+		if _, err := rt.mutateGeneration(func(current *generationRecord) {
+			if current.TaskStateChainID == record.TaskStateChainID && current.TaskStateChainKind == "" {
+				current.TaskStateChainKind = kind
+			}
+		}); err != nil {
+			return "", err
+		}
+	}
+	return kind, nil
 }
 
 func (m *agentManager) recordTaskStartFailure(workspace serveWorkspace, message resourceMailboxMessage, cause error) (bool, error) {
@@ -112,6 +159,7 @@ func (m *agentManager) prepareTaskWorkChain(workspace serveWorkspace, message re
 	if message.Type != resourceMessageTypeTaskContinuation {
 		if _, err = rt.mutateGeneration(func(record *generationRecord) {
 			record.TaskStateChainID = message.ID
+			record.TaskStateChainKind = taskStateChainKindForOpener(message)
 			record.TaskStateContinuationCount = 0
 			// A fresh external work chain supersedes any terminal marker from
 			// the previous Turn. Consume it before exposing in_progress so a
@@ -215,11 +263,11 @@ func (m *agentManager) handleTaskTurnCompletionLocked(ctx context.Context, rt *a
 	if detail.State != app.TaskStateInProgress && detail.State != app.TaskStateWaiting {
 		return markTaskTurnCompletionHandled(rt, marker)
 	}
-	scheduled, err := taskWorkChainStartedByScheduleOccurrence(rt.workspace.Path, record)
+	chainKind, err := taskWorkChainKind(rt.workspace.Path, rt, record)
 	if err != nil {
 		return err
 	}
-	if scheduled {
+	if chainKind == taskStateChainKindScheduleOccurrence {
 		return markTaskTurnCompletionHandled(rt, marker)
 	}
 	superseded, err := taskCompletionSupersededByWork(rt.workspace.Path, record)

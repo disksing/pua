@@ -2,6 +2,7 @@ package serve
 
 import (
 	"context"
+	"errors"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -9,6 +10,41 @@ import (
 
 	"github.com/disksing/pua/internal/app"
 )
+
+func removeTaskOpenerFixture(t *testing.T, workspacePath, resourceID, messageID, state string) {
+	t.Helper()
+	if _, err := mutateResourceMailboxStoreForResource(workspacePath, resourceID, func(store *resourceMailboxStore) error {
+		messages := store.Mailbox.Messages[:0]
+		for _, message := range store.Mailbox.Messages {
+			if message.ID != messageID {
+				messages = append(messages, message)
+			}
+		}
+		store.Mailbox.Messages = messages
+		receipts := store.Receipts.Receipts[:0]
+		for _, receipt := range store.Receipts.Receipts {
+			if receipt.ID != messageID {
+				receipts = append(receipts, receipt)
+			}
+		}
+		store.Receipts.Receipts = receipts
+		expired := store.Receipts.Expired[:0]
+		for _, entry := range store.Receipts.Expired {
+			if entry.ID != messageID {
+				expired = append(expired, entry)
+			}
+		}
+		store.Receipts.Expired = expired
+		if state == resourceMailboxExpiredState {
+			store.Receipts.Expired = append(store.Receipts.Expired, resourceMailboxExpiredEntry{
+				ID: messageID, ExpiredAt: time.Now().Format(time.RFC3339Nano),
+			})
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestTaskMessageAcceptanceWaitsForDeliveryBoundary(t *testing.T) {
 	manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
@@ -48,7 +84,8 @@ func TestTaskMessageAcceptanceWaitsForDeliveryBoundary(t *testing.T) {
 		t.Fatalf("delivery boundary did not start Task work: detail=%#v err=%v", detail, err)
 	}
 	updated := rt.snapshotGeneration()
-	if updated.TaskStateChainID != message.ID || updated.TaskStateContinuationCount != 0 || updated.TaskStateCompletionMarker != record.CompletionMarker {
+	if updated.TaskStateChainID != message.ID || updated.TaskStateChainKind != taskStateChainKindOrdinary ||
+		updated.TaskStateContinuationCount != 0 || updated.TaskStateCompletionMarker != record.CompletionMarker {
 		t.Fatalf("fresh work chain did not consume the stale completion: %#v", updated)
 	}
 
@@ -67,13 +104,14 @@ func TestTaskMessageAcceptanceWaitsForDeliveryBoundary(t *testing.T) {
 
 func TestScheduledTaskOccurrenceIsOneShot(t *testing.T) {
 	tests := []struct {
-		name        string
-		guard       string
-		initial     app.TaskState
-		initialNote string
+		name         string
+		guard        string
+		initial      app.TaskState
+		initialNote  string
+		receiptState string
 	}{
-		{name: "unguarded normal action", initial: app.TaskStateBlocked, initialNote: "waiting for the schedule"},
-		{name: "guarded false exit", guard: "the release branch is green", initial: app.TaskStateInProgress},
+		{name: "expired opener receipt", initial: app.TaskStateBlocked, initialNote: "waiting for the schedule", receiptState: resourceMailboxExpiredState},
+		{name: "pruned opener receipt", guard: "the release branch is green", initial: app.TaskStateInProgress},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -124,6 +162,9 @@ func TestScheduledTaskOccurrenceIsOneShot(t *testing.T) {
 			if err := manager.prepareTaskWorkChain(workspace, opener, rt); err != nil {
 				t.Fatal(err)
 			}
+			if updated := rt.snapshotGeneration(); updated.TaskStateChainKind != taskStateChainKindScheduleOccurrence {
+				t.Fatalf("scheduled opener kind was not durable: %#v", updated)
+			}
 			detail, err := puaWorkspace.Resource(record.ResourceID)
 			if err != nil || detail.State != test.initial || detail.StateNote != test.initialNote {
 				t.Fatalf("scheduled opener changed Task state: detail=%#v err=%v", detail, err)
@@ -140,6 +181,21 @@ func TestScheduledTaskOccurrenceIsOneShot(t *testing.T) {
 			if err != nil || !found || !stored.receipt || !isScheduleOccurrenceMessage(stored) {
 				t.Fatalf("durable scheduled opener = %#v, found=%v err=%v", stored, found, err)
 			}
+			removeTaskOpenerFixture(t, workspace.Path, record.ResourceID, opener.ID, test.receiptState)
+			_, found, err = mailboxMessageByID(workspace.Path, opener.ID)
+			if test.receiptState == resourceMailboxExpiredState {
+				var apiErr *resourceAPIError
+				if found || !errors.As(err, &apiErr) || apiErr.Code != "message_receipt_expired" {
+					t.Fatalf("expired opener lookup = found=%v err=%v", found, err)
+				}
+			} else if found || err != nil {
+				t.Fatalf("pruned opener lookup = found=%v err=%v", found, err)
+			}
+			persisted, err := loadGenerationRecord(workspace.Path, record.ID)
+			if err != nil || persisted.TaskStateChainKind != taskStateChainKindScheduleOccurrence {
+				t.Fatalf("reloaded scheduled chain kind = %q, err=%v", persisted.TaskStateChainKind, err)
+			}
+			rt = newAgentHubRuntime(manager, workspace, persisted, nil)
 			marker := "session-scheduled:2"
 			if _, err := rt.mutateGeneration(func(current *generationRecord) {
 				current.CompletionMarker = marker
@@ -208,7 +264,8 @@ func TestScheduledTaskOccurrenceSteerPreservesOneShotChain(t *testing.T) {
 		t.Fatal("scheduled occurrence did not attach its runtime")
 	}
 	afterOpener := rt.snapshotGeneration()
-	if afterOpener.TaskStateChainID != opener.ID || afterOpener.TaskStateContinuationCount != 0 ||
+	if afterOpener.TaskStateChainID != opener.ID || afterOpener.TaskStateChainKind != taskStateChainKindScheduleOccurrence ||
+		afterOpener.TaskStateContinuationCount != 0 ||
 		afterOpener.TaskStateCompletionMarker != afterOpener.CompletionMarker {
 		t.Fatalf("scheduled opener did not establish its one-shot chain: %#v", afterOpener)
 	}
@@ -257,10 +314,12 @@ func TestScheduledTaskOccurrenceSteerPreservesOneShotChain(t *testing.T) {
 	afterCompletion := rt.snapshotGeneration()
 	mailbox, mailboxErr := loadHotResourceMailbox(workspace.Path, record.ResourceID)
 	if afterSteer.TaskStateChainID != afterOpener.TaskStateChainID ||
+		afterSteer.TaskStateChainKind != afterOpener.TaskStateChainKind ||
 		afterSteer.TaskStateContinuationCount != afterOpener.TaskStateContinuationCount ||
 		afterSteer.TaskStateCompletionMarker != afterOpener.TaskStateCompletionMarker ||
 		detailErr != nil || detailAfterSteer.State != app.TaskStateWaiting || detailAfterSteer.StateNote != waitingNote ||
 		afterCompletion.TaskStateCompletionMarker != completionMarker ||
+		afterCompletion.TaskStateChainKind != taskStateChainKindScheduleOccurrence ||
 		afterCompletion.TaskStateContinuationCount != afterOpener.TaskStateContinuationCount ||
 		mailboxErr != nil || len(mailbox.Messages) != 0 {
 		t.Fatalf("active steer changed scheduled one-shot handling: opener=%#v steer=%#v detail=%#v detailErr=%v completion=%#v mailbox=%#v mailboxErr=%v",
@@ -288,7 +347,8 @@ func TestScheduledTaskOccurrenceSteerPreservesOneShotChain(t *testing.T) {
 	afterOrdinary := rt.snapshotGeneration()
 	detail, err = puaWorkspace.Resource(record.ResourceID)
 	if ordinary.Status != resourceMessageDelivered || ordinary.ActualMode != resourceMessageModeEnqueue ||
-		afterOrdinary.TaskStateChainID != ordinary.ID || afterOrdinary.TaskStateContinuationCount != 0 ||
+		afterOrdinary.TaskStateChainID != ordinary.ID || afterOrdinary.TaskStateChainKind != taskStateChainKindOrdinary ||
+		afterOrdinary.TaskStateContinuationCount != 0 ||
 		detail.State != app.TaskStateInProgress || err != nil {
 		t.Fatalf("genuine next-Turn opener did not start a fresh chain: message=%#v generation=%#v detail=%#v err=%v",
 			ordinary, afterOrdinary, detail, err)
@@ -334,6 +394,19 @@ func TestOrdinaryTaskCompletionStillEnqueuesContinuation(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	afterOpener := rt.snapshotGeneration()
+	if afterOpener.TaskStateChainKind != taskStateChainKindOrdinary {
+		t.Fatalf("ordinary opener kind was not durable: %#v", afterOpener)
+	}
+	removeTaskOpenerFixture(t, workspace.Path, record.ResourceID, opener.ID, "")
+	if _, found, err := mailboxMessageByID(workspace.Path, opener.ID); err != nil || found {
+		t.Fatalf("removed ordinary opener lookup = found=%v err=%v", found, err)
+	}
+	persisted, err := loadGenerationRecord(workspace.Path, record.ID)
+	if err != nil || persisted.TaskStateChainKind != taskStateChainKindOrdinary {
+		t.Fatalf("reloaded ordinary chain kind = %q, err=%v", persisted.TaskStateChainKind, err)
+	}
+	rt = newAgentHubRuntime(manager, workspace, persisted, nil)
 	marker := "session-ordinary:2"
 	if _, err := rt.mutateGeneration(func(current *generationRecord) {
 		current.CompletionMarker = marker
@@ -346,12 +419,118 @@ func TestOrdinaryTaskCompletionStillEnqueuesContinuation(t *testing.T) {
 		t.Fatal(err)
 	}
 	updated := rt.snapshotGeneration()
-	if updated.TaskStateCompletionMarker != marker || updated.TaskStateContinuationCount != 1 {
+	if updated.TaskStateCompletionMarker != marker || updated.TaskStateChainKind != taskStateChainKindOrdinary ||
+		updated.TaskStateContinuationCount != 1 {
 		t.Fatalf("ordinary completion did not follow continuation policy: %#v", updated)
 	}
 	mailbox, err := loadHotResourceMailbox(workspace.Path, record.ResourceID)
 	if err != nil || len(mailbox.Messages) != 1 || mailbox.Messages[0].Type != resourceMessageTypeTaskContinuation {
 		t.Fatalf("ordinary completion mailbox = %#v, err=%v", mailbox, err)
+	}
+}
+
+func TestTaskContinuationInheritsPersistedChainKind(t *testing.T) {
+	manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+	now := time.Now().Format(time.RFC3339Nano)
+	record := generationRecord{
+		ID: "task-continuation-kind-gen", WorkspaceID: workspace.ID, ResourceID: "project1.task1",
+		Generation: 1, GenerationID: "gen-task-continuation-kind", Status: "idle", Title: "Task continuation kind",
+		CreatedAt: now, UpdatedAt: now, CompletionMarker: "session:2", TaskStateCompletionMarker: "session:1",
+		TaskStateChainID: "ordinary-opener", TaskStateChainKind: taskStateChainKindOrdinary, TaskStateContinuationCount: 1,
+	}
+	if err := saveGenerationRecord(workspace.Path, record); err != nil {
+		t.Fatal(err)
+	}
+	rt := newAgentHubRuntime(manager, workspace, record, nil)
+	continuation := resourceMailboxMessage{
+		ID: "generated-task-continuation", ResourceID: record.ResourceID, Type: resourceMessageTypeTaskContinuation,
+		Status: resourceMessageQueued, RequestedMode: resourceMessageModeEnqueue, ActualMode: resourceMessageModeEnqueue,
+	}
+	if err := manager.prepareTaskWorkChain(workspace, continuation, rt); err != nil {
+		t.Fatal(err)
+	}
+	updated := rt.snapshotGeneration()
+	if updated.TaskStateChainID != record.TaskStateChainID || updated.TaskStateChainKind != record.TaskStateChainKind ||
+		updated.TaskStateContinuationCount != record.TaskStateContinuationCount ||
+		updated.TaskStateCompletionMarker != record.TaskStateCompletionMarker {
+		t.Fatalf("generated continuation replaced its work chain: before=%#v after=%#v", record, updated)
+	}
+}
+
+func TestLegacyTaskChainKindIsInferredFromReceipt(t *testing.T) {
+	tests := []struct {
+		name      string
+		scheduled bool
+		wantKind  taskStateChainKind
+		wantCount int
+	}{
+		{name: "scheduled occurrence", scheduled: true, wantKind: taskStateChainKindScheduleOccurrence},
+		{name: "ordinary opener", wantKind: taskStateChainKindOrdinary, wantCount: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+			puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := puaWorkspace.SetTaskState("project1.task1", app.TaskStateInProgress, ""); err != nil {
+				t.Fatal(err)
+			}
+			message := resourceMailboxMessage{
+				ID: "legacy-chain-opener", ResourceID: "project1.task1", Text: "Open legacy chain", Role: "user",
+				Status: resourceMessageQueued, RequestedMode: resourceMessageModeEnqueue, ActualMode: resourceMessageModeEnqueue,
+			}
+			if test.scheduled {
+				message.Type = resourceMessageTypeScheduleOccurrence
+				message.Causation = &resourceMessageCausation{
+					Type: resourceMessageTypeScheduleOccurrence, SourceResourceID: app.SchedulerResourceID,
+				}
+			}
+			var opener resourceMailboxMessage
+			if test.scheduled {
+				opener, err = acceptGeneratedMailboxMessage(workspace.Path, message)
+			} else {
+				opener, err = acceptMailboxMessage(workspace.Path, message.ResourceID, resourceMessageRequest{
+					Text: message.Text, Role: message.Role, Mode: message.ActualMode,
+				})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := updateMailboxMessage(workspace.Path, opener.ID, func(current *resourceMailboxMessage) {
+				current.Status = resourceMessageDelivered
+				current.GenerationID = "gen-legacy-chain-kind"
+				current.TurnID = "turn-legacy"
+				current.DeliveredAt = time.Now().Format(time.RFC3339Nano)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().Format(time.RFC3339Nano)
+			record := generationRecord{
+				ID: "legacy-chain-kind-gen", WorkspaceID: workspace.ID, ResourceID: opener.ResourceID,
+				Generation: 1, GenerationID: "gen-legacy-chain-kind", Status: "stopped", ReplacementPending: true,
+				Title: "Legacy chain kind", CreatedAt: now, UpdatedAt: now,
+				CompletionMarker: "session-legacy:2", CompletionTurnID: "turn-legacy", TaskStateChainID: opener.ID,
+			}
+			if err := saveGenerationRecord(workspace.Path, record); err != nil {
+				t.Fatal(err)
+			}
+			rt := newAgentHubRuntime(manager, workspace, record, nil)
+			manager.registerRuntime(rt)
+			if err := manager.handleTaskTurnCompletionLocked(context.Background(), rt); err != nil {
+				t.Fatal(err)
+			}
+			updated := rt.snapshotGeneration()
+			if updated.TaskStateChainKind != test.wantKind || updated.TaskStateContinuationCount != test.wantCount ||
+				updated.TaskStateCompletionMarker != record.CompletionMarker {
+				t.Fatalf("legacy chain inference = %#v", updated)
+			}
+			persisted, err := loadGenerationRecord(workspace.Path, record.ID)
+			if err != nil || persisted.TaskStateChainKind != test.wantKind {
+				t.Fatalf("persisted legacy chain kind = %q, err=%v", persisted.TaskStateChainKind, err)
+			}
+		})
 	}
 }
 

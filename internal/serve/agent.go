@@ -127,9 +127,10 @@ type generationRecord struct {
 	CompletionPending       bool   `json:"completionPending,omitempty"`
 	// Task workflow continuation fields make terminal handling idempotent across
 	// duplicate AgentHub observations and PUA Server restarts.
-	TaskStateChainID           string `json:"taskStateChainId,omitempty"`
-	TaskStateContinuationCount int    `json:"taskStateContinuationCount,omitempty"`
-	TaskStateCompletionMarker  string `json:"taskStateCompletionMarker,omitempty"`
+	TaskStateChainID           string             `json:"taskStateChainId,omitempty"`
+	TaskStateChainKind         taskStateChainKind `json:"taskStateChainKind,omitempty"`
+	TaskStateContinuationCount int                `json:"taskStateContinuationCount,omitempty"`
+	TaskStateCompletionMarker  string             `json:"taskStateCompletionMarker,omitempty"`
 	// Retired is a storage projection flag, not a public runtime field.
 	// Retired records are immutable history and must never enter the
 	// lifecycle reconciler.

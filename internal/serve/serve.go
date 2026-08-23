@@ -986,19 +986,27 @@ func (s *server) updateResourceAgentBinding(w http.ResponseWriter, r *http.Reque
 		writeError(w, err, http.StatusNotFound)
 		return
 	}
-	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
-	if err != nil {
-		writeError(w, err, http.StatusBadRequest)
-		return
-	}
-	updated, err := puaWorkspace.SetResourceAgentBinding(resourceID, binding)
-	if err != nil {
-		writeError(w, err, http.StatusBadRequest)
-		return
-	}
+	var updated app.AgentBinding
 	if s.agents != nil {
-		if err := s.agents.resourceBindingChanged(r.Context(), workspace, resourceID, updated); err != nil {
-			writeError(w, err, http.StatusBadGateway)
+		var persisted bool
+		updated, persisted, err = s.agents.updateResourceAgentBinding(r.Context(), workspace, resourceID, binding)
+		if err != nil {
+			status := http.StatusBadRequest
+			if persisted {
+				status = http.StatusBadGateway
+			}
+			writeError(w, err, status)
+			return
+		}
+	} else {
+		puaWorkspace, openErr := app.OpenWorkspace(workspace.Path)
+		if openErr != nil {
+			writeError(w, openErr, http.StatusBadRequest)
+			return
+		}
+		updated, err = puaWorkspace.SetResourceAgentBinding(resourceID, binding)
+		if err != nil {
+			writeError(w, err, http.StatusBadRequest)
 			return
 		}
 	}

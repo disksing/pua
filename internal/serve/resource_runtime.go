@@ -336,6 +336,34 @@ func (m *agentManager) resourceBindingChanged(ctx context.Context, workspace ser
 	})
 }
 
+// updateResourceAgentBinding serializes the portable binding mutation with
+// generation reconciliation. Scheduler attention has no retry deadline, so a
+// changed binding must wake it promptly, but only after both durable mutation
+// and generation reconciliation succeed. Requesting the reconcile after the
+// resource controller is released avoids acquiring Scheduler controllers in
+// the opposite order from occurrence delivery.
+func (m *agentManager) updateResourceAgentBinding(ctx context.Context, workspace serveWorkspace, resourceID string, binding app.AgentBinding) (updated app.AgentBinding, persisted bool, err error) {
+	changed := false
+	err = m.withResourceController(ctx, workspace, resourceID, func() error {
+		puaWorkspace, openErr := app.OpenWorkspace(workspace.Path)
+		if openErr != nil {
+			return openErr
+		}
+		previous, previousErr := puaWorkspace.ResourceAgentBinding(resourceID)
+		updated, err = puaWorkspace.SetResourceAgentBinding(resourceID, binding)
+		if err != nil {
+			return err
+		}
+		persisted = true
+		changed = previousErr != nil || previous != updated
+		return m.resourceBindingChangedLocked(ctx, workspace, resourceID, updated)
+	})
+	if err == nil && changed {
+		m.requestReconcile(reconcileScheduler)
+	}
+	return updated, persisted, err
+}
+
 func (m *agentManager) resourceBindingChangedLocked(ctx context.Context, workspace serveWorkspace, resourceID string, binding app.AgentBinding) error {
 	_ = binding
 	record, found, err := currentResourceGeneration(workspace.Path, resourceID)

@@ -2125,6 +2125,138 @@ func TestNativeSchedulerBindingAttentionRecoversPreparedOccurrence(t *testing.T)
 	}
 }
 
+func TestResourceBindingChangeWakesAttentionHeldScheduler(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	hub := httptest.NewServer(fake)
+	defer hub.Close()
+	manager, workspace, configPath := newRuntimeTestManager(t, hub.URL)
+	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rewriteSchedulerTestProfiles(t, configPath, nil)
+	anchor := time.Now().UTC().Add(time.Minute).Truncate(time.Second)
+	schedule, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Wake restored binding", Condition: "every minute", Target: "project1.task1",
+		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerInterval, EverySeconds: 60, AnchorAt: anchor.Format(time.RFC3339Nano)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := anchor.Add(3*time.Minute + 10*time.Second)
+	manager.now = func() time.Time { return now }
+	native := newNativeScheduler(manager, workspace)
+	if deadline, reconcileErr := native.Reconcile(context.Background(), now); reconcileErr != nil || !deadline.IsZero() {
+		t.Fatalf("create binding attention: deadline=%s err=%v", deadline, reconcileErr)
+	}
+	runtime, err := native.schedulerRuntime(schedule.ID)
+	if err != nil || runtime.EffectiveState != schedulerOutcomeAttention || runtime.Prepared == nil {
+		t.Fatalf("binding attention runtime = %#v, %v", runtime, err)
+	}
+	prepared := *runtime.Prepared
+	_ = manager.takeReconcileRequests()
+	select {
+	case <-manager.reconcileWake:
+	default:
+	}
+
+	body, err := json.Marshal(app.AgentBinding{Kind: "agent", Name: "fake-agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	manager.server.updateResourceAgentBinding(recorder, httptest.NewRequest(http.MethodPut, "/agent-binding", bytes.NewReader(body)), workspace.ID, schedule.Target)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("binding restoration returned %d: %s", recorder.Code, recorder.Body.String())
+	}
+	request := manager.takeReconcileRequests()
+	if request&reconcileScheduler == 0 {
+		t.Fatalf("binding restoration reconcile request = %08b, want Scheduler", request)
+	}
+	select {
+	case <-manager.reconcileWake:
+	default:
+		t.Fatal("binding restoration did not wake the reconcile loop")
+	}
+	if err := manager.reconcileOwnedWorkspaceSchedulers(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	messages := scheduleOccurrenceMessages(t, workspace.Path, schedule.Target)
+	if len(messages) != 1 || messages[0].ID != prepared.MessageID {
+		t.Fatalf("binding wake delivered occurrences = %#v, want %s", messages, prepared.MessageID)
+	}
+	if err := manager.reconcileOwnedWorkspaceSchedulers(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if messages := scheduleOccurrenceMessages(t, workspace.Path, schedule.Target); len(messages) != 1 || messages[0].ID != prepared.MessageID {
+		t.Fatalf("binding wake duplicated occurrence: %#v", messages)
+	}
+}
+
+func TestResourceBindingMutationRequestsSchedulerOnlyAfterChangedReconciliation(t *testing.T) {
+	t.Run("no-op", func(t *testing.T) {
+		manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+		_ = manager.takeReconcileRequests()
+		body := bytes.NewBufferString(`{"kind":"profile","name":"default"}`)
+		recorder := httptest.NewRecorder()
+		manager.server.updateResourceAgentBinding(recorder, httptest.NewRequest(http.MethodPut, "/agent-binding", body), workspace.ID, "project1.task1")
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("no-op binding update returned %d: %s", recorder.Code, recorder.Body.String())
+		}
+		if request := manager.takeReconcileRequests(); request&reconcileScheduler != 0 {
+			t.Fatalf("no-op binding update requested Scheduler reconciliation: %08b", request)
+		}
+	})
+
+	t.Run("reconciliation failure after persistence", func(t *testing.T) {
+		manager, workspace, configPath := newRuntimeTestManager(t, "http://127.0.0.1:1")
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		record := generationRecord{
+			ID: "gen-binding-wake-failure", WorkspaceID: workspace.ID, ResourceID: "project1.task1",
+			Generation: 1, GenerationID: "gen-binding-wake-failure", AgentHubSessionID: "ses-binding-wake-failure",
+			BindingKind: "profile", BindingName: "default", AgentHubAgentName: "fake-agent", Status: "idle",
+			CreatedAt: now, UpdatedAt: now,
+		}
+		if err := saveGenerationRecord(workspace.Path, record); err != nil {
+			t.Fatal(err)
+		}
+		data, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var cfg agentHubServeConfig
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			t.Fatal(err)
+		}
+		cfg.AgentHubInstanceID = ""
+		data, err = json.Marshal(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(configPath, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_ = manager.takeReconcileRequests()
+		body := bytes.NewBufferString(`{"kind":"agent","name":"replacement-agent"}`)
+		recorder := httptest.NewRecorder()
+		manager.server.updateResourceAgentBinding(recorder, httptest.NewRequest(http.MethodPut, "/agent-binding", body), workspace.ID, record.ResourceID)
+		if recorder.Code != http.StatusBadGateway {
+			t.Fatalf("failed binding reconciliation returned %d: %s", recorder.Code, recorder.Body.String())
+		}
+		puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		binding, err := puaWorkspace.ResourceAgentBinding(record.ResourceID)
+		if err != nil || binding != (app.AgentBinding{Kind: "agent", Name: "replacement-agent"}) {
+			t.Fatalf("failed reconciliation lost durable binding: %#v, %v", binding, err)
+		}
+		if request := manager.takeReconcileRequests(); request&reconcileScheduler != 0 {
+			t.Fatalf("failed binding reconciliation requested Scheduler reconciliation: %08b", request)
+		}
+	})
+}
+
 func TestNativeSchedulerTransientBindingPreflightUsesBackoff(t *testing.T) {
 	fake := newRuntimeFakeAgentHub()
 	failCatalog := true

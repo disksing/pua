@@ -778,8 +778,14 @@ func mailboxPriority(message resourceMailboxMessage) int {
 	}
 }
 
-func findCanonicalAgentHubMessage(ctx context.Context, client *agentHubClient, sessionID string, expected resourceMailboxMessage) (agentHubInboundMessage, bool, error) {
-	cursor := int64(0)
+// findCanonicalAgentHubMessage locates the durable message.input event for
+// expected by scanning semantic frames after the given cursor. A delivery
+// that just appended its canonical event passes the pre-delivery
+// LastEventID so large sessions do not pay a full-history rescan on every
+// message; recovery paths that may look for an event written by an earlier
+// attempt must pass 0.
+func findCanonicalAgentHubMessage(ctx context.Context, client *agentHubClient, sessionID string, expected resourceMailboxMessage, after int64) (agentHubInboundMessage, bool, error) {
+	cursor := after
 	for {
 		frames, latest, err := client.SessionFrames(ctx, sessionID, cursor, agentHubEventMaxCount)
 		if err != nil {
@@ -816,7 +822,9 @@ func findCanonicalAgentHubMessage(ctx context.Context, client *agentHubClient, s
 // exact response remains unsubscribed until a later canonical observation.
 func deliveredMailboxTurnID(ctx context.Context, client *agentHubClient, sessionID string, message resourceMailboxMessage, delivered, before agentHubSession) string {
 	if client != nil && strings.TrimSpace(sessionID) != "" {
-		if canonical, found, err := findCanonicalAgentHubMessage(ctx, client, sessionID, message); err == nil && found {
+		// The canonical message.input event was appended by the delivery that
+		// just returned, so it must sit after the pre-delivery cursor.
+		if canonical, found, err := findCanonicalAgentHubMessage(ctx, client, sessionID, message, before.LastEventID); err == nil && found {
 			if turnID := strings.TrimSpace(canonical.TurnID); turnID != "" {
 				return turnID
 			}
@@ -1462,7 +1470,10 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 			var canonicalFound bool
 			var canonicalErr error
 			if conflict {
-				canonical, canonicalFound, canonicalErr = findCanonicalAgentHubMessage(ctx, client, session.ID, message)
+				// The conflicting canonical event may come from an earlier
+				// attempt that predates the session snapshot taken by this pass,
+				// so the recovery scan cannot use the pre-delivery cursor hint.
+				canonical, canonicalFound, canonicalErr = findCanonicalAgentHubMessage(ctx, client, session.ID, message, 0)
 			}
 			if canonicalErr == nil && canonicalFound {
 				stillCurrent, guardErr := legacyLifecyclePlanStillCurrent(workspace, deliveryPlan, &session)

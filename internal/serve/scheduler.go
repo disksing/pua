@@ -202,7 +202,7 @@ func schedulerTickTerminal(ctx context.Context, workspacePath string, message re
 }
 
 func findSchedulerTickTurn(ctx context.Context, client *agentHubClient, sessionID string, message resourceMailboxMessage) (agentHubTurn, bool, error) {
-	canonical, canonicalFound, canonicalErr := findCanonicalAgentHubMessage(ctx, client, sessionID, message)
+	canonical, canonicalFound, canonicalErr := findCanonicalAgentHubMessage(ctx, client, sessionID, message, 0)
 	if canonicalErr != nil {
 		return agentHubTurn{}, false, canonicalErr
 	}

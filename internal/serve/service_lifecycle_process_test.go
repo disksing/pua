@@ -77,6 +77,207 @@ func waitForProcessGone(t *testing.T, pid int) {
 	}
 }
 
+func startTermExitingServiceWithTermIgnoringChild(t *testing.T, shutdown bool) {
+	t.Helper()
+	root := t.TempDir()
+	childPIDPath := filepath.Join(root, "child.pid")
+	cleanupPath := filepath.Join(root, "cleanup")
+	writeTestService(t, root, ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "worker",
+		Enabled:       true,
+		Command: []string{"/bin/sh", "-c",
+			"trap 'exit 0' TERM; " +
+				"(trap '' TERM; exec sleep 30) </dev/null >/dev/null 2>&1 & " +
+				"printf '%s\\n' \"$!\" > " + shellQuote(childPIDPath) + "; " +
+				"while :; do sleep 1; done"},
+		Cleanup: &ServiceCleanupConfig{
+			Command: []string{"/bin/sh", "-c", "printf 'cleaned\\n' > " + shellQuote(cleanupPath)},
+			Timeout: time.Second,
+		},
+	})
+
+	manager, err := NewServiceManager(root, ServiceManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.processTerminationGrace = 100 * time.Millisecond
+	stopProcessTestManager(t, &manager)
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	running := waitForServiceState(t, manager, "worker", ServiceStateReady)
+	childPIDs := waitForLaunches(t, childPIDPath, 1)
+	childPID, err := strconv.Atoi(childPIDs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	childIdentity, err := readServiceProcessIdentity(childPID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if childIdentity.processGroup != running.ProcessGroup {
+		t.Fatalf("child process group = %d, want service group %d", childIdentity.processGroup, running.ProcessGroup)
+	}
+	t.Cleanup(func() { _ = terminateProcessGroup(running.ProcessGroup, true) })
+
+	started := time.Now()
+	if shutdown {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		err = manager.Stop(ctx)
+	} else {
+		err = manager.StopService(context.Background(), "worker")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("process-group shutdown duration = %s, want bounded graceful escalation", elapsed)
+	}
+	manager = nil
+	waitForProcessGone(t, running.PID)
+	waitForProcessGone(t, childPID)
+
+	status := readPersistedServiceStatus(t, root, "worker")
+	if status.State != ServiceStateStopped || status.PID != 0 || status.ProcessGroup != 0 || status.AttentionRequired {
+		t.Fatalf("stopped process-group status = %#v", status)
+	}
+	if shutdown && status.ManualStop {
+		t.Fatalf("manager shutdown persisted manual-stop intent: %#v", status)
+	}
+	if !shutdown && !status.ManualStop {
+		t.Fatalf("manual stop lost manual-stop intent: %#v", status)
+	}
+	if !status.Cleanup.Succeeded || status.Cleanup.Attempts != 1 {
+		t.Fatalf("cleanup status = %#v, want one successful cleanup", status.Cleanup)
+	}
+	cleanup, err := os.ReadFile(cleanupPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(cleanup) != "cleaned\n" {
+		t.Fatalf("cleanup output = %q", cleanup)
+	}
+	events, err := os.ReadFile(filepath.Join(serviceRuntimePath(root, "worker"), "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(events), `"type":"exited"`) || strings.Contains(string(events), `"type":"start_failed"`) {
+		t.Fatalf("graceful process-group shutdown entered restart policy: %s", events)
+	}
+}
+
+func TestServiceManagerStopsEntireProcessGroupAfterLeaderExits(t *testing.T) {
+	t.Run("manual stop", func(t *testing.T) {
+		startTermExitingServiceWithTermIgnoringChild(t, false)
+	})
+	t.Run("manager shutdown", func(t *testing.T) {
+		startTermExitingServiceWithTermIgnoringChild(t, true)
+	})
+}
+
+func TestServiceManagerStopsAlreadyExitedLeader(t *testing.T) {
+	root := t.TempDir()
+	releasePath := filepath.Join(root, "release")
+	writeTestService(t, root, ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "worker",
+		Enabled:       true,
+		Command:       []string{"/bin/sh", "-c", "while test ! -f " + shellQuote(releasePath) + "; do sleep 0.01; done"},
+	})
+
+	manager, err := NewServiceManager(root, ServiceManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopProcessTestManager(t, &manager)
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	running, err := manager.Show("worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(releasePath, []byte("exit\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitForProcessGone(t, running.PID)
+	if err := manager.StopService(context.Background(), "worker"); err != nil {
+		t.Fatal(err)
+	}
+	manager = nil
+	status := readPersistedServiceStatus(t, root, "worker")
+	if status.State != ServiceStateStopped || status.PID != 0 || status.ProcessGroup != 0 || !status.ManualStop || status.AttentionRequired {
+		t.Fatalf("already-exited stop status = %#v", status)
+	}
+}
+
+func TestServiceManagerRetainsOwnershipWhenLeaderIdentityChanges(t *testing.T) {
+	if !serviceProcessIdentityRequired() {
+		t.Skip("native service process identity is unavailable")
+	}
+	root := t.TempDir()
+	writeTestService(t, root, ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "worker",
+		Enabled:       true,
+		Command:       []string{"/bin/sh", "-c", "exec sleep 30"},
+	})
+
+	manager, err := NewServiceManager(root, ServiceManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopProcessTestManager(t, &manager)
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	running := waitForServiceState(t, manager, "worker", ServiceStateReady)
+	t.Cleanup(func() { _ = terminateProcessGroup(running.ProcessGroup, true) })
+	manager.mu.Lock()
+	manager.runtimes["worker"].status.ProcessStartID += "-reused"
+	manager.mu.Unlock()
+
+	err = manager.StopService(context.Background(), "worker")
+	if err == nil || !strings.Contains(err.Error(), "leader identity changed") {
+		t.Fatalf("identity-change stop error = %v", err)
+	}
+	retained, err := manager.Show("worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retained.State != ServiceStateAttentionRequired || !retained.AttentionRequired || !retained.ManualStop || retained.PID != running.PID || retained.ProcessGroup != running.ProcessGroup {
+		t.Fatalf("identity-change status = %#v, want attention with retained ownership", retained)
+	}
+	if !processExists(running.PID) {
+		t.Fatal("identity mismatch signaled the potentially reused process group")
+	}
+	events, err := os.ReadFile(filepath.Join(serviceRuntimePath(root, "worker"), "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(events), `"type":"stop_failed"`) {
+		t.Fatalf("identity-change stop event missing: %s", events)
+	}
+
+	manager.mu.Lock()
+	manager.runtimes["worker"].status.ProcessStartID = running.ProcessStartID
+	manager.mu.Unlock()
+	if err := manager.StopService(context.Background(), "worker"); err != nil {
+		t.Fatal(err)
+	}
+	stopped, err := manager.Show("worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stopped.State != ServiceStateStopped || stopped.AttentionRequired || stopped.PID != 0 || stopped.ProcessGroup != 0 {
+		t.Fatalf("recovered stop status = %#v", stopped)
+	}
+	manager = nil
+	waitForProcessGone(t, running.PID)
+}
+
 func readPersistedServiceStatus(t *testing.T, root, id string) ServiceStatus {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join(serviceRuntimePath(root, id), "state.json"))

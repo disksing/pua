@@ -2,6 +2,7 @@ package serve
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -17,6 +18,20 @@ import (
 const serviceStartupLogBufferBytes = 1 << 20
 
 const serviceCommandWaitDelay = 250 * time.Millisecond
+
+const (
+	serviceProcessGroupPollInterval = 10 * time.Millisecond
+	serviceProcessGroupKillWait     = time.Second
+)
+
+type serviceProcessGroupIdentity struct {
+	leaderPID            int
+	processGroup         int
+	startID              string
+	instanceToken        string
+	commandDigest        string
+	verifyLeaderIdentity bool
+}
 
 type serviceLogSink struct {
 	mu       sync.Mutex
@@ -332,19 +347,8 @@ func (s *serviceLogSink) Close() error {
 	return closeErr
 }
 
-func reapOrphanProcessGroup(pgid int) {
-	if pgid <= 0 {
-		return
-	}
-	_ = terminateProcessGroup(pgid, false)
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		if err := syscall.Kill(-pgid, 0); err != nil {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	_ = terminateProcessGroup(pgid, true)
+func reapOrphanProcessGroup(identity serviceProcessGroupIdentity) error {
+	return terminateOwnedServiceProcessGroup(context.Background(), identity, 500*time.Millisecond)
 }
 
 func terminateProcessGroup(pgid int, force bool) error {
@@ -355,9 +359,205 @@ func terminateProcessGroup(pgid int, force bool) error {
 	if force {
 		signal = syscall.SIGKILL
 	}
+	return signalProcessGroup(pgid, signal)
+}
+
+func signalProcessGroup(pgid int, signal syscall.Signal) error {
+	if pgid <= 0 {
+		return nil
+	}
 	err := syscall.Kill(-pgid, signal)
-	if err != nil && err != syscall.ESRCH {
+	if errors.Is(err, syscall.ESRCH) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("signal process group %d: %w", pgid, err)
+	}
+	return nil
+}
+
+func processGroupPresent(pgid int) (bool, error) {
+	if pgid <= 0 {
+		return false, nil
+	}
+	err := syscall.Kill(-pgid, 0)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, syscall.ESRCH) {
+		return false, nil
+	}
+	return true, fmt.Errorf("probe process group %d: %w", pgid, err)
+}
+
+func processPresent(pid int) (bool, error) {
+	if pid <= 0 {
+		return false, nil
+	}
+	err := syscall.Kill(pid, 0)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, syscall.ESRCH) {
+		return false, nil
+	}
+	return true, fmt.Errorf("probe process %d: %w", pid, err)
+}
+
+// ownedServiceProcessGroupPresent checks the group before every graceful or
+// forceful signal. Once the original leader has been observed, its later
+// absence is expected while descendants drain. If the numeric leader PID is
+// reused, however, its native identity no longer matches and the supervisor
+// refuses to signal the potentially unrelated group.
+func ownedServiceProcessGroupPresent(identity serviceProcessGroupIdentity, allowLeaderExit bool) (bool, error) {
+	present, err := processGroupPresent(identity.processGroup)
+	if err != nil || !present {
+		return present, err
+	}
+	leaderPresent, err := processPresent(identity.leaderPID)
+	if err != nil {
+		return true, err
+	}
+	if !leaderPresent {
+		if allowLeaderExit {
+			return true, nil
+		}
+		return true, fmt.Errorf("service process group %d remains after its leader exited before ownership was confirmed", identity.processGroup)
+	}
+	if !identity.verifyLeaderIdentity {
+		return true, nil
+	}
+	var current serviceProcessIdentity
+	for attempt := 0; attempt < 3; attempt++ {
+		current, err = readServiceProcessIdentity(identity.leaderPID)
+		if err == nil {
+			break
+		}
+		leaderPresent, probeErr := processPresent(identity.leaderPID)
+		if probeErr != nil {
+			return true, probeErr
+		}
+		if !leaderPresent {
+			if allowLeaderExit {
+				return true, nil
+			}
+			return true, fmt.Errorf("service process group %d remains after its leader exited before ownership was confirmed", identity.processGroup)
+		}
+		if attempt < 2 {
+			time.Sleep(serviceProcessGroupPollInterval)
+		}
+	}
+	if err != nil {
+		return true, fmt.Errorf("verify service process group %d leader: %w", identity.processGroup, err)
+	}
+	if !serviceProcessIdentityMatches(current, identity.processGroup, identity.startID, identity.instanceToken, identity.commandDigest) {
+		return true, fmt.Errorf("service process group %d leader identity changed", identity.processGroup)
+	}
+	return true, nil
+}
+
+func signalOwnedServiceProcessGroup(identity serviceProcessGroupIdentity, allowLeaderExit bool, signal syscall.Signal) (bool, error) {
+	present, err := ownedServiceProcessGroupPresent(identity, allowLeaderExit)
+	if errors.Is(err, syscall.EPERM) {
+		// Darwin can briefly report EPERM while a dying group is being reaped.
+		// Give that transition a bounded chance to resolve, but retain the error
+		// when the group remains inaccessible rather than treating it as gone.
+		gone, waitErr := waitForOwnedServiceProcessGroup(context.Background(), identity, allowLeaderExit, time.Now().Add(5*serviceProcessGroupPollInterval))
+		if gone {
+			return false, nil
+		}
+		if waitErr != nil {
+			return true, waitErr
+		}
+		present, err = ownedServiceProcessGroupPresent(identity, allowLeaderExit)
+	}
+	if err != nil || !present {
+		return present, err
+	}
+	if err := signalProcessGroup(identity.processGroup, signal); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
+func waitForOwnedServiceProcessGroup(ctx context.Context, identity serviceProcessGroupIdentity, allowLeaderExit bool, deadline time.Time) (bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		present, err := ownedServiceProcessGroupPresent(identity, allowLeaderExit)
+		if err != nil && !errors.Is(err, syscall.EPERM) {
+			return false, err
+		}
+		if err == nil && !present {
+			return true, nil
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return false, err
+		}
+		if remaining > serviceProcessGroupPollInterval {
+			remaining = serviceProcessGroupPollInterval
+		}
+		timer := time.NewTimer(remaining)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return false, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+// terminateOwnedServiceProcessGroup gives the complete owned group a graceful
+// TERM window even when its leader exits first. Remaining descendants are
+// killed as a group, and success is reported only after the group no longer
+// exists. Context cancellation shortens the graceful window but does not skip
+// the bounded SIGKILL verification needed to avoid silent orphans.
+func terminateOwnedServiceProcessGroup(ctx context.Context, identity serviceProcessGroupIdentity, grace time.Duration) error {
+	if identity.leaderPID <= 0 || identity.processGroup <= 0 || identity.leaderPID != identity.processGroup {
+		return fmt.Errorf("invalid service process group identity: leader=%d group=%d", identity.leaderPID, identity.processGroup)
+	}
+	present, err := signalOwnedServiceProcessGroup(identity, false, syscall.SIGTERM)
+	if err != nil || !present {
 		return err
+	}
+	if grace < 0 {
+		grace = 0
+	}
+	graceErr := error(nil)
+	gone, err := waitForOwnedServiceProcessGroup(ctx, identity, true, time.Now().Add(grace))
+	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	if gone {
+		return nil
+	}
+	graceErr = err
+	present, err = signalOwnedServiceProcessGroup(identity, true, syscall.SIGKILL)
+	if err != nil {
+		if graceErr != nil {
+			return fmt.Errorf("force service process group %d after %v: %w", identity.processGroup, graceErr, err)
+		}
+		return err
+	}
+	if !present {
+		return nil
+	}
+	gone, err = waitForOwnedServiceProcessGroup(context.Background(), identity, true, time.Now().Add(serviceProcessGroupKillWait))
+	if err != nil {
+		return err
+	}
+	if !gone {
+		if graceErr != nil {
+			return fmt.Errorf("service process group %d remains after SIGKILL following %v", identity.processGroup, graceErr)
+		}
+		return fmt.Errorf("service process group %d remains after SIGKILL", identity.processGroup)
 	}
 	return nil
 }

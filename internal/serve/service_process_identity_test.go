@@ -86,6 +86,65 @@ func TestProcessIdentityMatchesNativeChild(t *testing.T) {
 	}
 }
 
+func TestTerminateOwnedServiceProcessGroupForcesAfterCancellation(t *testing.T) {
+	if !serviceProcessIdentityRequired() {
+		t.Skip("native service process identity is unavailable")
+	}
+	const token = "cancelled-instance-token"
+	const digest = "cancelled-command-digest"
+	readyPath := filepath.Join(t.TempDir(), "ready")
+	cmd := exec.Command("/bin/sh", "-c", "trap '' TERM; printf 'ready\\n' > "+shellQuote(readyPath)+"; exec sleep 30")
+	cmd.Env = append(os.Environ(),
+		serviceInstanceTokenEnvironment+"="+token,
+		serviceCommandDigestEnvironment+"="+digest,
+	)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	pid := cmd.Process.Pid
+	exit := make(chan serviceProcessExit, 1)
+	go func() { exit <- serviceProcessExit{err: cmd.Wait()} }()
+	waited := false
+	t.Cleanup(func() {
+		if waited {
+			return
+		}
+		_ = terminateProcessGroup(pid, true)
+		<-exit
+	})
+	waitForTestPath(t, readyPath, "ready")
+
+	identity, err := readServiceProcessIdentity(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	started := time.Now()
+	err = terminateOwnedServiceProcessGroup(ctx, serviceProcessGroupIdentity{
+		leaderPID:            pid,
+		processGroup:         pid,
+		startID:              identity.startID,
+		instanceToken:        token,
+		commandDigest:        digest,
+		verifyLeaderIdentity: true,
+	}, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("cancelled process-group termination took %s", elapsed)
+	}
+	if err := waitForServiceProcessLeader(exit); err != nil {
+		t.Fatal(err)
+	}
+	waited = true
+	if present, err := processGroupPresent(pid); err != nil || present {
+		t.Fatalf("process group after cancelled termination = present %t, error %v", present, err)
+	}
+}
+
 func TestServiceManagerReplacesVerifiedOrphanProcess(t *testing.T) {
 	for _, state := range []ServiceState{ServiceStateReady, ServiceState("unknown")} {
 		t.Run(string(state), func(t *testing.T) {

@@ -187,7 +187,7 @@ type server struct {
 	doctor           *doctorMonitor
 	locks            *workspaceLockManager
 	serviceMu        sync.Mutex
-	services         map[string]*ServiceManager
+	services         map[serviceWorkspaceKey]*ServiceManager
 	serviceContext   context.Context
 	uiStateMu        sync.Mutex
 }
@@ -322,7 +322,7 @@ func Main(args []string) error {
 	}
 	defer s.locks.closeAll()
 	s.agents = newAgentManager(s)
-	s.services = make(map[string]*ServiceManager)
+	s.services = make(map[serviceWorkspaceKey]*ServiceManager)
 	if initialWorkspace != "" {
 		if _, err := s.addWorkspace(signalContext, initialWorkspace); err != nil {
 			return fmt.Errorf("add initial workspace: %w", err)
@@ -1812,11 +1812,11 @@ func (s *server) removeWorkspace(id string) error {
 	}
 	next := cfg.Workspaces[:0]
 	removed := false
-	var removedPath string
+	var removedWorkspace serveWorkspace
 	for _, workspace := range cfg.Workspaces {
 		if workspace.ID == id {
 			removed = true
-			removedPath = workspace.Path
+			removedWorkspace = workspace
 			continue
 		}
 		next = append(next, workspace)
@@ -1834,27 +1834,23 @@ func (s *server) removeWorkspace(id string) error {
 	if err := s.saveConfig(cfg); err != nil {
 		return err
 	}
-	root, rootErr := filepath.Abs(removedPath)
-	if rootErr == nil {
-		if canonical, evalErr := filepath.EvalSymlinks(root); evalErr == nil {
-			root = canonical
+	s.serviceMu.Lock()
+	manager, managerErr := s.removeServiceManagerLocked(removedWorkspace)
+	s.serviceMu.Unlock()
+	if managerErr != nil {
+		log.Printf("remove workspace service manager: %v", managerErr)
+	}
+	if manager != nil {
+		stopContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if stopErr := manager.Stop(stopContext); stopErr != nil {
+			log.Printf("stop workspace services after removal: %v", stopErr)
 		}
-		s.serviceMu.Lock()
-		manager := s.services[root]
-		delete(s.services, root)
-		s.serviceMu.Unlock()
-		if manager != nil {
-			stopContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			if stopErr := manager.Stop(stopContext); stopErr != nil {
-				log.Printf("stop workspace services after removal: %v", stopErr)
-			}
-			cancel()
-		}
+		cancel()
 	}
 	// The Workspace is no longer managed once it leaves the persisted config;
 	// release the serve lock only after its service process groups are stopped.
 	if s.locks != nil {
-		s.locks.release(removedPath)
+		s.locks.release(removedWorkspace.Path)
 	}
 	if s.doctor != nil {
 		s.doctor.requestScan()

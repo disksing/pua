@@ -269,6 +269,137 @@ func TestServiceManagerReapsDescendantsBeforeUnexpectedExitBackoff(t *testing.T)
 	}
 }
 
+func TestServiceManagerObservesLeaderExitWhenDescendantInheritsOutput(t *testing.T) {
+	if !serviceProcessIdentityRequired() {
+		t.Skip("native service process identity is unavailable")
+	}
+	const secret = "inherited-output-secret"
+	root := t.TempDir()
+	childPIDPath := filepath.Join(root, "child.pid")
+	now := time.Date(2026, time.August, 24, 8, 0, 0, 0, time.UTC)
+	writeTestService(t, root, ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "worker",
+		Enabled:       true,
+		Command: []string{"/bin/sh", "-c",
+			"printf 'leader-output:%s' \"$TOKEN\"; printf 'leader-error:%s' \"$TOKEN\" >&2; " +
+				"(trap '' TERM; exec sleep 30) & " +
+				"printf '%s\\n' \"$!\" > " + shellQuote(childPIDPath) + "; exit 17"},
+		Environment: map[string]ServiceEnvironment{
+			"TOKEN": {SecretName: "token"},
+		},
+		Restart: ServiceRestartConfig{
+			InitialDelay: time.Minute,
+			Multiplier:   2,
+			MaxDelay:     time.Minute,
+			ResetAfter:   time.Minute,
+		},
+	})
+
+	manager, err := NewServiceManager(root, ServiceManagerOptions{
+		Resolver: EnvironmentSecretResolver{Values: map[string]string{"token": secret}},
+		Now:      func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.processTerminationGrace = 50 * time.Millisecond
+	stopProcessTestManager(t, &manager)
+	started := time.Now()
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	running, err := manager.Show("worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	childPIDs := waitForLaunches(t, childPIDPath, 1)
+	childPID, err := strconv.Atoi(childPIDs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = terminateProcessGroup(running.ProcessGroup, true) })
+
+	status := waitForServiceState(t, manager, "worker", ServiceStateBackoff)
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("unexpected-exit observation duration = %s, want bounded completion", elapsed)
+	}
+	if status.ExitCode != 17 || status.FailureCount != 1 || status.PID != 0 || status.ProcessGroup != 0 {
+		t.Fatalf("unexpected-exit status = %#v", status)
+	}
+	if processExists(childPID) {
+		t.Fatalf("output-inheriting descendant %d remained alive after backoff", childPID)
+	}
+	stdout, err := os.ReadFile(filepath.Join(serviceRuntimePath(root, "worker"), "stdout.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(stdout), secret) || !strings.Contains(string(stdout), "leader-output:<redacted>") {
+		t.Fatalf("service output was not completely redacted: %q", stdout)
+	}
+	stderr, err := os.ReadFile(filepath.Join(serviceRuntimePath(root, "worker"), "stderr.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(stderr), secret) || !strings.Contains(string(stderr), "leader-error:<redacted>") {
+		t.Fatalf("service error output was not completely redacted: %q", stderr)
+	}
+}
+
+func TestServiceManagerWaitDelayPreservesLiveStreamingAndShutdown(t *testing.T) {
+	const secret = "live-stream-secret"
+	root := t.TempDir()
+	writeTestService(t, root, ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "streamer",
+		Enabled:       true,
+		Command: []string{"/bin/sh", "-c",
+			"printf 'stream-one:%s\\n' \"$TOKEN\"; " +
+				"sleep 0.4; printf 'stream-two:%s\\n' \"$TOKEN\"; " +
+				"printf 'stream-error:%s\\n' \"$TOKEN\" >&2; exec sleep 30"},
+		Environment: map[string]ServiceEnvironment{
+			"TOKEN": {SecretName: "token"},
+		},
+	})
+
+	manager, err := NewServiceManager(root, ServiceManagerOptions{
+		Resolver: EnvironmentSecretResolver{Values: map[string]string{"token": secret}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopProcessTestManager(t, &manager)
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	running := waitForServiceState(t, manager, "streamer", ServiceStateReady)
+	stdoutPath := filepath.Join(serviceRuntimePath(root, "streamer"), "stdout.log")
+	stderrPath := filepath.Join(serviceRuntimePath(root, "streamer"), "stderr.log")
+	waitForTestPath(t, stdoutPath, "stream-two:<redacted>")
+	waitForTestPath(t, stderrPath, "stream-error:<redacted>")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := manager.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+	manager = nil
+	waitForProcessGone(t, running.PID)
+	status := readPersistedServiceStatus(t, root, "streamer")
+	if status.State != ServiceStateStopped || status.PID != 0 || status.ProcessGroup != 0 || status.AttentionRequired {
+		t.Fatalf("streaming service shutdown status = %#v", status)
+	}
+	for _, path := range []string{stdoutPath, stderrPath} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), secret) {
+			t.Fatalf("streaming service log %s disclosed secret: %q", filepath.Base(path), data)
+		}
+	}
+}
+
 func TestServiceManagerRecoversDescendantsAfterLeaderExitAndReconstruction(t *testing.T) {
 	if !serviceProcessIdentityRequired() {
 		t.Skip("native service process identity is unavailable")

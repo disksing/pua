@@ -504,6 +504,11 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 	}
 	cmd.Env = env
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// A service descendant may inherit the copy pipes that os/exec creates for
+	// the redacting log writers. Once the leader exits, bound the final pipe
+	// drain so the descendant cannot hide that exit from reconciliation. The
+	// existing unexpected-exit path then verifies and reaps the residual group.
+	cmd.WaitDelay = serviceCommandWaitDelay
 	instanceToken := valueFromEnvironment(env, serviceInstanceTokenEnvironment)
 	var identityMarker *os.File
 	identityMarkerPath := ""

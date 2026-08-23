@@ -119,8 +119,16 @@ func TestAddScheduleRequiresTriggerWithoutMutation(t *testing.T) {
 	}
 }
 
-func TestScheduleAtMutationRequiresFutureInstant(t *testing.T) {
+func TestScheduleAtMutationRequiresFutureOnlyWhenChanged(t *testing.T) {
 	workspace, err := app.Initialize(t.TempDir(), "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := workspace.CreateProject("Recovery target", "recovery-target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := workspace.CreateTask(app.CreateTaskInput{ProjectID: project.ID, Title: "Overdue recovery", Slug: "overdue-recovery"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,15 +158,60 @@ func TestScheduleAtMutationRequiresFutureInstant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	config, err := workspace.Scheduler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	historicalTrigger := app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: "2000-01-01T00:00:00Z"}
+	config.Schedules[0].Trigger = &historicalTrigger
+	fixture, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture = append(fixture, '\n')
+	if err := os.WriteFile(path, fixture, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	changedPastTrigger := app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: "2000-01-01T00:00:01Z"}
+	_, err = workspace.UpdateSchedule(app.UpdateScheduleInput{
+		ID: created.ID, ExpectedRevision: created.Revision + 1, Trigger: &changedPastTrigger,
+	})
+	var conflict *app.ScheduleRevisionConflictError
+	if !errors.As(err, &conflict) || conflict.Actual != created.Revision {
+		t.Fatalf("past trigger revision conflict = %#v, %v", conflict, err)
+	}
+	afterConflict, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(afterConflict) != string(fixture) {
+		t.Fatalf("revision conflict mutated scheduler.json:\nbefore=%s\nafter=%s", fixture, afterConflict)
+	}
+
+	description := "Recover overdue delivery"
+	target := task.ID
+	retargeted, err := workspace.UpdateSchedule(app.UpdateScheduleInput{
+		ID: created.ID, ExpectedRevision: created.Revision, Description: &description, Target: &target, Trigger: &historicalTrigger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retargeted.Revision != created.Revision+1 || retargeted.Description != description || retargeted.Target != task.ID ||
+		retargeted.Trigger == nil || *retargeted.Trigger != historicalTrigger {
+		t.Fatalf("overdue retarget update = %#v", retargeted)
+	}
+
 	beforeUpdate, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	description := "Must stay unchanged"
-	if _, err := workspace.UpdateSchedule(app.UpdateScheduleInput{
-		ID: created.ID, ExpectedRevision: created.Revision, Description: &description, Trigger: &pastTrigger,
-	}); !errors.Is(err, app.ErrScheduleTriggerAtNotFuture) {
-		t.Fatalf("past one-time update error = %v", err)
+	rejectedDescription := "Must stay unchanged"
+	rejectedTarget := app.SchedulerResourceID
+	_, err = workspace.UpdateSchedule(app.UpdateScheduleInput{
+		ID: retargeted.ID, ExpectedRevision: retargeted.Revision, Description: &rejectedDescription, Target: &rejectedTarget, Trigger: &changedPastTrigger,
+	})
+	if !errors.Is(err, app.ErrScheduleTriggerAtNotFuture) || err.Error() != "update schedule: schedule trigger.at must be strictly in the future" {
+		t.Fatalf("changed past one-time update error = %v", err)
 	}
 	afterUpdate, err := os.ReadFile(path)
 	if err != nil {
@@ -167,22 +220,23 @@ func TestScheduleAtMutationRequiresFutureInstant(t *testing.T) {
 	if string(afterUpdate) != string(beforeUpdate) {
 		t.Fatalf("failed update mutated scheduler.json:\nbefore=%s\nafter=%s", beforeUpdate, afterUpdate)
 	}
-	config, err := workspace.Scheduler()
+	config, err = workspace.Scheduler()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(config.Schedules) != 1 || config.Schedules[0].Revision != created.Revision || config.Schedules[0].Description != created.Description || *config.Schedules[0].Trigger != futureTrigger {
+	if len(config.Schedules) != 1 || config.Schedules[0].Revision != retargeted.Revision || config.Schedules[0].Description != retargeted.Description ||
+		config.Schedules[0].Target != retargeted.Target || config.Schedules[0].Trigger == nil || *config.Schedules[0].Trigger != historicalTrigger {
 		t.Fatalf("failed update changed schedule = %#v", config.Schedules)
 	}
 
 	futureUpdate := app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: "9999-12-31T23:59:59Z"}
 	updated, err := workspace.UpdateSchedule(app.UpdateScheduleInput{
-		ID: created.ID, ExpectedRevision: created.Revision, Trigger: &futureUpdate,
+		ID: retargeted.ID, ExpectedRevision: retargeted.Revision, Trigger: &futureUpdate,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.Revision != created.Revision+1 || updated.Trigger == nil || *updated.Trigger != futureUpdate {
+	if updated.Revision != retargeted.Revision+1 || updated.Trigger == nil || *updated.Trigger != futureUpdate {
 		t.Fatalf("valid future update = %#v", updated)
 	}
 }

@@ -558,6 +558,20 @@ func validateScheduleTriggerForMutation(trigger ScheduleTrigger, now time.Time) 
 	if err := ValidateScheduleTrigger(trigger); err != nil {
 		return err
 	}
+	return validateScheduleTriggerAtFuture(trigger, now)
+}
+
+func validateScheduleTriggerForUpdate(trigger ScheduleTrigger, persisted *ScheduleTrigger, now time.Time) error {
+	if err := ValidateScheduleTrigger(trigger); err != nil {
+		return err
+	}
+	if persisted != nil && trigger == *persisted {
+		return nil
+	}
+	return validateScheduleTriggerAtFuture(trigger, now)
+}
+
+func validateScheduleTriggerAtFuture(trigger ScheduleTrigger, now time.Time) error {
 	if trigger.Type != ScheduleTriggerAt {
 		return nil
 	}
@@ -824,7 +838,7 @@ func (w *Workspace) UpdateSchedule(input UpdateScheduleInput) (Schedule, error) 
 		trigger := updated.Trigger
 		if input.Trigger != nil {
 			copy := *input.Trigger
-			if err := validateScheduleTriggerForMutation(copy, mutationTime); err != nil {
+			if err := validateScheduleTriggerForUpdate(copy, updated.Trigger, mutationTime); err != nil {
 				return err
 			}
 			trigger = &copy

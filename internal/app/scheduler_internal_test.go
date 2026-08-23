@@ -18,3 +18,11 @@ func TestValidateScheduleTriggerForMutationRejectsAtEqualNow(t *testing.T) {
 		t.Fatalf("past interval anchor error = %v", err)
 	}
 }
+
+func TestValidateScheduleTriggerForUpdateStillValidatesIdenticalTrigger(t *testing.T) {
+	now := time.Date(2026, time.August, 24, 12, 0, 0, 0, time.UTC)
+	invalid := ScheduleTrigger{Type: ScheduleTriggerAt, At: now.Add(-time.Hour).Format(time.RFC3339Nano), EverySeconds: 60}
+	if err := validateScheduleTriggerForUpdate(invalid, &invalid, now); err == nil || err.Error() != "at trigger must contain only at" {
+		t.Fatalf("identical invalid trigger error = %v", err)
+	}
+}

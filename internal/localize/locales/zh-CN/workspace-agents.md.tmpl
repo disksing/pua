@@ -225,7 +225,7 @@ pua scheduler show --id=<schedule> [--server=<url>]
 pua scheduler add --description=<text> --condition=<text> --target=<resource> --at=<rfc3339>
 pua scheduler add --description=<text> --condition=<text> --target=<resource> --every=5m --anchor=<rfc3339>
 pua scheduler add --description=<text> --condition=<text> --target=<resource> --cron='0 0 9 * * *' --timezone=Asia/Shanghai
-pua scheduler update --id=<schedule> --revision=<n> [fields and optional trigger]
+pua scheduler update --id=<schedule> --revision=<n> [--description=<text>] [--condition=<text>] [--guard=<text>] [--target=<resource>] (--at=<rfc3339>|--every=<duration> --anchor=<rfc3339>|--cron=<six-fields> --timezone=<iana>)
 pua scheduler pause|resume|remove --id=<schedule>
 ~~~
 
@@ -235,4 +235,4 @@ pua scheduler pause|resume|remove --id=<schedule>
 pua message send --to=scheduler '<request>'
 ~~~
 
-description 是动作，condition 保留用户原始表述，guard 是到点后由目标 Agent 检查的可选谓词，target 使用稳定资源 ID。时间或 IANA 时区有歧义时，给 Scheduler Agent 发消息并回答澄清问题，不得猜测。Occurrence 消息采用 at-least-once 语义；产生外部副作用时使用 occurrence ID 做幂等去重。
+description 是动作，condition 保留用户原始表述，guard 是到点后由目标 Agent 检查的可选谓词，target 使用稳定资源 ID。编辑请求必须编译为且只编译为一个完整的替换 trigger。更新时非 trigger 字段可选，但必须携带当前 revision 执行 compare-and-swap。时间或 IANA 时区有歧义时，先请求澄清，不得猜测；编译、校验或 compare-and-swap 失败时，保持原 schedule 不变。Occurrence 消息采用 at-least-once 语义；产生外部副作用时使用 occurrence ID 做幂等去重。

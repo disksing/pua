@@ -215,7 +215,7 @@ The Web sidebar has a server-owned Activity panel below the resource tree with i
 
 Normal execution does not wake the Scheduler Agent. The Server persists a per-schedule cursor and immutable prepared occurrence in the Scheduler runtime checkpoint, sets one dynamic timer to the earliest Workspace deadline, and delivers due work through the existing target resource mailbox. Restart and sleep catch-up coalesces missed repeating occurrences into one message; one-time work is delivered once. Repeating work skips an occurrence when the target already has an active Turn or hot mailbox, while one-time work remains queued. Occurrence causation includes stable schedule/revision/occurrence IDs and coalescing bounds, so targets can make external side effects idempotent.
 
-The Scheduler Agent is the natural-language compilation and management entry point. The Web form sends it an ordinary user message; direct pause, resume, and remove operations remain structural. A guard is checked by the target Agent at occurrence time and is never interpreted by the Scheduler. The CLI requires the owning Server and uses revision compare-and-swap for updates:
+The Scheduler Agent is the natural-language compilation and management entry point. An edit request must compile to exactly one complete replacement trigger. If its timing or IANA timezone is ambiguous, the Agent asks for clarification instead of guessing; compilation, validation, or revision compare-and-swap failure leaves the existing schedule unchanged. The Web form sends the Scheduler Agent an ordinary user message; direct pause, resume, and remove operations remain structural. Update non-trigger fields are optional, but the current revision and replacement trigger are required. A guard is checked by the target Agent at occurrence time and is never interpreted by the Scheduler. The CLI requires the owning Server:
 
 ```text
 pua scheduler list [--json] [--server=<url>]
@@ -223,7 +223,7 @@ pua scheduler show --id=<schedule> [--server=<url>]
 pua scheduler add --description=<text> --condition=<text> --target=<resource> --at=<rfc3339>
 pua scheduler add --description=<text> --condition=<text> --target=<resource> --every=5m --anchor=<rfc3339>
 pua scheduler add --description=<text> --condition=<text> --target=<resource> --cron='0 0 9 * * *' --timezone=Asia/Shanghai
-pua scheduler update --id=<schedule> --revision=<n> [fields and optional trigger]
+pua scheduler update --id=<schedule> --revision=<n> [--description=<text>] [--condition=<text>] [--guard=<text>] [--target=<resource>] (--at=<rfc3339>|--every=<duration> --anchor=<rfc3339>|--cron=<six-fields> --timezone=<iana>)
 pua scheduler pause|resume|remove --id=<schedule>
 ```
 
@@ -397,7 +397,7 @@ pua template list|show|validate|render|create|migrate ...
 
 pua scheduler list|show ... [--server=<url>]
 pua scheduler add ... (--at=<rfc3339>|--every=<duration> --anchor=<rfc3339>|--cron=<six-fields> --timezone=<iana>) [--server=<url>]
-pua scheduler update --id=<schedule> --revision=<n> ... [--server=<url>]
+pua scheduler update --id=<schedule> --revision=<n> [--description=<text>] [--condition=<text>] [--guard=<text>] [--target=<resource>] (--at=<rfc3339>|--every=<duration> --anchor=<rfc3339>|--cron=<six-fields> --timezone=<iana>) [--server=<url>]
 pua scheduler pause|resume|remove --id=<schedule> [--server=<url>]
 
 pua agent list [--server=<url>] [--json]

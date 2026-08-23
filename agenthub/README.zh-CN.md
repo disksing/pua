@@ -66,7 +66,7 @@ agenthub serve --addr 0.0.0.0:4646 --allow-origin https://agenthub.example.com:8
 
 ```bash
 go run ./cmd/agenthub serve
-cd frontend && npm run dev
+cd ../web && npm run dev -- --config vite.agenthub.config.ts
 ```
 
 Vite 会把 `/agenthub/v1` 代理到默认 daemon 端口。
@@ -327,15 +327,17 @@ daemon 只读取统一的 `~/.agenthub` 布局。旧版本可能把 Session 存�
 
 ## 验证
 
-在干净的 PUA checkout 中可以直接编译和运行后端测试，不需要先构建任一前端。
-仓库根目录的 `scripts/build` 会构建两套前端，并在生成发布 binary 时强制校验入口文件。
+在干净的 PUA checkout 中可以直接编译和运行后端测试，不需要先构建前端。
+PUA 与 AgentHub 共用 `../web` 下的 Svelte/TypeScript 工程，同时保留各自的 Vite 入口、嵌入资源与 binary。仓库根目录的 `scripts/build` 会构建两个应用入口，并在生成发布 binary 时强制校验入口文件。
 
 ```bash
 go test -race ./...
 go test -race -count=1 -tags=integration ./integration
 go vet ./...
-cd frontend
-npm run build
+cd ../web
+npm ci
+npm run check
+npm run build:agenthub
 npm run test:sites
 ```
 

@@ -502,13 +502,23 @@ default.
     `source.externalId` match.
     Source filters can be combined with each other and with archive and state
     filters. Sessions created without `source` never match a source filter.
-- **Success `200`:** `{"sessions": [...]}` — an array of session objects.
+  - `limit=<n>` — opt in to cursor pagination with a page size from 1 to 500.
+    When `cursor` is present and `limit` is omitted, the page size is 50.
+  - `cursor=<opaque>` — continue from the `page.nextCursor` returned by the
+    previous response. Cursors are opaque and should not be parsed or edited.
+- **Success `200`:** `{"sessions": [...], "page": {"limit": 50,
+  "hasMore": true, "nextCursor": "..."}}`. Results have a stable
+  `updatedAt` descending, Session ID descending order. Calls that omit both
+  pagination parameters retain the historical unbounded result for existing
+  clients; their `page.hasMore` is false.
+- **Errors:** `400 invalid_session_limit`, `400 invalid_session_cursor`.
 
 ```bash
 curl -s "$BASE/v1/sessions"
 curl -s "$BASE/v1/sessions?archived=true"
 curl -s "$BASE/v1/sessions?state=running,waiting_approval"
 curl -s "$BASE/v1/sessions?sourceApp=pua&sourceInstanceId=mac-mini&state=ready"
+curl -s "$BASE/v1/sessions?limit=50"
 ```
 
 ### POST /v1/sessions

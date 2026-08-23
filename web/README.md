@@ -1,10 +1,10 @@
-# PUA web application
+# Unified PUA and AgentHub web applications
 
-This directory owns the complete PUA web application: Svelte 5 and TypeScript source, frontend tests and build tooling, the static HTML/vendor tree, generated Vite assets, and the Go embed boundary. `src/entry.ts` is the only production application entry point, and all components use runes mode. Vite emits deterministic `pua-app.js` and `pua-app.css` assets into `static/assets`; `assets.go` embeds `static/` so the released PUA binary has no Node runtime dependency. Generated assets are never committed: run `npm --prefix web run build` (or `scripts/build`) after checkout, and `assets.go` fails compilation when the build output is missing.
+This directory owns the unified Svelte 5 and TypeScript project for both PUA and AgentHub: shared UI primitives, frontend tests, build tooling, and two production entries. `src/entry.ts` mounts PUA; `src/agenthub/entry.ts` mounts AgentHub. The default Vite build emits deterministic PUA assets into `static/assets`, while `vite.agenthub.config.ts` emits AgentHub assets into `../agenthub/frontend/dist/client` before the existing embed and Sites packaging steps copy them into place. The released binaries have no Node runtime dependency. Generated assets are never committed: run `npm --prefix web run build` (or `scripts/build`) after checkout.
 
 The directory layers are intentional:
 
-- `src/` contains editable application source.
+- `src/` contains editable application source; `src/agenthub/` owns the AgentHub-specific audit UI and reuses shared components from `src/components/`.
 - `tests/` contains Vitest fixtures/component tests and Playwright flows.
 - `static/` contains the HTML shell, immutable vendor/icon assets, and the (git-ignored, generated) `assets/pua-app.{js,css}` files served at runtime.
 - `assets.go` exposes the complete static tree to the Go server through `go:embed`.
@@ -15,7 +15,7 @@ The directory layers are intentional:
 - `controllers/` contains independently testable domain boundaries. Controllers receive browser/server access and cross-domain effects through explicit dependencies; none imports `app-controller.ts` or owns a second application-wide store.
 - `models/` separates the common, create, settings, chat, detail, shell, and Workspace contracts. `components/models.ts` is a compatibility barrel only; production modules import their owning domain directly, and `noImplicitAny` is enabled.
 - `components/` owns the entire interactive UI. Components receive typed models and callbacks through `ModelChannel`, and keep form, focus, selection, expansion, and pending-action state locally when that state belongs to the view.
-- `entry.ts` creates the typed channels and mounts one `PUAApp` root. `PUAApp.svelte` composes the shell, panes, dialogs, and toast; the static HTML document provides one `#app` mount point plus vendor scripts.
+- `entry.ts` creates the typed channels and mounts one `PUAApp` root. `agenthub/entry.ts` mounts the independent `AgentHubApp` root. Each binary still serves its own HTML shell and embedded asset tree.
 - `api/client.ts` owns scoped request cancellation and stale-response rejection. Detail previews, Diff requests, uploads, and chat history are keyed by Workspace, Resource, generation, path, or mode identity as appropriate.
 - `app.css` is the global style entry and imports only `styles/tokens.css`, browser defaults from `styles/base.css`, deliberately shared UI primitives, and the `.markdown-rendered` rich-content boundary. It must not contain component selectors.
 - Every visual Svelte component owns an adjacent `ComponentName.css` module imported by that component. Selectors are bounded by the component's `data-component-owner`; composed roots declare the attribute at the owning boundary. `:where(...)` keeps the boundary from increasing the original selector specificity.

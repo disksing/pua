@@ -9,6 +9,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -464,6 +465,55 @@ func TestSessionSourceAPIAndCombinedFilters(t *testing.T) {
 	}
 	if value.Source == nil || !reflect.DeepEqual(*value.Source, session.Source{App: "pua", InstanceID: "mac-1", ExternalID: "task-1"}) {
 		t.Fatalf("source after daemon-style reopen = %+v", value.Source)
+	}
+}
+
+func TestSessionListCursorPagination(t *testing.T) {
+	now := time.Date(2026, 8, 23, 1, 2, 3, 0, time.UTC)
+	values := []session.Session{
+		{ID: "ses_d", UpdatedAt: now.Add(2 * time.Minute)},
+		{ID: "ses_c", UpdatedAt: now.Add(time.Minute)},
+		{ID: "ses_b", UpdatedAt: now},
+		{ID: "ses_a", UpdatedAt: now},
+	}
+	first, queryErr := paginateSessions(values, url.Values{"limit": {"2"}})
+	if queryErr != nil {
+		t.Fatal(queryErr)
+	}
+	if got := []string{first.sessions[0].ID, first.sessions[1].ID}; !reflect.DeepEqual(got, []string{"ses_d", "ses_c"}) {
+		t.Fatalf("first page ids = %v", got)
+	}
+	if !first.metadata.HasMore || first.metadata.NextCursor == "" || first.metadata.Limit != 2 {
+		t.Fatalf("first page metadata = %+v", first.metadata)
+	}
+	second, queryErr := paginateSessions(values, url.Values{
+		"limit": {"2"}, "cursor": {first.metadata.NextCursor},
+	})
+	if queryErr != nil {
+		t.Fatal(queryErr)
+	}
+	if got := []string{second.sessions[0].ID, second.sessions[1].ID}; !reflect.DeepEqual(got, []string{"ses_b", "ses_a"}) {
+		t.Fatalf("second page ids = %v", got)
+	}
+	if second.metadata.HasMore || second.metadata.NextCursor != "" {
+		t.Fatalf("second page metadata = %+v", second.metadata)
+	}
+}
+
+func TestSessionListPaginationValidation(t *testing.T) {
+	for _, test := range []struct {
+		query url.Values
+		code  string
+	}{
+		{query: url.Values{"limit": {"0"}}, code: "invalid_session_limit"},
+		{query: url.Values{"limit": {"501"}}, code: "invalid_session_limit"},
+		{query: url.Values{"limit": {"many"}}, code: "invalid_session_limit"},
+		{query: url.Values{"cursor": {"not-a-cursor"}}, code: "invalid_session_cursor"},
+	} {
+		_, queryErr := paginateSessions(nil, test.query)
+		if queryErr == nil || queryErr.code != test.code {
+			t.Errorf("query %v error = %+v, want %s", test.query, queryErr, test.code)
+		}
 	}
 }
 

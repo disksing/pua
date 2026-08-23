@@ -73,7 +73,7 @@ During development you can run the two parts separately:
 
 ```bash
 go run ./cmd/agenthub serve
-cd frontend && npm run dev
+cd ../web && npm run dev -- --config vite.agenthub.config.ts
 ```
 
 Vite proxies `/agenthub/v1` to the default daemon port.
@@ -416,17 +416,19 @@ The no-authentication mode is only suitable for the local machine and trusted ne
 ## Verification
 
 Backend tests compile directly from a clean PUA checkout; they do not require
-building either frontend first. The repository-level `scripts/build` command
-builds both frontends and enforces their generated entrypoints for release
-binaries.
+building the frontend first. PUA and AgentHub share the Svelte/TypeScript
+project under `../web`, while keeping separate Vite entries, embedded assets,
+and binaries. The repository-level `scripts/build` command builds both app
+entries and enforces their generated entrypoints for release binaries.
 
 ```bash
 go test -race ./...
 go test -race -count=1 -tags=integration ./integration
 go vet ./...
-cd frontend
+cd ../web
 npm ci
-npm run build
+npm run check
+npm run build:agenthub
 npm test
 npm run test:sites
 ```

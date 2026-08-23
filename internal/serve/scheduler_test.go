@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -324,6 +325,24 @@ func preparedOccurrenceMessage(prepared schedulerPreparedOccurrence) resourceMai
 	}
 }
 
+func assertPreparedOccurrenceEqual(t *testing.T, got *schedulerPreparedOccurrence, want schedulerPreparedOccurrence) {
+	t.Helper()
+	if got == nil || !reflect.DeepEqual(*got, want) {
+		t.Fatalf("prepared occurrence = %#v, want %#v", got, want)
+	}
+}
+
+func assertDeliveredPreparedOccurrence(t *testing.T, messages []resourceMailboxMessage, prepared schedulerPreparedOccurrence) {
+	t.Helper()
+	if len(messages) != 1 {
+		t.Fatalf("delivered occurrence count = %d in %#v, want 1", len(messages), messages)
+	}
+	message := messages[0]
+	if message.ID != prepared.MessageID || !reflect.DeepEqual(message.Causation, prepared.Causation) {
+		t.Fatalf("delivered occurrence changed identity or causation: %#v, want %s/%#v", message, prepared.MessageID, prepared.Causation)
+	}
+}
+
 func assertSingleDurableOccurrence(t *testing.T, workspacePath string, prepared schedulerPreparedOccurrence, want int) {
 	t.Helper()
 	messages := scheduleOccurrenceMessages(t, workspacePath, prepared.Target)
@@ -417,15 +436,15 @@ func TestNativeSchedulerBindingAttentionRecoversPreparedOccurrence(t *testing.T)
 		t.Fatal(err)
 	}
 	rewriteSchedulerTestProfiles(t, configPath, nil)
-	at := time.Now().UTC().Add(time.Minute).Truncate(time.Second)
+	anchor := time.Now().UTC().Add(time.Minute).Truncate(time.Second)
 	schedule, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
-		Description: "Recover binding", Condition: "once", Target: "project1.task1",
-		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: at.Format(time.RFC3339Nano)},
+		Description: "Recover binding", Condition: "every minute", Target: "project1.task1",
+		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerInterval, EverySeconds: 60, AnchorAt: anchor.Format(time.RFC3339Nano)},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := at.Add(time.Second)
+	now := anchor.Add(3*time.Minute + 10*time.Second)
 	native := newNativeScheduler(manager, workspace)
 	deadline, err := native.Reconcile(context.Background(), now)
 	if err != nil {
@@ -442,23 +461,39 @@ func TestNativeSchedulerBindingAttentionRecoversPreparedOccurrence(t *testing.T)
 		t.Fatalf("binding attention advanced the occurrence: %#v", runtime)
 	}
 	prepared := *runtime.Prepared
+	if prepared.ScheduledFor != anchor.Format(time.RFC3339Nano) || prepared.CoalescedThrough != anchor.Add(3*time.Minute).Format(time.RFC3339Nano) || prepared.CoalescedCount != 4 || prepared.NextRunAt != anchor.Add(4*time.Minute).Format(time.RFC3339Nano) || prepared.Reason != schedulerOccurrenceReasonCoalesced {
+		t.Fatalf("binding attention did not freeze the coalesced occurrence: %#v", prepared)
+	}
 	if messages := scheduleOccurrenceMessages(t, workspace.Path, schedule.Target); len(messages) != 0 {
 		t.Fatalf("binding attention accepted mailbox work: %#v", messages)
 	}
+	resumed, err := native.Change(context.Background(), NativeSchedulerChange{Operation: app.ScheduleChangeResume, ID: schedule.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed.Revision != schedule.Revision || resumed.State != app.ScheduleStateActive {
+		t.Fatalf("attention retry mutated the portable definition: %#v", resumed)
+	}
+	runtime, err = native.schedulerRuntime(schedule.ID)
+	if err != nil || runtime.EffectiveState != schedulerOutcomeAttention || runtime.NextRunAt != "" || runtime.RetryAt != "" {
+		t.Fatalf("resume discarded binding attention occurrence: %#v, %v", runtime, err)
+	}
+	assertPreparedOccurrenceEqual(t, runtime.Prepared, prepared)
+	if snapshot, snapshotErr := native.Snapshot(now); snapshotErr != nil || snapshot.NextWakeAt != "" {
+		t.Fatalf("binding attention retry acquired a deadline: %#v, %v", snapshot, snapshotErr)
+	}
 
 	rewriteSchedulerTestProfiles(t, configPath, []agentHubProfileRoute{{Key: "default", AgentName: "fake-agent"}})
-	if _, err := native.Reconcile(context.Background(), now.Add(time.Minute)); err != nil {
+	if _, err := native.Change(context.Background(), NativeSchedulerChange{Operation: app.ScheduleChangeResume, ID: schedule.ID}); err != nil {
 		t.Fatal(err)
 	}
 	messages := scheduleOccurrenceMessages(t, workspace.Path, schedule.Target)
-	if len(messages) != 1 || messages[0].ID != prepared.MessageID || messages[0].Causation == nil || messages[0].Causation.OccurrenceID != prepared.OccurrenceID {
-		t.Fatalf("recovered occurrence changed identity: %#v, want %s/%s", messages, prepared.MessageID, prepared.OccurrenceID)
-	}
+	assertDeliveredPreparedOccurrence(t, messages, prepared)
 	runtime, err = native.schedulerRuntime(schedule.ID)
-	if err != nil || runtime.Prepared != nil || runtime.EffectiveState != app.ScheduleStateCompleted || runtime.LastOutcome != schedulerOutcomeAccepted || runtime.LastOccurrenceAt != prepared.CoalescedThrough {
+	if err != nil || runtime.Prepared != nil || runtime.EffectiveState != app.ScheduleStateActive || runtime.LastOutcome != schedulerOutcomeAccepted || runtime.LastOccurrenceAt != prepared.CoalescedThrough || runtime.NextRunAt != prepared.NextRunAt {
 		t.Fatalf("recovered occurrence checkpoint = %#v, %v", runtime, err)
 	}
-	if _, err := native.Reconcile(context.Background(), now.Add(2*time.Minute)); err != nil {
+	if _, err := native.Reconcile(context.Background(), now.Add(20*time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	if messages := scheduleOccurrenceMessages(t, workspace.Path, schedule.Target); len(messages) != 1 || messages[0].ID != prepared.MessageID {
@@ -744,7 +779,112 @@ func TestNativeSchedulerResumeSkipsExpiredOneTimeWithoutReconcile(t *testing.T) 
 	}
 }
 
-func TestNativeSchedulerArchivedTargetRequiresAttentionUntilModified(t *testing.T) {
+func TestNativeSchedulerUnavailableTargetPreservesPreparedOccurrence(t *testing.T) {
+	tests := []struct {
+		name        string
+		makeMissing func(*testing.T, *app.Workspace, string, string) func()
+	}{
+		{
+			name: "archived",
+			makeMissing: func(t *testing.T, workspace *app.Workspace, workspacePath, targetPath string) func() {
+				archived, err := workspace.ArchiveResource("project1.task1")
+				if err != nil {
+					t.Fatal(err)
+				}
+				archivedPath := filepath.Join(workspacePath, filepath.FromSlash(archived.Path))
+				return func() {
+					if err := os.Rename(archivedPath, targetPath); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+		},
+		{
+			name: "missing",
+			makeMissing: func(t *testing.T, _ *app.Workspace, _ string, targetPath string) func() {
+				detachedPath := filepath.Join(t.TempDir(), "missing-target")
+				if err := os.Rename(targetPath, detachedPath); err != nil {
+					t.Fatal(err)
+				}
+				return func() {
+					if err := os.Rename(detachedPath, targetPath); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fake := newRuntimeFakeAgentHub()
+			hub := httptest.NewServer(fake)
+			defer hub.Close()
+			manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+			puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			target, err := puaWorkspace.ResourceValue("project1.task1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			at := time.Now().UTC().Add(time.Minute).Truncate(time.Second)
+			schedule, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+				Description: "Recover target", Condition: "once", Target: "project1.task1",
+				Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: at.Format(time.RFC3339Nano)},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			targetPath := filepath.Join(workspace.Path, filepath.FromSlash(target.Path))
+			restore := test.makeMissing(t, puaWorkspace, workspace.Path, targetPath)
+			now := at.Add(time.Second)
+			native := newNativeScheduler(manager, workspace)
+			deadline, err := native.Reconcile(context.Background(), now)
+			if err != nil || !deadline.IsZero() {
+				t.Fatalf("unavailable target deadline = %s, %v", deadline, err)
+			}
+			runtime, err := native.schedulerRuntime(schedule.ID)
+			if err != nil || runtime.EffectiveState != schedulerOutcomeAttention || runtime.Prepared == nil || runtime.NextRunAt != "" || runtime.RetryAt != "" || runtime.LastOccurrenceAt != "" {
+				t.Fatalf("unavailable target advanced the occurrence: %#v, %v", runtime, err)
+			}
+			prepared := *runtime.Prepared
+			if prepared.Target != schedule.Target || prepared.ScheduledFor != at.Format(time.RFC3339Nano) || prepared.CoalescedThrough != at.Format(time.RFC3339Nano) {
+				t.Fatalf("unavailable target prepared occurrence = %#v", prepared)
+			}
+			if deadline, err = native.Reconcile(context.Background(), now.Add(time.Minute)); err != nil || !deadline.IsZero() {
+				t.Fatalf("repeated attention deadline = %s, %v", deadline, err)
+			}
+			runtime, err = native.schedulerRuntime(schedule.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertPreparedOccurrenceEqual(t, runtime.Prepared, prepared)
+			if messages := scheduleOccurrenceMessages(t, workspace.Path, schedule.Target); len(messages) != 0 {
+				t.Fatalf("unavailable target accepted mailbox work: %#v", messages)
+			}
+
+			restore()
+			if _, err := native.Reconcile(context.Background(), now.Add(2*time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+			messages := scheduleOccurrenceMessages(t, workspace.Path, schedule.Target)
+			assertDeliveredPreparedOccurrence(t, messages, prepared)
+			runtime, err = native.schedulerRuntime(schedule.ID)
+			if err != nil || runtime.Prepared != nil || runtime.EffectiveState != app.ScheduleStateCompleted || runtime.LastOutcome != schedulerOutcomeAccepted || runtime.LastOccurrenceAt != prepared.CoalescedThrough {
+				t.Fatalf("restored target checkpoint = %#v, %v", runtime, err)
+			}
+			if _, err := native.Reconcile(context.Background(), now.Add(3*time.Minute)); err != nil {
+				t.Fatal(err)
+			}
+			if messages := scheduleOccurrenceMessages(t, workspace.Path, schedule.Target); len(messages) != 1 || messages[0].ID != prepared.MessageID {
+				t.Fatalf("restored target duplicated the occurrence: %#v", messages)
+			}
+		})
+	}
+}
+
+func TestNativeSchedulerTargetEditReplacesPreparedOccurrence(t *testing.T) {
 	fake := newRuntimeFakeAgentHub()
 	hub := httptest.NewServer(fake)
 	defer hub.Close()
@@ -765,10 +905,16 @@ func TestNativeSchedulerArchivedTargetRequiresAttentionUntilModified(t *testing.
 	if err := manager.reconcileSchedulerLocked(context.Background(), workspace); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := newNativeScheduler(manager, workspace).Snapshot(manager.now())
+	native := newNativeScheduler(manager, workspace)
+	snapshot, err := native.Snapshot(manager.now())
 	if err != nil || snapshot.Schedules[0].EffectiveState != schedulerOutcomeAttention || snapshot.Schedules[0].NextRunAt != "" || snapshot.NextWakeAt != "" {
 		t.Fatalf("archived target snapshot = %#v, %v", snapshot, err)
 	}
+	runtime, err := native.schedulerRuntime(created.ID)
+	if err != nil || runtime.Prepared == nil {
+		t.Fatalf("archived target did not preserve prepared occurrence: %#v, %v", runtime, err)
+	}
+	prepared := *runtime.Prepared
 	description := "Still archived"
 	updated, err := puaWorkspace.UpdateSchedule(app.UpdateScheduleInput{ID: created.ID, ExpectedRevision: created.Revision, Description: &description})
 	if err != nil {
@@ -777,18 +923,32 @@ func TestNativeSchedulerArchivedTargetRequiresAttentionUntilModified(t *testing.
 	if err := manager.reconcileSchedulerLocked(context.Background(), workspace); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err = newNativeScheduler(manager, workspace).Snapshot(manager.now())
+	snapshot, err = native.Snapshot(manager.now())
 	if err != nil || snapshot.Schedules[0].EffectiveState != schedulerOutcomeAttention {
 		t.Fatalf("unrelated edit cleared target attention: %#v, %v", snapshot, err)
 	}
+	runtime, err = native.schedulerRuntime(created.ID)
+	if err != nil || runtime.Revision != updated.Revision {
+		t.Fatalf("unrelated edit runtime = %#v, %v", runtime, err)
+	}
+	assertPreparedOccurrenceEqual(t, runtime.Prepared, prepared)
 	target := "workspace"
-	if _, err := puaWorkspace.UpdateSchedule(app.UpdateScheduleInput{ID: created.ID, ExpectedRevision: updated.Revision, Target: &target}); err != nil {
+	retargeted, err := puaWorkspace.UpdateSchedule(app.UpdateScheduleInput{ID: created.ID, ExpectedRevision: updated.Revision, Target: &target})
+	if err != nil {
 		t.Fatal(err)
 	}
 	if err := manager.reconcileSchedulerLocked(context.Background(), workspace); err != nil {
 		t.Fatal(err)
 	}
-	if messages := scheduleOccurrenceMessages(t, workspace.Path, "workspace"); len(messages) != 1 {
-		t.Fatalf("modified attention schedule did not run once: %#v", messages)
+	messages := scheduleOccurrenceMessages(t, workspace.Path, "workspace")
+	if len(messages) != 1 || messages[0].ID == prepared.MessageID || messages[0].Causation == nil || messages[0].Causation.ScheduleRevision != retargeted.Revision {
+		t.Fatalf("retargeted attention schedule did not prepare a new revision: %#v", messages)
+	}
+	if messages := scheduleOccurrenceMessages(t, workspace.Path, created.Target); len(messages) != 0 {
+		t.Fatalf("retargeting delivered the discarded occurrence: %#v", messages)
+	}
+	runtime, err = native.schedulerRuntime(created.ID)
+	if err != nil || runtime.Revision != retargeted.Revision || runtime.Prepared != nil || runtime.EffectiveState != app.ScheduleStateCompleted || runtime.LastOutcome != schedulerOutcomeAccepted {
+		t.Fatalf("retargeted attention checkpoint = %#v, %v", runtime, err)
 	}
 }

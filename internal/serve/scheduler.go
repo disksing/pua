@@ -174,11 +174,8 @@ func (n *NativeScheduler) Change(ctx context.Context, change NativeSchedulerChan
 			runtime.Revision = resumed.Revision
 			runtimeErr = n.storeSchedulerRuntime(change.ID, runtime)
 		}
-		if runtime.EffectiveState == schedulerOutcomeAttention {
-			_, runtimeErr = mutateResourceMailboxStoreForResource(n.workspace.Path, app.SchedulerResourceID, func(store *resourceMailboxStore) error {
-				delete(store.Scheduler.Schedules, change.ID)
-				return nil
-			})
+		if runtimeErr == nil && runtime.EffectiveState == schedulerOutcomeAttention {
+			runtimeErr = n.reconcileSchedule(ctx, resumed, n.manager.now())
 		}
 		return resumed, runtimeErr
 	case app.ScheduleChangeRemove:
@@ -431,7 +428,6 @@ func (n *NativeScheduler) deliverPrepared(ctx context.Context, schedule app.Sche
 		} else if archived {
 			reason = "target resource is archived"
 		}
-		runtime.Prepared = nil
 		runtime.NextRunAt = ""
 		runtime.RetryAt = ""
 		runtime.EffectiveState = schedulerOutcomeAttention

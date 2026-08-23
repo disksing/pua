@@ -199,7 +199,7 @@ async function installMockApi(page: Page, lastResourceId = "project1.task1", wit
     schedulerAgentCreateDefinition: () => { throw new Error("Scheduler mock is not initialized."); },
     schedulerAgentUpdateDefinition: () => { throw new Error("Scheduler mock is not initialized."); },
   };
-  let waitingMessages = withWaitingMessage ? [{ messageId: "msg-waiting", resourceId: "project1.task1", text: "Review the mailbox change now", status: "waiting", acceptedAt: now, requestedMode: "enqueue", actualMode: "enqueue" }] : [];
+  let waitingMessages = withWaitingMessage ? [{ messageId: "msg-waiting", resourceId: "project1.task1", text: "Review the mailbox change now", status: "waiting", acceptedAt: now, requestedMode: "enqueue", actualMode: "enqueue", canPromote: true }] : [];
   const resourceStates: Record<string, { readTurnNumber?: number }> = {};
   let runtimeExists = !startWithoutRuntime;
   let turnRunning = initialTurnRunning;

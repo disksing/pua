@@ -954,7 +954,8 @@ func TestResourceServerAPIListsAndSteersWaitingMessageInPlace(t *testing.T) {
 		t.Fatal(err)
 	}
 	if status.SessionState != "working" || !status.CanSteerWaiting || status.Messages.Waiting != 1 || len(status.WaitingMessages) != 1 ||
-		status.WaitingMessages[0].MessageID != waiting.ID || status.WaitingMessages[0].Text != "move this now" || status.WaitingMessages[0].Status != "waiting" {
+		status.WaitingMessages[0].MessageID != waiting.ID || status.WaitingMessages[0].Text != "move this now" || status.WaitingMessages[0].Status != "waiting" ||
+		!status.WaitingMessages[0].CanPromote {
 		t.Fatalf("waiting projection mismatch: %#v", status)
 	}
 
@@ -973,7 +974,7 @@ func TestResourceServerAPIListsAndSteersWaitingMessageInPlace(t *testing.T) {
 	}
 }
 
-func TestResourceServerAPIRejectsFrozenOccurrencePromotion(t *testing.T) {
+func TestResourceServerAPIPromotionPolicySurvivesFixedBaseMessages(t *testing.T) {
 	fake := newRuntimeFakeAgentHub()
 	fake.enforceMessageIDs = true
 	hub := httptest.NewServer(fake)
@@ -993,7 +994,17 @@ func TestResourceServerAPIRejectsFrozenOccurrencePromotion(t *testing.T) {
 	fake.sessions[session.ID] = session
 	fake.mu.Unlock()
 
-	ordinary := acceptTestResourceMessage(t, manager, workspace, "project1.task1", "ordinary waiting", resourceMessageModeEnqueue, nil)
+	legacyOrdinary := acceptTestResourceMessage(t, manager, workspace, "project1.task1", "legacy ordinary waiting", resourceMessageModeEnqueue, nil)
+	legacyOrdinary, err = updateMailboxMessage(workspace.Path, legacyOrdinary.ID, func(message *resourceMailboxMessage) {
+		// The fixed base persisted ordinary enqueues as mode-frozen while they
+		// waited behind an active Turn. The new field is deliberately omitted.
+		message.ModeFrozen = true
+		message.NonPromotable = false
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordinary := acceptTestResourceMessage(t, manager, workspace, "project1.task1", "new ordinary waiting", resourceMessageModeEnqueue, nil)
 	frozen, err := acceptGeneratedMailboxMessage(workspace.Path, resourceMailboxMessage{
 		ID: "msg-frozen-occurrence", ResourceID: "project1.task1", Text: "run the one-time occurrence",
 		RequestedMode: resourceMessageModeEnqueue, ActualMode: resourceMessageModeEnqueue, ModeFrozen: true,
@@ -1007,9 +1018,41 @@ func TestResourceServerAPIRejectsFrozenOccurrencePromotion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ordinary.Status != resourceMessageQueued || ordinary.ModeFrozen || frozen.Status != resourceMessageQueued ||
-		!frozen.ModeFrozen || frozen.ActualMode != resourceMessageModeEnqueue || frozen.Sequence <= ordinary.Sequence {
-		t.Fatalf("waiting setup mismatch: ordinary=%#v frozen=%#v", ordinary, frozen)
+	generated := []resourceMailboxMessage{frozen}
+	for _, fixture := range []struct {
+		id, messageType string
+	}{
+		{id: "msg-fixed-base-migration", messageType: resourceMessageTypeScheduleMigration},
+		{id: "msg-fixed-base-generated", messageType: resourceMessageTypeTurnStallRecovery},
+	} {
+		accepted, acceptErr := acceptGeneratedMailboxMessage(workspace.Path, resourceMailboxMessage{
+			ID: fixture.id, ResourceID: "project1.task1", Text: "fixed-base generated message",
+			RequestedMode: resourceMessageModeEnqueue, ActualMode: resourceMessageModeEnqueue, ModeFrozen: true,
+			Type: fixture.messageType, SenderWorkspaceInstanceID: "workspace-instance",
+			Causation: &resourceMessageCausation{
+				Type: fixture.messageType, SourceWorkspaceInstanceID: "workspace-instance", SourceResourceID: app.SchedulerResourceID,
+			},
+		})
+		if acceptErr != nil {
+			t.Fatal(acceptErr)
+		}
+		// Simulate the exact fixed-base JSON omission and prove the loader's
+		// origin classifier restores the generated-message policy.
+		if _, updateErr := updateMailboxMessage(workspace.Path, accepted.ID, func(message *resourceMailboxMessage) {
+			message.NonPromotable = false
+		}); updateErr != nil {
+			t.Fatal(updateErr)
+		}
+		loaded, found, loadErr := mailboxMessageByID(workspace.Path, accepted.ID)
+		if loadErr != nil || !found || !loaded.NonPromotable {
+			t.Fatalf("fixed-base generated message did not normalize: found=%v err=%v message=%#v", found, loadErr, loaded)
+		}
+		generated = append(generated, loaded)
+	}
+	if legacyOrdinary.Status != resourceMessageQueued || !legacyOrdinary.ModeFrozen || legacyOrdinary.NonPromotable ||
+		ordinary.Status != resourceMessageQueued || ordinary.ModeFrozen || ordinary.NonPromotable || frozen.Status != resourceMessageQueued ||
+		!frozen.ModeFrozen || !frozen.NonPromotable || frozen.ActualMode != resourceMessageModeEnqueue || frozen.Sequence <= ordinary.Sequence {
+		t.Fatalf("waiting setup mismatch: legacy=%#v ordinary=%#v frozen=%#v", legacyOrdinary, ordinary, frozen)
 	}
 
 	manager.waitBackground()
@@ -1019,21 +1062,39 @@ func TestResourceServerAPIRejectsFrozenOccurrencePromotion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	statusRecorder := httptest.NewRecorder()
+	restarted.server.handleWorkspace(statusRecorder, httptest.NewRequest(http.MethodGet,
+		"/api/workspaces/"+workspace.ID+"/resources/project1.task1/status", nil))
+	var status resourceStatusResponse
+	if err := json.Unmarshal(statusRecorder.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	canPromote := make(map[string]bool, len(status.WaitingMessages))
+	for _, waiting := range status.WaitingMessages {
+		canPromote[waiting.MessageID] = waiting.CanPromote
+	}
+	if statusRecorder.Code != http.StatusOK || !status.CanSteerWaiting || !canPromote[legacyOrdinary.ID] || !canPromote[ordinary.ID] {
+		t.Fatalf("ordinary promotion projection mismatch: code=%d status=%#v", statusRecorder.Code, status)
+	}
 	fake.mu.Lock()
 	beforeInputs := len(fake.messageIDs)
 	beforeSession := fake.sessions[record.AgentHubSessionID]
 	beforeSessionReads := fake.getSessionCalls
 	fake.mu.Unlock()
-
-	rejected := httptest.NewRecorder()
-	restarted.server.handleWorkspace(rejected, httptest.NewRequest(http.MethodPost,
-		"/api/workspaces/"+workspace.ID+"/messages/"+frozen.ID+"/steer", nil))
-	var rejection map[string]any
-	if err := json.Unmarshal(rejected.Body.Bytes(), &rejection); err != nil {
-		t.Fatal(err)
-	}
-	if rejected.Code != http.StatusConflict || rejection["code"] != "message_mode_frozen" {
-		t.Fatalf("frozen promotion response = %d %#v", rejected.Code, rejection)
+	for _, message := range generated {
+		if canPromote[message.ID] {
+			t.Fatalf("generated message %s was projected as promotable: %#v", message.ID, status)
+		}
+		rejected := httptest.NewRecorder()
+		restarted.server.handleWorkspace(rejected, httptest.NewRequest(http.MethodPost,
+			"/api/workspaces/"+workspace.ID+"/messages/"+message.ID+"/steer", nil))
+		var rejection map[string]any
+		if err := json.Unmarshal(rejected.Body.Bytes(), &rejection); err != nil {
+			t.Fatal(err)
+		}
+		if rejected.Code != http.StatusConflict || rejection["code"] != "message_not_promotable" {
+			t.Fatalf("generated promotion response = %d %#v", rejected.Code, rejection)
+		}
 	}
 	afterMailbox, err := loadHotResourceMailbox(workspace.Path, "project1.task1")
 	if err != nil {
@@ -1052,19 +1113,21 @@ func TestResourceServerAPIRejectsFrozenOccurrencePromotion(t *testing.T) {
 			afterInputs, beforeInputs, afterSessionReads, beforeSessionReads, afterSession, beforeSession)
 	}
 
-	promoted := httptest.NewRecorder()
-	restarted.server.handleWorkspace(promoted, httptest.NewRequest(http.MethodPost,
-		"/api/workspaces/"+workspace.ID+"/messages/"+ordinary.ID+"/steer", nil))
-	if promoted.Code != http.StatusOK {
-		t.Fatalf("ordinary promotion failed: %d %s", promoted.Code, promoted.Body.String())
-	}
-	var ordinaryResponse resourceMessageResponse
-	if err := json.Unmarshal(promoted.Body.Bytes(), &ordinaryResponse); err != nil {
-		t.Fatal(err)
-	}
-	if ordinaryResponse.MessageID != ordinary.ID || ordinaryResponse.ActualMode != resourceMessageModeSteer ||
-		ordinaryResponse.Status != resourceMessageDelivered || ordinaryResponse.PromotedAt == "" {
-		t.Fatalf("ordinary promotion response mismatch: %#v", ordinaryResponse)
+	for _, message := range []resourceMailboxMessage{legacyOrdinary, ordinary} {
+		promoted := httptest.NewRecorder()
+		restarted.server.handleWorkspace(promoted, httptest.NewRequest(http.MethodPost,
+			"/api/workspaces/"+workspace.ID+"/messages/"+message.ID+"/steer", nil))
+		if promoted.Code != http.StatusOK {
+			t.Fatalf("ordinary promotion failed: %d %s", promoted.Code, promoted.Body.String())
+		}
+		var ordinaryResponse resourceMessageResponse
+		if err := json.Unmarshal(promoted.Body.Bytes(), &ordinaryResponse); err != nil {
+			t.Fatal(err)
+		}
+		if ordinaryResponse.MessageID != message.ID || ordinaryResponse.ActualMode != resourceMessageModeSteer ||
+			ordinaryResponse.Status != resourceMessageDelivered || ordinaryResponse.PromotedAt == "" || ordinaryResponse.CanPromote {
+			t.Fatalf("ordinary promotion response mismatch: %#v", ordinaryResponse)
+		}
 	}
 	stillFrozen, found, err := mailboxMessageByID(workspace.Path, frozen.ID)
 	if err != nil || !found || stillFrozen.Status != resourceMessageQueued || !stillFrozen.ModeFrozen ||
@@ -1090,7 +1153,7 @@ func TestResourceServerAPIRejectsFrozenOccurrencePromotion(t *testing.T) {
 	}
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
-	if len(fake.messageIDs) != beforeInputs+2 || fake.messageIDs[len(fake.messageIDs)-1] != frozen.ID ||
+	if len(fake.messageIDs) != beforeInputs+3 || fake.messageIDs[len(fake.messageIDs)-1] != frozen.ID ||
 		fake.messageSteers[len(fake.messageSteers)-1] {
 		t.Fatalf("delivery modes after promotions = ids=%#v steers=%#v", fake.messageIDs, fake.messageSteers)
 	}

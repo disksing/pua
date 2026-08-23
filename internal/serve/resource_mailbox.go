@@ -99,6 +99,7 @@ type resourceMailboxMessage struct {
 	RequestedMode             string                       `json:"requestedMode"`
 	ActualMode                string                       `json:"actualMode"`
 	ModeFrozen                bool                         `json:"modeFrozen,omitempty"`
+	NonPromotable             bool                         `json:"nonPromotable,omitempty"`
 	DowngradeReason           string                       `json:"downgradeReason,omitempty"`
 	Status                    string                       `json:"status"`
 	AcceptedAt                string                       `json:"acceptedAt"`
@@ -275,6 +276,7 @@ type resourceMessageResponse struct {
 	Type                     string                       `json:"type,omitempty"`
 	Causation                *resourceMessageCausation    `json:"causation,omitempty"`
 	Notification             *resourceNotificationReceipt `json:"notification,omitempty"`
+	CanPromote               bool                         `json:"canPromote"`
 }
 
 type resourceAPIError struct {
@@ -407,6 +409,7 @@ func mailboxMessageResponse(message resourceMailboxMessage) resourceMessageRespo
 		SubscribeResult: message.SubscribeResult, ResultSubscriptionStatus: message.ResultSubscriptionStatus, ResultOperationID: message.ResultOperationID,
 		LastError: message.LastError, LastErrorCode: message.LastErrorCode,
 		Type: message.Type, Causation: message.Causation, Notification: message.Notification,
+		CanPromote: message.Status == resourceMessageQueued && !message.NonPromotable,
 	}
 }
 
@@ -565,6 +568,7 @@ func acceptGeneratedMailboxMessage(workspacePath string, expected resourceMailbo
 	expected.SubscribeResult = false
 	expected.ResultSubscriptionStatus = resourceResultSubscriptionDisabled
 	expected.ResultOperationID = ""
+	expected.NonPromotable = true
 	expected.subscribeResultPresent = true
 	expected.RequestedMode = requestedMode
 	if expected.ModeFrozen {
@@ -1092,9 +1096,9 @@ func (m *agentManager) promoteWaitingMessageLocked(ctx context.Context, workspac
 	if message.Status != resourceMessageQueued {
 		return resourceMailboxMessage{}, &resourceAPIError{Code: "message_not_waiting", Message: fmt.Sprintf("message %s is not waiting", messageID)}
 	}
-	if message.ModeFrozen {
+	if message.NonPromotable {
 		return resourceMailboxMessage{}, &resourceAPIError{
-			Code: "message_mode_frozen", Message: fmt.Sprintf("message %s has a frozen delivery mode and cannot be promoted", messageID),
+			Code: "message_not_promotable", Message: fmt.Sprintf("message %s cannot be promoted", messageID),
 		}
 	}
 	_, archived, _, resourceErr := resourceExistsAndArchived(workspace.Path, message.ResourceID)
@@ -1635,7 +1639,7 @@ func resourceErrorStatus(err error) int {
 		return http.StatusNotFound
 	case "message_receipt_expired":
 		return http.StatusGone
-	case "resource_archived", "message_not_waiting", "message_mode_frozen", "steer_unavailable", "generation_unavailable", "generation_changed", "active_turn":
+	case "resource_archived", "message_not_waiting", "message_not_promotable", "steer_unavailable", "generation_unavailable", "generation_changed", "active_turn":
 		return http.StatusConflict
 	case "workspace_not_owned":
 		return http.StatusConflict

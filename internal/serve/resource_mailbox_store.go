@@ -72,6 +72,7 @@ type resourceMailboxReceipt struct {
 	RequestedMode             string                       `json:"requestedMode"`
 	ActualMode                string                       `json:"actualMode"`
 	ModeFrozen                bool                         `json:"modeFrozen,omitempty"`
+	NonPromotable             bool                         `json:"nonPromotable,omitempty"`
 	DowngradeReason           string                       `json:"downgradeReason,omitempty"`
 	Status                    string                       `json:"status"`
 	AcceptedAt                string                       `json:"acceptedAt"`
@@ -480,7 +481,7 @@ func receiptFromMailboxMessage(message resourceMailboxMessage) resourceMailboxRe
 		Role: message.Role, Sender: sender, SenderWorkspaceInstanceID: message.SenderWorkspaceInstanceID,
 		SubscribeResult: message.SubscribeResult, ResultSubscriptionStatus: message.ResultSubscriptionStatus, ResultOperationID: message.ResultOperationID,
 		Type: message.Type, Causation: cloneMailboxCausation(message.Causation), Notification: cloneNotificationReceipt(message.Notification),
-		RequestedMode: message.RequestedMode, ActualMode: message.ActualMode, ModeFrozen: message.ModeFrozen,
+		RequestedMode: message.RequestedMode, ActualMode: message.ActualMode, ModeFrozen: message.ModeFrozen, NonPromotable: message.NonPromotable,
 		DowngradeReason: message.DowngradeReason, Status: message.Status, AcceptedAt: message.AcceptedAt,
 		UpdatedAt: message.UpdatedAt, DeliveredAt: message.DeliveredAt, TerminalAt: message.TerminalAt,
 		TurnTerminalAt: message.TurnTerminalAt, GenerationID: message.GenerationID,
@@ -502,7 +503,7 @@ func mailboxMessageFromReceipt(receipt resourceMailboxReceipt) resourceMailboxMe
 		Role: receipt.Role, Sender: sender, SenderWorkspaceInstanceID: receipt.SenderWorkspaceInstanceID,
 		SubscribeResult: receipt.SubscribeResult, ResultSubscriptionStatus: receipt.ResultSubscriptionStatus, ResultOperationID: receipt.ResultOperationID,
 		Type: receipt.Type, Causation: cloneMailboxCausation(receipt.Causation), Notification: cloneNotificationReceipt(receipt.Notification),
-		RequestedMode: receipt.RequestedMode, ActualMode: receipt.ActualMode, ModeFrozen: receipt.ModeFrozen,
+		RequestedMode: receipt.RequestedMode, ActualMode: receipt.ActualMode, ModeFrozen: receipt.ModeFrozen, NonPromotable: receipt.NonPromotable,
 		DowngradeReason: receipt.DowngradeReason, Status: receipt.Status, AcceptedAt: receipt.AcceptedAt,
 		UpdatedAt: receipt.UpdatedAt, DeliveredAt: receipt.DeliveredAt, TerminalAt: receipt.TerminalAt,
 		TurnTerminalAt: receipt.TurnTerminalAt, GenerationID: receipt.GenerationID,
@@ -948,6 +949,14 @@ func normalizeStoredMailboxMessage(message *resourceMailboxMessage) {
 	if message == nil {
 		return
 	}
+	// Fixed-base generated messages predate the explicit promotion policy.
+	// Their system role plus typed causation is the durable signature imposed
+	// by acceptGeneratedMailboxMessage, while ordinary persisted enqueues have
+	// neither. ModeFrozen cannot be used here: older ordinary enqueues waiting
+	// behind an active Turn were persisted frozen but remained promotable.
+	if message.Role == "system" && message.Type != "" && message.Causation != nil {
+		message.NonPromotable = true
+	}
 	if !message.subscribeResultPresent && message.Status == resourceMessageDelivered && message.Notification == nil && message.Type == "" {
 		message.SubscribeResult = false
 		message.ResultSubscriptionStatus = resourceResultSubscriptionNone
@@ -967,6 +976,9 @@ func normalizeStoredMailboxMessage(message *resourceMailboxMessage) {
 func normalizeStoredMailboxReceipt(receipt *resourceMailboxReceipt) {
 	if receipt == nil {
 		return
+	}
+	if receipt.Role == "system" && receipt.Type != "" && receipt.Causation != nil {
+		receipt.NonPromotable = true
 	}
 	if !receipt.subscribeResultPresent && receipt.Status == resourceMessageDelivered && receipt.Notification == nil && receipt.Type == "" {
 		receipt.SubscribeResult = false

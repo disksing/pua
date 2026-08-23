@@ -110,7 +110,7 @@ func platformServiceProcessIdentityMatches(identity serviceProcessIdentity, star
 		environmentHasSingleValue(identity.environment, serviceCommandDigestEnvironment, digest)
 }
 
-func serviceProcessIdentityRequired() bool { return true }
+func serviceProcessIdentityInspectionAvailable() bool { return true }
 
 func serviceProcessIdentityMarkerRequired() bool { return false }
 

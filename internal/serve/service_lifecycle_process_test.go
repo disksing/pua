@@ -214,7 +214,7 @@ func TestServiceManagerStopsAlreadyExitedLeader(t *testing.T) {
 }
 
 func TestServiceManagerReapsDescendantsBeforeUnexpectedExitBackoff(t *testing.T) {
-	if !serviceProcessIdentityRequired() {
+	if !serviceProcessIdentityInspectionAvailable() {
 		t.Skip("native service process identity is unavailable")
 	}
 	root := t.TempDir()
@@ -270,7 +270,7 @@ func TestServiceManagerReapsDescendantsBeforeUnexpectedExitBackoff(t *testing.T)
 }
 
 func TestServiceManagerObservesLeaderExitWhenDescendantInheritsOutput(t *testing.T) {
-	if !serviceProcessIdentityRequired() {
+	if !serviceProcessIdentityInspectionAvailable() {
 		t.Skip("native service process identity is unavailable")
 	}
 	const secret = "inherited-output-secret"
@@ -401,7 +401,7 @@ func TestServiceManagerWaitDelayPreservesLiveStreamingAndShutdown(t *testing.T) 
 }
 
 func TestServiceManagerRecoversDescendantsAfterLeaderExitAndReconstruction(t *testing.T) {
-	if !serviceProcessIdentityRequired() {
+	if !serviceProcessIdentityInspectionAvailable() {
 		t.Skip("native service process identity is unavailable")
 	}
 	root := t.TempDir()
@@ -469,7 +469,7 @@ func TestServiceManagerRecoversDescendantsAfterLeaderExitAndReconstruction(t *te
 }
 
 func TestServiceManagerRetainsResidualGroupWhenReconstructedIdentityMismatches(t *testing.T) {
-	if !serviceProcessIdentityRequired() {
+	if !serviceProcessIdentityInspectionAvailable() {
 		t.Skip("native service process identity is unavailable")
 	}
 	root := t.TempDir()
@@ -536,7 +536,7 @@ func TestServiceManagerRetainsResidualGroupWhenReconstructedIdentityMismatches(t
 }
 
 func TestServiceManagerManualStopRecoversReconstructedResidualGroup(t *testing.T) {
-	if !serviceProcessIdentityRequired() {
+	if !serviceProcessIdentityInspectionAvailable() {
 		t.Skip("native service process identity is unavailable")
 	}
 	root := t.TempDir()
@@ -591,7 +591,7 @@ func TestServiceManagerManualStopRecoversReconstructedResidualGroup(t *testing.T
 }
 
 func TestServiceManagerRetainsOwnershipWhenLeaderIdentityChanges(t *testing.T) {
-	if !serviceProcessIdentityRequired() {
+	if !serviceProcessIdentityInspectionAvailable() {
 		t.Skip("native service process identity is unavailable")
 	}
 	root := t.TempDir()

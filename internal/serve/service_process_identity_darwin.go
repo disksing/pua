@@ -82,7 +82,7 @@ func platformServiceProcessIdentityMatches(identity serviceProcessIdentity, star
 	return startID != "" && identity.startID == startID && token != "" && digest != ""
 }
 
-func serviceProcessIdentityRequired() bool { return true }
+func serviceProcessIdentityInspectionAvailable() bool { return true }
 
 func serviceProcessIdentityMarkerRequired() bool { return true }
 

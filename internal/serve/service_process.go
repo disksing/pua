@@ -26,14 +26,58 @@ const (
 )
 
 type serviceProcessGroupIdentity struct {
-	leaderPID            int
-	processGroup         int
-	startID              string
-	instanceToken        string
-	commandDigest        string
-	markerPath           string
-	verifyLeaderIdentity bool
-	trustResidual        bool
+	leaderPID       int
+	processGroup    int
+	startID         string
+	instanceToken   string
+	commandDigest   string
+	markerPath      string
+	ownership       serviceProcessOwnership
+	processPlatform *serviceProcessPlatform
+}
+
+// serviceProcessOwnership records whether ownership comes from the current
+// manager's uninterrupted launch or must be reconstructed from durable state.
+// The zero value is deliberately the fail-closed reconstructed case.
+type serviceProcessOwnership uint8
+
+const (
+	serviceProcessOwnershipReconstructed serviceProcessOwnership = iota
+	serviceProcessOwnershipCurrentManager
+)
+
+// serviceProcessPlatform keeps process inspection and signaling injectable so
+// unsupported-platform ownership behavior can be verified without ever
+// signaling a real numeric PID or process group.
+type serviceProcessPlatform struct {
+	identityInspectionAvailable bool
+	identityMarkerRequired      bool
+	processGroupPresent         func(int) (bool, error)
+	processPresent              func(int) (bool, error)
+	readProcessIdentity         func(int) (serviceProcessIdentity, error)
+	readProcessGroupMembers     func(int) ([]serviceProcessIdentity, error)
+	processGroupMemberMatches   func(serviceProcessIdentity, string, string) (bool, error)
+	signalProcessGroup          func(int, syscall.Signal) error
+}
+
+func nativeServiceProcessPlatform() *serviceProcessPlatform {
+	return &serviceProcessPlatform{
+		identityInspectionAvailable: serviceProcessIdentityInspectionAvailable(),
+		identityMarkerRequired:      serviceProcessIdentityMarkerRequired(),
+		processGroupPresent:         processGroupPresent,
+		processPresent:              processPresent,
+		readProcessIdentity:         readServiceProcessIdentity,
+		readProcessGroupMembers:     readServiceProcessGroupMembers,
+		processGroupMemberMatches:   platformServiceProcessGroupMemberMatches,
+		signalProcessGroup:          signalProcessGroup,
+	}
+}
+
+func (identity serviceProcessGroupIdentity) platform() *serviceProcessPlatform {
+	if identity.processPlatform != nil {
+		return identity.processPlatform
+	}
+	return nativeServiceProcessPlatform()
 }
 
 func serviceProcessIdentityMarkerPath(root, serviceID, token string) string {
@@ -423,37 +467,42 @@ func processPresent(pid int) (bool, error) {
 }
 
 // ownedServiceProcessGroupPresent checks the group before every graceful or
-// forceful signal. A live leader must match its native launch identity. An
-// in-memory runtime retains continuity with the group it launched; after
-// reconstruction, however, every residual member must carry the persisted
-// launch token. Once either proof has been observed, the leader may disappear
-// while descendants drain. If the numeric PID or process group was reused,
+// forceful signal. A current manager may rely on uninterrupted launch
+// continuity when native inspection is unavailable. Reconstructed ownership
+// always requires native proof: a live leader must match its durable identity,
+// and every residual member must carry the persisted launch token. Once proof
+// or launch continuity has been established, the leader may disappear while
+// descendants drain. If the numeric PID or process group was reused,
 // verification fails before a signal is sent.
 func ownedServiceProcessGroupPresent(identity serviceProcessGroupIdentity, allowLeaderExit bool) (bool, error) {
-	present, err := processGroupPresent(identity.processGroup)
+	platform := identity.platform()
+	present, err := platform.processGroupPresent(identity.processGroup)
 	if err != nil || !present {
 		return present, err
 	}
-	leaderPresent, err := processPresent(identity.leaderPID)
+	leaderPresent, err := platform.processPresent(identity.leaderPID)
 	if err != nil {
 		return true, err
 	}
 	if !leaderPresent {
-		if allowLeaderExit || identity.trustResidual {
+		if allowLeaderExit || identity.ownership == serviceProcessOwnershipCurrentManager {
 			return true, nil
 		}
 		return ownedResidualServiceProcessGroupPresent(identity)
 	}
-	if !identity.verifyLeaderIdentity {
+	if identity.ownership == serviceProcessOwnershipCurrentManager && !platform.identityInspectionAvailable {
 		return true, nil
+	}
+	if !platform.identityInspectionAvailable {
+		return true, fmt.Errorf("service process group %d ownership identity inspection is unavailable", identity.processGroup)
 	}
 	var current serviceProcessIdentity
 	for attempt := 0; attempt < 3; attempt++ {
-		current, err = readServiceProcessIdentity(identity.leaderPID)
+		current, err = platform.readProcessIdentity(identity.leaderPID)
 		if err == nil {
 			break
 		}
-		leaderPresent, probeErr := processPresent(identity.leaderPID)
+		leaderPresent, probeErr := platform.processPresent(identity.leaderPID)
 		if probeErr != nil {
 			return true, probeErr
 		}
@@ -477,10 +526,14 @@ func ownedServiceProcessGroupPresent(identity serviceProcessGroupIdentity, allow
 }
 
 func ownedResidualServiceProcessGroupPresent(identity serviceProcessGroupIdentity) (bool, error) {
+	platform := identity.platform()
+	if !platform.identityInspectionAvailable {
+		return true, fmt.Errorf("service process group %d residual ownership identity inspection is unavailable", identity.processGroup)
+	}
 	if identity.instanceToken == "" || strings.ContainsRune(identity.instanceToken, '\x00') {
 		return true, fmt.Errorf("service process group %d residual ownership token is unavailable", identity.processGroup)
 	}
-	members, err := readServiceProcessGroupMembers(identity.processGroup)
+	members, err := platform.readProcessGroupMembers(identity.processGroup)
 	if err != nil {
 		return true, fmt.Errorf("inspect residual service process group %d: %w", identity.processGroup, err)
 	}
@@ -494,7 +547,7 @@ func ownedResidualServiceProcessGroupPresent(identity serviceProcessGroupIdentit
 				return true, fmt.Errorf("service process group %d leader identity changed", identity.processGroup)
 			}
 		} else {
-			matches, matchErr := platformServiceProcessGroupMemberMatches(member, identity.instanceToken, identity.markerPath)
+			matches, matchErr := platform.processGroupMemberMatches(member, identity.instanceToken, identity.markerPath)
 			if matchErr != nil {
 				return true, fmt.Errorf("inspect service process group %d residual member %d: %w", identity.processGroup, member.pid, matchErr)
 			}
@@ -507,7 +560,7 @@ func ownedResidualServiceProcessGroupPresent(identity serviceProcessGroupIdentit
 	if verified > 0 {
 		return true, nil
 	}
-	present, err := processGroupPresent(identity.processGroup)
+	present, err := platform.processGroupPresent(identity.processGroup)
 	if err != nil || !present {
 		return present, err
 	}
@@ -532,7 +585,7 @@ func signalOwnedServiceProcessGroup(identity serviceProcessGroupIdentity, allowL
 	if err != nil || !present {
 		return present, err
 	}
-	if err := signalProcessGroup(identity.processGroup, signal); err != nil {
+	if err := identity.platform().signalProcessGroup(identity.processGroup, signal); err != nil {
 		return true, err
 	}
 	return true, nil

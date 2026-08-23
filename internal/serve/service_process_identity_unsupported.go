@@ -14,7 +14,7 @@ func platformServiceProcessIdentityMatches(identity serviceProcessIdentity, star
 	return false
 }
 
-func serviceProcessIdentityRequired() bool { return false }
+func serviceProcessIdentityInspectionAvailable() bool { return false }
 
 func serviceProcessIdentityMarkerRequired() bool { return false }
 

@@ -96,6 +96,7 @@ type serviceRuntime struct {
 	exports               ServiceExportFile
 	logWriters            []*serviceLogWriter
 	terminationPending    bool
+	processOwnership      serviceProcessOwnership
 }
 
 // ServiceManager owns all mutable service state for one Workspace. It is the
@@ -111,6 +112,7 @@ type ServiceManager struct {
 	// processTerminationGrace is fixed in production and shortened only by
 	// real-process tests that exercise graceful escalation deterministically.
 	processTerminationGrace time.Duration
+	processPlatform         *serviceProcessPlatform
 	stopping                bool
 	started                 bool
 }
@@ -125,7 +127,7 @@ func NewServiceManager(root string, options ServiceManagerOptions) (*ServiceMana
 	if strings.TrimSpace(root) == "" {
 		return nil, errors.New("workspace root is required")
 	}
-	m := &ServiceManager{root: filepath.Clean(root), configs: map[string]ServiceConfig{}, graph: serviceDependencyGraph{}, runtimes: map[string]*serviceRuntime{}, resolver: options.Resolver, now: options.Now, processTerminationGrace: defaultServiceProcessTerminationGrace}
+	m := &ServiceManager{root: filepath.Clean(root), configs: map[string]ServiceConfig{}, graph: serviceDependencyGraph{}, runtimes: map[string]*serviceRuntime{}, resolver: options.Resolver, now: options.Now, processTerminationGrace: defaultServiceProcessTerminationGrace, processPlatform: nativeServiceProcessPlatform()}
 	if m.now == nil {
 		m.now = time.Now
 	}
@@ -133,6 +135,13 @@ func NewServiceManager(root string, options ServiceManagerOptions) (*ServiceMana
 		return nil, err
 	}
 	return m, nil
+}
+
+func (m *ServiceManager) serviceProcessPlatform() *serviceProcessPlatform {
+	if m != nil && m.processPlatform != nil {
+		return m.processPlatform
+	}
+	return nativeServiceProcessPlatform()
 }
 
 func (m *ServiceManager) Root() string {
@@ -512,7 +521,8 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 	instanceToken := valueFromEnvironment(env, serviceInstanceTokenEnvironment)
 	var identityMarker *os.File
 	identityMarkerPath := ""
-	if serviceProcessIdentityMarkerRequired() {
+	processPlatform := m.serviceProcessPlatform()
+	if processPlatform.identityMarkerRequired {
 		identityMarker, identityMarkerPath, err = openServiceProcessIdentityMarker(m.root, cfg.ID, instanceToken)
 		if err != nil {
 			return m.failStartLocked(ctx, rt, err)
@@ -555,8 +565,8 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 		_ = identityMarker.Close()
 	}
 	processStartID := ""
-	if serviceProcessIdentityRequired() {
-		processIdentity, identityErr := readServiceProcessIdentity(cmd.Process.Pid)
+	if processPlatform.identityInspectionAvailable {
+		processIdentity, identityErr := processPlatform.readProcessIdentity(cmd.Process.Pid)
 		if identityErr != nil || processIdentity.processGroup != cmd.Process.Pid || processIdentity.startID == "" {
 			_ = terminateProcessGroup(cmd.Process.Pid, true)
 			_ = cmd.Wait()
@@ -590,6 +600,7 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 	rt.exportSecrets = map[string]string{}
 	rt.exports = exports
 	rt.logWriters = []*serviceLogWriter{stdoutWriter, stderrWriter}
+	rt.processOwnership = serviceProcessOwnershipCurrentManager
 	rt.status.State = ServiceStateStarting
 	rt.status.PID = cmd.Process.Pid
 	rt.status.ProcessGroup = cmd.Process.Pid
@@ -1142,6 +1153,7 @@ func (m *ServiceManager) stopProcessLocked(ctx context.Context, rt *serviceRunti
 	rt.exit = nil
 	rt.logWriters = nil
 	rt.terminationPending = false
+	rt.processOwnership = serviceProcessOwnershipReconstructed
 	rt.status.PID, rt.status.ProcessGroup = 0, 0
 	if recoveredTermination && (manual || m.stopping) {
 		rt.status.AttentionRequired = false
@@ -1167,19 +1179,20 @@ func (m *ServiceManager) terminateRuntimeProcessGroupLocked(ctx context.Context,
 	if rt.process != nil && rt.process.Process != nil {
 		leaderPID = rt.process.Process.Pid
 	}
+	processPlatform := m.serviceProcessPlatform()
 	markerPath := ""
-	if serviceProcessIdentityMarkerRequired() {
+	if processPlatform.identityMarkerRequired {
 		markerPath = serviceProcessIdentityMarkerPath(m.root, rt.status.ID, rt.status.InstanceToken)
 	}
 	err := terminateOwnedServiceProcessGroup(ctx, serviceProcessGroupIdentity{
-		leaderPID:            leaderPID,
-		processGroup:         rt.status.ProcessGroup,
-		startID:              rt.status.ProcessStartID,
-		instanceToken:        rt.status.InstanceToken,
-		commandDigest:        rt.status.CommandDigest,
-		markerPath:           markerPath,
-		verifyLeaderIdentity: serviceProcessIdentityRequired(),
-		trustResidual:        rt.process != nil,
+		leaderPID:       leaderPID,
+		processGroup:    rt.status.ProcessGroup,
+		startID:         rt.status.ProcessStartID,
+		instanceToken:   rt.status.InstanceToken,
+		commandDigest:   rt.status.CommandDigest,
+		markerPath:      markerPath,
+		ownership:       rt.processOwnership,
+		processPlatform: processPlatform,
 	}, grace)
 	if err == nil && markerPath != "" {
 		_ = os.Remove(markerPath)
@@ -1424,17 +1437,11 @@ func (m *ServiceManager) recoverOrphanLocked(rt *serviceRuntime) {
 	if rt.status.PID <= 0 && rt.status.ProcessGroup <= 0 {
 		return
 	}
-	present, err := processGroupPresent(rt.status.ProcessGroup)
-	if err != nil {
+	if err := m.terminateRuntimeProcessGroupLocked(context.Background(), rt, 500*time.Millisecond); err != nil {
 		m.failOrphanRecoveryLocked(rt, err)
 		return
 	}
-	if present {
-		if err := m.terminateRuntimeProcessGroupLocked(context.Background(), rt, 500*time.Millisecond); err != nil {
-			m.failOrphanRecoveryLocked(rt, err)
-			return
-		}
-	}
+	rt.processOwnership = serviceProcessOwnershipReconstructed
 	rt.status.PID, rt.status.ProcessGroup = 0, 0
 	rt.status.State = ServiceStateStopped
 	rt.status.ManualStop = false
@@ -1786,7 +1793,7 @@ func (m *ServiceManager) Apply(cfg ServiceConfig) error {
 	if !pathWithinResolved(filepath.Join(m.root, ".pua"), filepath.Join(m.root, ".pua", serviceConfigDir)) {
 		return errors.New("service directory must remain inside the workspace control directory")
 	}
-	if rt := m.runtimes[cfg.ID]; rt != nil && rt.process != nil && serviceConfigDigest(rt.config) != serviceConfigDigest(cfg) {
+	if rt := m.runtimes[cfg.ID]; rt != nil && (rt.process != nil || rt.status.ProcessGroup > 0) && serviceConfigDigest(rt.config) != serviceConfigDigest(cfg) {
 		if err := m.stopProcessLocked(context.Background(), rt, false); err != nil {
 			return err
 		}

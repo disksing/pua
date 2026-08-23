@@ -2,6 +2,7 @@ package serve
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,112 @@ import (
 	"testing"
 	"time"
 )
+
+func runtimeFakeAgentHubWithCapabilities(fake *runtimeFakeAgentHub, capabilities []string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/status" && r.Method == http.MethodGet {
+			writeRuntimeFakeJSON(w, agentHubStatus{APIVersion: agentHubAPIVersion, Capabilities: capabilities})
+			return
+		}
+		fake.ServeHTTP(w, r)
+	})
+}
+
+func writeRuntimeServiceBindings(t *testing.T, workspace serveWorkspace, secret string) {
+	t.Helper()
+	t.Setenv("PUA_SECRET_RECOVERY_TOKEN", secret)
+	if err := writeServiceJSON(serviceBindingsPath(workspace.Path), ServiceBindings{
+		SchemaVersion: serviceSchemaVersion,
+		Variables:     map[string]string{"PUBLIC_ENDPOINT": "http://service.test"},
+		Secrets:       map[string]string{"SERVICE_TOKEN": "${secret.recovery-token}"},
+	}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAgentHubRecoveryReusesBoundCreateEnvironment(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	capabilities := append(append([]string(nil), requiredAgentHubCapabilities...), "session.ephemeral-environment")
+	hub := httptest.NewServer(runtimeFakeAgentHubWithCapabilities(fake, capabilities))
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+	const secret = "recovery-overlay-secret"
+	writeRuntimeServiceBindings(t, workspace, secret)
+	record := generationRecord{
+		ID: "gen-overlay-recovery", WorkspaceID: workspace.ID, ResourceID: "project1.task1",
+		Generation: 1, GenerationID: "gen-overlay-recovery", AgentHubAgentName: "fake-agent",
+		SourceInstanceID: "pua-runtime-test", SourceExternalID: "project1.task1/1",
+		BindingKind: "profile", BindingName: "default", ResolvedProfile: "default",
+		Title: "Recovered overlay", Cwd: workspace.Path, Status: "recovering",
+		CreatedAt: "2026-08-01T00:00:01Z", UpdatedAt: "2026-08-01T00:00:01Z",
+	}
+	if err := rewriteTestGenerationRecords(workspace.Path, []generationRecord{record}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := manager.recoverAgentHubGenerations(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	fake.mu.Lock()
+	requests := append([]agentHubCreateSessionRequest(nil), fake.createRequests...)
+	fake.mu.Unlock()
+	if len(requests) != 1 {
+		t.Fatalf("recovery create requests = %d, want 1", len(requests))
+	}
+	request := requests[0]
+	if request.LaunchEnvironment["PUA_WORKSPACE_ROOT"] != workspace.Path ||
+		request.LaunchEnvironment["PUA_WORKSPACE_INSTANCE_ID"] != record.SourceInstanceID ||
+		request.LaunchEnvironment["PUA_RESOURCE_ID"] != record.ResourceID ||
+		request.LaunchEnvironment["PUBLIC_ENDPOINT"] != "http://service.test" {
+		t.Fatalf("recovery launch environment = %#v", request.LaunchEnvironment)
+	}
+	if request.EphemeralEnvironment["SERVICE_TOKEN"] != secret {
+		t.Fatalf("recovery ephemeral environment was not restored: %#v", request.EphemeralEnvironment)
+	}
+	data, err := json.Marshal(request.LaunchEnvironment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), secret) {
+		t.Fatalf("secret entered durable launch environment: %s", data)
+	}
+}
+
+func TestAgentHubRecoveryDoesNotBypassEphemeralCapability(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	hub := httptest.NewServer(runtimeFakeAgentHubWithCapabilities(fake, append([]string(nil), requiredAgentHubCapabilities...)))
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+	writeRuntimeServiceBindings(t, workspace, "older-agenthub-secret")
+	cfg, client, err := manager.agentHubRuntimeConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := manager.resolveResourceAgent(workspace, "project1.task1", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, createErr := manager.createResourceGeneration(context.Background(), workspace, "project1.task1", workspace.Path, cfg, client, resolved)
+	if createErr == nil || !strings.Contains(createErr.Error(), "does not support ephemeral service secrets") {
+		t.Fatalf("initial create error = %v", createErr)
+	}
+	if record.GenerationID == "" || record.Status != "recovering" {
+		t.Fatalf("failed initial create did not retain a recoverable generation: %#v", record)
+	}
+
+	restarted := newAgentManager(manager.server)
+	manager.server.agents = restarted
+	recoveryErr := restarted.recoverAgentHubGenerations(context.Background())
+	if recoveryErr == nil || !strings.Contains(recoveryErr.Error(), "does not support ephemeral service secrets") {
+		t.Fatalf("recovery capability error = %v", recoveryErr)
+	}
+	fake.mu.Lock()
+	createCount := len(fake.createRequests)
+	fake.mu.Unlock()
+	if createCount != 0 {
+		t.Fatalf("older AgentHub received %d create POSTs despite required secret overlay", createCount)
+	}
+}
 
 func TestAgentHubRecoveryProjectsSessionsWithoutEventsOrStreams(t *testing.T) {
 	fake := newRuntimeFakeAgentHub()

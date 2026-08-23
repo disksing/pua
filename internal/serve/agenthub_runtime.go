@@ -130,6 +130,63 @@ func agentHubInitialMessage(text string, userName string) *agentHubInboundMessag
 	return &input
 }
 
+// agentHubGenerationCreateRequest is the only request builder for a PUA
+// generation. Recovery must renegotiate one-shot secret support and resolve
+// bindings again instead of replaying or reconstructing a partial request from
+// durable generation facts.
+func (m *agentManager) agentHubGenerationCreateRequest(ctx context.Context, cfg config, client *agentHubClient, workspace serveWorkspace, record generationRecord) (agentHubSource, agentHubCreateSessionRequest, error) {
+	resourceKey := strings.TrimSpace(record.ResourceID)
+	if resourceKey == "" {
+		resourceKey = "workspace"
+	}
+	source := agentHubSource{
+		App: agentHubSourceApp, InstanceID: generationSourceInstanceID(cfg, record), ExternalID: record.SourceExternalID,
+	}
+	request := agentHubCreateSessionRequest{
+		Title: record.Title, Cwd: record.Cwd, AgentName: record.AgentHubAgentName,
+		Source: &source,
+		LaunchEnvironment: map[string]string{
+			"PUA_WORKSPACE_ROOT":        workspace.Path,
+			"PUA_WORKSPACE_INSTANCE_ID": source.InstanceID,
+			"PUA_RESOURCE_ID":           resourceKey,
+		},
+		InitialMessage: agentHubInitialMessage(record.PendingInitialMessage, ""),
+	}
+	if record.GenerationID != "" {
+		source.Metadata = map[string]string{
+			"workspaceInstanceId": source.InstanceID, "resourceId": resourceKey,
+			"generation": strconv.Itoa(record.Generation), "generationId": record.GenerationID,
+			"bindingKind": record.BindingKind, "bindingName": record.BindingName,
+			"profileRevision": record.ProfileRevision,
+		}
+		request.Source = &source
+		request.IdempotencyKey = record.GenerationID
+		request.InitialMessage = nil
+	}
+	if m.server == nil {
+		return source, request, nil
+	}
+	boundVariables, boundSecrets, err := m.server.serviceEnvironment(workspace)
+	if err != nil {
+		return agentHubSource{}, agentHubCreateSessionRequest{}, err
+	}
+	for key, value := range boundVariables {
+		request.LaunchEnvironment[key] = value
+	}
+	if len(boundSecrets) == 0 {
+		return source, request, nil
+	}
+	status, err := client.Status(ctx)
+	if err != nil {
+		return agentHubSource{}, agentHubCreateSessionRequest{}, err
+	}
+	if !agentHubHasCapability(status, "session.ephemeral-environment") {
+		return agentHubSource{}, agentHubCreateSessionRequest{}, errors.New("AgentHub does not support ephemeral service secrets")
+	}
+	request.EphemeralEnvironment = boundSecrets
+	return source, request, nil
+}
+
 func (m *agentManager) findOrCreateAgentHubSession(ctx context.Context, client *agentHubClient, source agentHubSource, request agentHubCreateSessionRequest) (agentHubSession, error) {
 	found, err := findAgentHubSourceSessions(ctx, client, source)
 	if err != nil {
@@ -577,21 +634,12 @@ func (m *agentManager) recoverAgentHubGenerationLocked(ctx context.Context, cfg 
 		candidates = []agentHubSession{bound}
 	}
 	if len(candidates) == 0 && live {
-		request := agentHubCreateSessionRequest{
-			Title: record.Title, Cwd: record.Cwd, AgentName: record.AgentHubAgentName,
-			Source:         &source,
-			InitialMessage: agentHubInitialMessage(record.PendingInitialMessage, ""),
-		}
-		if record.GenerationID != "" {
-			source.Metadata = map[string]string{
-				"workspaceInstanceId": record.SourceInstanceID, "resourceId": record.ResourceID,
-				"generation": strconv.Itoa(record.Generation), "generationId": record.GenerationID,
-				"bindingKind": record.BindingKind, "bindingName": record.BindingName,
-				"profileRevision": record.ProfileRevision,
-			}
-			request.Source = &source
-			request.IdempotencyKey = record.GenerationID
-			request.InitialMessage = nil
+		var request agentHubCreateSessionRequest
+		var requestErr error
+		source, request, requestErr = m.agentHubGenerationCreateRequest(ctx, cfg, client, workspace, record)
+		if requestErr != nil {
+			m.markGenerationRecovering(workspace, record)
+			return requestErr
 		}
 		recovered, createErr := m.findOrCreateAgentHubSession(ctx, client, source, request)
 		if createErr != nil {

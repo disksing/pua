@@ -33,13 +33,14 @@ type active struct {
 	// interruptRequested is set before calling the provider so a provider
 	// completion notification caused by that call cannot be mistaken for a
 	// naturally completed Turn.
-	interruptRequested bool
-	ready              chan struct{}
-	startErr           error
-	stopReason         string
-	finalized          bool
-	finalize           sync.Once
-	redactor           *security.Redactor
+	interruptRequested  bool
+	ready               chan struct{}
+	startErr            error
+	stopReason          string
+	finalized           bool
+	finalize            sync.Once
+	redactor            *security.Redactor
+	providerIdentityErr error
 	// replies holds custom text replies queued while the owning turn is still
 	// open. Providers cannot accept free text inside an approval response, so
 	// each reply dismisses its question immediately and is delivered as a
@@ -155,6 +156,25 @@ func (a *active) withEvent(fn func(turnID string)) {
 		return
 	}
 	fn(a.turnID)
+}
+
+func (a *active) withProviderIdentity(nativeID string, fn func()) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.finalized || a.providerIdentityErr != nil {
+		return
+	}
+	if a.redactor != nil && a.redactor.ContainsSecret([]byte(nativeID)) {
+		a.providerIdentityErr = errors.New("provider session identity contains a registered secret")
+		return
+	}
+	fn()
+}
+
+func (a *active) providerIdentityError() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.providerIdentityErr
 }
 
 func (a *active) beginFinalizing() {
@@ -456,7 +476,7 @@ func (m *Manager) Stop(id string) error {
 		return nil
 	}
 	m.mu.Unlock()
-	closeErr := run.adapter.Close()
+	closeErr := run.redactError(run.adapter.Close())
 	_ = run.waitReady()
 	if closeErr == nil {
 		m.convergeActive(id, run, nil)
@@ -580,7 +600,7 @@ func (m *Manager) ensureWithEphemeral(id string, ephemeral map[string]string) (*
 		Environment: mergeEnvironmentWithEphemeral(agent.Environment, value.LaunchEnvironment, ephemeral),
 		Hooks: provider.Hooks{
 			NativeID: func(nativeID string) {
-				run.withEvent(func(_ string) {
+				run.withProviderIdentity(nativeID, func() {
 					_, _ = m.store.Append(id, "session.provider", "", marshal(session.ProviderEventData{
 						AgentName: agent.Name, Provider: providerConfig.Type, ProviderSessionID: nativeID,
 						InputCapabilities: provider.InputCapabilities(providerConfig.Type),
@@ -625,12 +645,16 @@ func (m *Manager) ensureWithEphemeral(id string, ephemeral map[string]string) (*
 	m.running[id] = run
 	m.mu.Unlock()
 
-	if err := adapter.Start(value.ProviderSessionID); err != nil {
-		err = run.redactError(err)
-		run.finishStart(err)
+	startErr := adapter.Start(value.ProviderSessionID)
+	if identityErr := run.providerIdentityError(); identityErr != nil {
+		startErr = identityErr
+	}
+	if startErr != nil {
+		startErr = run.redactError(startErr)
+		run.finishStart(startErr)
 		_ = adapter.Close()
-		m.convergeActive(id, run, err)
-		return nil, err
+		m.convergeActive(id, run, startErr)
+		return nil, startErr
 	}
 	readyState := session.StateReady
 	if value.CurrentTurnID != "" {

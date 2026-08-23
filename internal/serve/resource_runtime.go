@@ -272,48 +272,12 @@ func (m *agentManager) createResourceGeneration(ctx context.Context, workspace s
 	persisted = true
 	m.registerRuntime(rt)
 
-	source := agentHubSource{
-		App: agentHubSourceApp, InstanceID: record.SourceInstanceID, ExternalID: record.SourceExternalID,
-		Metadata: map[string]string{
-			"workspaceInstanceId": record.SourceInstanceID, "resourceId": resourceKey,
-			"generation": fmt.Sprint(record.Generation), "generationId": record.GenerationID,
-			"bindingKind": record.BindingKind, "bindingName": record.BindingName,
-			"profileRevision": record.ProfileRevision,
-		},
+	source, request, err := m.agentHubGenerationCreateRequest(ctx, cfg, client, workspace, record)
+	if err != nil {
+		rt.setRecoveryError(m, err)
+		return rt.snapshotGeneration(), err
 	}
-	launchEnvironment := map[string]string{
-		"PUA_WORKSPACE_ROOT":        workspace.Path,
-		"PUA_WORKSPACE_INSTANCE_ID": record.SourceInstanceID,
-		"PUA_RESOURCE_ID":           resourceKey,
-	}
-	var ephemeralEnvironment map[string]string
-	if m.server != nil {
-		boundVariables, boundSecrets, bindingErr := m.server.serviceEnvironment(workspace)
-		if bindingErr != nil {
-			rt.setRecoveryError(m, bindingErr)
-			return rt.snapshotGeneration(), bindingErr
-		}
-		for key, value := range boundVariables {
-			launchEnvironment[key] = value
-		}
-		if len(boundSecrets) > 0 {
-			status, statusErr := client.Status(ctx)
-			if statusErr != nil {
-				rt.setRecoveryError(m, statusErr)
-				return rt.snapshotGeneration(), statusErr
-			}
-			if !agentHubHasCapability(status, "session.ephemeral-environment") {
-				err := errors.New("AgentHub does not support ephemeral service secrets")
-				rt.setRecoveryError(m, err)
-				return rt.snapshotGeneration(), err
-			}
-			ephemeralEnvironment = boundSecrets
-		}
-	}
-	session, err := m.findOrCreateAgentHubSession(ctx, client, source, agentHubCreateSessionRequest{
-		Title: record.Title, Cwd: record.Cwd, AgentName: record.AgentHubAgentName,
-		Source: &source, IdempotencyKey: record.GenerationID, LaunchEnvironment: launchEnvironment, EphemeralEnvironment: ephemeralEnvironment,
-	})
+	session, err := m.findOrCreateAgentHubSession(ctx, client, source, request)
 	if err != nil {
 		rt.setRecoveryError(m, err)
 		return rt.snapshotGeneration(), err

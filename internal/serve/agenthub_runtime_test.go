@@ -53,6 +53,7 @@ type runtimeFakeAgentHub struct {
 	messageSenders       []*agentHubMessageSender
 	messageIDs           []string
 	messageInputs        map[string]agentHubInboundMessage
+	createRequests       []agentHubCreateSessionRequest
 	actions              []string
 	resumeEnvironments   []map[string]string
 	listCalls            int
@@ -402,6 +403,7 @@ func (f *runtimeFakeAgentHub) create(w http.ResponseWriter, r *http.Request) {
 	var request agentHubCreateSessionRequest
 	_ = json.NewDecoder(r.Body).Decode(&request)
 	f.mu.Lock()
+	f.createRequests = append(f.createRequests, request)
 	if f.rejectIdempotencyKey != "" && request.IdempotencyKey == f.rejectIdempotencyKey {
 		f.mu.Unlock()
 		w.WriteHeader(http.StatusConflict)

@@ -752,6 +752,18 @@ func resourceMailboxStoreNeedsHotWork(store resourceMailboxStore) bool {
 	return false
 }
 
+// resourceMailboxHasHotWork reports whether the mailbox controller still owns
+// any work for a resource. Keep callers on the same predicate that controls
+// hot-store persistence and hot-index membership so new controller obligations
+// cannot silently drift from resource busy checks.
+func resourceMailboxHasHotWork(workspacePath, resourceID string) (bool, error) {
+	store, err := loadResourceMailboxStoreForRead(workspacePath, resourceID)
+	if err != nil {
+		return false, err
+	}
+	return resourceMailboxStoreNeedsHotWork(store), nil
+}
+
 func resourceMailboxStoreNeedsCompaction(store resourceMailboxStore) bool {
 	for _, message := range store.Mailbox.Messages {
 		if message.receipt || mailboxMessageNeedsHot(message) {

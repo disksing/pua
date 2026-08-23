@@ -565,7 +565,7 @@ func (n *NativeScheduler) targetBusy(resourceID string) (bool, error) {
 	if found && generationHasActiveTurn(record) {
 		return true, nil
 	}
-	return mailboxPendingForResource(n.workspace.Path, resourceID)
+	return resourceMailboxHasHotWork(n.workspace.Path, resourceID)
 }
 
 func (n *NativeScheduler) recordScheduleError(id string, runtime schedulerScheduleRuntime, now time.Time, cause error) error {

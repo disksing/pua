@@ -410,38 +410,171 @@ func TestNativeSchedulerSkipsBusyRepeatingTargetButQueuesOneTime(t *testing.T) {
 	fake := newRuntimeFakeAgentHub()
 	hub := httptest.NewServer(fake)
 	defer hub.Close()
-	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
-	puaWorkspace, _ := app.OpenWorkspace(workspace.Path)
-	anchor := time.Now().UTC().Add(time.Minute).Truncate(time.Second)
-	if _, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
-		Description: "Repeated", Condition: "each minute", Target: "project1.task1",
-		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerInterval, EverySeconds: 60, AnchorAt: anchor.Format(time.RFC3339Nano)},
-	}); err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name     string
+		wantBusy bool
+		seed     func(*resourceMailboxStore, string)
+	}{
+		{
+			name:     "queued message",
+			wantBusy: true,
+			seed: func(store *resourceMailboxStore, stamp string) {
+				store.Mailbox.NextSequence++
+				store.Mailbox.Messages = append(store.Mailbox.Messages, resourceMailboxMessage{
+					ID: "queued-message", Sequence: store.Mailbox.NextSequence, ResourceID: "project1.task1",
+					Text: "already waiting", Role: "user", RequestedMode: resourceMessageModeEnqueue,
+					ActualMode: resourceMessageModeEnqueue, Status: resourceMessageQueued,
+					AcceptedAt: stamp, UpdatedAt: stamp,
+				})
+			},
+		},
+		{
+			name:     "unresolved result subscription",
+			wantBusy: true,
+			seed: func(store *resourceMailboxStore, stamp string) {
+				store.Mailbox.NextSequence++
+				store.Mailbox.Messages = append(store.Mailbox.Messages, resourceMailboxMessage{
+					ID: "pending-result", Sequence: store.Mailbox.NextSequence, ResourceID: "project1.task1",
+					Text: "awaiting result", Role: "agent", Sender: &agentHubMessageSender{ID: "project1", Name: "Sender"},
+					SenderWorkspaceInstanceID: "sender-instance", SubscribeResult: true,
+					ResultSubscriptionStatus: resourceResultSubscriptionPending,
+					RequestedMode:            resourceMessageModeEnqueue, ActualMode: resourceMessageModeEnqueue,
+					Status: resourceMessageDelivered, AcceptedAt: stamp, UpdatedAt: stamp,
+					DeliveredAt: stamp, TerminalAt: stamp, GenerationID: "generation-1", TurnID: "turn-1",
+				})
+			},
+		},
+		{
+			name:     "unresolved notification",
+			wantBusy: true,
+			seed: func(store *resourceMailboxStore, stamp string) {
+				store.Mailbox.NextSequence++
+				store.Mailbox.Messages = append(store.Mailbox.Messages, resourceMailboxMessage{
+					ID: "pending-notification", Sequence: store.Mailbox.NextSequence, ResourceID: "project1.task1",
+					Text: "notify sender", Role: "agent", RequestedMode: resourceMessageModeEnqueue,
+					ActualMode: resourceMessageModeEnqueue, Status: resourceMessageDelivered,
+					AcceptedAt: stamp, UpdatedAt: stamp, DeliveredAt: stamp, TerminalAt: stamp,
+					Notification: &resourceNotificationReceipt{
+						ID: "notification-1", Type: resourceMessageTypeDeliveryTerminal, Status: resourceNotificationWaiting,
+						TargetWorkspaceInstanceID: "sender-instance", TargetResourceID: "project1",
+						CreatedAt: stamp, UpdatedAt: stamp,
+					},
+				})
+			},
+		},
+		{
+			name:     "pending notification outbox",
+			wantBusy: true,
+			seed: func(store *resourceMailboxStore, stamp string) {
+				store.Mailbox.NextSequence++
+				store.Mailbox.Messages = append(store.Mailbox.Messages, resourceMailboxMessage{
+					ID: "outbox-source", Sequence: store.Mailbox.NextSequence, ResourceID: "project1.task1",
+					Text: "completed source", Role: "agent", RequestedMode: resourceMessageModeEnqueue,
+					ActualMode: resourceMessageModeEnqueue, Status: resourceMessageDelivered,
+					AcceptedAt: stamp, UpdatedAt: stamp, DeliveredAt: stamp, TerminalAt: stamp,
+				})
+				store.Outbox.Operations = append(store.Outbox.Operations, resourceMailboxNotificationOp{
+					ID: "outbox-operation", Type: resourceMessageTypeDeliveryTerminal,
+					SourceMessageID: "outbox-source", SourceResourceID: "project1.task1",
+					SourceWorkspaceInstanceID: "target-instance", TargetWorkspaceInstanceID: "sender-instance",
+					TargetResourceID: "project1", GeneratedMessageID: "generated-notification",
+					Status: resourceNotificationWaiting, UpdatedAt: stamp,
+				})
+			},
+		},
+		{
+			name: "cold terminal receipt",
+			seed: func(store *resourceMailboxStore, stamp string) {
+				store.Mailbox.NextSequence++
+				store.Mailbox.Messages = append(store.Mailbox.Messages, resourceMailboxMessage{
+					ID: "cold-receipt", Sequence: store.Mailbox.NextSequence, ResourceID: "project1.task1",
+					Text: "finished", Role: "user", SubscribeResult: false,
+					ResultSubscriptionStatus: resourceResultSubscriptionDisabled,
+					RequestedMode:            resourceMessageModeEnqueue, ActualMode: resourceMessageModeEnqueue,
+					Status: resourceMessageDelivered, AcceptedAt: stamp, UpdatedAt: stamp,
+					DeliveredAt: stamp, TerminalAt: stamp,
+				})
+			},
+		},
 	}
-	at := anchor.Add(10 * time.Second)
-	if _, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
-		Description: "One time", Condition: "once", Target: "project1.task1",
-		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: at.Format(time.RFC3339Nano)},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := acceptMailboxMessage(workspace.Path, "project1.task1", resourceMessageRequest{Text: "already waiting", Mode: resourceMessageModeEnqueue}); err != nil {
-		t.Fatal(err)
-	}
-	manager.now = func() time.Time { return at.Add(time.Second) }
-	if err := manager.reconcileSchedulerLocked(context.Background(), workspace); err != nil {
-		t.Fatal(err)
-	}
-	snapshot, err := newNativeScheduler(manager, workspace).Snapshot(manager.now())
-	if err != nil || len(snapshot.Schedules) != 2 {
-		t.Fatalf("snapshot = %#v, %v", snapshot, err)
-	}
-	if snapshot.Schedules[0].LastOutcome != schedulerOutcomeBusy {
-		t.Fatalf("repeating target outcome = %#v", snapshot.Schedules[0])
-	}
-	if messages := scheduleOccurrenceMessages(t, workspace.Path, "project1.task1"); len(messages) != 1 || messages[0].Causation.ScheduleID != snapshot.Schedules[1].ID {
-		t.Fatalf("one-time occurrence was not queued: %#v", messages)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+			puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			anchor := time.Now().UTC().Add(time.Minute).Truncate(time.Second)
+			repeating, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+				Description: "Repeated", Condition: "each minute", Target: "project1.task1",
+				Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerInterval, EverySeconds: 60, AnchorAt: anchor.Format(time.RFC3339Nano)},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			at := anchor.Add(10 * time.Second)
+			oneTime, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+				Description: "One time", Condition: "once", Target: "project1.task1",
+				Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: at.Format(time.RFC3339Nano)},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			stamp := anchor.Add(-time.Minute).Format(time.RFC3339Nano)
+			if _, err := mutateResourceMailboxStoreForResource(workspace.Path, "project1.task1", func(store *resourceMailboxStore) error {
+				test.seed(store, stamp)
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			hasHotWork, err := resourceMailboxHasHotWork(workspace.Path, "project1.task1")
+			if err != nil || hasHotWork != test.wantBusy {
+				t.Fatalf("hot mailbox ownership = %v, want %v: %v", hasHotWork, test.wantBusy, err)
+			}
+			if test.name == "cold terminal receipt" {
+				stored, found, err := mailboxMessageByID(workspace.Path, "cold-receipt")
+				if err != nil || !found || !stored.receipt {
+					t.Fatalf("terminal message did not leave hot storage: found=%v err=%v message=%#v", found, err, stored)
+				}
+			}
+
+			manager.now = func() time.Time { return at.Add(time.Second) }
+			if err := manager.reconcileSchedulerLocked(context.Background(), workspace); err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := newNativeScheduler(manager, workspace).Snapshot(manager.now())
+			if err != nil || len(snapshot.Schedules) != 2 {
+				t.Fatalf("snapshot = %#v, %v", snapshot, err)
+			}
+			wantRepeatOutcome := schedulerOutcomeAccepted
+			if test.wantBusy {
+				wantRepeatOutcome = schedulerOutcomeBusy
+			}
+			if snapshot.Schedules[0].ID != repeating.ID || snapshot.Schedules[0].LastOutcome != wantRepeatOutcome {
+				t.Fatalf("repeating target outcome = %#v, want %q", snapshot.Schedules[0], wantRepeatOutcome)
+			}
+			if snapshot.Schedules[1].ID != oneTime.ID || snapshot.Schedules[1].LastOutcome != schedulerOutcomeAccepted {
+				t.Fatalf("one-time target outcome = %#v", snapshot.Schedules[1])
+			}
+			messages := scheduleOccurrenceMessages(t, workspace.Path, "project1.task1")
+			wantIDs := map[string]bool{oneTime.ID: true}
+			if !test.wantBusy {
+				wantIDs[repeating.ID] = true
+			}
+			if len(messages) != len(wantIDs) {
+				t.Fatalf("occurrence messages = %#v, want schedule ids %#v", messages, wantIDs)
+			}
+			for _, message := range messages {
+				if message.Causation == nil || !wantIDs[message.Causation.ScheduleID] {
+					t.Fatalf("unexpected occurrence message = %#v, want schedule ids %#v", message, wantIDs)
+				}
+				delete(wantIDs, message.Causation.ScheduleID)
+			}
+			if len(wantIDs) != 0 {
+				t.Fatalf("missing occurrence schedule ids = %#v", wantIDs)
+			}
+		})
 	}
 }
 
@@ -549,6 +682,12 @@ func TestNativeSchedulerCrashWindowReplayMatrix(t *testing.T) {
 			}
 			if recomputed.OccurrenceID != prepared.OccurrenceID || recomputed.MessageID != prepared.MessageID {
 				t.Fatalf("stable identifiers changed after restart: got %s/%s, want %s/%s", recomputed.OccurrenceID, recomputed.MessageID, prepared.OccurrenceID, prepared.MessageID)
+			}
+			if test.window == crashWithAcceptedMessage {
+				busy, err := restarted.targetBusy(prepared.Target)
+				if err != nil || !busy {
+					t.Fatalf("accepted prepared occurrence was not hot before replay: busy=%v err=%v", busy, err)
+				}
 			}
 			if _, err := restarted.Reconcile(context.Background(), now); err != nil {
 				t.Fatal(err)

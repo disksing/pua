@@ -1,10 +1,12 @@
 package serve
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -561,6 +563,131 @@ func TestServiceManagerRejectsSecretRotationBeforePersistingLaterLogs(t *testing
 		if strings.Contains(string(data), "rotated-secret") {
 			t.Fatalf("rotated secret appeared in %s: %s", name, data)
 		}
+	}
+}
+
+func TestServiceManagerPreservesExportReplacementForLogGuard(t *testing.T) {
+	const (
+		initialSecret = "initial-handoff-secret"
+		rotatedSecret = "rotated-handoff-secret"
+	)
+	root := t.TempDir()
+	runtimeDir := serviceRuntimePath(root, "exporter")
+	path := filepath.Join(runtimeDir, "export.json")
+	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	m := &ServiceManager{root: root, now: time.Now}
+	rt := &serviceRuntime{
+		config:        ServiceConfig{SchemaVersion: serviceSchemaVersion, ID: "exporter", Exports: true},
+		secretNames:   map[string]ServiceSecretMetadata{},
+		exportSecrets: map[string]string{},
+		redactor:      security.NewRedactor(),
+	}
+	initial := ServiceExportFile{
+		SchemaVersion: serviceExportSchema,
+		Variables:     map[string]string{"PUBLIC": "initial"},
+		Secrets:       map[string]string{"TOKEN": initialSecret},
+	}
+	if err := writeServiceJSON(path, initial, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	handoff, err := openServiceExportHandoff(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(handoff.data, []byte(initialSecret)) {
+		t.Fatal("opened hand-off did not retain the initial export")
+	}
+	rotated := ServiceExportFile{
+		SchemaVersion: serviceExportSchema,
+		Variables:     map[string]string{"PUBLIC": "rotated"},
+		Secrets:       map[string]string{"TOKEN": rotatedSecret},
+	}
+	if err := writeServiceJSON(path, rotated, 0o644); err != nil {
+		_ = handoff.file.Close()
+		t.Fatal(err)
+	}
+	accepted, err := m.readExportHandoffWithGateLocked(rt, handoff, false)
+	if err != nil {
+		_ = handoff.file.Close()
+		t.Fatal(err)
+	}
+	rt.exports = accepted
+	if _, err := handoff.file.Seek(0, io.SeekStart); err != nil {
+		_ = handoff.file.Close()
+		t.Fatal(err)
+	}
+	scrubbedInitial, err := io.ReadAll(handoff.file)
+	initialInfo, statErr := handoff.file.Stat()
+	if closeErr := handoff.file.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if statErr != nil {
+		t.Fatal(statErr)
+	}
+	if bytes.Contains(scrubbedInitial, []byte(initialSecret)) {
+		t.Fatalf("accepted inode retained its secret: %s", scrubbedInitial)
+	}
+	if initialInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("accepted inode mode = %o, want 600", initialInfo.Mode().Perm())
+	}
+
+	pathnameData, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(pathnameData, []byte(rotatedSecret)) || bytes.Contains(pathnameData, []byte(initialSecret)) {
+		t.Fatalf("concurrent pathname replacement was overwritten: %s", pathnameData)
+	}
+
+	logPath := filepath.Join(runtimeDir, "stdout.log")
+	writer := newServiceLogWriter(
+		newServiceLogSink(logPath, ServiceLogRotationConfig{}),
+		rt.redactor,
+		false,
+		func() error { return m.guardServiceLogExport(rt) },
+	)
+	if written, err := writer.Write([]byte("ordinary-output " + rotatedSecret + "\n")); err == nil || written != 0 {
+		t.Fatalf("guarded write = %d, %v; want rejection before persistence", written, err)
+	}
+	_ = writer.Close()
+	if !rt.redactor.ContainsSecret([]byte(rotatedSecret)) {
+		t.Fatal("log guard rejected the replacement without registering its secret")
+	}
+	if err := m.exportProtocolErrorLocked(rt); err == nil || !strings.Contains(err.Error(), "immutable") {
+		t.Fatalf("protocol error = %v, want immutable export rejection", err)
+	}
+	if !containsString(rt.secretValues, rotatedSecret) {
+		t.Fatal("rejected replacement secret was not promoted for durable redaction")
+	}
+
+	for _, durablePath := range []string{path, logPath} {
+		data, err := os.ReadFile(durablePath)
+		if err != nil && os.IsNotExist(err) && durablePath == logPath {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(data, []byte(rotatedSecret)) {
+			t.Fatalf("replacement secret reached %s: %s", filepath.Base(durablePath), data)
+		}
+	}
+	if info, err := os.Stat(path); err != nil {
+		t.Fatal(err)
+	} else if info.Mode().Perm() != 0o600 {
+		t.Fatalf("replacement hand-off mode = %o, want 600", info.Mode().Perm())
+	}
+	projection, err := json.Marshal(publicExports(rt.exports, rt.secretNames))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(projection, []byte(rotatedSecret)) || bytes.Contains(projection, []byte("rotated")) {
+		t.Fatalf("rejected replacement reached visible exports: %s", projection)
 	}
 }
 

@@ -717,7 +717,7 @@ func (m *ServiceManager) readExportsWithGateLocked(rt *serviceRuntime, fromLog b
 	if !pathWithinResolved(filepath.Join(m.root, ".pua"), path) {
 		return ServiceExportFile{}, m.rejectExportLocked(rt, errors.New("service export path escapes the workspace control directory"), nil, fromLog)
 	}
-	data, err := os.ReadFile(path)
+	handoff, err := openServiceExportHandoff(path)
 	if os.IsNotExist(err) {
 		if requiresInitialExport(rt.config) {
 			message := "service has not written its initial export"
@@ -731,20 +731,46 @@ func (m *ServiceManager) readExportsWithGateLocked(rt *serviceRuntime, fromLog b
 	if err != nil {
 		return ServiceExportFile{}, m.rejectExportLocked(rt, err, nil, fromLog)
 	}
-	if len(data) > 1<<20 {
+	defer handoff.file.Close()
+	return m.readExportHandoffWithGateLocked(rt, handoff, fromLog)
+}
+
+type serviceExportHandoff struct {
+	file *os.File
+	data []byte
+}
+
+// openServiceExportHandoff keeps the accepted inode open through validation and
+// scrubbing. A service may atomically replace the pathname after this read; the
+// replacement must remain untouched so the next log guard can inspect it.
+func openServiceExportHandoff(path string) (*serviceExportHandoff, error) {
+	file, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return nil, err
+	}
+	data, err := io.ReadAll(file)
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return &serviceExportHandoff{file: file, data: data}, nil
+}
+
+func (m *ServiceManager) readExportHandoffWithGateLocked(rt *serviceRuntime, handoff *serviceExportHandoff, fromLog bool) (ServiceExportFile, error) {
+	if len(handoff.data) > 1<<20 {
 		cause := errors.New("service export exceeds 1 MiB")
-		cause = scrubRejectedExport(path, serviceExportSchema, cause)
+		cause = scrubRejectedExport(handoff.file, serviceExportSchema, cause)
 		return ServiceExportFile{}, m.rejectExportLocked(rt, cause, nil, fromLog)
 	}
 	var export ServiceExportFile
-	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder := json.NewDecoder(bytes.NewReader(handoff.data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&export); err != nil {
-		cause := scrubRejectedExport(path, serviceExportSchema, fmt.Errorf("decode export: %w", err))
+		cause := scrubRejectedExport(handoff.file, serviceExportSchema, fmt.Errorf("decode export: %w", err))
 		return ServiceExportFile{}, m.rejectExportLocked(rt, cause, nil, fromLog)
 	}
 	if export.SchemaVersion != serviceExportSchema {
-		cause := scrubRejectedExport(path, serviceExportSchema, fmt.Errorf("unsupported export schema version %d", export.SchemaVersion))
+		cause := scrubRejectedExport(handoff.file, serviceExportSchema, fmt.Errorf("unsupported export schema version %d", export.SchemaVersion))
 		return ServiceExportFile{}, m.rejectExportLocked(rt, cause, nil, fromLog)
 	}
 	if export.Variables == nil {
@@ -760,24 +786,24 @@ func (m *ServiceManager) readExportsWithGateLocked(rt *serviceRuntime, fromLog b
 			rt.redactor.Register(value)
 		}
 		if !validSecretName(name) || strings.ContainsRune(value, '\x00') {
-			cause := scrubRejectedExport(path, export.SchemaVersion, fmt.Errorf("invalid exported secret %q", name))
+			cause := scrubRejectedExport(handoff.file, export.SchemaVersion, fmt.Errorf("invalid exported secret %q", name))
 			return ServiceExportFile{}, m.rejectExportLocked(rt, cause, candidateSecrets, fromLog)
 		}
 	}
 	candidateRedactor := security.NewRedactor(candidateSecrets...)
 	for name, value := range export.Variables {
 		if !environmentNamePattern.MatchString(name) || strings.ContainsRune(value, '\x00') {
-			cause := scrubRejectedExport(path, export.SchemaVersion, fmt.Errorf("invalid exported variable %q", name))
+			cause := scrubRejectedExport(handoff.file, export.SchemaVersion, fmt.Errorf("invalid exported variable %q", name))
 			return ServiceExportFile{}, m.rejectExportLocked(rt, cause, candidateSecrets, fromLog)
 		}
 		if candidateRedactor.ContainsSecret([]byte(value)) || rt.redactor != nil && rt.redactor.ContainsSecret([]byte(value)) {
-			cause := scrubRejectedExport(path, export.SchemaVersion, fmt.Errorf("exported variable %q contains a secret; place it under secrets", name))
+			cause := scrubRejectedExport(handoff.file, export.SchemaVersion, fmt.Errorf("exported variable %q contains a secret; place it under secrets", name))
 			return ServiceExportFile{}, m.rejectExportLocked(rt, cause, candidateSecrets, fromLog)
 		}
 	}
 	if rt.exportAccepted && export.Secrets != nil && !equalStringMap(export.Secrets, rt.exportSecrets) {
 		sanitized := ServiceExportFile{SchemaVersion: export.SchemaVersion, Variables: cloneStringMap(export.Variables)}
-		if err := writeSanitizedExport(path, sanitized); err != nil {
+		if err := writeSanitizedExport(handoff.file, sanitized); err != nil {
 			return ServiceExportFile{}, m.rejectExportLocked(rt, fmt.Errorf("scrub rejected exported secrets: %w", err), candidateSecrets, fromLog)
 		}
 		return ServiceExportFile{}, m.rejectExportLocked(rt, errors.New("service exported secrets are immutable after the initial hand-off"), candidateSecrets, fromLog)
@@ -793,11 +819,11 @@ func (m *ServiceManager) readExportsWithGateLocked(rt *serviceRuntime, fromLog b
 			}
 		}
 		// The export file is an IPC hand-off, not durable secret storage. Keep
-		// variables available for later reads but atomically replace the file
+		// variables available for later reads but overwrite this accepted inode
 		// with a secret-free representation as soon as its secret values have
 		// been registered in memory. A failure to scrub is fail-closed.
 		sanitized := ServiceExportFile{SchemaVersion: export.SchemaVersion, Variables: cloneStringMap(export.Variables)}
-		if err := writeSanitizedExport(path, sanitized); err != nil {
+		if err := writeSanitizedExport(handoff.file, sanitized); err != nil {
 			return ServiceExportFile{}, fmt.Errorf("scrub exported secrets: %w", err)
 		}
 	} else {
@@ -853,21 +879,45 @@ func (m *ServiceManager) exportProtocolErrorLocked(rt *serviceRuntime) error {
 	return errors.New(rt.exportViolation)
 }
 
-func scrubRejectedExport(path string, schemaVersion int, cause error) error {
-	if err := writeSanitizedExport(path, ServiceExportFile{SchemaVersion: schemaVersion, Variables: map[string]string{}}); err != nil {
+func scrubRejectedExport(file *os.File, schemaVersion int, cause error) error {
+	if err := writeSanitizedExport(file, ServiceExportFile{SchemaVersion: schemaVersion, Variables: map[string]string{}}); err != nil {
 		return fmt.Errorf("%v; scrub rejected export: %w", cause, err)
 	}
 	return cause
 }
 
-func writeSanitizedExport(path string, export ServiceExportFile) error {
-	if err := writeServiceJSON(path, export, 0o600); err != nil {
-		if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
-			return fmt.Errorf("write sanitized export: %v; remove rejected export: %w", err, removeErr)
-		}
+func writeSanitizedExport(file *os.File, export ServiceExportFile) error {
+	data, err := json.MarshalIndent(export, "", "  ")
+	if err != nil {
+		return discardRejectedExport(file, err)
+	}
+	data = append(data, '\n')
+	if err := file.Chmod(0o600); err != nil {
+		return discardRejectedExport(file, err)
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return discardRejectedExport(file, err)
+	}
+	if _, err := file.Write(data); err != nil {
+		return discardRejectedExport(file, err)
+	}
+	if err := file.Truncate(int64(len(data))); err != nil {
+		return discardRejectedExport(file, err)
+	}
+	if err := file.Sync(); err != nil {
 		return err
 	}
 	return nil
+}
+
+func discardRejectedExport(file *os.File, cause error) error {
+	if err := file.Truncate(0); err != nil {
+		return fmt.Errorf("write sanitized export: %v; discard rejected export: %w", cause, err)
+	}
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("write sanitized export: %v; sync discarded export: %w", cause, err)
+	}
+	return cause
 }
 
 func equalStringMap(left, right map[string]string) bool {

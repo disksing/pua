@@ -47,18 +47,7 @@
   }
 </script>
 
-<section class="inventory" aria-labelledby="session-inventory-title">
-  <header class="inventory-header">
-    <div>
-      <span class="eyebrow">Session inventory</span>
-      <h1 id="session-inventory-title">Agent activity and history</h1>
-      <p>Inspect Session state, provenance, agents, and recent activity. Open a row when intervention or conversation is needed.</p>
-    </div>
-    <button class="secondary-button refresh-button" type="button" disabled={loading} onclick={onRefresh}>
-      <Icon name="refresh-cw" /><span>{loading ? "Refreshing…" : "Refresh"}</span>
-    </button>
-  </header>
-
+<section class="inventory" aria-label="Sessions">
   <form class="inventory-filters" onsubmit={(event) => { event.preventDefault(); onApplyFilters(); }}>
     <div class="scope-switch" aria-label="Session scope">
       <button type="button" class:active={!filters.archived} onclick={() => { filters.archived = false; onApplyFilters(); }}>Current</button>
@@ -79,6 +68,9 @@
       <Icon name="box" /><span>Source</span>{#if filters.sourceApp || filters.sourceInstanceId || filters.sourceExternalId}<strong>Set</strong>{/if}
     </button>
     <span class="filter-note">Exact filters from the current AgentHub API</span>
+    <button class="secondary-button refresh-button" type="button" disabled={loading} onclick={onRefresh}>
+      <Icon name="refresh-cw" /><span>{loading ? "Refreshing…" : "Refresh"}</span>
+    </button>
     {#if sourceOpen}
       <div class="source-filter-fields">
         <label><span>Application</span><input bind:value={filters.sourceApp} placeholder="pua" /></label>

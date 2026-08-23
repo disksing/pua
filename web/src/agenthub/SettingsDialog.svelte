@@ -4,6 +4,7 @@
   import Icon from "../components/Icon.svelte";
   import { COMPLETION_SOUNDS, TonePlayer } from "./companion/audio";
   import { BEEP_PROGRESSIONS } from "./companion/chords";
+  import { applyBalanceTotals, DEFAULT_BALANCE_TOTAL, quotaVisibilityKey } from "./companion/model";
   import { companionPreferencesEqual, loadCompanionPreferences, saveCompanionPreferences, validateCompanionPreferences } from "./companion/preferences";
   import { api } from "./core/api";
   import ModelSelect from "./ModelSelect.svelte";
@@ -29,6 +30,13 @@
 
   const errors = $derived(draft && activity ? [...validateDraft(draft), ...validateCompanionPreferences(activity)] : []);
   const dirty = $derived(Boolean(draft && snapshot && (isDirty(draft, snapshot) || !companionPreferencesEqual(activity, activitySnapshot))));
+  const effectiveQuota = $derived(activity ? applyBalanceTotals(quota, activity.balanceTotals) : quota);
+  const quotaEntries = $derived((effectiveQuota?.providers || []).flatMap((provider: any) => (
+    (provider.quotas || []).map((item: any) => ({ provider, item, key: quotaVisibilityKey(provider, item) }))
+  )));
+  const balanceProviders = $derived((quota?.providers || []).filter((provider: any) => (
+    (provider.quotas || []).some((item: any) => item.kind === "balance")
+  )));
 
   onMount(() => {
     void load();
@@ -119,6 +127,22 @@
 
   function removeAgent(index: number): void { mutate((next) => next.agents.splice(index, 1)); }
   function moveAgent(index: number, delta: number): void { const target = index + delta; if (target < 0 || target >= draft.agents.length) return; mutate((next) => { next.agents = reorderAgents(next.agents, index, target); }); }
+  function toggleQuota(key: string, visible: boolean): void {
+    const hidden = new Set<string>(activity.hiddenQuotaKeys || []);
+    if (visible) hidden.delete(key); else hidden.add(key);
+    mutateActivity({ hiddenQuotaKeys: [...hidden].sort() });
+  }
+  function setBalanceTotal(providerId: string, raw: string): void {
+    const totals = { ...(activity.balanceTotals || {}) };
+    const numeric = Number(raw);
+    if (Number.isFinite(numeric) && numeric > 0) totals[providerId] = numeric;
+    else delete totals[providerId];
+    mutateActivity({ balanceTotals: totals });
+  }
+  function balanceTotalFor(providerId: string): number {
+    const numeric = Number(activity.balanceTotals?.[providerId]);
+    return Number.isFinite(numeric) && numeric > 0 ? numeric : DEFAULT_BALANCE_TOTAL;
+  }
   function changeProvider(index: number, providerId: string): void {
     mutate((next) => {
       const agent = next.agents[index]; agent.providerId = providerId;
@@ -157,12 +181,27 @@
                 <div class="settings-inline"><button type="button" class="secondary-button" disabled={testing} onclick={testOnWatch}>{testing ? "Testing…" : "Test connection"}</button>{#if testMessage}<span>{testMessage}</span>{/if}</div>
               </section>
             {:else if section === "activity"}
-              <section class="settings-card"><header><div><h3>Activity monitor</h3><p>Browser-local Companion and Beeper preferences.</p></div><label class="switch"><input type="checkbox" checked={activity.showActivity} onchange={(event) => mutateActivity({ showActivity: event.currentTarget.checked })} /><span></span></label></header>
-                <label class="setting-row"><span><strong>Enable beeping</strong><small>Play a quantized tone for active Sessions.</small></span><label class="switch"><input type="checkbox" checked={activity.enableBeeping} onchange={(event) => mutateActivity({ enableBeeping: event.currentTarget.checked })} /><span></span></label></label>
-                <label><span>Volume · {Math.round(activity.beepVolume * 100)}%</span><input type="range" min="0" max="1" step="0.01" value={activity.beepVolume} oninput={(event) => mutateActivity({ beepVolume: Number(event.currentTarget.value) })} /></label>
-                <label><span>Chord progression</span><select value={activity.beepProgression} onchange={(event) => mutateActivity({ beepProgression: event.currentTarget.value })}>{#each BEEP_PROGRESSIONS as option}<option value={option.value}>{option.label}</option>{/each}</select></label>
-                <label><span>On finish</span><div class="model-select-row"><select value={activity.completionSound} onchange={(event) => mutateActivity({ completionSound: event.currentTarget.value })}>{#each COMPLETION_SOUNDS as option}<option value={option.value}>{option.label}</option>{/each}</select><button type="button" class="icon-button" aria-label="Preview sound" onclick={async () => { await player.resume(); player.completion(activity.completionSound, activity.beepVolume); }}><Icon name="play" /></button></div></label>
-                {#if quota.providers?.length}<h4>Quota visibility</h4>{#each quota.providers as provider}<div class="quota-pref"><strong>{provider.label || provider.provider}</strong>{#each provider.quotas || [] as item}<span>{item.label || item.kind}</span>{/each}</div>{/each}{/if}
+              <section class="settings-stack">
+                <section class="settings-card"><header><div><h3>Activity monitor</h3><p>Browser-local Companion and Beeper preferences.</p></div><label class="switch"><input type="checkbox" checked={activity.showActivity} onchange={(event) => mutateActivity({ showActivity: event.currentTarget.checked })} /><span></span></label></header>
+                  <div class="setting-row"><span><strong>Enable beeping</strong><small>Play a quantized tone for active Sessions.</small></span><label class="switch"><input type="checkbox" checked={activity.enableBeeping} onchange={(event) => mutateActivity({ enableBeeping: event.currentTarget.checked })} /><span></span></label></div>
+                  <label><span>Volume · {Math.round(activity.beepVolume * 100)}%</span><input type="range" min="0" max="1" step="0.01" value={activity.beepVolume} oninput={(event) => mutateActivity({ beepVolume: Number(event.currentTarget.value) })} /></label>
+                  <label><span>Chord progression</span><select value={activity.beepProgression} onchange={(event) => mutateActivity({ beepProgression: event.currentTarget.value })}>{#each BEEP_PROGRESSIONS as option}<option value={option.value}>{option.label}</option>{/each}</select></label>
+                  <label><span>On finish</span><div class="model-select-row"><select value={activity.completionSound} onchange={(event) => mutateActivity({ completionSound: event.currentTarget.value })}>{#each COMPLETION_SOUNDS as option}<option value={option.value}>{option.label}</option>{/each}</select><button type="button" class="icon-button" aria-label="Preview sound" onclick={async () => { await player.resume(); player.completion(activity.completionSound, activity.beepVolume); }}><Icon name="play" /></button></div></label>
+                </section>
+                <section class="settings-card"><header><div><h3>Quota visibility</h3><p>Choose which current quota rows appear in Beeper and its collapsed rotation.</p></div></header>
+                  {#each quotaEntries as entry (entry.key)}
+                    <div class="quota-pref"><span><strong>{entry.provider.label || entry.provider.provider} / {entry.item.label || entry.item.kind}</strong><small>{Math.round(Number(entry.item.remainingPercent) || 0)}% remaining</small></span><label class="switch"><input type="checkbox" checked={!new Set(activity.hiddenQuotaKeys || []).has(entry.key)} aria-label={`Show ${entry.provider.label || entry.provider.provider} / ${entry.item.label || entry.item.kind}`} onchange={(event) => toggleQuota(entry.key, event.currentTarget.checked)} /><span></span></label></div>
+                  {:else}<div class="settings-empty">{quota?.error || "No current quota data."}</div>{/each}
+                </section>
+                {#if balanceProviders.length}
+                  <section class="settings-card"><header><div><h3>Balance totals</h3><p>Set the denominator used to calculate the remaining percentage of balance quota entries.</p></div></header>
+                    {#each balanceProviders as provider (provider.provider)}
+                      {@const balance = (provider.quotas || []).find((item: any) => item.kind === "balance")}
+                      {@const total = balanceTotalFor(provider.provider)}
+                      <label><span>{provider.label || provider.provider} / {balance?.label || "Balance"}</span><input type="number" min="0" step="any" value={activity.balanceTotals?.[provider.provider] ?? DEFAULT_BALANCE_TOTAL} oninput={(event) => setBalanceTotal(provider.provider, event.currentTarget.value)} /><small>Current balance {balance?.value != null ? Number(balance.value).toFixed(2) : "—"} out of {total}. Clear to reset to {DEFAULT_BALANCE_TOTAL}.</small></label>
+                    {/each}
+                  </section>
+                {/if}
               </section>
             {:else if section === "providers"}
               <section class="settings-stack"><header class="settings-section-heading"><h3>Providers</h3><p>Enable the four built-in integrations. Existing Sessions are not interrupted.</p></header>

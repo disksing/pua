@@ -3830,7 +3830,7 @@ func TestNativeSchedulerProvesUncertainLegacyTicksWereNotAccepted(t *testing.T) 
 	}
 }
 
-func TestNativeSchedulerInterruptsOnlyCanonicalActiveLegacyTick(t *testing.T) {
+func TestNativeSchedulerWaitsForCanonicalActiveLegacyTick(t *testing.T) {
 	fake := newRuntimeFakeAgentHub()
 	hub := httptest.NewServer(fake)
 	defer hub.Close()
@@ -3839,35 +3839,123 @@ func TestNativeSchedulerInterruptsOnlyCanonicalActiveLegacyTick(t *testing.T) {
 	message := seedCanonicalLegacyTick(t, fake, workspace, "msg-active-legacy-tick", resourceMessageDelivered,
 		"running", turnID, agentHubTurn{TurnID: turnID, Status: "running"}, true)
 
-	if err := newNativeScheduler(manager, workspace).cancelLegacyTicks(context.Background()); err != nil {
-		t.Fatal(err)
+	if err := newNativeScheduler(manager, workspace).cancelLegacyTicks(context.Background()); err == nil ||
+		!strings.Contains(err.Error(), "no conditional Turn interrupt") {
+		t.Fatalf("active legacy tick error = %v", err)
 	}
-	retired, found, err := mailboxMessageByID(workspace.Path, message.ID)
-	if err != nil || !found || retired.Status != resourceMessageDelivered || retired.TurnID != turnID ||
-		retired.InterruptTurnID != turnID || retired.InterruptAt == "" || retired.TurnTerminalAt == "" {
-		t.Fatalf("active tick retirement = %#v, found=%v err=%v", retired, found, err)
+	pending, found, err := mailboxMessageByID(workspace.Path, message.ID)
+	if err != nil || !found || pending.Status != resourceMessageDelivered || pending.TurnID != turnID ||
+		pending.InterruptTurnID != "" || pending.InterruptAt != "" || pending.TurnTerminalAt != "" {
+		t.Fatalf("active tick checkpoint = %#v, found=%v err=%v", pending, found, err)
 	}
 	fake.mu.Lock()
 	actions := append([]string(nil), fake.actions...)
-	terminal := fake.turns[message.AgentHubSessionID][turnID]
+	active := fake.turns[message.AgentHubSessionID][turnID]
 	fake.mu.Unlock()
-	if !reflect.DeepEqual(actions, []string{"interrupt"}) || !terminal.Closed || terminal.Status != "cancelled" {
-		t.Fatalf("active tick AgentHub state: actions=%#v turn=%#v", actions, terminal)
+	if len(actions) != 0 || active.Closed || active.Status != "running" {
+		t.Fatalf("active tick AgentHub state: actions=%#v turn=%#v", actions, active)
 	}
 
-	// TurnTerminalAt is the durable restart proof. A new manager must not issue
-	// another interrupt or require AgentHub history to retire the same tick.
+	// Model a checkpoint written by the previous implementation immediately
+	// before its unsafe call. A restart must not replay that Session-wide
+	// interrupt now that the API is known to lack a Turn precondition.
+	if _, err := updateMailboxMessage(workspace.Path, message.ID, func(current *resourceMailboxMessage) {
+		current.InterruptTurnID = turnID
+		current.InterruptAt = "2026-08-01T00:00:02Z"
+		current.UpdatedAt = current.InterruptAt
+	}); err != nil {
+		t.Fatal(err)
+	}
 	restarted := newAgentManager(manager.server)
 	restarted.now = manager.now
 	manager.server.agents = restarted
-	if err := newNativeScheduler(restarted, workspace).cancelLegacyTicks(context.Background()); err != nil {
-		t.Fatal(err)
+	if err := newNativeScheduler(restarted, workspace).cancelLegacyTicks(context.Background()); err == nil ||
+		!strings.Contains(err.Error(), "no conditional Turn interrupt") {
+		t.Fatalf("restarted active legacy tick error = %v", err)
 	}
 	fake.mu.Lock()
 	actions = append([]string(nil), fake.actions...)
 	fake.mu.Unlock()
-	if !reflect.DeepEqual(actions, []string{"interrupt"}) {
-		t.Fatalf("restart repeated a terminal tick interrupt: %#v", actions)
+	if len(actions) != 0 {
+		t.Fatalf("restart interrupted an active legacy tick: %#v", actions)
+	}
+	pending, found, err = mailboxMessageByID(workspace.Path, message.ID)
+	if err != nil || !found || pending.InterruptTurnID != turnID ||
+		pending.InterruptAt != "2026-08-01T00:00:02Z" || pending.TurnTerminalAt != "" {
+		t.Fatalf("restarted legacy intent checkpoint = %#v, found=%v err=%v", pending, found, err)
+	}
+}
+
+func TestNativeSchedulerNeverInterruptsTurnThatReplacesLegacyTick(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	hub := httptest.NewServer(fake)
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+	const oldTurnID = "turn-racing-legacy-tick"
+	const newTurnID = "turn-new-scheduler-chat"
+	message := seedCanonicalLegacyTick(t, fake, workspace, "msg-racing-legacy-tick", resourceMessageDelivered,
+		"running", oldTurnID, agentHubTurn{TurnID: oldTurnID, Status: "running"}, true)
+
+	// The Turn endpoint returns the running snapshot, then deterministically
+	// closes that Turn and starts an unrelated one. This is the exact window in
+	// which a Session-scoped interrupt would cancel the replacement Turn.
+	fake.mu.Lock()
+	fake.turnHook = func(sessionID, turnID string) {
+		fake.mu.Lock()
+		defer fake.mu.Unlock()
+		fake.turnHook = nil
+		if sessionID != message.AgentHubSessionID || turnID != oldTurnID {
+			return
+		}
+		old := fake.turns[sessionID][oldTurnID]
+		old.Status = "completed"
+		old.Closed = true
+		old.EndedAt = "2026-08-01T00:00:04Z"
+		fake.turns[sessionID][oldTurnID] = old
+		fake.turns[sessionID][newTurnID] = agentHubTurn{
+			ID: newTurnID, TurnID: newTurnID, Status: "running", TriggerMessageID: "msg-new-scheduler-chat",
+		}
+		session := fake.sessions[sessionID]
+		session.State = "running"
+		session.CurrentTurnID = newTurnID
+		fake.sessions[sessionID] = session
+	}
+	fake.mu.Unlock()
+
+	if err := newNativeScheduler(manager, workspace).cancelLegacyTicks(context.Background()); err == nil ||
+		!strings.Contains(err.Error(), "no conditional Turn interrupt") {
+		t.Fatalf("racing legacy tick error = %v", err)
+	}
+	fake.mu.Lock()
+	actions := append([]string(nil), fake.actions...)
+	session := fake.sessions[message.AgentHubSessionID]
+	replacement := fake.turns[message.AgentHubSessionID][newTurnID]
+	fake.mu.Unlock()
+	if len(actions) != 0 || session.CurrentTurnID != newTurnID || session.State != "running" ||
+		replacement.Closed || replacement.Status != "running" {
+		t.Fatalf("replacement Turn was disturbed: actions=%#v session=%#v turn=%#v", actions, session, replacement)
+	}
+	pending, found, err := mailboxMessageByID(workspace.Path, message.ID)
+	if err != nil || !found || pending.TurnTerminalAt != "" || pending.InterruptTurnID != "" || pending.InterruptAt != "" {
+		t.Fatalf("racing tick checkpoint = %#v, found=%v err=%v", pending, found, err)
+	}
+
+	// The next pass observes the exact legacy Turn's terminal record and may
+	// retire it without touching the unrelated active chat.
+	if err := newNativeScheduler(manager, workspace).cancelLegacyTicks(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	retired, found, err := mailboxMessageByID(workspace.Path, message.ID)
+	if err != nil || !found || retired.TurnTerminalAt != "2026-08-01T00:00:04Z" {
+		t.Fatalf("terminal legacy tick = %#v, found=%v err=%v", retired, found, err)
+	}
+	fake.mu.Lock()
+	actions = append([]string(nil), fake.actions...)
+	session = fake.sessions[message.AgentHubSessionID]
+	replacement = fake.turns[message.AgentHubSessionID][newTurnID]
+	fake.mu.Unlock()
+	if len(actions) != 0 || session.CurrentTurnID != newTurnID || replacement.Closed || replacement.Status != "running" {
+		t.Fatalf("terminal proof disturbed replacement Turn: actions=%#v session=%#v turn=%#v", actions, session, replacement)
 	}
 }
 
@@ -3941,43 +4029,6 @@ func TestNativeSchedulerLegacyTickIdentityAmbiguityFailsClosedAcrossRestart(t *t
 	}
 }
 
-func TestNativeSchedulerRetriesUnknownLegacyTickInterruptAfterRestart(t *testing.T) {
-	fake := newRuntimeFakeAgentHub()
-	hub := httptest.NewServer(fake)
-	defer hub.Close()
-	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
-	const turnID = "turn-retry-legacy-tick"
-	message := seedCanonicalLegacyTick(t, fake, workspace, "msg-retry-legacy-tick", resourceMessageDelivered,
-		"running", turnID, agentHubTurn{TurnID: turnID, Status: "running"}, true)
-	fake.mu.Lock()
-	fake.failNextInterrupt = true
-	fake.mu.Unlock()
-	if err := newNativeScheduler(manager, workspace).cancelLegacyTicks(context.Background()); err == nil {
-		t.Fatal("ambiguous interrupt unexpectedly completed migration")
-	}
-	pending, found, err := mailboxMessageByID(workspace.Path, message.ID)
-	if err != nil || !found || pending.InterruptTurnID != turnID || pending.InterruptAt == "" || pending.TurnTerminalAt != "" {
-		t.Fatalf("durable interrupt intent = %#v, found=%v err=%v", pending, found, err)
-	}
-
-	restarted := newAgentManager(manager.server)
-	restarted.now = manager.now
-	manager.server.agents = restarted
-	if err := newNativeScheduler(restarted, workspace).cancelLegacyTicks(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	retired, found, err := mailboxMessageByID(workspace.Path, message.ID)
-	if err != nil || !found || retired.TurnTerminalAt == "" {
-		t.Fatalf("restarted interrupt retirement = %#v, found=%v err=%v", retired, found, err)
-	}
-	fake.mu.Lock()
-	actions := append([]string(nil), fake.actions...)
-	fake.mu.Unlock()
-	if !reflect.DeepEqual(actions, []string{"interrupt"}) {
-		t.Fatalf("restart interrupt actions = %#v", actions)
-	}
-}
-
 func TestNativeSchedulerBlocksMigrationUntilLegacyTickTurnIsTerminal(t *testing.T) {
 	fake := newRuntimeFakeAgentHub()
 	hub := httptest.NewServer(fake)
@@ -3994,12 +4045,10 @@ func TestNativeSchedulerBlocksMigrationUntilLegacyTickTurnIsTerminal(t *testing.
 	const turnID = "turn-blocking-legacy-tick"
 	message := seedCanonicalLegacyTick(t, fake, workspace, "msg-blocking-legacy-tick", resourceMessageDelivered,
 		"running", turnID, agentHubTurn{TurnID: turnID, Status: "running"}, true)
-	fake.mu.Lock()
-	fake.failNextInterrupt = true
-	fake.mu.Unlock()
 	native := newNativeScheduler(manager, workspace)
-	if _, err := native.Reconcile(context.Background(), manager.now()); err == nil {
-		t.Fatal("migration proceeded across an unknown legacy Turn interrupt")
+	if _, err := native.Reconcile(context.Background(), manager.now()); err == nil ||
+		!strings.Contains(err.Error(), "no conditional Turn interrupt") {
+		t.Fatalf("active legacy Turn migration error = %v", err)
 	}
 	mailbox, err := loadResourceMailboxForResource(workspace.Path, app.SchedulerResourceID)
 	if err != nil {
@@ -4011,9 +4060,20 @@ func TestNativeSchedulerBlocksMigrationUntilLegacyTickTurnIsTerminal(t *testing.
 		}
 	}
 	pending, found, err := mailboxMessageByID(workspace.Path, message.ID)
-	if err != nil || !found || pending.TurnTerminalAt != "" || pending.InterruptTurnID != turnID {
+	if err != nil || !found || pending.TurnTerminalAt != "" || pending.InterruptTurnID != "" || pending.InterruptAt != "" {
 		t.Fatalf("pending legacy retirement = %#v, found=%v err=%v", pending, found, err)
 	}
+	fake.mu.Lock()
+	terminal := fake.turns[message.AgentHubSessionID][turnID]
+	terminal.Status = "completed"
+	terminal.Closed = true
+	terminal.EndedAt = "2026-08-01T00:00:05Z"
+	fake.turns[message.AgentHubSessionID][turnID] = terminal
+	session := fake.sessions[message.AgentHubSessionID]
+	session.State = "ready"
+	session.CurrentTurnID = ""
+	fake.sessions[message.AgentHubSessionID] = session
+	fake.mu.Unlock()
 
 	if _, err := native.Reconcile(context.Background(), manager.now()); err != nil {
 		t.Fatal(err)
@@ -4030,6 +4090,12 @@ func TestNativeSchedulerBlocksMigrationUntilLegacyTickTurnIsTerminal(t *testing.
 	}
 	if migrationCount != 1 {
 		t.Fatalf("terminal legacy tick produced %d migration messages, want 1", migrationCount)
+	}
+	fake.mu.Lock()
+	actions := append([]string(nil), fake.actions...)
+	fake.mu.Unlock()
+	if len(actions) != 0 {
+		t.Fatalf("migration issued a Session action: %#v", actions)
 	}
 }
 

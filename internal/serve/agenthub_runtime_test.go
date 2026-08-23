@@ -48,6 +48,7 @@ type runtimeFakeAgentHub struct {
 	stopHook             func(string)
 	resumeHook           func(string)
 	messageHook          func(string, agentHubInboundMessage)
+	turnHook             func(string, string)
 	messageSteers        []bool
 	messageRoles         []string
 	messageSenders       []*agentHubMessageSender
@@ -187,7 +188,11 @@ func (f *runtimeFakeAgentHub) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		turnID, _ := url.PathUnescape(parts[4])
 		f.mu.Lock()
 		turn, ok := f.turns[id][turnID]
+		turnHook := f.turnHook
 		f.mu.Unlock()
+		if turnHook != nil {
+			turnHook(id, turnID)
+		}
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
 			return

@@ -906,8 +906,8 @@ func (n *NativeScheduler) cancelLegacyTicks(ctx context.Context) error {
 // have durably accepted a v1 tick while the local mailbox still says
 // delivering or delivery_unknown. Migration cannot proceed until the stable
 // input is proved absent, or its exact materialized Turn is terminal. Session
-// source validation and trigger ownership prevent a stale receipt from
-// interrupting an unrelated Scheduler conversation.
+// source validation and trigger ownership prevent a stale receipt from being
+// confused with an unrelated Scheduler conversation.
 func (n *NativeScheduler) resolveLegacyTick(ctx context.Context, message resourceMailboxMessage) error {
 	generationID := strings.TrimSpace(message.GenerationID)
 	if generationID == "" {
@@ -972,24 +972,12 @@ func (n *NativeScheduler) resolveLegacyTick(ctx context.Context, message resourc
 		}
 		return fmt.Errorf("legacy tick Turn %s is not terminal yet", turnID)
 	}
-	if err := n.markLegacyTickInterruptIntent(message.ID, turnID); err != nil {
-		return err
-	}
-	interrupted, err := client.Interrupt(ctx, sessionID)
-	if err != nil {
-		return fmt.Errorf("interrupt legacy tick Turn %s: %w", turnID, err)
-	}
-	if !agentHubSessionExactlyMatchesGeneration(cfg, record, interrupted) {
-		return errors.New("AgentHub interrupt response changed Session identity")
-	}
-	terminal, _, err := client.SessionTurn(ctx, sessionID, turnID)
-	if err != nil {
-		return fmt.Errorf("confirm legacy tick Turn %s terminal: %w", turnID, err)
-	}
-	if !terminal.Closed && !terminalTurnStatus(terminal.Status) {
-		return fmt.Errorf("legacy tick Turn %s remains active after interrupt", turnID)
-	}
-	return n.markLegacyTickTurnTerminal(message.ID, terminal)
+	// AgentHub v1 exposes only a Session-scoped interrupt with an empty request
+	// body. It has no expected Turn ID or other atomic precondition. Calling it
+	// here would race the observed Turn finishing and a new Scheduler chat
+	// starting, and could interrupt that unrelated Turn. Keep migration blocked
+	// until the exact, ownership-checked legacy Turn is observed terminal.
+	return fmt.Errorf("legacy tick Turn %s is active; AgentHub has no conditional Turn interrupt, waiting for terminal state", turnID)
 }
 
 // findCanonicalLegacyTickMessage is receipt-aware. Terminal mailbox receipts
@@ -1115,17 +1103,6 @@ func (n *NativeScheduler) markLegacyTickAccepted(messageID, generationID, sessio
 		}
 		message.UpdatedAt = now
 		message.LastError, message.LastErrorCode = "", ""
-	})
-	return err
-}
-
-func (n *NativeScheduler) markLegacyTickInterruptIntent(messageID, turnID string) error {
-	_, err := updateMailboxMessage(n.workspace.Path, messageID, func(message *resourceMailboxMessage) {
-		if message.InterruptTurnID == "" {
-			message.InterruptTurnID = turnID
-			message.InterruptAt = time.Now().Format(time.RFC3339Nano)
-			message.UpdatedAt = message.InterruptAt
-		}
 	})
 	return err
 }

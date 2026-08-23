@@ -679,7 +679,7 @@ func (s *server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err, http.StatusBadRequest)
 			return
 		}
-		writeJSON(w, detail)
+		writeJSON(w, schedulerResourceDetailAPIResponse(detail))
 	case "scheduler":
 		s.handleScheduler(w, r, id, parts[2:])
 	case "users":

@@ -1,5 +1,6 @@
 import { RequestCoordinator, StaleResponseError } from "../api/client";
 import type { SchedulerSaveInput } from "../models/detail";
+import { isSchedulerRevision } from "../models/workspace";
 
 export interface SchedulerMutationContext {
 	workspaceId: string;
@@ -63,7 +64,7 @@ export function createSchedulerMutationController(dependencies: SchedulerMutatio
 	async function save(identity: SchedulerMutationContext, input: SchedulerSaveInput): Promise<SchedulerMutationLease | null> {
 		if (!input.description.trim() || !input.condition.trim() || validateTarget(identity, input.target)) return null;
 		const scheduleId = input.scheduleId || "";
-		if (scheduleId && (!Number.isSafeInteger(input.expectedRevision) || (input.expectedRevision || 0) <= 0)) return null;
+		if (scheduleId && !isSchedulerRevision(input.expectedRevision)) return null;
 		const body = {
 			description: input.description,
 			condition: input.condition,

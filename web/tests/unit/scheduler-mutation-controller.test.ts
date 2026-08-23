@@ -50,10 +50,10 @@ describe("SchedulerMutationController", () => {
 		await expect(operations.save({ ...input, target: "scheduler" })).resolves.toBeNull();
 		expect(request).not.toHaveBeenCalled();
 		await expect(operations.save({ ...input, scheduleId: "schedule/one" } as SchedulerSaveInput)).resolves.toBeNull();
-		await expect(operations.save({ ...input, scheduleId: "schedule/one", expectedRevision: 0 })).resolves.toBeNull();
+		await expect(operations.save({ ...input, scheduleId: "schedule/one", expectedRevision: "0" })).resolves.toBeNull();
 		expect(request).not.toHaveBeenCalled();
 		await release(operations.save(input));
-		await release(operations.save({ ...input, scheduleId: "schedule/one", expectedRevision: 7 }));
+		await release(operations.save({ ...input, scheduleId: "schedule/one", expectedRevision: "7" }));
 		await release(operations.setPaused("schedule/one", false));
 		await release(operations.remove("schedule/one"));
 
@@ -62,11 +62,55 @@ describe("SchedulerMutationController", () => {
 			{
 				path: "/api/workspaces/workspace%20current/scheduler/schedule%2Fone",
 				method: "PUT",
-				body: JSON.stringify({ ...input, expectedRevision: 7 }),
+				body: JSON.stringify({ ...input, expectedRevision: "7" }),
 			},
 			{ path: "/api/workspaces/workspace%20current/scheduler/schedule%2Fone/resume", method: "POST", body: undefined },
 			{ path: "/api/workspaces/workspace%20current/scheduler/schedule%2Fone", method: "DELETE", body: undefined },
 		]);
+	});
+
+	it("sends full-width uint64 revisions without numeric coercion", async () => {
+		const context: SchedulerMutationContext = { workspaceId: "alpha", navigationVersion: 1, selectedId: "scheduler" };
+		const request = vi.fn(async () => ({}));
+		const controller = createSchedulerMutationController({
+			context: () => context,
+			isCurrentWorkspace: () => true,
+			resolveResourceTitle: () => "Resource",
+			request: request as SchedulerMutationDependencies["request"],
+		});
+		const fields = { description: "Review", condition: "later", target: "workspace" };
+
+		await release(controller.operations().save({
+			...fields,
+			scheduleId: "schedule-maximum",
+			expectedRevision: "18446744073709551615",
+		}));
+		expect(request).toHaveBeenCalledWith(
+			"/api/workspaces/alpha/scheduler/schedule-maximum",
+			expect.objectContaining({
+				body: JSON.stringify({ ...fields, expectedRevision: "18446744073709551615" }),
+			})
+		);
+	});
+
+	it.each(["", "0", "01", "+1", "1.0", "18446744073709551616", 9007199254740992 as unknown as string])("rejects noncanonical revision %j", async (expectedRevision) => {
+		const context: SchedulerMutationContext = { workspaceId: "alpha", navigationVersion: 1, selectedId: "scheduler" };
+		const request = vi.fn(async () => ({}));
+		const controller = createSchedulerMutationController({
+			context: () => context,
+			isCurrentWorkspace: () => true,
+			resolveResourceTitle: () => "Resource",
+			request: request as SchedulerMutationDependencies["request"],
+		});
+
+		await expect(controller.operations().save({
+			description: "Review",
+			condition: "later",
+			target: "workspace",
+			scheduleId: "schedule-invalid",
+			expectedRevision,
+		})).resolves.toBeNull();
+		expect(request).not.toHaveBeenCalled();
 	});
 
 	it("supersedes duplicate keys without cancelling independent operations", async () => {
@@ -142,7 +186,7 @@ describe("SchedulerMutationController", () => {
 
 		await expect(controller.operations().save({
 			scheduleId: "schedule-stale",
-			expectedRevision: 4,
+			expectedRevision: "4",
 			description: "Review release",
 			condition: "when green",
 			target: "workspace",

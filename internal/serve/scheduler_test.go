@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/disksing/pua/internal/app"
+	"github.com/disksing/pua/internal/schedulerapi"
 )
 
 type schedulerV1TestDefinition struct {
@@ -179,7 +180,7 @@ func TestSchedulerHTTPAPIRoutesNaturalLanguageAndNativeChanges(t *testing.T) {
 	if err != nil || len(mailbox.Messages) != 1 || mailbox.Messages[0].Role != "user" || mailbox.Messages[0].Sender == nil || mailbox.Messages[0].Sender.Name != "Ada" || !strings.Contains(mailbox.Messages[0].Text, "IANA timezone") {
 		t.Fatalf("Scheduler compilation mailbox = %#v, %v", mailbox.Messages, err)
 	}
-	revisionedCreate := request(http.MethodPost, "/api/workspaces/workspace-scheduler/scheduler", `{"expectedRevision":1,"description":"Review","condition":"tomorrow morning","target":"workspace"}`)
+	revisionedCreate := request(http.MethodPost, "/api/workspaces/workspace-scheduler/scheduler", `{"expectedRevision":"1","description":"Review","condition":"tomorrow morning","target":"workspace"}`)
 	if revisionedCreate.Code != http.StatusBadRequest || !strings.Contains(revisionedCreate.Body.String(), "expectedRevision is only valid") {
 		t.Fatalf("natural-language create with revision = %d %s", revisionedCreate.Code, revisionedCreate.Body.String())
 	}
@@ -209,12 +210,13 @@ func TestSchedulerHTTPAPIRoutesNaturalLanguageAndNativeChanges(t *testing.T) {
 	if createdResponse.Code != http.StatusOK {
 		t.Fatalf("native create = %d %s", createdResponse.Code, createdResponse.Body.String())
 	}
-	var created app.Schedule
-	if err := json.Unmarshal(createdResponse.Body.Bytes(), &created); err != nil || created.Revision != 1 || created.Trigger == nil {
-		t.Fatalf("created schedule = %#v, %v", created, err)
+	var createdResponseSchedule schedulerapi.Schedule
+	if err := json.Unmarshal(createdResponse.Body.Bytes(), &createdResponseSchedule); err != nil || createdResponseSchedule.Revision != "1" || createdResponseSchedule.Trigger == nil {
+		t.Fatalf("created schedule = %#v, %v", createdResponseSchedule, err)
 	}
+	created := schedulerTestScheduleByID(t, puaWorkspace, createdResponseSchedule.ID)
 	selfTargetUpdateAt := time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339Nano)
-	selfTargetUpdate := request(http.MethodPost, "/api/workspaces/workspace-scheduler/scheduler/changes", `{"operation":"update","id":"`+created.ID+`","expectedRevision":1,"target":"scheduler","trigger":{"type":"at","at":"`+selfTargetUpdateAt+`"}}`)
+	selfTargetUpdate := request(http.MethodPost, "/api/workspaces/workspace-scheduler/scheduler/changes", `{"operation":"update","id":"`+created.ID+`","expectedRevision":"1","target":"scheduler","trigger":{"type":"at","at":"`+selfTargetUpdateAt+`"}}`)
 	if selfTargetUpdate.Code != http.StatusBadRequest || !strings.Contains(selfTargetUpdate.Body.String(), `"code":"schedule_target_invalid"`) {
 		t.Fatalf("native self-target update = %d %s", selfTargetUpdate.Code, selfTargetUpdate.Body.String())
 	}
@@ -223,10 +225,10 @@ func TestSchedulerHTTPAPIRoutesNaturalLanguageAndNativeChanges(t *testing.T) {
 	}
 	for _, invalidUpdate := range []string{
 		`{"description":"Review later","condition":"next week","target":"workspace"}`,
-		`{"expectedRevision":0,"description":"Review later","condition":"next week","target":"workspace"}`,
+		`{"expectedRevision":"0","description":"Review later","condition":"next week","target":"workspace"}`,
 	} {
 		rejected := request(http.MethodPut, "/api/workspaces/workspace-scheduler/scheduler/"+created.ID, invalidUpdate)
-		if rejected.Code != http.StatusBadRequest || !strings.Contains(rejected.Body.String(), "expectedRevision is required") {
+		if rejected.Code != http.StatusBadRequest || !strings.Contains(rejected.Body.String(), "expectedRevision") {
 			t.Fatalf("natural-language update without revision = %d %s", rejected.Code, rejected.Body.String())
 		}
 	}
@@ -234,7 +236,7 @@ func TestSchedulerHTTPAPIRoutesNaturalLanguageAndNativeChanges(t *testing.T) {
 	if err != nil || len(mailbox.Messages) != 1 {
 		t.Fatalf("rejected revision mutated Scheduler mailbox: %#v, %v", mailbox.Messages, err)
 	}
-	naturalUpdate := request(http.MethodPut, "/api/workspaces/workspace-scheduler/scheduler/"+created.ID, `{"expectedRevision":1,"description":"Review later","condition":"next week","target":"workspace"}`)
+	naturalUpdate := request(http.MethodPut, "/api/workspaces/workspace-scheduler/scheduler/"+created.ID, `{"expectedRevision":"1","description":"Review later","condition":"next week","target":"workspace"}`)
 	if naturalUpdate.Code != http.StatusAccepted {
 		t.Fatalf("natural-language update = %d %s", naturalUpdate.Code, naturalUpdate.Body.String())
 	}
@@ -242,7 +244,7 @@ func TestSchedulerHTTPAPIRoutesNaturalLanguageAndNativeChanges(t *testing.T) {
 	if err != nil || len(mailbox.Messages) != 2 || mailbox.Messages[1].Sender == nil || mailbox.Messages[1].Sender.Name != "Ada" || !strings.Contains(mailbox.Messages[1].Text, "Please update a native schedule for \""+created.ID+"\"") || !strings.Contains(mailbox.Messages[1].Text, "Pass exactly `--revision=1`") {
 		t.Fatalf("Scheduler update compilation mailbox = %#v, %v", mailbox.Messages, err)
 	}
-	conflict := request(http.MethodPost, "/api/workspaces/workspace-scheduler/scheduler/changes", `{"operation":"update","id":"`+created.ID+`","expectedRevision":9,"description":"Changed","trigger":{"type":"at","at":"`+at+`"}}`)
+	conflict := request(http.MethodPost, "/api/workspaces/workspace-scheduler/scheduler/changes", `{"operation":"update","id":"`+created.ID+`","expectedRevision":"9","description":"Changed","trigger":{"type":"at","at":"`+at+`"}}`)
 	if conflict.Code != http.StatusConflict || !strings.Contains(conflict.Body.String(), "schedule_revision_conflict") {
 		t.Fatalf("revision conflict = %d %s", conflict.Code, conflict.Body.String())
 	}
@@ -318,7 +320,7 @@ func TestSchedulerNaturalLanguageCompilationPromptUsesWorkspaceLanguage(t *testi
 			for _, requestCase := range paths {
 				requestInput := maps.Clone(input)
 				if requestCase.expectedRevision != 0 {
-					requestInput["expectedRevision"] = requestCase.expectedRevision
+					requestInput["expectedRevision"] = strconv.FormatUint(requestCase.expectedRevision, 10)
 				}
 				body, err := json.Marshal(requestInput)
 				if err != nil {
@@ -408,7 +410,7 @@ func TestSchedulerHTTPRevisionExhaustionIsConflict(t *testing.T) {
 	t.Cleanup(s.agents.waitBackground)
 	description := "Cannot wrap"
 	body, err := json.Marshal(schedulerChangeRequest{
-		Operation: string(app.ScheduleChangeUpdate), ID: created.ID, ExpectedRevision: ^uint64(0),
+		Operation: string(app.ScheduleChangeUpdate), ID: created.ID, ExpectedRevision: schedulerapi.RevisionFromUint64(^uint64(0)),
 		Description: &description, Trigger: &trigger,
 	})
 	if err != nil {
@@ -439,6 +441,135 @@ func TestSchedulerHTTPRevisionExhaustionIsConflict(t *testing.T) {
 	loaded, err := puaWorkspace.Scheduler()
 	if err != nil || len(loaded.Schedules) != 1 || loaded.Schedules[0].Revision != ^uint64(0) {
 		t.Fatalf("Scheduler after HTTP revision exhaustion = %#v, %v", loaded.Schedules, err)
+	}
+}
+
+func TestSchedulerHTTPRevisionTransportPreservesUint64(t *testing.T) {
+	root := t.TempDir()
+	puaWorkspace, err := app.Initialize(root, "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := puaWorkspace.RegisterUser("Ada"); err != nil {
+		t.Fatal(err)
+	}
+	trigger := app.ScheduleTrigger{
+		Type: app.ScheduleTriggerInterval, EverySeconds: 60, AnchorAt: "2026-08-24T00:00:00Z",
+	}
+	created, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Revision boundary", Condition: "every minute", Target: "workspace", Trigger: &trigger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	setRevision := func(revision uint64) {
+		t.Helper()
+		config, readErr := puaWorkspace.Scheduler()
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		config.Schedules[0].Revision = revision
+		data, marshalErr := json.MarshalIndent(config, "", "  ")
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if writeErr := os.WriteFile(filepath.Join(root, "scheduler", "scheduler.json"), append(data, '\n'), 0o644); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+
+	workspace := serveWorkspace{ID: "workspace-scheduler-transport", Name: "Scheduler Revision", Path: root}
+	s := &server{config: filepath.Join(t.TempDir(), "serve.json")}
+	if err := s.saveConfig(config{Version: agentHubConfigVersion, Workspaces: []serveWorkspace{workspace}}); err != nil {
+		t.Fatal(err)
+	}
+	s.agents = newAgentManager(s)
+	t.Cleanup(s.agents.waitBackground)
+	request := func(method, path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		httpRequest := httptest.NewRequest(method, path, strings.NewReader(body))
+		httpRequest.Header.Set(workspaceUserHeader, "Ada")
+		s.handleWorkspace(recorder, httpRequest)
+		return recorder
+	}
+
+	const maxSafeRevision = uint64(1<<53 - 1)
+	const firstUnsafeRevision = "9007199254740992"
+	const maximumRevision = "18446744073709551615"
+	setRevision(maxSafeRevision)
+	updated := request(http.MethodPost, "/api/workspaces/"+workspace.ID+"/scheduler/changes",
+		`{"operation":"update","id":"`+created.ID+`","expectedRevision":"9007199254740991","description":"Exact revision","trigger":{"type":"interval","everySeconds":60,"anchorAt":"2026-08-24T00:00:00Z"}}`)
+	if updated.Code != http.StatusOK || !strings.Contains(updated.Body.String(), `"revision": "`+firstUnsafeRevision+`"`) {
+		t.Fatalf("unsafe revision update = %d %s", updated.Code, updated.Body.String())
+	}
+
+	for name, path := range map[string]string{
+		"snapshot":        "/api/workspaces/" + workspace.ID + "/scheduler",
+		"resource detail": "/api/workspaces/" + workspace.ID + "/resources/scheduler",
+	} {
+		t.Run(name, func(t *testing.T) {
+			response := request(http.MethodGet, path, "")
+			if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"revision": "`+firstUnsafeRevision+`"`) || strings.Contains(response.Body.String(), `"revision": 9007199254740992`) {
+				t.Fatalf("%s revision response = %d %s", name, response.Code, response.Body.String())
+			}
+		})
+	}
+
+	natural := request(http.MethodPut, "/api/workspaces/"+workspace.ID+"/scheduler/"+created.ID,
+		`{"expectedRevision":"`+firstUnsafeRevision+`","description":"Review later","condition":"next week","target":"workspace"}`)
+	if natural.Code != http.StatusAccepted {
+		t.Fatalf("natural update = %d %s", natural.Code, natural.Body.String())
+	}
+	mailbox, err := loadResourceMailboxForResource(root, app.SchedulerResourceID)
+	if err != nil || len(mailbox.Messages) != 1 || !strings.Contains(mailbox.Messages[0].Text, "Pass exactly `--revision="+firstUnsafeRevision+"`") {
+		t.Fatalf("unsafe revision compilation prompt = %#v, %v", mailbox.Messages, err)
+	}
+
+	conflict := request(http.MethodPost, "/api/workspaces/"+workspace.ID+"/scheduler/changes",
+		`{"operation":"update","id":"`+created.ID+`","expectedRevision":"9007199254740991","description":"Stale","trigger":{"type":"interval","everySeconds":60,"anchorAt":"2026-08-24T00:00:00Z"}}`)
+	if conflict.Code != http.StatusConflict || !strings.Contains(conflict.Body.String(), "revision is "+firstUnsafeRevision+", expected 9007199254740991") {
+		t.Fatalf("exact revision conflict = %d %s", conflict.Code, conflict.Body.String())
+	}
+
+	setRevision(^uint64(0))
+	maximumPrompt := request(http.MethodPut, "/api/workspaces/"+workspace.ID+"/scheduler/"+created.ID,
+		`{"expectedRevision":"`+maximumRevision+`","description":"Maximum review","condition":"next week","target":"workspace"}`)
+	if maximumPrompt.Code != http.StatusAccepted {
+		t.Fatalf("maximum revision natural update = %d %s", maximumPrompt.Code, maximumPrompt.Body.String())
+	}
+	mailbox, err = loadResourceMailboxForResource(root, app.SchedulerResourceID)
+	if err != nil || len(mailbox.Messages) != 2 || !strings.Contains(mailbox.Messages[1].Text, "Pass exactly `--revision="+maximumRevision+"`") {
+		t.Fatalf("maximum revision compilation prompt = %#v, %v", mailbox.Messages, err)
+	}
+	maximumConflict := request(http.MethodPost, "/api/workspaces/"+workspace.ID+"/scheduler/changes",
+		`{"operation":"update","id":"`+created.ID+`","expectedRevision":"`+firstUnsafeRevision+`","description":"Stale maximum","trigger":{"type":"interval","everySeconds":60,"anchorAt":"2026-08-24T00:00:00Z"}}`)
+	if maximumConflict.Code != http.StatusConflict || !strings.Contains(maximumConflict.Body.String(), "revision is "+maximumRevision+", expected "+firstUnsafeRevision) {
+		t.Fatalf("maximum revision conflict = %d %s", maximumConflict.Code, maximumConflict.Body.String())
+	}
+	exhausted := request(http.MethodPost, "/api/workspaces/"+workspace.ID+"/scheduler/changes",
+		`{"operation":"update","id":"`+created.ID+`","expectedRevision":"`+maximumRevision+`","description":"Cannot wrap","trigger":{"type":"interval","everySeconds":60,"anchorAt":"2026-08-24T00:00:00Z"}}`)
+	if exhausted.Code != http.StatusConflict || !strings.Contains(exhausted.Body.String(), `"code":"schedule_revision_exhausted"`) {
+		t.Fatalf("maximum revision exhaustion = %d %s", exhausted.Code, exhausted.Body.String())
+	}
+
+	for _, test := range []struct {
+		name, method, path, body string
+	}{
+		{name: "structured number", method: http.MethodPost, path: "/scheduler/changes", body: `{"operation":"update","id":"` + created.ID + `","expectedRevision":9007199254740992,"trigger":{"type":"interval","everySeconds":60,"anchorAt":"2026-08-24T00:00:00Z"}}`},
+		{name: "structured leading zero", method: http.MethodPost, path: "/scheduler/changes", body: `{"operation":"update","id":"` + created.ID + `","expectedRevision":"01","trigger":{"type":"interval","everySeconds":60,"anchorAt":"2026-08-24T00:00:00Z"}}`},
+		{name: "structured overflow", method: http.MethodPost, path: "/scheduler/changes", body: `{"operation":"update","id":"` + created.ID + `","expectedRevision":"18446744073709551616","trigger":{"type":"interval","everySeconds":60,"anchorAt":"2026-08-24T00:00:00Z"}}`},
+		{name: "natural number", method: http.MethodPut, path: "/scheduler/" + created.ID, body: `{"expectedRevision":9007199254740992,"description":"Review","condition":"later","target":"workspace"}`},
+		{name: "natural zero", method: http.MethodPut, path: "/scheduler/" + created.ID, body: `{"expectedRevision":"0","description":"Review","condition":"later","target":"workspace"}`},
+		{name: "natural noncanonical", method: http.MethodPut, path: "/scheduler/" + created.ID, body: `{"expectedRevision":"+1","description":"Review","condition":"later","target":"workspace"}`},
+		{name: "natural overflow", method: http.MethodPut, path: "/scheduler/" + created.ID, body: `{"expectedRevision":"18446744073709551616","description":"Review","condition":"later","target":"workspace"}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := request(test.method, "/api/workspaces/"+workspace.ID+test.path, test.body)
+			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "revision") {
+				t.Fatalf("invalid revision response = %d %s", response.Code, response.Body.String())
+			}
+		})
 	}
 }
 
@@ -496,7 +627,7 @@ func TestSchedulerHTTPMissingMutationsAreNotFound(t *testing.T) {
 		name, method, path string
 		body               *schedulerChangeRequest
 	}{
-		{name: "changes update", method: http.MethodPost, path: "/scheduler/changes", body: &schedulerChangeRequest{Operation: string(app.ScheduleChangeUpdate), ID: missingID, ExpectedRevision: ^uint64(0), Description: &description, Trigger: &trigger}},
+		{name: "changes update", method: http.MethodPost, path: "/scheduler/changes", body: &schedulerChangeRequest{Operation: string(app.ScheduleChangeUpdate), ID: missingID, ExpectedRevision: schedulerapi.RevisionFromUint64(^uint64(0)), Description: &description, Trigger: &trigger}},
 		{name: "changes pause", method: http.MethodPost, path: "/scheduler/changes", body: &schedulerChangeRequest{Operation: string(app.ScheduleChangePause), ID: missingID}},
 		{name: "changes resume", method: http.MethodPost, path: "/scheduler/changes", body: &schedulerChangeRequest{Operation: string(app.ScheduleChangeResume), ID: missingID}},
 		{name: "changes remove", method: http.MethodPost, path: "/scheduler/changes", body: &schedulerChangeRequest{Operation: string(app.ScheduleChangeRemove), ID: missingID}},
@@ -664,7 +795,7 @@ func TestSchedulerNaturalLanguageAPIRetainsAcceptanceAfterBackgroundFailure(t *t
 	fake.failNextMessage = true
 	fake.mu.Unlock()
 
-	request := httptest.NewRequest(http.MethodPut, "/api/workspaces/"+workspace.ID+"/scheduler/schedule-222222222222222222222222", strings.NewReader(`{"expectedRevision":1,"description":"Review later","condition":"next week","target":"workspace"}`))
+	request := httptest.NewRequest(http.MethodPut, "/api/workspaces/"+workspace.ID+"/scheduler/schedule-222222222222222222222222", strings.NewReader(`{"expectedRevision":"1","description":"Review later","condition":"next week","target":"workspace"}`))
 	request.Header.Set(workspaceUserHeader, "Ada")
 	recorder := httptest.NewRecorder()
 	manager.server.handleWorkspace(recorder, request)
@@ -735,7 +866,7 @@ func TestSchedulerHTTPStructuredUpdateRequiresCompleteTrigger(t *testing.T) {
 		}
 	}
 
-	descriptionOnly := request(`{"operation":"update","id":"` + original.ID + `","expectedRevision":1,"description":"Changed"}`)
+	descriptionOnly := request(`{"operation":"update","id":"` + original.ID + `","expectedRevision":"1","description":"Changed"}`)
 	if descriptionOnly.Code != http.StatusBadRequest {
 		t.Fatalf("description-only update = %d %s", descriptionOnly.Code, descriptionOnly.Body.String())
 	}
@@ -748,7 +879,7 @@ func TestSchedulerHTTPStructuredUpdateRequiresCompleteTrigger(t *testing.T) {
 	}
 	assertUnchanged(original)
 
-	partialCompilation := request(`{"operation":"update","id":"` + compiled.ID + `","expectedRevision":1,"condition":"still ambiguous"}`)
+	partialCompilation := request(`{"operation":"update","id":"` + compiled.ID + `","expectedRevision":"1","condition":"still ambiguous"}`)
 	if partialCompilation.Code != http.StatusBadRequest || !strings.Contains(partialCompilation.Body.String(), "schedule_trigger_required") {
 		t.Fatalf("partial compilation = %d %s", partialCompilation.Code, partialCompilation.Body.String())
 	}
@@ -761,20 +892,21 @@ func TestSchedulerHTTPStructuredUpdateRequiresCompleteTrigger(t *testing.T) {
 	}
 
 	replacementAt := time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339Nano)
-	triggerOnly := request(`{"operation":"update","id":"` + original.ID + `","expectedRevision":1,"trigger":{"type":"at","at":"` + replacementAt + `"}}`)
+	triggerOnly := request(`{"operation":"update","id":"` + original.ID + `","expectedRevision":"1","trigger":{"type":"at","at":"` + replacementAt + `"}}`)
 	if triggerOnly.Code != http.StatusOK {
 		t.Fatalf("trigger-only update = %d %s", triggerOnly.Code, triggerOnly.Body.String())
 	}
-	var updated app.Schedule
-	if err := json.Unmarshal(triggerOnly.Body.Bytes(), &updated); err != nil {
+	var updatedResponse schedulerapi.Schedule
+	if err := json.Unmarshal(triggerOnly.Body.Bytes(), &updatedResponse); err != nil {
 		t.Fatal(err)
 	}
-	if updated.Revision != 2 || updated.Description != original.Description || updated.Condition != original.Condition || updated.Target != original.Target || updated.Trigger == nil || updated.Trigger.At != replacementAt {
-		t.Fatalf("trigger-only schedule = %#v", updated)
+	if updatedResponse.Revision != "2" || updatedResponse.Description != original.Description || updatedResponse.Condition != original.Condition || updatedResponse.Target != original.Target || updatedResponse.Trigger == nil || updatedResponse.Trigger.At != replacementAt {
+		t.Fatalf("trigger-only schedule = %#v", updatedResponse)
 	}
+	updated := schedulerTestScheduleByID(t, puaWorkspace, updatedResponse.ID)
 
 	staleAt := time.Now().UTC().Add(3 * time.Hour).Format(time.RFC3339Nano)
-	stale := request(`{"operation":"update","id":"` + original.ID + `","expectedRevision":1,"description":"Stale","condition":"stale rule","target":"scheduler","trigger":{"type":"at","at":"` + staleAt + `"}}`)
+	stale := request(`{"operation":"update","id":"` + original.ID + `","expectedRevision":"1","description":"Stale","condition":"stale rule","target":"scheduler","trigger":{"type":"at","at":"` + staleAt + `"}}`)
 	if stale.Code != http.StatusConflict || !strings.Contains(stale.Body.String(), "schedule_revision_conflict") {
 		t.Fatalf("full stale update = %d %s", stale.Code, stale.Body.String())
 	}
@@ -786,7 +918,7 @@ func TestSchedulerHTTPStructuredUpdateRequiresCompleteTrigger(t *testing.T) {
 		t.Fatalf("schedule changed after stale update: got %#v, want %#v", got, updated)
 	}
 
-	malformed := request(`{"operation":"update","id":"` + original.ID + `","expectedRevision":2,"trigger":{"type":"at"}}`)
+	malformed := request(`{"operation":"update","id":"` + original.ID + `","expectedRevision":"2","trigger":{"type":"at"}}`)
 	if malformed.Code != http.StatusBadRequest || !strings.Contains(malformed.Body.String(), "at trigger must contain only at") {
 		t.Fatalf("malformed trigger update = %d %s", malformed.Code, malformed.Body.String())
 	}

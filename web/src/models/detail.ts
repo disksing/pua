@@ -1,6 +1,6 @@
 import type { TaskTemplate } from "./create";
 import type { AgentOption } from "./common";
-import type { GenerationPolicyRecord, SchedulerConfigRecord, StallWatchdogPolicyRecord, WorkspaceUser } from "./workspace";
+import type { GenerationPolicyRecord, SchedulerConfigRecord, SchedulerRevision, StallWatchdogPolicyRecord, WorkspaceUser } from "./workspace";
 
 export interface ResourceAgentBindingModel {
   kind: "profile" | "agent";
@@ -88,7 +88,7 @@ interface SchedulerSaveFields {
 
 export type SchedulerSaveInput = SchedulerSaveFields & (
   | { scheduleId?: undefined; expectedRevision?: undefined }
-  | { scheduleId: string; expectedRevision: number }
+  | { scheduleId: string; expectedRevision: SchedulerRevision }
 );
 
 export interface SchedulerMutationCallbacks {

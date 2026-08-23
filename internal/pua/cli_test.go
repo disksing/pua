@@ -17,6 +17,7 @@ import (
 
 	"github.com/disksing/pua/internal/app"
 	"github.com/disksing/pua/internal/buildinfo"
+	"github.com/disksing/pua/internal/schedulerapi"
 )
 
 const (
@@ -72,7 +73,7 @@ func TestSchedulerCommandsUseOwningServerForNativeSchedules(t *testing.T) {
 				for _, schedule := range config.Schedules {
 					snapshot.Schedules = append(snapshot.Schedules, app.ScheduleSnapshot{Schedule: schedule, EffectiveState: schedule.State})
 				}
-				_ = json.NewEncoder(w).Encode(snapshot)
+				_ = json.NewEncoder(w).Encode(schedulerapi.FromSnapshot(snapshot))
 			case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/scheduler/changes"):
 				changeRequests++
 				var body schedulerChangePayload
@@ -83,11 +84,17 @@ func TestSchedulerCommandsUseOwningServerForNativeSchedules(t *testing.T) {
 				}
 				var schedule app.Schedule
 				var changeErr error
+				expectedRevision := uint64(0)
+				if body.ExpectedRevision != "" {
+					expectedRevision, changeErr = body.ExpectedRevision.Uint64()
+				}
 				switch body.Operation {
 				case app.ScheduleChangeCreate:
 					schedule, changeErr = workspace.AddSchedule(app.CreateScheduleInput{Description: *body.Description, Condition: *body.Condition, Target: *body.Target, Trigger: body.Trigger})
 				case app.ScheduleChangeUpdate:
-					schedule, changeErr = workspace.UpdateSchedule(app.UpdateScheduleInput{ID: body.ID, ExpectedRevision: body.ExpectedRevision, Description: body.Description, Condition: body.Condition, Guard: body.Guard, Target: body.Target, Trigger: body.Trigger})
+					if changeErr == nil {
+						schedule, changeErr = workspace.UpdateSchedule(app.UpdateScheduleInput{ID: body.ID, ExpectedRevision: expectedRevision, Description: body.Description, Condition: body.Condition, Guard: body.Guard, Target: body.Target, Trigger: body.Trigger})
+					}
 				case app.ScheduleChangePause:
 					schedule, changeErr = workspace.PauseSchedule(body.ID)
 				case app.ScheduleChangeResume:
@@ -99,7 +106,7 @@ func TestSchedulerCommandsUseOwningServerForNativeSchedules(t *testing.T) {
 					http.Error(w, changeErr.Error(), http.StatusBadRequest)
 					return
 				}
-				_ = json.NewEncoder(w).Encode(schedule)
+				_ = json.NewEncoder(w).Encode(schedulerapi.FromSchedule(schedule))
 			default:
 				http.NotFound(w, r)
 			}
@@ -115,11 +122,11 @@ func TestSchedulerCommandsUseOwningServerForNativeSchedules(t *testing.T) {
 
 		at := time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)
 		createdOutput := run(t, "scheduler", "add", "--description", "Review release", "--condition", "at the agreed review time", "--target", "workspace", "--at", at)
-		var created app.Schedule
+		var created schedulerapi.Schedule
 		if err := json.Unmarshal([]byte(createdOutput), &created); err != nil {
 			t.Fatal(err)
 		}
-		if created.ID == "" || created.Revision != 1 || created.Trigger == nil || created.Target != "workspace" {
+		if created.ID == "" || created.Revision != "1" || created.Trigger == nil || created.Target != "workspace" {
 			t.Fatalf("created schedule = %#v", created)
 		}
 		listed := run(t, "scheduler", "list")
@@ -159,20 +166,20 @@ func TestSchedulerCommandsUseOwningServerForNativeSchedules(t *testing.T) {
 
 		updatedAt := time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339Nano)
 		updatedOutput := run(t, "scheduler", "update", "--id="+created.ID, "--revision=1", "--condition=at the agreed time when the release branch is green", "--target=workspace", "--at="+updatedAt)
-		var updated app.Schedule
+		var updated schedulerapi.Schedule
 		if err := json.Unmarshal([]byte(updatedOutput), &updated); err != nil {
 			t.Fatal(err)
 		}
-		if updated.Revision != 2 || updated.Condition != "at the agreed time when the release branch is green" || updated.Target != "workspace" || updated.CreatedAt != created.CreatedAt || updated.Trigger == nil || updated.Trigger.At != updatedAt {
+		if updated.Revision != "2" || updated.Condition != "at the agreed time when the release branch is green" || updated.Target != "workspace" || updated.CreatedAt != created.CreatedAt || updated.Trigger == nil || updated.Trigger.At != updatedAt {
 			t.Fatalf("updated schedule = %#v", updated)
 		}
 		triggerOnlyAt := time.Now().UTC().Add(3 * time.Hour).Format(time.RFC3339Nano)
 		triggerOnlyOutput := run(t, "scheduler", "update", "--id="+created.ID, "--revision=2", "--at="+triggerOnlyAt)
-		var triggerOnly app.Schedule
+		var triggerOnly schedulerapi.Schedule
 		if err := json.Unmarshal([]byte(triggerOnlyOutput), &triggerOnly); err != nil {
 			t.Fatal(err)
 		}
-		if triggerOnly.Revision != 3 || triggerOnly.Description != updated.Description || triggerOnly.Condition != updated.Condition || triggerOnly.Target != updated.Target || triggerOnly.Trigger == nil || triggerOnly.Trigger.At != triggerOnlyAt {
+		if triggerOnly.Revision != "3" || triggerOnly.Description != updated.Description || triggerOnly.Condition != updated.Condition || triggerOnly.Target != updated.Target || triggerOnly.Trigger == nil || triggerOnly.Trigger.At != triggerOnlyAt {
 			t.Fatalf("trigger-only update changed unrelated fields = %#v", triggerOnly)
 		}
 		shown := run(t, "scheduler", "show", "--id", created.ID)
@@ -184,13 +191,13 @@ func TestSchedulerCommandsUseOwningServerForNativeSchedules(t *testing.T) {
 			t.Fatalf("JSON schedule list = %s", jsonList)
 		}
 		pausedOutput := run(t, "scheduler", "pause", "--id="+created.ID)
-		var paused app.Schedule
-		if err := json.Unmarshal([]byte(pausedOutput), &paused); err != nil || paused.State != app.ScheduleStatePaused || paused.Revision != 4 {
+		var paused schedulerapi.Schedule
+		if err := json.Unmarshal([]byte(pausedOutput), &paused); err != nil || paused.State != app.ScheduleStatePaused || paused.Revision != "4" {
 			t.Fatalf("paused schedule = %#v, %v", paused, err)
 		}
 		resumedOutput := run(t, "scheduler", "resume", "--id="+created.ID)
-		var resumed app.Schedule
-		if err := json.Unmarshal([]byte(resumedOutput), &resumed); err != nil || resumed.State != app.ScheduleStateActive || resumed.Revision != 5 {
+		var resumed schedulerapi.Schedule
+		if err := json.Unmarshal([]byte(resumedOutput), &resumed); err != nil || resumed.State != app.ScheduleStateActive || resumed.Revision != "5" {
 			t.Fatalf("resumed schedule = %#v, %v", resumed, err)
 		}
 		removed := run(t, "scheduler", "remove", "--id="+created.ID)
@@ -199,6 +206,81 @@ func TestSchedulerCommandsUseOwningServerForNativeSchedules(t *testing.T) {
 		}
 		if _, err := os.Stat(filepath.Join(root, "scheduler", "scheduler.json")); err != nil {
 			t.Fatal(err)
+		}
+	})
+}
+
+func TestSchedulerCLIRevisionTransportPreservesUint64(t *testing.T) {
+	withTempCwd(t, func(root string) {
+		run(t, "init")
+		const (
+			firstUnsafeRevision = "9007199254740992"
+			maximumRevision     = "18446744073709551615"
+		)
+		at := time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)
+		trigger := &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: at}
+		schedules := []schedulerapi.ScheduleSnapshot{
+			{Schedule: schedulerapi.Schedule{ID: "schedule-111111111111111111111111", Revision: firstUnsafeRevision, Description: "Unsafe", Condition: "later", Target: "workspace", State: app.ScheduleStateActive, Trigger: trigger}, EffectiveState: app.ScheduleStateActive},
+			{Schedule: schedulerapi.Schedule{ID: "schedule-222222222222222222222222", Revision: maximumRevision, Description: "Maximum", Condition: "later", Target: "workspace", State: app.ScheduleStateActive, Trigger: trigger}, EffectiveState: app.ScheduleStateActive},
+		}
+		var received []schedulerapi.Revision
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/scheduler"):
+				_ = json.NewEncoder(w).Encode(schedulerapi.Snapshot{SchemaVersion: 2, AgentBinding: app.AgentBinding{Kind: "profile", Name: "default"}, Schedules: schedules})
+			case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/scheduler/changes"):
+				var body schedulerChangePayload
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Error(err)
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				received = append(received, body.ExpectedRevision)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusConflict)
+				code, message := "schedule_revision_conflict", "revision conflict"
+				if body.ExpectedRevision == maximumRevision {
+					code, message = "schedule_revision_exhausted", app.ErrScheduleRevisionExhausted.Error()
+				}
+				_ = json.NewEncoder(w).Encode(map[string]string{"code": code, "error": message})
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+		lock, err := json.Marshal(map[string]any{"pid": os.Getpid(), "address": server.URL, "workspacePath": root})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, ".pua", "serve.lock"), lock, 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		listed := run(t, "scheduler", "list")
+		if !strings.Contains(listed, schedules[0].ID+"\t"+firstUnsafeRevision+"\t") || !strings.Contains(listed, schedules[1].ID+"\t"+maximumRevision+"\t") {
+			t.Fatalf("lossy Scheduler list:\n%s", listed)
+		}
+		jsonList := run(t, "scheduler", "list", "--json")
+		if !strings.Contains(jsonList, `"revision": "`+firstUnsafeRevision+`"`) || !strings.Contains(jsonList, `"revision": "`+maximumRevision+`"`) {
+			t.Fatalf("lossy JSON Scheduler list:\n%s", jsonList)
+		}
+		shown := run(t, "scheduler", "show", "--id="+schedules[1].ID)
+		if !strings.Contains(shown, `"revision": "`+maximumRevision+`"`) {
+			t.Fatalf("lossy Scheduler show:\n%s", shown)
+		}
+		for _, test := range []struct {
+			revision, code string
+		}{
+			{revision: firstUnsafeRevision, code: "schedule_revision_conflict"},
+			{revision: maximumRevision, code: "schedule_revision_exhausted"},
+		} {
+			_, err := runErr(t, "scheduler", "update", "--id="+schedules[0].ID, "--revision="+test.revision, "--at="+at)
+			if err == nil || !strings.Contains(err.Error(), test.code) {
+				t.Fatalf("revision %s error = %v, want %s", test.revision, err, test.code)
+			}
+		}
+		if len(received) != 2 || received[0] != firstUnsafeRevision || received[1] != maximumRevision {
+			t.Fatalf("Scheduler update revisions = %#v", received)
 		}
 	})
 }
@@ -339,6 +421,9 @@ func TestSchedulerValidatesCommandsBeforeOwnerDiscovery(t *testing.T) {
 			{name: "incomplete add trigger", args: []string{"scheduler", "add", "--description=Review", "--condition=At review time", "--target=workspace", "--every=5m"}, want: "--every and --anchor are required together"},
 			{name: "missing update revision", args: []string{"scheduler", "update", "--id=schedule-1", "--at=" + validAt}, want: schedulerUpdateUsage},
 			{name: "zero update revision", args: []string{"scheduler", "update", "--id=schedule-1", "--revision=0", "--at=" + validAt}, want: schedulerUpdateUsage},
+			{name: "leading-zero update revision", args: []string{"scheduler", "update", "--id=schedule-1", "--revision=01", "--at=" + validAt}, want: schedulerUpdateUsage},
+			{name: "overflowing update revision", args: []string{"scheduler", "update", "--id=schedule-1", "--revision=18446744073709551616", "--at=" + validAt}, want: schedulerUpdateUsage},
+			{name: "signed update revision", args: []string{"scheduler", "update", "--id=schedule-1", "--revision=+1", "--at=" + validAt}, want: schedulerUpdateUsage},
 			{name: "missing update trigger", args: []string{"scheduler", "update", "--id=schedule-1", "--revision=1"}, want: schedulerUpdateUsage},
 			{name: "Scheduler self-target update", args: []string{"scheduler", "update", "--id=schedule-1", "--revision=1", "--target=scheduler", "--at=" + validAt}, want: app.ErrScheduleTargetScheduler.Error()},
 			{name: "incomplete update trigger", args: []string{"scheduler", "update", "--id=schedule-1", "--revision=1", "--cron=0 0 9 * * *"}, want: "--cron and --timezone are required together"},

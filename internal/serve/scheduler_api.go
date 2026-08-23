@@ -6,21 +6,37 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/disksing/pua/internal/app"
 	"github.com/disksing/pua/internal/localize"
+	"github.com/disksing/pua/internal/schedulerapi"
 )
 
 type schedulerChangeRequest struct {
-	Operation        string               `json:"operation"`
-	ID               string               `json:"id,omitempty"`
-	ExpectedRevision uint64               `json:"expectedRevision,omitempty"`
-	Description      *string              `json:"description,omitempty"`
-	Condition        *string              `json:"condition,omitempty"`
-	Guard            *string              `json:"guard,omitempty"`
-	Target           *string              `json:"target,omitempty"`
-	Trigger          *app.ScheduleTrigger `json:"trigger,omitempty"`
+	Operation        string                `json:"operation"`
+	ID               string                `json:"id,omitempty"`
+	ExpectedRevision schedulerapi.Revision `json:"expectedRevision,omitempty"`
+	Description      *string               `json:"description,omitempty"`
+	Condition        *string               `json:"condition,omitempty"`
+	Guard            *string               `json:"guard,omitempty"`
+	Target           *string               `json:"target,omitempty"`
+	Trigger          *app.ScheduleTrigger  `json:"trigger,omitempty"`
+}
+
+type schedulerResourceDetail struct {
+	app.ResourceDetailView
+	Scheduler *schedulerapi.Snapshot `json:"scheduler,omitempty"`
+}
+
+func schedulerResourceDetailAPIResponse(detail app.ResourceDetailView) schedulerResourceDetail {
+	response := schedulerResourceDetail{ResourceDetailView: detail}
+	if detail.Scheduler != nil {
+		snapshot := schedulerapi.FromSnapshot(*detail.Scheduler)
+		response.Scheduler = &snapshot
+	}
+	return response
 }
 
 func (s *server) handleScheduler(w http.ResponseWriter, r *http.Request, workspaceID string, parts []string) {
@@ -48,7 +64,7 @@ func (s *server) handleScheduler(w http.ResponseWriter, r *http.Request, workspa
 				writeError(w, readErr, http.StatusBadRequest)
 				return
 			}
-			writeJSON(w, snapshot)
+			writeJSON(w, schedulerapi.FromSnapshot(snapshot))
 		case http.MethodPost:
 			s.handleNaturalLanguageScheduleRequest(w, r, workspace, app.ScheduleChangeCreate, "")
 		default:
@@ -83,7 +99,7 @@ func (s *server) handleScheduler(w http.ResponseWriter, r *http.Request, workspa
 			return
 		}
 		s.agents.requestReconcile(reconcileScheduler)
-		writeJSON(w, changed)
+		writeJSON(w, schedulerapi.FromSchedule(changed))
 		return
 	}
 
@@ -125,10 +141,23 @@ func schedulerNativeChange(body schedulerChangeRequest) (NativeSchedulerChange, 
 	if err != nil {
 		return NativeSchedulerChange{}, err
 	}
+	expectedRevision := uint64(0)
+	if body.ExpectedRevision != "" {
+		expectedRevision, err = body.ExpectedRevision.Uint64()
+		if err != nil {
+			return NativeSchedulerChange{}, err
+		}
+	}
+	if operation == app.ScheduleChangeUpdate && expectedRevision == 0 {
+		return NativeSchedulerChange{}, errors.New("expectedRevision is required for schedule updates")
+	}
+	if operation != app.ScheduleChangeUpdate && expectedRevision != 0 {
+		return NativeSchedulerChange{}, errors.New("expectedRevision is only valid for schedule updates")
+	}
 	return NativeSchedulerChange{
 		Operation:        operation,
 		ID:               strings.TrimSpace(body.ID),
-		ExpectedRevision: body.ExpectedRevision,
+		ExpectedRevision: expectedRevision,
 		Description:      body.Description,
 		Condition:        body.Condition,
 		Guard:            body.Guard,
@@ -150,7 +179,7 @@ func (s *server) applyDirectScheduleChange(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	s.agents.requestReconcile(reconcileScheduler)
-	writeJSON(w, changed)
+	writeJSON(w, schedulerapi.FromSchedule(changed))
 }
 
 func writeSchedulerChangeError(w http.ResponseWriter, err error) {
@@ -194,10 +223,10 @@ func writeSchedulerTargetError(w http.ResponseWriter) {
 
 func (s *server) handleNaturalLanguageScheduleRequest(w http.ResponseWriter, r *http.Request, workspace serveWorkspace, operation app.ScheduleChangeOperation, id string) {
 	var body struct {
-		ExpectedRevision *uint64 `json:"expectedRevision,omitempty"`
-		Description      string  `json:"description"`
-		Condition        string  `json:"condition"`
-		Target           string  `json:"target"`
+		ExpectedRevision *schedulerapi.Revision `json:"expectedRevision,omitempty"`
+		Description      string                 `json:"description"`
+		Condition        string                 `json:"condition"`
+		Target           string                 `json:"target"`
 	}
 	if err := decodeSchedulerBody(r, &body); err != nil {
 		writeError(w, err, http.StatusBadRequest)
@@ -212,13 +241,18 @@ func (s *server) handleNaturalLanguageScheduleRequest(w http.ResponseWriter, r *
 		writeError(w, errors.New("expectedRevision is only valid for schedule updates"), http.StatusBadRequest)
 		return
 	}
-	if operation == app.ScheduleChangeUpdate && (body.ExpectedRevision == nil || *body.ExpectedRevision == 0) {
+	if operation == app.ScheduleChangeUpdate && body.ExpectedRevision == nil {
 		writeError(w, errors.New("expectedRevision is required for schedule updates"), http.StatusBadRequest)
 		return
 	}
 	expectedRevision := uint64(0)
 	if body.ExpectedRevision != nil {
-		expectedRevision = *body.ExpectedRevision
+		parsedRevision, parseErr := body.ExpectedRevision.Uint64()
+		if parseErr != nil {
+			writeError(w, parseErr, http.StatusBadRequest)
+			return
+		}
+		expectedRevision = parsedRevision
 	}
 	if err := app.ValidateScheduleTarget(target); err != nil {
 		writeSchedulerTargetError(w)
@@ -239,7 +273,7 @@ func (s *server) handleNaturalLanguageScheduleRequest(w http.ResponseWriter, r *
 		"HasID":               id != "",
 		"ID":                  id,
 		"HasExpectedRevision": operation == app.ScheduleChangeUpdate,
-		"ExpectedRevision":    expectedRevision,
+		"ExpectedRevision":    strconv.FormatUint(expectedRevision, 10),
 		"Description":         description,
 		"Condition":           condition,
 		"Target":              target,

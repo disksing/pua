@@ -7,11 +7,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/disksing/pua/internal/app"
+	"github.com/disksing/pua/internal/schedulerapi"
 )
 
 const (
@@ -24,7 +24,7 @@ const (
 type schedulerChangePayload struct {
 	Operation        app.ScheduleChangeOperation `json:"operation"`
 	ID               string                      `json:"id,omitempty"`
-	ExpectedRevision uint64                      `json:"expectedRevision,omitempty"`
+	ExpectedRevision schedulerapi.Revision       `json:"expectedRevision,omitempty"`
 	Description      *string                     `json:"description,omitempty"`
 	Condition        *string                     `json:"condition,omitempty"`
 	Guard            *string                     `json:"guard,omitempty"`
@@ -80,7 +80,7 @@ func runScheduler(args []string) error {
 			if lastOutcome == "" {
 				lastOutcome = "-"
 			}
-			fmt.Fprintf(os.Stdout, "%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n", schedule.ID, schedule.Revision, schedule.EffectiveState, scheduleTriggerSummary(schedule.Trigger), nextRun, lastOutcome, schedule.Description, schedule.Target)
+			fmt.Fprintf(os.Stdout, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", schedule.ID, schedule.Revision, schedule.EffectiveState, scheduleTriggerSummary(schedule.Trigger), nextRun, lastOutcome, schedule.Description, schedule.Target)
 		}
 		return nil
 	case schedulerCommandShow:
@@ -201,8 +201,8 @@ func parseSchedulerUpdatePayload(args []string) (schedulerChangePayload, error) 
 	if err != nil || values["id"] == "" || values["revision"] == "" {
 		return schedulerChangePayload{}, errors.New(schedulerUpdateUsage)
 	}
-	revision, err := strconv.ParseUint(values["revision"], 10, 64)
-	if err != nil || revision == 0 {
+	revision, err := schedulerapi.ParseRevision(values["revision"])
+	if err != nil {
 		return schedulerChangePayload{}, errors.New(schedulerUpdateUsage)
 	}
 	trigger, triggerPresent, err := schedulerTriggerFromOptions(values)
@@ -227,14 +227,14 @@ func parseSchedulerUpdatePayload(args []string) (schedulerChangePayload, error) 
 	return payload, nil
 }
 
-func schedulerSnapshot(client *resourceServerClient, path string) (app.SchedulerSnapshot, error) {
-	var snapshot app.SchedulerSnapshot
+func schedulerSnapshot(client *resourceServerClient, path string) (schedulerapi.Snapshot, error) {
+	var snapshot schedulerapi.Snapshot
 	err := client.request(context.Background(), http.MethodGet, path, nil, &snapshot)
 	return snapshot, err
 }
 
 func schedulerChangeRequest(client *resourceServerClient, path string, payload schedulerChangePayload) error {
-	var schedule app.Schedule
+	var schedule schedulerapi.Schedule
 	if err := client.request(context.Background(), http.MethodPost, path+"/changes", payload, &schedule); err != nil {
 		return err
 	}

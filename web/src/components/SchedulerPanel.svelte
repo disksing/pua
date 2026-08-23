@@ -3,7 +3,8 @@
 
   import { confirmDialog } from "../controllers/confirm-dialog-controller";
   import type { SchedulerMutationCallbacks, SchedulerSaveInput } from "../models/detail";
-  import type { ScheduleRecord, SchedulerConfigRecord } from "../models/workspace";
+  import { isSchedulerRevision } from "../models/workspace";
+  import type { ScheduleRecord, SchedulerConfigRecord, SchedulerRevision } from "../models/workspace";
   import Icon from "./Icon.svelte";
 
   let { config, actions }: {
@@ -11,7 +12,7 @@
     actions: SchedulerMutationCallbacks;
   } = $props();
   let editingId = $state("");
-  let editingRevision = $state<number | undefined>();
+  let editingRevision = $state<SchedulerRevision | undefined>();
   let description = $state("");
   let condition = $state("");
   let target = $state("workspace");
@@ -21,6 +22,7 @@
   const targetError = $derived(actions.validateTarget(target));
 
   function edit(schedule: ScheduleRecord): void {
+    if (!isSchedulerRevision(schedule.revision)) return;
     formGeneration += 1;
     editingId = schedule.id;
     editingRevision = schedule.revision;
@@ -111,7 +113,7 @@
   {#if config.schedules.length}
     {#each config.schedules as schedule (schedule.id)}
       <article class:editing={editingId === schedule.id}>
-        <header><div><strong>{schedule.description}</strong><code>{schedule.id} · r{schedule.revision}</code></div><div><button type="button" class="secondary-button" disabled={pendingScheduleIds.has(schedule.id)} onclick={() => edit(schedule)}><Icon name="pencil" /><span>Edit</span></button>{#if schedule.effectiveState === "paused" || schedule.effectiveState === "attention_required"}<button type="button" class="secondary-button" disabled={pendingScheduleIds.has(schedule.id)} onclick={() => setPaused(schedule, false)}><span>Resume</span></button>{:else if schedule.effectiveState === "active"}<button type="button" class="secondary-button" disabled={pendingScheduleIds.has(schedule.id)} onclick={() => setPaused(schedule, true)}><span>Pause</span></button>{/if}<button type="button" class="danger-button" disabled={pendingScheduleIds.has(schedule.id)} onclick={() => remove(schedule)}><Icon name="trash-2" /><span>Remove</span></button></div></header>
+        <header><div><strong>{schedule.description}</strong><code>{schedule.id} · r{schedule.revision}</code></div><div><button type="button" class="secondary-button" disabled={pendingScheduleIds.has(schedule.id) || !isSchedulerRevision(schedule.revision)} onclick={() => edit(schedule)}><Icon name="pencil" /><span>Edit</span></button>{#if schedule.effectiveState === "paused" || schedule.effectiveState === "attention_required"}<button type="button" class="secondary-button" disabled={pendingScheduleIds.has(schedule.id)} onclick={() => setPaused(schedule, false)}><span>Resume</span></button>{:else if schedule.effectiveState === "active"}<button type="button" class="secondary-button" disabled={pendingScheduleIds.has(schedule.id)} onclick={() => setPaused(schedule, true)}><span>Pause</span></button>{/if}<button type="button" class="danger-button" disabled={pendingScheduleIds.has(schedule.id)} onclick={() => remove(schedule)}><Icon name="trash-2" /><span>Remove</span></button></div></header>
         <dl><div><dt>Trigger</dt><dd>{triggerLabel(schedule)}</dd></div><div><dt>Condition</dt><dd>{schedule.condition}</dd></div>{#if schedule.guard}<div><dt>Guard</dt><dd>{schedule.guard}</dd></div>{/if}<div><dt>Target</dt><dd><code>{schedule.target}</code></dd></div><div><dt>State</dt><dd>{schedule.effectiveState}</dd></div>{#if schedule.nextRunAt}<div><dt>Next run</dt><dd>{schedule.nextRunAt}</dd></div>{/if}{#if schedule.lastOccurrenceAt}<div><dt>Last occurrence</dt><dd>{schedule.lastOccurrenceAt}</dd></div>{/if}{#if schedule.lastOutcome}<div><dt>Last outcome</dt><dd>{schedule.lastOutcome}</dd></div>{/if}{#if schedule.lastError}<div><dt>Error</dt><dd>{schedule.lastError}</dd></div>{/if}</dl>
       </article>
     {/each}

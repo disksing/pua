@@ -94,7 +94,7 @@ type MockScheduleDefinition = {
 
 type MockSchedule = MockScheduleDefinition & {
   id: string;
-  revision: number;
+  revision: string;
   state: "active" | "paused" | "completed" | "needs_compilation";
   effectiveState: string;
   trigger?: { type: "at"; at: string };
@@ -103,6 +103,10 @@ type MockSchedule = MockScheduleDefinition & {
   createdAt: string;
   updatedAt: string;
 };
+
+function incrementMockSchedulerRevision(revision: string): string {
+  return (BigInt(revision) + 1n).toString();
+}
 
 function resourceDetail(resource: MockResource) {
   const resourceReference = resource.id === "project1.task1" ? "\n\nRelated: [[project1.task2]]." : "";
@@ -228,7 +232,7 @@ async function installMockApi(page: Page, lastResourceId = "project1.task1", wit
       ...schedulerConfig,
       schedules: [...schedulerConfig.schedules, {
         id,
-        revision: 1,
+        revision: "1",
         ...definition,
         state: "active",
         effectiveState: "active",
@@ -249,7 +253,7 @@ async function installMockApi(page: Page, lastResourceId = "project1.task1", wit
       schedules: schedulerConfig.schedules.map((schedule) => schedule.id === scheduleId ? {
         ...schedule,
         ...definition,
-        revision: schedule.revision + 1,
+        revision: incrementMockSchedulerRevision(schedule.revision),
         updatedAt: now,
       } : schedule),
     };
@@ -397,7 +401,7 @@ async function installMockApi(page: Page, lastResourceId = "project1.task1", wit
         ...schedulerConfig,
         schedules: schedulerConfig.schedules.map((schedule, scheduleIndex) => scheduleIndex === index ? {
           ...schedule,
-          revision: schedule.revision + 1,
+          revision: incrementMockSchedulerRevision(schedule.revision),
           state: paused ? "paused" : "active",
           effectiveState: paused ? "paused" : "active",
           nextRunAt: paused ? undefined : schedule.nextRunAt,
@@ -1308,7 +1312,7 @@ test("manages natural-language schedules from the fixed Scheduler resource", asy
     target: "project1.task1",
   });
   expect(harness.schedulerBodies[1].body).toEqual({
-    expectedRevision: 1,
+    expectedRevision: "1",
     description: "Notify after release verification",
     condition: "When the release branch is green after 09:00 Shanghai time",
     target: "project1.task1",

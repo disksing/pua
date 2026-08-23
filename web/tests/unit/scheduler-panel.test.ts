@@ -15,7 +15,7 @@ const config: SchedulerConfigRecord = {
 
 const schedule: ScheduleRecord = {
   id: "schedule-0123456789abcdef01234567",
-  revision: 1,
+  revision: "1",
   description: "Recover target",
   condition: "once",
   target: "project1.task1",
@@ -201,7 +201,7 @@ describe("SchedulerPanel", () => {
     const otherSchedule = {
       ...schedule,
       id: "schedule-fedcba9876543210fedcba98",
-      revision: 7,
+      revision: "7",
       description: "Publish target",
       condition: "daily",
       target: "workspace",
@@ -217,7 +217,7 @@ describe("SchedulerPanel", () => {
     await vi.waitFor(() => expect(save).toHaveBeenCalledOnce());
     expect(save).toHaveBeenLastCalledWith(expect.objectContaining({
       scheduleId: schedule.id,
-      expectedRevision: 1,
+      expectedRevision: "1",
     }));
     editButtons[1].click();
     await tick();
@@ -234,7 +234,7 @@ describe("SchedulerPanel", () => {
     await vi.waitFor(() => expect(save).toHaveBeenCalledTimes(2));
     expect(save).toHaveBeenLastCalledWith(expect.objectContaining({
       scheduleId: otherSchedule.id,
-      expectedRevision: 7,
+      expectedRevision: "7",
     }));
   });
 
@@ -250,18 +250,52 @@ describe("SchedulerPanel", () => {
     editButton.click();
     await tick();
 
-    concurrentlyUpdated.revision = 2;
+    concurrentlyUpdated.revision = "2";
     inputValue(editorFields(target).description, "Review without overwriting the concurrent change");
     editorFields(target).save.click();
 
     await vi.waitFor(() => expect(save).toHaveBeenCalledOnce());
     expect(save).toHaveBeenCalledWith({
       scheduleId: schedule.id,
-      expectedRevision: 1,
+      expectedRevision: "1",
       description: "Review without overwriting the concurrent change",
       condition: schedule.condition,
       target: schedule.target,
     });
+  });
+
+  it.each(["9007199254740992", "18446744073709551615"])("snapshots full-width revision %s exactly when editing", async (revision) => {
+    const save = vi.fn(async () => true);
+    const fullWidth = { ...schedule, revision };
+    const { target } = mountPanel({ ...config, schedules: [fullWidth] }, schedulerActions({ save }));
+    await tick();
+
+    const editButton = Array.from(target.querySelectorAll<HTMLButtonElement>(".schedule-list button"))
+      .find((button) => button.textContent?.trim() === "Edit")!;
+    expect(target.querySelector(".schedule-list article code")?.textContent).toContain(`r${revision}`);
+    editButton.click();
+    await tick();
+    editorFields(target).save.click();
+
+    await vi.waitFor(() => expect(save).toHaveBeenCalledOnce());
+    expect(save).toHaveBeenCalledWith(expect.objectContaining({
+      scheduleId: fullWidth.id,
+      expectedRevision: revision,
+    }));
+  });
+
+  it.each(["18446744073709551616", 9007199254740992 as unknown as string])("does not edit a schedule with malformed revision %j", async (revision) => {
+    const malformed = { ...schedule, revision };
+    const { target, actions } = mountPanel({ ...config, schedules: [malformed] }, schedulerActions());
+    await tick();
+
+    const editButton = Array.from(target.querySelectorAll<HTMLButtonElement>(".schedule-list button"))
+      .find((button) => button.textContent?.trim() === "Edit")!;
+    expect(editButton.disabled).toBe(true);
+    editButton.click();
+    await tick();
+    expect(target.querySelector(".schedule-editor-heading strong")?.textContent).toBe("Add schedule");
+    expect(actions.save).not.toHaveBeenCalled();
   });
 
   it("preserves a new draft started after cancelling a pending edit", async () => {

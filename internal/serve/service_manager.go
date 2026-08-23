@@ -105,7 +105,6 @@ type ServiceManager struct {
 	runtimes map[string]*serviceRuntime
 	resolver ServiceSecretResolver
 	now      func() time.Time
-	ctx      context.Context
 	stopping bool
 	started  bool
 }
@@ -293,7 +292,6 @@ func (m *ServiceManager) Start(ctx context.Context) error {
 	if m.started && !m.stopping {
 		return m.reconcileLocked(ctx)
 	}
-	m.ctx = ctx
 	m.stopping = false
 	m.started = true
 	for _, rt := range m.runtimes {
@@ -360,9 +358,6 @@ func (m *ServiceManager) Reconcile(ctx context.Context) error {
 func (m *ServiceManager) reconcileLocked(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
-	}
-	if m.ctx == nil {
-		m.ctx = ctx
 	}
 	ids := m.sortedIDsLocked()
 	var first error
@@ -1738,7 +1733,6 @@ func (m *ServiceManager) StartService(ctx context.Context, id string) error {
 	if !m.started {
 		m.started = true
 		m.stopping = false
-		m.ctx = context.Background()
 	}
 	return m.reconcileOneLocked(ctx, rt, m.graph[id])
 }

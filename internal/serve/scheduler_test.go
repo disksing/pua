@@ -3719,6 +3719,228 @@ func TestNativeSchedulerTargetEditReplacesPreparedOccurrence(t *testing.T) {
 	}
 }
 
+func TestNativeSchedulerArchiveWinsBeforePreparedMailboxAcceptance(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	hub := httptest.NewServer(fake)
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const targetID = "project1.task1"
+	target, err := puaWorkspace.ResourceValue(targetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().UTC().Add(time.Minute).Truncate(time.Second)
+	schedule, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Do not lose this occurrence", Condition: "once", Target: targetID,
+		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: at.Format(time.RFC3339Nano)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	native := newNativeScheduler(manager, workspace)
+	prepared, err := native.prepareOccurrence(schedule, at, at, time.Time{}, 1, false, time.Time{}, schedulerOccurrenceReasonTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := schedulerScheduleRuntime{
+		Revision: schedule.Revision, TriggerDigest: mustSchedulerTriggerDigest(t, schedule.Trigger),
+		Target: schedule.Target, EffectiveState: app.ScheduleStateActive,
+		NextRunAt: at.Format(time.RFC3339Nano), Prepared: &prepared,
+	}
+	if err := native.storeSchedulerRuntime(schedule.ID, runtime); err != nil {
+		t.Fatal(err)
+	}
+
+	// Hold the target controller, queue archive first, then queue delivery. This
+	// forces archive to complete after deliverPrepared's initial availability
+	// check but before its mailbox acceptance on the unfixed implementation.
+	controller, err := manager.controllerForResource(workspace, targetID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockerStarted := make(chan struct{})
+	releaseBlocker := make(chan struct{})
+	if err := manager.enqueueResourceController(workspace, targetID, func() error {
+		close(blockerStarted)
+		<-releaseBlocker
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	<-blockerStarted
+	waitForQueuedJobs := func(want int) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			controller.mu.Lock()
+			queued := len(controller.jobs)
+			controller.mu.Unlock()
+			if queued >= want {
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+		t.Fatalf("target controller queued jobs did not reach %d", want)
+	}
+
+	archiveDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/api/workspaces/"+workspace.ID+"/archive", strings.NewReader(`{"resourceId":"`+targetID+`"}`))
+		manager.server.archiveResource(recorder, request, workspace.ID)
+		archiveDone <- recorder
+	}()
+	waitForQueuedJobs(1)
+	deliveryDone := make(chan error, 1)
+	go func() {
+		deliveryDone <- native.deliverPrepared(context.Background(), schedule, runtime, at.Add(time.Second))
+	}()
+	waitForQueuedJobs(2)
+	close(releaseBlocker)
+
+	recorder := <-archiveDone
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("archive prepared target = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if err := <-deliveryDone; err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := native.schedulerRuntime(schedule.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.EffectiveState != schedulerOutcomeAttention || persisted.LastOutcome != schedulerOutcomeAttention ||
+		persisted.AttentionTarget != targetID || persisted.NextRunAt != "" || persisted.RetryAt != "" {
+		t.Fatalf("archived target runtime = %#v", persisted)
+	}
+	assertPreparedOccurrenceEqual(t, persisted.Prepared, prepared)
+	if messages := scheduleOccurrenceMessages(t, workspace.Path, targetID); len(messages) != 0 {
+		t.Fatalf("archived target consumed prepared occurrence: %#v", messages)
+	}
+	if deadline, err := native.Reconcile(context.Background(), at.Add(2*time.Minute)); err != nil || !deadline.IsZero() {
+		t.Fatalf("attention reconcile deadline = %s, %v", deadline, err)
+	}
+
+	var archived struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &archived); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(workspace.Path, filepath.FromSlash(archived.Path)), filepath.Join(workspace.Path, filepath.FromSlash(target.Path))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := native.Reconcile(context.Background(), at.Add(3*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	assertDeliveredPreparedOccurrence(t, scheduleOccurrenceMessages(t, workspace.Path, targetID), prepared)
+	persisted, err = native.schedulerRuntime(schedule.ID)
+	if err != nil || persisted.Prepared != nil || persisted.EffectiveState != app.ScheduleStateCompleted || persisted.LastOutcome != schedulerOutcomeAccepted {
+		t.Fatalf("restored target runtime = %#v, %v", persisted, err)
+	}
+}
+
+func TestNativeSchedulerProjectArchiveSerializesChildAcceptance(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	hub := httptest.NewServer(fake)
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const (
+		projectID = "project1"
+		targetID  = "project1.task1"
+	)
+	at := time.Now().UTC().Add(time.Minute).Truncate(time.Second)
+	schedule, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Preserve child occurrence", Condition: "once", Target: targetID,
+		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: at.Format(time.RFC3339Nano)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	native := newNativeScheduler(manager, workspace)
+	prepared, err := native.prepareOccurrence(schedule, at, at, time.Time{}, 1, false, time.Time{}, schedulerOccurrenceReasonTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := schedulerScheduleRuntime{
+		Revision: schedule.Revision, TriggerDigest: mustSchedulerTriggerDigest(t, schedule.Trigger),
+		Target: schedule.Target, EffectiveState: app.ScheduleStateActive,
+		NextRunAt: at.Format(time.RFC3339Nano), Prepared: &prepared,
+	}
+	if err := native.storeSchedulerRuntime(schedule.ID, runtime); err != nil {
+		t.Fatal(err)
+	}
+
+	projectController, err := manager.controllerForResource(workspace, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockerStarted := make(chan struct{})
+	releaseBlocker := make(chan struct{})
+	if err := manager.enqueueResourceController(workspace, projectID, func() error {
+		close(blockerStarted)
+		<-releaseBlocker
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	<-blockerStarted
+	waitForProjectQueue := func(want int) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			projectController.mu.Lock()
+			queued := len(projectController.jobs)
+			projectController.mu.Unlock()
+			if queued >= want {
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+		t.Fatalf("Project controller queued jobs did not reach %d", want)
+	}
+
+	archiveDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/api/workspaces/"+workspace.ID+"/archive", strings.NewReader(`{"resourceId":"`+projectID+`"}`))
+		manager.server.archiveResource(recorder, request, workspace.ID)
+		archiveDone <- recorder
+	}()
+	waitForProjectQueue(1)
+	deliveryDone := make(chan error, 1)
+	go func() {
+		deliveryDone <- native.deliverPrepared(context.Background(), schedule, runtime, at.Add(time.Second))
+	}()
+	// Child delivery must also queue on its Project address. That makes a
+	// Project subtree move and child mailbox acceptance one ordered operation.
+	waitForProjectQueue(2)
+	close(releaseBlocker)
+
+	if recorder := <-archiveDone; recorder.Code != http.StatusOK {
+		t.Fatalf("archive prepared target Project = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if err := <-deliveryDone; err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := native.schedulerRuntime(schedule.ID)
+	if err != nil || persisted.EffectiveState != schedulerOutcomeAttention || persisted.LastOutcome != schedulerOutcomeAttention || persisted.AttentionTarget != targetID {
+		t.Fatalf("Project-archived target runtime = %#v, %v", persisted, err)
+	}
+	assertPreparedOccurrenceEqual(t, persisted.Prepared, prepared)
+	if messages := scheduleOccurrenceMessages(t, workspace.Path, targetID); len(messages) != 0 {
+		t.Fatalf("Project archive consumed child prepared occurrence: %#v", messages)
+	}
+}
+
 func TestNativeSchedulerTriggerEditReplacesAttentionRuntime(t *testing.T) {
 	tests := []struct {
 		name         string

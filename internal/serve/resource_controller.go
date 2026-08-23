@@ -3,6 +3,7 @@ package serve
 import (
 	"context"
 	"errors"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -131,6 +132,35 @@ func (m *agentManager) withResourceController(ctx context.Context, workspace ser
 	// follow-up jobs before the caller returns; keeping the worker registered
 	// until its FIFO is empty prevents shutdown from racing those follow-ups.
 	return controller.doWithStart(ctx, fn, m.runBackground)
+}
+
+// withResourceControllers serializes one operation with every listed stable
+// resource address. Controllers are always acquired by normalized resource ID
+// so overlapping multi-resource operations cannot invert their lock order.
+// Callers already running under a resource controller must not include it and
+// must ensure no path holding an inner controller can acquire their outer one.
+func (m *agentManager) withResourceControllers(ctx context.Context, workspace serveWorkspace, resourceIDs []string, fn func() error) error {
+	ids := make([]string, 0, len(resourceIDs))
+	seen := make(map[string]bool, len(resourceIDs))
+	for _, resourceID := range resourceIDs {
+		resourceID = normalizedResourceID(resourceID)
+		if resourceID == "" || seen[resourceID] {
+			continue
+		}
+		seen[resourceID] = true
+		ids = append(ids, resourceID)
+	}
+	sort.Strings(ids)
+	var acquire func(int) error
+	acquire = func(index int) error {
+		if index == len(ids) {
+			return fn()
+		}
+		return m.withResourceController(ctx, workspace, ids[index], func() error {
+			return acquire(index + 1)
+		})
+	}
+	return acquire(0)
 }
 
 func (m *agentManager) enqueueResourceController(workspace serveWorkspace, resourceID string, fn func() error) error {

@@ -628,27 +628,32 @@ func (n *NativeScheduler) deliverPrepared(ctx context.Context, schedule app.Sche
 	if prepared == nil {
 		return nil
 	}
-	exists, archived, _, targetErr := resourceExistsAndArchived(n.workspace.Path, prepared.Target)
-	if targetErr != nil && !errors.Is(targetErr, app.ErrResourceNotFound) {
-		return n.recordScheduleError(schedule.ID, runtime, now, targetErr)
-	}
-	if targetErr != nil || !exists || archived {
-		reason := "target resource is unavailable"
-		if targetErr != nil {
-			reason = targetErr.Error()
-		} else if archived {
-			reason = "target resource is archived"
-		}
-		runtime.NextRunAt = ""
-		runtime.RetryAt = ""
-		runtime.EffectiveState = schedulerOutcomeAttention
-		runtime.LastOutcome = schedulerOutcomeAttention
-		runtime.LastError = reason
-		runtime.AttentionTarget = prepared.Target
-		return n.storeSchedulerRuntime(schedule.ID, runtime)
-	}
 
 	deliver := func() error {
+		// This availability check and the acceptance/checkpoint transaction run
+		// under all Scheduler delivery controllers for the target. Task delivery
+		// includes its Project controller because Project archival moves the
+		// complete Task subtree while holding that stable resource address.
+		exists, archived, _, targetErr := resourceExistsAndArchived(n.workspace.Path, prepared.Target)
+		if targetErr != nil && !errors.Is(targetErr, app.ErrResourceNotFound) {
+			return targetErr
+		}
+		if targetErr != nil || !exists || archived {
+			reason := "target resource is unavailable"
+			if targetErr != nil {
+				reason = targetErr.Error()
+			} else if archived {
+				reason = "target resource is archived"
+			}
+			runtime.NextRunAt = ""
+			runtime.RetryAt = ""
+			runtime.RetryCount = 0
+			runtime.EffectiveState = schedulerOutcomeAttention
+			runtime.LastOutcome = schedulerOutcomeAttention
+			runtime.LastError = reason
+			runtime.AttentionTarget = prepared.Target
+			return n.storeSchedulerRuntime(schedule.ID, runtime)
+		}
 		accepted, alreadyAccepted, err := mailboxMessageByID(n.workspace.Path, prepared.MessageID)
 		expiredAcceptance := false
 		if err != nil {
@@ -738,12 +743,22 @@ func (n *NativeScheduler) deliverPrepared(ctx context.Context, schedule app.Sche
 	if prepared.Target == app.SchedulerResourceID {
 		err = deliver()
 	} else {
-		err = n.manager.withResourceController(ctx, n.workspace, prepared.Target, deliver)
+		// Production reconciliation already owns the Scheduler controller. It is
+		// the outer orchestration lock: target/archive paths never acquire it.
+		err = n.manager.withResourceControllers(ctx, n.workspace, schedulerDeliveryControllerIDs(prepared.Target), deliver)
 	}
 	if err == nil {
 		return nil
 	}
 	return n.recordScheduleError(schedule.ID, runtime, now, err)
+}
+
+func schedulerDeliveryControllerIDs(target string) []string {
+	target = normalizedResourceID(target)
+	if separator := strings.IndexByte(target, '.'); separator > 0 {
+		return []string{target[:separator], target}
+	}
+	return []string{target}
 }
 
 func (n *NativeScheduler) targetBusy(resourceID string) (bool, error) {

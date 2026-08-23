@@ -169,23 +169,41 @@ func (n *NativeScheduler) Change(ctx context.Context, change NativeSchedulerChan
 		if err != nil {
 			return app.Schedule{}, err
 		}
+		var pausing app.Schedule
 		for _, schedule := range config.Schedules {
 			if schedule.ID != change.ID || schedule.State == app.ScheduleStatePaused {
 				continue
 			}
+			pausing = schedule
 			if schedule.State == app.ScheduleStateCompleted {
 				return app.Schedule{}, errNativeSchedulerPauseCompleted
+			}
+			if schedule.Trigger != nil && schedule.Trigger.Type == app.ScheduleTriggerAt {
+				if err := n.reconcileSchedule(ctx, schedule, n.manager.now()); err != nil {
+					return app.Schedule{}, err
+				}
 			}
 			runtime, err := n.schedulerRuntime(change.ID)
 			if err != nil {
 				return app.Schedule{}, err
 			}
-			if runtimeCompletesSameOneTimeOccurrence(runtime, schedule) {
+			if runtimeClaimsSameOneTimeOccurrence(runtime, schedule) {
 				return app.Schedule{}, errNativeSchedulerPauseCompleted
 			}
 			break
 		}
-		return workspace.PauseSchedule(change.ID)
+		paused, err := workspace.PauseSchedule(change.ID)
+		if !errors.Is(err, app.ErrScheduleOccurrenceDue) {
+			return paused, err
+		}
+		at, parseErr := time.Parse(time.RFC3339Nano, pausing.Trigger.At)
+		if parseErr != nil {
+			return app.Schedule{}, parseErr
+		}
+		if reconcileErr := n.reconcileSchedule(ctx, pausing, at); reconcileErr != nil {
+			return app.Schedule{}, reconcileErr
+		}
+		return app.Schedule{}, errNativeSchedulerPauseCompleted
 	case app.ScheduleChangeResume:
 		if change.ID == "" {
 			return app.Schedule{}, errors.New("resume requires id")
@@ -386,6 +404,18 @@ func runtimeCompletesSameOneTimeOccurrence(runtime schedulerScheduleRuntime, sch
 	completedAt, completedErr := time.Parse(time.RFC3339Nano, runtime.LastOccurrenceAt)
 	triggerAt, triggerErr := time.Parse(time.RFC3339Nano, schedule.Trigger.At)
 	return completedErr == nil && triggerErr == nil && completedAt.Equal(triggerAt)
+}
+
+func runtimeClaimsSameOneTimeOccurrence(runtime schedulerScheduleRuntime, schedule app.Schedule) bool {
+	if runtimeCompletesSameOneTimeOccurrence(runtime, schedule) {
+		return true
+	}
+	if runtime.Prepared == nil || schedule.Trigger == nil || schedule.Trigger.Type != app.ScheduleTriggerAt || runtime.Prepared.ScheduleID != schedule.ID {
+		return false
+	}
+	preparedAt, preparedErr := time.Parse(time.RFC3339Nano, runtime.Prepared.ScheduledFor)
+	triggerAt, triggerErr := time.Parse(time.RFC3339Nano, schedule.Trigger.At)
+	return preparedErr == nil && triggerErr == nil && preparedAt.Equal(triggerAt)
 }
 
 func initialScheduleRuntime(schedule app.Schedule, now time.Time) (schedulerScheduleRuntime, error) {

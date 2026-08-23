@@ -27,6 +27,10 @@ var ErrScheduleTriggerRequired = errors.New("schedule trigger is required")
 // strictly later than the mutation that would make it active.
 var ErrScheduleTriggerAtNotFuture = errors.New("schedule trigger.at must be strictly in the future")
 
+// ErrScheduleOccurrenceDue identifies a one-time schedule whose occurrence
+// reached its deadline before the pause transition could be persisted.
+var ErrScheduleOccurrenceDue = errors.New("one-time schedule occurrence is due")
+
 const (
 	SchedulerResourceID         = "scheduler"
 	schedulerDir                = "scheduler"
@@ -902,9 +906,19 @@ func (w *Workspace) changeScheduleState(id, state string) (Schedule, error) {
 		if updated.Trigger == nil {
 			return errors.New("schedule requires compilation before it can change state")
 		}
+		mutationTime := time.Now()
+		if state == ScheduleStatePaused && updated.Trigger.Type == ScheduleTriggerAt {
+			at, err := time.Parse(time.RFC3339Nano, updated.Trigger.At)
+			if err != nil {
+				return err
+			}
+			if !at.After(mutationTime) {
+				return ErrScheduleOccurrenceDue
+			}
+		}
 		updated.State = state
 		updated.Revision++
-		updated.UpdatedAt = time.Now().Format(time.RFC3339Nano)
+		updated.UpdatedAt = mutationTime.Format(time.RFC3339Nano)
 		config.Schedules[index] = updated
 		return writeSchedulerJSON(schedulerJSONPath(w.root), config)
 	})

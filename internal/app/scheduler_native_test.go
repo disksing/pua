@@ -279,6 +279,70 @@ func TestScheduleTriggerValidationAndRevisionCAS(t *testing.T) {
 	}
 }
 
+func TestPauseScheduleCommitsOnlyBeforeOneTimeDeadline(t *testing.T) {
+	workspace, err := app.Initialize(t.TempDir(), "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	futureAt := time.Now().UTC().Add(time.Hour)
+	future, err := workspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Pause before due", Condition: "once", Target: "workspace",
+		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: futureAt.Format(time.RFC3339Nano)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	paused, err := workspace.PauseSchedule(future.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pauseBoundary, err := time.Parse(time.RFC3339Nano, paused.UpdatedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if paused.State != app.ScheduleStatePaused || paused.Revision != future.Revision+1 || !pauseBoundary.Before(futureAt) {
+		t.Fatalf("future pause transition = %#v, boundary %s", paused, pauseBoundary)
+	}
+
+	due, err := workspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Do not pause after due", Condition: "once", Target: "workspace",
+		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := workspace.Scheduler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := range config.Schedules {
+		if config.Schedules[index].ID == due.ID {
+			config.Schedules[index].Trigger.At = time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)
+		}
+	}
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(filepath.Join(workspace.Root(), "scheduler", "scheduler.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := workspace.PauseSchedule(due.ID); !errors.Is(err, app.ErrScheduleOccurrenceDue) {
+		t.Fatalf("due one-time pause error = %v", err)
+	}
+	loaded, err := workspace.Scheduler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, schedule := range loaded.Schedules {
+		if schedule.ID == due.ID && (schedule.State != app.ScheduleStateActive || schedule.Revision != due.Revision || schedule.UpdatedAt != due.UpdatedAt) {
+			t.Fatalf("rejected pause mutated due definition: before=%#v after=%#v", due, schedule)
+		}
+	}
+}
+
 func TestScheduleChangeOperationRejectsUnknownValues(t *testing.T) {
 	operation, err := app.ParseScheduleChangeOperation(" pause ")
 	if err != nil || operation != app.ScheduleChangePause {

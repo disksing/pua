@@ -1209,6 +1209,177 @@ func TestNativeSchedulerRejectsPauseAfterOneTimeAcceptance(t *testing.T) {
 	}
 }
 
+func TestNativeSchedulerPauseRecoversOneTimeDueAtPersistenceBoundary(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	hub := httptest.NewServer(fake)
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Run before pause", Condition: "once", Target: "workspace",
+		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	rewriteSchedulerTestOneTimeDeadline(t, puaWorkspace, created.ID, at)
+	before := schedulerTestScheduleByID(t, puaWorkspace, created.ID)
+
+	// The injected clock is deliberately before the occurrence. Only the
+	// timestamp captured inside the persisted app transition can close this
+	// deadline-crossing window deterministically.
+	manager.now = func() time.Time { return at.Add(-time.Nanosecond) }
+	native := newNativeScheduler(manager, workspace)
+	if _, err := native.Change(context.Background(), NativeSchedulerChange{Operation: app.ScheduleChangePause, ID: created.ID}); !errors.Is(err, errNativeSchedulerPauseCompleted) {
+		t.Fatalf("pause due one-time error = %v", err)
+	}
+	after := schedulerTestScheduleByID(t, puaWorkspace, created.ID)
+	if !reflect.DeepEqual(after, before) || after.State != app.ScheduleStateActive || after.Revision != created.Revision {
+		t.Fatalf("due pause mutated portable definition: before=%#v after=%#v", before, after)
+	}
+	messages := scheduleOccurrenceMessages(t, workspace.Path, created.Target)
+	if len(messages) != 1 || messages[0].Causation == nil || messages[0].Causation.ScheduledFor != at.Format(time.RFC3339Nano) {
+		t.Fatalf("due occurrence mailbox = %#v", messages)
+	}
+	runtime, err := native.schedulerRuntime(created.ID)
+	if err != nil || runtime.Revision != created.Revision || runtime.EffectiveState != app.ScheduleStateCompleted || runtime.Prepared != nil || runtime.LastOutcome != schedulerOutcomeAccepted || runtime.LastOccurrenceAt != at.Format(time.RFC3339Nano) {
+		t.Fatalf("due occurrence runtime = %#v, %v", runtime, err)
+	}
+}
+
+func TestNativeSchedulerPausePreservesClaimedOneTimeOccurrence(t *testing.T) {
+	tests := []struct {
+		name      string
+		target    string
+		accepted  bool
+		configure func(*testing.T, *NativeScheduler, string, app.Schedule, schedulerPreparedOccurrence, schedulerScheduleRuntime) schedulerScheduleRuntime
+		assert    func(*testing.T, *NativeScheduler, serveWorkspace, app.Schedule, schedulerPreparedOccurrence, schedulerScheduleRuntime)
+	}{
+		{
+			name:   "prepared",
+			target: "workspace",
+			configure: func(_ *testing.T, _ *NativeScheduler, _ string, _ app.Schedule, prepared schedulerPreparedOccurrence, runtime schedulerScheduleRuntime) schedulerScheduleRuntime {
+				runtime.Prepared = &prepared
+				return runtime
+			},
+			assert: func(t *testing.T, native *NativeScheduler, workspace serveWorkspace, schedule app.Schedule, prepared schedulerPreparedOccurrence, _ schedulerScheduleRuntime) {
+				runtime, err := native.schedulerRuntime(schedule.ID)
+				if err != nil || runtime.Revision != schedule.Revision || runtime.EffectiveState != app.ScheduleStateCompleted || runtime.Prepared != nil || runtime.LastOutcome != schedulerOutcomeAccepted || runtime.LastOccurrenceAt != prepared.ScheduledFor {
+					t.Fatalf("prepared pause recovery runtime = %#v, %v", runtime, err)
+				}
+				assertSingleDurableOccurrence(t, workspace.Path, prepared, 1)
+			},
+		},
+		{
+			name:   "retry backoff",
+			target: "workspace",
+			configure: func(_ *testing.T, _ *NativeScheduler, _ string, _ app.Schedule, prepared schedulerPreparedOccurrence, runtime schedulerScheduleRuntime) schedulerScheduleRuntime {
+				runtime.Prepared = &prepared
+				runtime.RetryAt = generationTime(prepared.ScheduledFor).Add(time.Minute).Format(time.RFC3339Nano)
+				runtime.RetryCount = 2
+				return runtime
+			},
+			assert: func(t *testing.T, native *NativeScheduler, workspace serveWorkspace, schedule app.Schedule, prepared schedulerPreparedOccurrence, want schedulerScheduleRuntime) {
+				runtime, err := native.schedulerRuntime(schedule.ID)
+				if err != nil || runtime.Revision != schedule.Revision || runtime.EffectiveState != app.ScheduleStateActive || runtime.RetryAt != want.RetryAt || runtime.RetryCount != want.RetryCount {
+					t.Fatalf("retry pause preservation runtime = %#v, %v", runtime, err)
+				}
+				assertPreparedOccurrenceEqual(t, runtime.Prepared, prepared)
+				assertSingleDurableOccurrence(t, workspace.Path, prepared, 0)
+			},
+		},
+		{
+			name:   "attention",
+			target: "project1.task1",
+			configure: func(t *testing.T, _ *NativeScheduler, configPath string, _ app.Schedule, prepared schedulerPreparedOccurrence, runtime schedulerScheduleRuntime) schedulerScheduleRuntime {
+				rewriteSchedulerTestProfiles(t, configPath, nil)
+				runtime.Prepared = &prepared
+				runtime.EffectiveState = schedulerOutcomeAttention
+				runtime.LastOutcome = schedulerOutcomeAttention
+				runtime.LastError = "binding unavailable"
+				runtime.AttentionTarget = prepared.Target
+				return runtime
+			},
+			assert: func(t *testing.T, native *NativeScheduler, workspace serveWorkspace, schedule app.Schedule, prepared schedulerPreparedOccurrence, _ schedulerScheduleRuntime) {
+				runtime, err := native.schedulerRuntime(schedule.ID)
+				if err != nil || runtime.Revision != schedule.Revision || runtime.EffectiveState != schedulerOutcomeAttention || runtime.LastOutcome != schedulerOutcomeAttention || runtime.AttentionTarget != prepared.Target {
+					t.Fatalf("attention pause preservation runtime = %#v, %v", runtime, err)
+				}
+				assertPreparedOccurrenceEqual(t, runtime.Prepared, prepared)
+				assertSingleDurableOccurrence(t, workspace.Path, prepared, 0)
+			},
+		},
+		{
+			name:     "mailbox accepted before checkpoint",
+			target:   "workspace",
+			accepted: true,
+			configure: func(_ *testing.T, _ *NativeScheduler, _ string, _ app.Schedule, prepared schedulerPreparedOccurrence, runtime schedulerScheduleRuntime) schedulerScheduleRuntime {
+				runtime.Prepared = &prepared
+				return runtime
+			},
+			assert: func(t *testing.T, native *NativeScheduler, workspace serveWorkspace, schedule app.Schedule, prepared schedulerPreparedOccurrence, _ schedulerScheduleRuntime) {
+				runtime, err := native.schedulerRuntime(schedule.ID)
+				if err != nil || runtime.Revision != schedule.Revision || runtime.EffectiveState != app.ScheduleStateCompleted || runtime.Prepared != nil || runtime.LastOutcome != schedulerOutcomeAccepted || runtime.LastOccurrenceAt != prepared.ScheduledFor {
+					t.Fatalf("accepted-window pause recovery runtime = %#v, %v", runtime, err)
+				}
+				assertSingleDurableOccurrence(t, workspace.Path, prepared, 1)
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fake := newRuntimeFakeAgentHub()
+			hub := httptest.NewServer(fake)
+			defer hub.Close()
+			manager, workspace, configPath := newRuntimeTestManager(t, hub.URL)
+			puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			at := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+			schedule, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+				Description: "Finish claimed work", Condition: "once", Target: test.target,
+				Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: at.Format(time.RFC3339Nano)},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			manager.now = func() time.Time { return at.Add(-time.Minute) }
+			native := newNativeScheduler(manager, workspace)
+			prepared, err := native.prepareOccurrence(schedule, at, at, time.Time{}, 1, schedulerOccurrenceReasonTime)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtime := schedulerScheduleRuntime{
+				Revision: schedule.Revision, TriggerDigest: mustSchedulerTriggerDigest(t, schedule.Trigger),
+				EffectiveState: app.ScheduleStateActive, NextRunAt: at.Format(time.RFC3339Nano),
+			}
+			runtime = test.configure(t, native, configPath, schedule, prepared, runtime)
+			if err := native.storeSchedulerRuntime(schedule.ID, runtime); err != nil {
+				t.Fatal(err)
+			}
+			if test.accepted {
+				if _, err := acceptGeneratedMailboxMessage(workspace.Path, preparedOccurrenceMessage(prepared)); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if _, err := native.Change(context.Background(), NativeSchedulerChange{Operation: app.ScheduleChangePause, ID: schedule.ID}); !errors.Is(err, errNativeSchedulerPauseCompleted) {
+				t.Fatalf("pause claimed one-time error = %v", err)
+			}
+			after := schedulerTestScheduleByID(t, puaWorkspace, schedule.ID)
+			if !reflect.DeepEqual(after, schedule) || after.State != app.ScheduleStateActive || after.Revision != schedule.Revision {
+				t.Fatalf("claimed pause mutated portable definition: before=%#v after=%#v", schedule, after)
+			}
+			test.assert(t, native, workspace, schedule, prepared, runtime)
+		})
+	}
+}
+
 func TestNativeSchedulerPauseStillWorksBeforeCompletion(t *testing.T) {
 	tests := []struct {
 		name    string

@@ -31,6 +31,10 @@ var ErrScheduleTriggerAtNotFuture = errors.New("schedule trigger.at must be stri
 // reached its deadline before the pause transition could be persisted.
 var ErrScheduleOccurrenceDue = errors.New("one-time schedule occurrence is due")
 
+// ErrScheduleOccurrenceOutOfRange identifies an occurrence that cannot be
+// round-tripped through the Scheduler's RFC3339Nano runtime persistence.
+var ErrScheduleOccurrenceOutOfRange = errors.New("schedule occurrence is outside the RFC3339Nano persistence range")
+
 const (
 	SchedulerResourceID         = "scheduler"
 	schedulerDir                = "scheduler"
@@ -605,12 +609,8 @@ func NextScheduleOccurrence(trigger ScheduleTrigger, after time.Time) (time.Time
 		return time.Time{}, nil
 	case ScheduleTriggerInterval:
 		anchor, _ := time.Parse(time.RFC3339Nano, trigger.AnchorAt)
-		if anchor.After(after) {
-			return anchor, nil
-		}
-		every := time.Duration(trigger.EverySeconds) * time.Second
-		steps := after.Sub(anchor)/every + 1
-		return anchor.Add(steps * every), nil
+		_, next, _, err := intervalOccurrenceBounds(anchor, after, trigger.EverySeconds)
+		return next, err
 	case ScheduleTriggerCron:
 		schedule, err := parseScheduleCron(trigger)
 		if err != nil {
@@ -629,17 +629,22 @@ func CoalescedScheduleOccurrence(trigger ScheduleTrigger, first, now time.Time) 
 	if err := ValidateScheduleTrigger(trigger); err != nil {
 		return time.Time{}, time.Time{}, 0, false, err
 	}
+	if trigger.Type == ScheduleTriggerInterval {
+		last, next, intervalCount, err := intervalOccurrenceBounds(first, now, trigger.EverySeconds)
+		if err != nil {
+			return time.Time{}, time.Time{}, 0, false, err
+		}
+		if intervalCount > int64(^uint(0)>>1) {
+			return time.Time{}, time.Time{}, 0, false, errors.New("schedule occurrence count exceeds platform int range")
+		}
+		return last, next, int(intervalCount), false, nil
+	}
 	if first.After(now) {
 		return time.Time{}, first, 0, false, nil
 	}
 	last, count = first, 1
 	if trigger.Type == ScheduleTriggerAt {
 		return last, time.Time{}, count, false, nil
-	}
-	if trigger.Type == ScheduleTriggerInterval {
-		every := time.Duration(trigger.EverySeconds) * time.Second
-		missed := int(now.Sub(first)/every) + 1
-		return first.Add(time.Duration(missed-1) * every), first.Add(time.Duration(missed) * every), missed, false, nil
 	}
 	parsed, err := parseScheduleCron(trigger)
 	if err != nil {
@@ -655,6 +660,62 @@ func CoalescedScheduleOccurrence(trigger ScheduleTrigger, first, now time.Time) 
 	}
 	next = parsed.Next(now)
 	return last, next, count, true, nil
+}
+
+// intervalOccurrenceBounds returns the last occurrence at or before boundary,
+// the first occurrence strictly after it, and the number of occurrences from
+// first through last. It operates in seconds because interval triggers retain
+// the anchor's nanosecond within every occurrence, while the complete
+// RFC3339Nano year range is much wider than time.Duration.
+func intervalOccurrenceBounds(first, boundary time.Time, everySeconds int64) (last, next time.Time, count int64, err error) {
+	if !scheduleOccurrenceRepresentable(first) {
+		return time.Time{}, time.Time{}, 0, ErrScheduleOccurrenceOutOfRange
+	}
+	if first.After(boundary) {
+		return time.Time{}, first, 0, nil
+	}
+
+	latestBoundary := time.Date(10000, time.January, 1, 0, 0, 0, 0, first.Location())
+	if !boundary.Before(latestBoundary) {
+		return time.Time{}, time.Time{}, 0, ErrScheduleOccurrenceOutOfRange
+	}
+
+	elapsedSeconds := boundary.Unix() - first.Unix()
+	if boundary.Nanosecond() < first.Nanosecond() {
+		elapsedSeconds--
+	}
+	lastOrdinal := elapsedSeconds / everySeconds
+	last, err = intervalOccurrenceAt(first, lastOrdinal, everySeconds)
+	if err != nil {
+		return time.Time{}, time.Time{}, 0, err
+	}
+	next, err = intervalOccurrenceAt(first, lastOrdinal+1, everySeconds)
+	if err != nil {
+		return time.Time{}, time.Time{}, 0, err
+	}
+	return last, next, lastOrdinal + 1, nil
+}
+
+func intervalOccurrenceAt(first time.Time, ordinal, everySeconds int64) (time.Time, error) {
+	if ordinal < 0 || ordinal > int64(^uint64(0)>>1)/everySeconds {
+		return time.Time{}, ErrScheduleOccurrenceOutOfRange
+	}
+	elapsedSeconds := ordinal * everySeconds
+	firstSeconds := first.Unix()
+	if firstSeconds > int64(^uint64(0)>>1)-elapsedSeconds {
+		return time.Time{}, ErrScheduleOccurrenceOutOfRange
+	}
+	occurrence := time.Unix(firstSeconds+elapsedSeconds, int64(first.Nanosecond())).In(first.Location())
+	if !scheduleOccurrenceRepresentable(occurrence) {
+		return time.Time{}, ErrScheduleOccurrenceOutOfRange
+	}
+	return occurrence, nil
+}
+
+func scheduleOccurrenceRepresentable(occurrence time.Time) bool {
+	encoded := occurrence.Format(time.RFC3339Nano)
+	decoded, err := time.Parse(time.RFC3339Nano, encoded)
+	return err == nil && decoded.Equal(occurrence)
 }
 
 func writeSchedulerJSON(path string, config SchedulerConfig) error {

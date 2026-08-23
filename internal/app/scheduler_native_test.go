@@ -420,6 +420,161 @@ func TestCronDowntimeCoalescingIsBounded(t *testing.T) {
 	}
 }
 
+func TestIntervalNextOccurrenceUsesOverflowSafeOrdinals(t *testing.T) {
+	ancient := time.Date(1700, time.January, 1, 0, 0, 0, 123456789, time.UTC)
+	aligned := time.Date(2026, time.August, 24, 12, 34, 0, 123456789, time.UTC)
+	minuteTrigger := app.ScheduleTrigger{
+		Type: app.ScheduleTriggerInterval, EverySeconds: 60,
+		AnchorAt: ancient.Format(time.RFC3339Nano),
+	}
+	maximumEverySeconds := int64(^uint64(0)>>1) / int64(time.Second)
+	maximumTrigger := app.ScheduleTrigger{
+		Type: app.ScheduleTriggerInterval, EverySeconds: maximumEverySeconds,
+		AnchorAt: ancient.Format(time.RFC3339Nano),
+	}
+	earliest := time.Date(0, time.January, 1, 0, 0, 0, 987654321, time.UTC)
+	earliestTrigger := app.ScheduleTrigger{
+		Type: app.ScheduleTriggerInterval, EverySeconds: 60,
+		AnchorAt: earliest.Format(time.RFC3339Nano),
+	}
+	offsetTrigger := app.ScheduleTrigger{
+		Type: app.ScheduleTriggerInterval, EverySeconds: 60,
+		AnchorAt: "1700-01-01T00:00:00.333333333-07:30",
+	}
+	offsetBoundary := time.Date(2026, time.August, 24, 12, 34, 0, 333333333, time.UTC)
+
+	tests := []struct {
+		name    string
+		trigger app.ScheduleTrigger
+		after   time.Time
+		want    time.Time
+	}{
+		{name: "ancient equality", trigger: minuteTrigger, after: aligned, want: aligned.Add(time.Minute)},
+		{name: "ancient nanosecond before", trigger: minuteTrigger, after: aligned.Add(-time.Nanosecond), want: aligned},
+		{name: "ancient nanosecond after", trigger: minuteTrigger, after: aligned.Add(time.Nanosecond), want: aligned.Add(time.Minute)},
+		{name: "before anchor", trigger: minuteTrigger, after: ancient.Add(-time.Nanosecond), want: ancient},
+		{name: "earliest anchor equality", trigger: earliestTrigger, after: earliest, want: earliest.Add(time.Minute)},
+		{name: "earliest anchor to modern boundary", trigger: earliestTrigger, after: aligned.Add(864197532 * time.Nanosecond), want: aligned.Add(time.Minute).Add(864197532 * time.Nanosecond)},
+		{name: "offset anchor absolute instant", trigger: offsetTrigger, after: offsetBoundary, want: offsetBoundary.Add(time.Minute)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			next, err := app.NextScheduleOccurrence(test.trigger, test.after)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !next.Equal(test.want) {
+				t.Fatalf("next = %s, want %s", next, test.want)
+			}
+			if !next.After(test.after) {
+				t.Fatalf("next %s is not after boundary %s", next, test.after)
+			}
+			anchor, _ := time.Parse(time.RFC3339Nano, test.trigger.AnchorAt)
+			if next.Nanosecond() != anchor.Nanosecond() {
+				t.Fatalf("next nanosecond = %d, anchor nanosecond = %d", next.Nanosecond(), anchor.Nanosecond())
+			}
+		})
+	}
+
+	maximumNext, err := app.NextScheduleOccurrence(maximumTrigger, aligned)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !maximumNext.After(aligned) || maximumNext.Nanosecond() != ancient.Nanosecond() {
+		t.Fatalf("maximum interval next = %s after %s", maximumNext, aligned)
+	}
+	secondMaximumNext, err := app.NextScheduleOccurrence(maximumTrigger, maximumNext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !secondMaximumNext.After(maximumNext) {
+		t.Fatalf("second maximum interval occurrence %s is not after %s", secondMaximumNext, maximumNext)
+	}
+}
+
+func TestIntervalOccurrenceRejectsRFC3339NanoOverflow(t *testing.T) {
+	anchor := time.Date(9999, time.December, 31, 23, 58, 59, 999999999, time.UTC)
+	latest := time.Date(9999, time.December, 31, 23, 59, 59, 999999999, time.UTC)
+	trigger := app.ScheduleTrigger{
+		Type: app.ScheduleTriggerInterval, EverySeconds: 60,
+		AnchorAt: anchor.Format(time.RFC3339Nano),
+	}
+	latestTrigger := app.ScheduleTrigger{
+		Type: app.ScheduleTriggerInterval, EverySeconds: 60,
+		AnchorAt: latest.Format(time.RFC3339Nano),
+	}
+
+	next, err := app.NextScheduleOccurrence(trigger, anchor)
+	if err != nil || !next.Equal(latest) {
+		t.Fatalf("latest representable next = %s, %v", next, err)
+	}
+	next, err = app.NextScheduleOccurrence(trigger, latest.Add(-time.Nanosecond))
+	if err != nil || !next.Equal(latest) {
+		t.Fatalf("next immediately before latest = %s, %v", next, err)
+	}
+	if next, err = app.NextScheduleOccurrence(latestTrigger, latest.Add(-time.Nanosecond)); err != nil || !next.Equal(latest) {
+		t.Fatalf("latest anchor next = %s, %v", next, err)
+	}
+	if next, err = app.NextScheduleOccurrence(latestTrigger, latest); !errors.Is(err, app.ErrScheduleOccurrenceOutOfRange) || !next.IsZero() {
+		t.Fatalf("overflowing next = %s, %v", next, err)
+	}
+
+	last, next, count, truncated, err := app.CoalescedScheduleOccurrence(trigger, anchor, anchor)
+	if err != nil || !last.Equal(anchor) || !next.Equal(latest) || count != 1 || truncated {
+		t.Fatalf("latest coalescing = last %s next %s count %d truncated %v err %v", last, next, count, truncated, err)
+	}
+	last, next, count, truncated, err = app.CoalescedScheduleOccurrence(latestTrigger, latest, latest)
+	if !errors.Is(err, app.ErrScheduleOccurrenceOutOfRange) || !last.IsZero() || !next.IsZero() || count != 0 || truncated {
+		t.Fatalf("overflowing coalescing = last %s next %s count %d truncated %v err %v", last, next, count, truncated, err)
+	}
+}
+
+func TestIntervalCoalescingUsesTruthfulOverflowSafeBounds(t *testing.T) {
+	first := time.Date(1700, time.January, 1, 0, 0, 0, 246813579, time.UTC)
+	now := time.Date(2026, time.August, 24, 12, 34, 0, 246813579, time.UTC)
+	trigger := app.ScheduleTrigger{
+		Type: app.ScheduleTriggerInterval, EverySeconds: 60,
+		AnchorAt: first.Format(time.RFC3339Nano),
+	}
+	wantCount := int((now.Unix()-first.Unix())/trigger.EverySeconds) + 1
+
+	last, next, count, truncated, err := app.CoalescedScheduleOccurrence(trigger, first, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !last.Equal(now) || !next.Equal(now.Add(time.Minute)) || count != wantCount || truncated {
+		t.Fatalf("coalescing = last %s next %s count %d truncated %v", last, next, count, truncated)
+	}
+	if last.After(now) || !next.After(now) || !last.Before(next) || count <= 1 {
+		t.Fatalf("non-monotonic coalescing = last %s now %s next %s count %d", last, now, next, count)
+	}
+
+	last, next, count, truncated, err = app.CoalescedScheduleOccurrence(trigger, first, first.Add(-time.Nanosecond))
+	if err != nil || !last.IsZero() || !next.Equal(first) || count != 0 || truncated {
+		t.Fatalf("pre-anchor coalescing = last %s next %s count %d truncated %v err %v", last, next, count, truncated, err)
+	}
+
+	last, next, count, truncated, err = app.CoalescedScheduleOccurrence(trigger, first, now.Add(-time.Nanosecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !last.Equal(now.Add(-time.Minute)) || !next.Equal(now) || count != wantCount-1 || truncated {
+		t.Fatalf("pre-boundary coalescing = last %s next %s count %d truncated %v", last, next, count, truncated)
+	}
+
+	maximumEverySeconds := int64(^uint64(0)>>1) / int64(time.Second)
+	maximumTrigger := app.ScheduleTrigger{
+		Type: app.ScheduleTriggerInterval, EverySeconds: maximumEverySeconds,
+		AnchorAt: first.Format(time.RFC3339Nano),
+	}
+	wantLast := time.Unix(first.Unix()+maximumEverySeconds, int64(first.Nanosecond())).UTC()
+	wantNext := time.Unix(first.Unix()+2*maximumEverySeconds, int64(first.Nanosecond())).UTC()
+	last, next, count, truncated, err = app.CoalescedScheduleOccurrence(maximumTrigger, first, now)
+	if err != nil || !last.Equal(wantLast) || !next.Equal(wantNext) || count != 2 || truncated {
+		t.Fatalf("maximum interval coalescing = last %s next %s count %d truncated %v err %v", last, next, count, truncated, err)
+	}
+}
+
 func TestNeedsCompilationScheduleCannotEnterInvalidPausedState(t *testing.T) {
 	workspace, err := app.Initialize(t.TempDir(), "en")
 	if err != nil {

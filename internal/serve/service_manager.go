@@ -320,15 +320,9 @@ func (m *ServiceManager) Stop(ctx context.Context) error {
 			continue
 		}
 		cleanupErr := error(nil)
-		if rt.process != nil {
+		if rt.process != nil || rt.status.ProcessGroup > 0 {
 			cleanupErr = m.stopProcessLocked(ctx, rt, false)
 			if cleanupErr != nil && first == nil {
-				first = cleanupErr
-			}
-		} else if rt.status.ProcessGroup > 0 {
-			cleanupErr = fmt.Errorf("service %s retains unresolved process group %d", rt.status.ID, rt.status.ProcessGroup)
-			rt.status.LastError = cleanupErr.Error()
-			if first == nil {
 				first = cleanupErr
 			}
 		}
@@ -510,6 +504,16 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 	}
 	cmd.Env = env
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	instanceToken := valueFromEnvironment(env, serviceInstanceTokenEnvironment)
+	var identityMarker *os.File
+	identityMarkerPath := ""
+	if serviceProcessIdentityMarkerRequired() {
+		identityMarker, identityMarkerPath, err = openServiceProcessIdentityMarker(m.root, cfg.ID, instanceToken)
+		if err != nil {
+			return m.failStartLocked(ctx, rt, err)
+		}
+		cmd.ExtraFiles = []*os.File{identityMarker}
+	}
 	redactor := security.NewRedactor(secrets...)
 	stdoutSink := newServiceLogSink(filepath.Join(serviceRuntimePath(m.root, cfg.ID), "stdout.log"), cfg.LogRotation)
 	stderrSink := newServiceLogSink(filepath.Join(serviceRuntimePath(m.root, cfg.ID), "stderr.log"), cfg.LogRotation)
@@ -534,9 +538,16 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 	rt.redactor = redactor
 	rt.exports = exports
 	if err := cmd.Start(); err != nil {
+		if identityMarker != nil {
+			_ = identityMarker.Close()
+			_ = os.Remove(identityMarkerPath)
+		}
 		_ = stdoutWriter.Close()
 		_ = stderrWriter.Close()
 		return m.failStartLocked(ctx, rt, err)
+	}
+	if identityMarker != nil {
+		_ = identityMarker.Close()
 	}
 	processStartID := ""
 	if serviceProcessIdentityRequired() {
@@ -544,6 +555,7 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 		if identityErr != nil || processIdentity.processGroup != cmd.Process.Pid || processIdentity.startID == "" {
 			_ = terminateProcessGroup(cmd.Process.Pid, true)
 			_ = cmd.Wait()
+			_ = os.Remove(identityMarkerPath)
 			_ = stdoutWriter.Close()
 			_ = stderrWriter.Close()
 			if identityErr == nil {
@@ -583,7 +595,7 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 	rt.status.LastError = ""
 	rt.status.NextRetryAt = ""
 	rt.status.CommandDigest = serviceCommandDigest(cfg)
-	rt.status.InstanceToken = valueFromEnvironment(env, "PUA_SERVICE_INSTANCE_TOKEN")
+	rt.status.InstanceToken = instanceToken
 	rt.status.ProcessStartID = processStartID
 	rt.status.Readiness = ServiceReadinessStatus{Configured: cfg.Readiness != nil}
 	rt.status.Cleanup = ServiceCleanupStatus{Configured: cfg.Cleanup != nil}
@@ -1040,15 +1052,21 @@ func (m *ServiceManager) handleProcessExitLocked(ctx context.Context, rt *servic
 	if exit.err == nil && exportErr != nil {
 		exit.err = exportErr
 	}
+	groupErr := m.terminateRuntimeProcessGroupLocked(ctx, rt, m.processTerminationGrace)
 	rt.process = nil
 	rt.exit = nil
 	rt.logWriters = nil
-	rt.status.PID, rt.status.ProcessGroup = 0, 0
 	rt.status.ExitedAt = m.now().Format(time.RFC3339Nano)
 	rt.status.ExitCode = exit.code
 	if exit.err != nil {
 		rt.status.ExitError = security.NewRedactor(rt.secretValues...).RedactString(exit.err.Error())
 	}
+	if groupErr != nil {
+		_ = m.appendEventLocked(rt, map[string]any{"type": "exited", "code": exit.code, "error": rt.status.ExitError, "time": rt.status.ExitedAt})
+		m.failOrphanRecoveryLocked(rt, groupErr)
+		return
+	}
+	rt.status.PID, rt.status.ProcessGroup = 0, 0
 	if rt.status.ManualStop || m.stopping || !rt.config.Enabled {
 		rt.status.State = ServiceStateStopped
 		m.persistStatusLocked(rt)
@@ -1086,7 +1104,7 @@ func (m *ServiceManager) transitionServiceFailureLocked(rt *serviceRuntime, fail
 }
 
 func (m *ServiceManager) stopProcessLocked(ctx context.Context, rt *serviceRuntime, manual bool) error {
-	if rt.process == nil {
+	if rt.process == nil && rt.status.ProcessGroup <= 0 {
 		return nil
 	}
 	if ctx == nil {
@@ -1095,26 +1113,19 @@ func (m *ServiceManager) stopProcessLocked(ctx context.Context, rt *serviceRunti
 	if manual {
 		rt.status.ManualStop = true
 	}
-	pid := rt.process.Process.Pid
-	identity := serviceProcessGroupIdentity{
-		leaderPID:            pid,
-		processGroup:         rt.status.ProcessGroup,
-		startID:              rt.status.ProcessStartID,
-		instanceToken:        rt.status.InstanceToken,
-		commandDigest:        rt.status.CommandDigest,
-		verifyLeaderIdentity: serviceProcessIdentityRequired(),
-	}
 	grace := m.processTerminationGrace
 	if grace <= 0 {
 		grace = defaultServiceProcessTerminationGrace
 	}
-	if err := terminateOwnedServiceProcessGroup(ctx, identity, grace); err != nil {
+	if err := m.terminateRuntimeProcessGroupLocked(ctx, rt, grace); err != nil {
 		return m.failProcessTerminationLocked(rt, err)
 	}
-	if err := waitForServiceProcessLeader(rt.exit); err != nil {
-		return m.failProcessTerminationLocked(rt, err)
+	if rt.process != nil {
+		if err := waitForServiceProcessLeader(rt.exit); err != nil {
+			return m.failProcessTerminationLocked(rt, err)
+		}
 	}
-	recoveredTermination := rt.terminationPending
+	recoveredTermination := rt.terminationPending || rt.process == nil
 	if requiresInitialExport(rt.config) {
 		_, _ = m.readExportsLocked(rt)
 	}
@@ -1143,6 +1154,34 @@ func (m *ServiceManager) stopProcessLocked(ctx context.Context, rt *serviceRunti
 	return nil
 }
 
+func (m *ServiceManager) terminateRuntimeProcessGroupLocked(ctx context.Context, rt *serviceRuntime, grace time.Duration) error {
+	if rt.status.ProcessGroup <= 0 {
+		return nil
+	}
+	leaderPID := rt.status.PID
+	if rt.process != nil && rt.process.Process != nil {
+		leaderPID = rt.process.Process.Pid
+	}
+	markerPath := ""
+	if serviceProcessIdentityMarkerRequired() {
+		markerPath = serviceProcessIdentityMarkerPath(m.root, rt.status.ID, rt.status.InstanceToken)
+	}
+	err := terminateOwnedServiceProcessGroup(ctx, serviceProcessGroupIdentity{
+		leaderPID:            leaderPID,
+		processGroup:         rt.status.ProcessGroup,
+		startID:              rt.status.ProcessStartID,
+		instanceToken:        rt.status.InstanceToken,
+		commandDigest:        rt.status.CommandDigest,
+		markerPath:           markerPath,
+		verifyLeaderIdentity: serviceProcessIdentityRequired(),
+		trustResidual:        rt.process != nil,
+	}, grace)
+	if err == nil && markerPath != "" {
+		_ = os.Remove(markerPath)
+	}
+	return err
+}
+
 func waitForServiceProcessLeader(wait <-chan serviceProcessExit) error {
 	if wait == nil {
 		return errors.New("service process leader wait is unavailable")
@@ -1163,7 +1202,7 @@ func waitForServiceProcessLeader(wait <-chan serviceProcessExit) error {
 func (m *ServiceManager) failProcessTerminationLocked(rt *serviceRuntime, cause error) error {
 	message := security.NewRedactor(rt.secretValues...).RedactString(cause.Error())
 	appendFailure := !rt.terminationPending || rt.status.LastError != message
-	rt.terminationPending = true
+	rt.terminationPending = rt.process != nil
 	rt.status.LastError = message
 	rt.status.State = ServiceStateAttentionRequired
 	rt.status.AttentionRequired = true
@@ -1386,15 +1425,7 @@ func (m *ServiceManager) recoverOrphanLocked(rt *serviceRuntime) {
 		return
 	}
 	if present {
-		identity := serviceProcessGroupIdentity{
-			leaderPID:            rt.status.PID,
-			processGroup:         rt.status.ProcessGroup,
-			startID:              rt.status.ProcessStartID,
-			instanceToken:        rt.status.InstanceToken,
-			commandDigest:        rt.status.CommandDigest,
-			verifyLeaderIdentity: serviceProcessIdentityRequired(),
-		}
-		if err := reapOrphanProcessGroup(identity); err != nil {
+		if err := m.terminateRuntimeProcessGroupLocked(context.Background(), rt, 500*time.Millisecond); err != nil {
 			m.failOrphanRecoveryLocked(rt, err)
 			return
 		}
@@ -1798,12 +1829,10 @@ func (m *ServiceManager) Remove(ctx context.Context, id string) error {
 			return fmt.Errorf("service %q is required by %q", id, dependentID)
 		}
 	}
-	if rt.process != nil {
+	if rt.process != nil || rt.status.ProcessGroup > 0 {
 		if err := m.stopProcessLocked(ctx, rt, true); err != nil {
 			return err
 		}
-	} else if rt.status.ProcessGroup > 0 {
-		return fmt.Errorf("service %s retains unresolved process group %d", id, rt.status.ProcessGroup)
 	}
 	delete(m.configs, id)
 	delete(m.graph, id)
@@ -1845,10 +1874,8 @@ func (m *ServiceManager) Disable(ctx context.Context, id string) error {
 	rt := m.runtimes[id]
 	rt.config = cfg
 	var cleanupErr error
-	if rt.process != nil {
+	if rt.process != nil || rt.status.ProcessGroup > 0 {
 		cleanupErr = m.stopProcessLocked(ctx, rt, true)
-	} else if rt.status.ProcessGroup > 0 {
-		cleanupErr = fmt.Errorf("service %s retains unresolved process group %d", id, rt.status.ProcessGroup)
 	}
 	rt.status.ManualStop = false
 	if cleanupErr != nil {
@@ -1900,18 +1927,10 @@ func (m *ServiceManager) StopService(ctx context.Context, id string) error {
 		return os.ErrNotExist
 	}
 	rt.status.ManualStop = true
-	if rt.process != nil {
+	if rt.process != nil || rt.status.ProcessGroup > 0 {
 		if err := m.stopProcessLocked(ctx, rt, true); err != nil {
 			return err
 		}
-	} else if rt.status.ProcessGroup > 0 {
-		rt.status.State = ServiceStateAttentionRequired
-		rt.status.AttentionRequired = true
-		if rt.status.LastError == "" {
-			rt.status.LastError = fmt.Sprintf("service process group %d ownership is unresolved", rt.status.ProcessGroup)
-		}
-		m.persistStatusLocked(rt)
-		return errors.New(rt.status.LastError)
 	}
 	rt.status.State = ServiceStateStopped
 	m.persistStatusLocked(rt)

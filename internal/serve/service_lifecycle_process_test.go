@@ -40,7 +40,7 @@ func waitForServiceState(t *testing.T, manager *ServiceManager, id string, want 
 			return status
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("service %s state = %q, want %q", id, status.State, want)
+			t.Fatalf("service %s status = %#v, want state %q", id, status, want)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -210,6 +210,252 @@ func TestServiceManagerStopsAlreadyExitedLeader(t *testing.T) {
 	status := readPersistedServiceStatus(t, root, "worker")
 	if status.State != ServiceStateStopped || status.PID != 0 || status.ProcessGroup != 0 || !status.ManualStop || status.AttentionRequired {
 		t.Fatalf("already-exited stop status = %#v", status)
+	}
+}
+
+func TestServiceManagerReapsDescendantsBeforeUnexpectedExitBackoff(t *testing.T) {
+	if !serviceProcessIdentityRequired() {
+		t.Skip("native service process identity is unavailable")
+	}
+	root := t.TempDir()
+	childPIDPath := filepath.Join(root, "child.pid")
+	launchPath := filepath.Join(root, "launches")
+	now := time.Date(2026, time.August, 24, 6, 0, 0, 0, time.UTC)
+	writeTestService(t, root, ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "worker",
+		Enabled:       true,
+		Command: []string{"/bin/sh", "-c",
+			"printf '%s\\n' \"$PUA_SERVICE_INSTANCE_TOKEN\" >> " + shellQuote(launchPath) + "; " +
+				"(trap '' TERM; exec sleep 30) </dev/null >/dev/null 2>&1 & " +
+				"printf '%s\\n' \"$!\" > " + shellQuote(childPIDPath) + "; exit 17"},
+		Restart: ServiceRestartConfig{
+			InitialDelay: time.Minute,
+			Multiplier:   2,
+			MaxDelay:     time.Minute,
+			ResetAfter:   time.Minute,
+		},
+	})
+
+	manager, err := NewServiceManager(root, ServiceManagerOptions{Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.processTerminationGrace = 50 * time.Millisecond
+	stopProcessTestManager(t, &manager)
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	running, err := manager.Show("worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	childPIDs := waitForLaunches(t, childPIDPath, 1)
+	childPID, err := strconv.Atoi(childPIDs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = terminateProcessGroup(running.ProcessGroup, true) })
+
+	status := waitForServiceState(t, manager, "worker", ServiceStateBackoff)
+	if status.ExitCode != 17 || status.FailureCount != 1 || status.PID != 0 || status.ProcessGroup != 0 {
+		t.Fatalf("unexpected-exit status = %#v", status)
+	}
+	if processExists(childPID) {
+		t.Fatalf("descendant %d remained alive after backoff was entered", childPID)
+	}
+	if launches := waitForLaunches(t, launchPath, 1); len(launches) != 1 {
+		t.Fatalf("unexpected exit launched a replacement before backoff: %#v", launches)
+	}
+}
+
+func TestServiceManagerRecoversDescendantsAfterLeaderExitAndReconstruction(t *testing.T) {
+	if !serviceProcessIdentityRequired() {
+		t.Skip("native service process identity is unavailable")
+	}
+	root := t.TempDir()
+	firstLaunchPath := filepath.Join(root, "first-launch")
+	childPIDPath := filepath.Join(root, "child.pid")
+	launchPath := filepath.Join(root, "launches")
+	writeTestService(t, root, ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "worker",
+		Enabled:       true,
+		Command: []string{"/bin/sh", "-c",
+			"printf '%s\\n' \"$PUA_SERVICE_INSTANCE_TOKEN\" >> " + shellQuote(launchPath) + "; " +
+				"if ! test -f " + shellQuote(firstLaunchPath) + "; then " +
+				"printf 'first\\n' > " + shellQuote(firstLaunchPath) + "; " +
+				"(trap '' TERM; exec sleep 30) </dev/null >/dev/null 2>&1 & " +
+				"printf '%s\\n' \"$!\" > " + shellQuote(childPIDPath) + "; exit 17; fi; " +
+				"exec sleep 30"},
+	})
+
+	original, err := NewServiceManager(root, ServiceManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := original.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	running, err := original.Show("worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	childPIDs := waitForLaunches(t, childPIDPath, 1)
+	childPID, err := strconv.Atoi(childPIDs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = terminateProcessGroup(running.ProcessGroup, true) })
+	waitForProcessGone(t, running.PID)
+	if !processExists(childPID) {
+		t.Fatalf("residual descendant %d exited before reconstruction", childPID)
+	}
+
+	// Dropping the original manager after its leader has exited models a daemon
+	// crash before the queued exit can be reconciled. Durable state still names
+	// the original launch while only its descendant remains in the process group.
+	original = nil
+	reconstructed, err := NewServiceManager(root, ServiceManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconstructed.processTerminationGrace = 50 * time.Millisecond
+	stopProcessTestManager(t, &reconstructed)
+	if err := reconstructed.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	replacement := waitForServiceState(t, reconstructed, "worker", ServiceStateReady)
+	if replacement.PID <= 0 || replacement.PID == running.PID || replacement.ProcessGroup == running.ProcessGroup {
+		t.Fatalf("replacement status = %#v, original = %#v", replacement, running)
+	}
+	if processExists(childPID) {
+		t.Fatalf("verified residual descendant %d survived reconstruction", childPID)
+	}
+	if launches := waitForLaunches(t, launchPath, 2); len(launches) != 2 || launches[0] == launches[1] {
+		t.Fatalf("reconstruction launches = %#v, want distinct original and replacement tokens", launches)
+	}
+}
+
+func TestServiceManagerRetainsResidualGroupWhenReconstructedIdentityMismatches(t *testing.T) {
+	if !serviceProcessIdentityRequired() {
+		t.Skip("native service process identity is unavailable")
+	}
+	root := t.TempDir()
+	childPIDPath := filepath.Join(root, "child.pid")
+	launchPath := filepath.Join(root, "launches")
+	writeTestService(t, root, ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "worker",
+		Enabled:       true,
+		Command: []string{"/bin/sh", "-c",
+			"printf '%s\\n' \"$PUA_SERVICE_INSTANCE_TOKEN\" >> " + shellQuote(launchPath) + "; " +
+				"(trap '' TERM; exec sleep 30) </dev/null >/dev/null 2>&1 & " +
+				"printf '%s\\n' \"$!\" > " + shellQuote(childPIDPath) + "; exit 17"},
+	})
+
+	original, err := NewServiceManager(root, ServiceManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := original.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	running, err := original.Show("worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	childPIDs := waitForLaunches(t, childPIDPath, 1)
+	childPID, err := strconv.Atoi(childPIDs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = terminateProcessGroup(running.ProcessGroup, true)
+		waitForProcessGone(t, childPID)
+	})
+	waitForProcessGone(t, running.PID)
+
+	persisted := readPersistedServiceStatus(t, root, "worker")
+	persisted.InstanceToken += "-mismatch"
+	if err := writeServiceJSON(filepath.Join(serviceRuntimePath(root, "worker"), "state.json"), persisted, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	original = nil
+	reconstructed, err := NewServiceManager(root, ServiceManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reconstructed.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	retained, err := reconstructed.Show("worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retained.State != ServiceStateAttentionRequired || !retained.AttentionRequired || retained.PID != running.PID || retained.ProcessGroup != running.ProcessGroup || retained.InstanceToken != persisted.InstanceToken {
+		t.Fatalf("identity-mismatch status = %#v, want attention with retained ownership", retained)
+	}
+	if !processExists(childPID) {
+		t.Fatal("identity mismatch signaled the residual process group")
+	}
+	if launches := waitForLaunches(t, launchPath, 1); len(launches) != 1 {
+		t.Fatalf("identity mismatch launched a replacement: %#v", launches)
+	}
+}
+
+func TestServiceManagerManualStopRecoversReconstructedResidualGroup(t *testing.T) {
+	if !serviceProcessIdentityRequired() {
+		t.Skip("native service process identity is unavailable")
+	}
+	root := t.TempDir()
+	childPIDPath := filepath.Join(root, "child.pid")
+	writeTestService(t, root, ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "worker",
+		Enabled:       true,
+		Command: []string{"/bin/sh", "-c",
+			"(trap '' TERM; exec sleep 30) </dev/null >/dev/null 2>&1 & " +
+				"printf '%s\\n' \"$!\" > " + shellQuote(childPIDPath) + "; exit 17"},
+	})
+
+	original, err := NewServiceManager(root, ServiceManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := original.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	running, err := original.Show("worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	childPIDs := waitForLaunches(t, childPIDPath, 1)
+	childPID, err := strconv.Atoi(childPIDs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = terminateProcessGroup(running.ProcessGroup, true) })
+	waitForProcessGone(t, running.PID)
+	original = nil
+
+	reconstructed, err := NewServiceManager(root, ServiceManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconstructed.processTerminationGrace = 50 * time.Millisecond
+	if err := reconstructed.StopService(context.Background(), "worker"); err != nil {
+		t.Fatal(err)
+	}
+	if processExists(childPID) {
+		t.Fatalf("manual stop left reconstructed descendant %d alive", childPID)
+	}
+	stopped, err := reconstructed.Show("worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stopped.State != ServiceStateStopped || !stopped.ManualStop || stopped.AttentionRequired || stopped.PID != 0 || stopped.ProcessGroup != 0 {
+		t.Fatalf("reconstructed manual-stop status = %#v", stopped)
 	}
 }
 

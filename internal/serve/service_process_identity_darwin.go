@@ -5,8 +5,10 @@ package serve
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"strings"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -31,11 +33,44 @@ func readServiceProcessIdentity(pid int) (serviceProcessIdentity, error) {
 		return serviceProcessIdentity{}, fmt.Errorf("%w: process changed during inspection", errProcessIdentityUnavailable)
 	}
 	return serviceProcessIdentity{
+		pid:          pid,
 		command:      strings.Join(arguments, " "),
 		environment:  environment,
 		processGroup: int(process.Eproc.Pgid),
 		startID:      fmt.Sprintf("%d:%06d", process.Proc.P_starttime.Sec, process.Proc.P_starttime.Usec),
 	}, nil
+}
+
+func readServiceProcessGroupMembers(processGroup int) ([]serviceProcessIdentity, error) {
+	if processGroup <= 0 {
+		return nil, errProcessIdentityUnavailable
+	}
+	processes, err := unix.SysctlKinfoProcSlice("kern.proc.pgrp", processGroup)
+	if err != nil {
+		return nil, err
+	}
+	members := make([]serviceProcessIdentity, 0, len(processes))
+	for _, process := range processes {
+		pid := int(process.Proc.P_pid)
+		if pid <= 0 || int(process.Eproc.Pgid) != processGroup {
+			continue
+		}
+		identity, identityErr := readServiceProcessIdentity(pid)
+		if identityErr != nil {
+			present, probeErr := processPresent(pid)
+			if probeErr != nil {
+				return nil, probeErr
+			}
+			if !present {
+				continue
+			}
+			return nil, fmt.Errorf("inspect service process group %d member %d: %w", processGroup, pid, identityErr)
+		}
+		if identity.processGroup == processGroup {
+			members = append(members, identity)
+		}
+	}
+	return members, nil
 }
 
 func platformServiceProcessIdentityMatches(identity serviceProcessIdentity, startID, token, digest string) bool {
@@ -48,6 +83,54 @@ func platformServiceProcessIdentityMatches(identity serviceProcessIdentity, star
 }
 
 func serviceProcessIdentityRequired() bool { return true }
+
+func serviceProcessIdentityMarkerRequired() bool { return true }
+
+func platformServiceProcessGroupMemberMatches(identity serviceProcessIdentity, token, markerPath string) (bool, error) {
+	if environmentHasSingleValue(identity.environment, serviceInstanceTokenEnvironment, token) {
+		return true, nil
+	}
+	if markerPath == "" {
+		return false, nil
+	}
+	return darwinProcessHasIdentityMarker(identity.pid, markerPath)
+}
+
+func darwinProcessHasIdentityMarker(pid int, markerPath string) (bool, error) {
+	const (
+		procInfoCallPIDFDInfo      = 3
+		procPIDFDVnodePathInfo     = 2
+		darwinVnodePathBufferBytes = 2048
+		darwinMaxPathBytes         = 1024
+	)
+	if pid <= 0 || markerPath == "" {
+		return false, nil
+	}
+	buffer := make([]byte, darwinVnodePathBufferBytes)
+	count, _, errno := unix.Syscall6(
+		unix.SYS_PROC_INFO,
+		procInfoCallPIDFDInfo,
+		uintptr(pid),
+		procPIDFDVnodePathInfo,
+		serviceProcessIdentityMarkerFD,
+		uintptr(unsafe.Pointer(&buffer[0])),
+		uintptr(len(buffer)),
+	)
+	if errno != 0 {
+		if errors.Is(errno, unix.EBADF) || errors.Is(errno, unix.ESRCH) {
+			return false, nil
+		}
+		return false, errno
+	}
+	if count < darwinMaxPathBytes || count > uintptr(len(buffer)) {
+		return false, fmt.Errorf("%w: malformed vnode path response", errProcessIdentityUnavailable)
+	}
+	pathData := buffer[int(count)-darwinMaxPathBytes : int(count)]
+	if end := bytes.IndexByte(pathData, 0); end >= 0 {
+		pathData = pathData[:end]
+	}
+	return string(pathData) == markerPath, nil
+}
 
 // kern.procargs2 returns argc, the executable path, argv, and envp in one
 // NUL-delimited buffer. Parsing it directly avoids depending on ps output,

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -30,7 +31,28 @@ type serviceProcessGroupIdentity struct {
 	startID              string
 	instanceToken        string
 	commandDigest        string
+	markerPath           string
 	verifyLeaderIdentity bool
+	trustResidual        bool
+}
+
+func serviceProcessIdentityMarkerPath(root, serviceID, token string) string {
+	if root == "" || serviceID == "" || token == "" || strings.ContainsRune(token, filepath.Separator) {
+		return ""
+	}
+	return filepath.Join(serviceRuntimePath(root, serviceID), ".identity-"+token)
+}
+
+func openServiceProcessIdentityMarker(root, serviceID, token string) (*os.File, string, error) {
+	path := serviceProcessIdentityMarkerPath(root, serviceID, token)
+	if path == "" {
+		return nil, "", errors.New("service process identity marker path is unavailable")
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDONLY, 0o600)
+	if err != nil {
+		return nil, "", fmt.Errorf("create service process identity marker: %w", err)
+	}
+	return file, path, nil
 }
 
 type serviceLogSink struct {
@@ -347,10 +369,6 @@ func (s *serviceLogSink) Close() error {
 	return closeErr
 }
 
-func reapOrphanProcessGroup(identity serviceProcessGroupIdentity) error {
-	return terminateOwnedServiceProcessGroup(context.Background(), identity, 500*time.Millisecond)
-}
-
 func terminateProcessGroup(pgid int, force bool) error {
 	if pgid <= 0 {
 		return nil
@@ -405,10 +423,12 @@ func processPresent(pid int) (bool, error) {
 }
 
 // ownedServiceProcessGroupPresent checks the group before every graceful or
-// forceful signal. Once the original leader has been observed, its later
-// absence is expected while descendants drain. If the numeric leader PID is
-// reused, however, its native identity no longer matches and the supervisor
-// refuses to signal the potentially unrelated group.
+// forceful signal. A live leader must match its native launch identity. An
+// in-memory runtime retains continuity with the group it launched; after
+// reconstruction, however, every residual member must carry the persisted
+// launch token. Once either proof has been observed, the leader may disappear
+// while descendants drain. If the numeric PID or process group was reused,
+// verification fails before a signal is sent.
 func ownedServiceProcessGroupPresent(identity serviceProcessGroupIdentity, allowLeaderExit bool) (bool, error) {
 	present, err := processGroupPresent(identity.processGroup)
 	if err != nil || !present {
@@ -419,10 +439,10 @@ func ownedServiceProcessGroupPresent(identity serviceProcessGroupIdentity, allow
 		return true, err
 	}
 	if !leaderPresent {
-		if allowLeaderExit {
+		if allowLeaderExit || identity.trustResidual {
 			return true, nil
 		}
-		return true, fmt.Errorf("service process group %d remains after its leader exited before ownership was confirmed", identity.processGroup)
+		return ownedResidualServiceProcessGroupPresent(identity)
 	}
 	if !identity.verifyLeaderIdentity {
 		return true, nil
@@ -454,6 +474,44 @@ func ownedServiceProcessGroupPresent(identity serviceProcessGroupIdentity, allow
 		return true, fmt.Errorf("service process group %d leader identity changed", identity.processGroup)
 	}
 	return true, nil
+}
+
+func ownedResidualServiceProcessGroupPresent(identity serviceProcessGroupIdentity) (bool, error) {
+	if identity.instanceToken == "" || strings.ContainsRune(identity.instanceToken, '\x00') {
+		return true, fmt.Errorf("service process group %d residual ownership token is unavailable", identity.processGroup)
+	}
+	members, err := readServiceProcessGroupMembers(identity.processGroup)
+	if err != nil {
+		return true, fmt.Errorf("inspect residual service process group %d: %w", identity.processGroup, err)
+	}
+	verified := 0
+	for _, member := range members {
+		if member.pid <= 0 || member.processGroup != identity.processGroup || strings.TrimSpace(member.command) == "" {
+			return true, fmt.Errorf("service process group %d residual member identity is unavailable", identity.processGroup)
+		}
+		if member.pid == identity.leaderPID {
+			if !serviceProcessIdentityMatches(member, identity.processGroup, identity.startID, identity.instanceToken, identity.commandDigest) {
+				return true, fmt.Errorf("service process group %d leader identity changed", identity.processGroup)
+			}
+		} else {
+			matches, matchErr := platformServiceProcessGroupMemberMatches(member, identity.instanceToken, identity.markerPath)
+			if matchErr != nil {
+				return true, fmt.Errorf("inspect service process group %d residual member %d: %w", identity.processGroup, member.pid, matchErr)
+			}
+			if !matches {
+				return true, fmt.Errorf("service process group %d residual member %d ownership is unresolved", identity.processGroup, member.pid)
+			}
+		}
+		verified++
+	}
+	if verified > 0 {
+		return true, nil
+	}
+	present, err := processGroupPresent(identity.processGroup)
+	if err != nil || !present {
+		return present, err
+	}
+	return true, fmt.Errorf("service process group %d remains without inspectable members", identity.processGroup)
 }
 
 func signalOwnedServiceProcessGroup(identity serviceProcessGroupIdentity, allowLeaderExit bool, signal syscall.Signal) (bool, error) {

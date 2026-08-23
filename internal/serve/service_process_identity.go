@@ -8,9 +8,11 @@ import (
 const (
 	serviceInstanceTokenEnvironment = "PUA_SERVICE_INSTANCE_TOKEN"
 	serviceCommandDigestEnvironment = "PUA_SERVICE_COMMAND_DIGEST"
+	serviceProcessIdentityMarkerFD  = 3
 )
 
 type serviceProcessIdentity struct {
+	pid          int
 	command      string
 	environment  []string
 	processGroup int

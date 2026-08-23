@@ -4,7 +4,11 @@ package serve
 
 import (
 	"encoding/binary"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"slices"
+	"syscall"
 	"testing"
 )
 
@@ -50,5 +54,40 @@ func TestParseDarwinProcessArgumentsFailsClosed(t *testing.T) {
 				t.Fatal("parseDarwinProcessArguments() succeeded")
 			}
 		})
+	}
+}
+
+func TestDarwinProcessIdentityMarkerSurvivesExec(t *testing.T) {
+	markerPath := filepath.Join(t.TempDir(), ".identity-token")
+	marker, err := os.OpenFile(markerPath, os.O_CREATE|os.O_EXCL|os.O_RDONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("/bin/sleep", "30")
+	cmd.ExtraFiles = []*os.File{marker}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		_ = marker.Close()
+		t.Fatal(err)
+	}
+	_ = marker.Close()
+	defer func() {
+		_ = terminateProcessGroup(cmd.Process.Pid, true)
+		_ = cmd.Wait()
+	}()
+
+	matches, err := darwinProcessHasIdentityMarker(cmd.Process.Pid, markerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !matches {
+		t.Fatal("exec'd child lost its service identity marker")
+	}
+	matches, err = darwinProcessHasIdentityMarker(cmd.Process.Pid, markerPath+"-other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if matches {
+		t.Fatal("service identity marker matched a different launch token path")
 	}
 }

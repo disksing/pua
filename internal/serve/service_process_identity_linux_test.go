@@ -2,7 +2,12 @@
 
 package serve
 
-import "testing"
+import (
+	"os"
+	"os/exec"
+	"syscall"
+	"testing"
+)
 
 func TestLinuxProcessIdentityRejectsEnvironmentSpoofing(t *testing.T) {
 	const (
@@ -28,4 +33,37 @@ func TestLinuxProcessIdentityRejectsEnvironmentSpoofing(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLinuxProcessGroupMembersExposeInheritedToken(t *testing.T) {
+	const token = "linux-member-token"
+	cmd := exec.Command("/bin/sh", "-c", "exec sleep 30")
+	cmd.Env = append(os.Environ(), serviceInstanceTokenEnvironment+"="+token)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = terminateProcessGroup(cmd.Process.Pid, true)
+		_ = cmd.Wait()
+	}()
+
+	members, err := readServiceProcessGroupMembers(cmd.Process.Pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, member := range members {
+		if member.pid != cmd.Process.Pid {
+			continue
+		}
+		matches, matchErr := platformServiceProcessGroupMemberMatches(member, token, "")
+		if matchErr != nil {
+			t.Fatal(matchErr)
+		}
+		if !matches {
+			t.Fatal("Linux process-group member lost its inherited launch token")
+		}
+		return
+	}
+	t.Fatalf("PID %d missing from process group members: %#v", cmd.Process.Pid, members)
 }

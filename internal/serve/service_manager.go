@@ -131,6 +131,35 @@ type serviceRuntime struct {
 	processOwnership      serviceProcessOwnership
 }
 
+type serviceRuntimeConfigSnapshot struct {
+	runtime               *serviceRuntime
+	config                ServiceConfig
+	status                ServiceStatus
+	process               *exec.Cmd
+	exit                  <-chan serviceProcessExit
+	started               time.Time
+	stableSince           time.Time
+	environment           []string
+	secretValues          []string
+	secretNames           map[string]ServiceSecretMetadata
+	exportSecrets         map[string]string
+	exportAccepted        bool
+	exportViolation       string
+	rejectedExportSecrets []string
+	redactor              *security.Redactor
+	exports               ServiceExportFile
+	logWriters            []*serviceLogWriter
+	terminationPending    bool
+	processOwnership      serviceProcessOwnership
+}
+
+type serviceFileSnapshot struct {
+	path   string
+	data   []byte
+	mode   os.FileMode
+	exists bool
+}
+
 // ServiceManager owns all mutable service state for one Workspace. It is the
 // only component that starts/stops service processes and writes runtime state.
 type ServiceManager struct {
@@ -2027,6 +2056,269 @@ func serviceDefinitionOperationError(rt *serviceRuntime, err error) error {
 	return errors.New(message)
 }
 
+// ApplyAll applies a collection request as one configuration transaction. The
+// collection augments or replaces matching definitions, just as repeated
+// Apply calls did historically, but validation and rollback cover the entire
+// request rather than each element independently.
+func (m *ServiceManager) ApplyAll(configs []ServiceConfig) error {
+	if m == nil {
+		return errors.New("service manager is unavailable")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(configs) == 0 {
+		return nil
+	}
+
+	next := cloneServiceConfigs(m.configs)
+	requested := make(map[string]ServiceConfig, len(configs))
+	for _, candidate := range configs {
+		candidate = defaultServiceConfig(candidate)
+		if _, duplicate := requested[candidate.ID]; duplicate {
+			return ServiceValidationError{"services", fmt.Sprintf("duplicate service id %q", candidate.ID)}
+		}
+		requested[candidate.ID] = candidate
+		next[candidate.ID] = candidate
+	}
+	graph, err := m.validateConfigTransactionLocked(next)
+	if err != nil {
+		return err
+	}
+	order, err := graph.topologicalOrder()
+	if err != nil {
+		return err
+	}
+	changed := make([]string, 0, len(requested))
+	for _, id := range order {
+		candidate, ok := requested[id]
+		if !ok {
+			continue
+		}
+		current, exists := m.configs[id]
+		if !exists || serviceConfigDigest(current) != serviceConfigDigest(candidate) {
+			changed = append(changed, id)
+		}
+	}
+	if len(changed) == 0 {
+		return nil
+	}
+
+	oldConfigs, oldGraph := m.configs, m.graph
+	runtimeSnapshots := make(map[string]serviceRuntimeConfigSnapshot, len(changed))
+	definitionSnapshots := make(map[string]serviceFileSnapshot, len(changed))
+	stateSnapshots := make(map[string]serviceFileSnapshot, len(changed))
+	eventSnapshots := make(map[string]serviceFileSnapshot, len(changed))
+	for _, id := range changed {
+		if rt := m.runtimes[id]; rt != nil {
+			runtimeSnapshots[id] = snapshotServiceRuntimeConfig(rt)
+		}
+		definitionSnapshots[id], err = snapshotServiceFile(serviceConfigPath(m.root, id))
+		if err != nil {
+			return err
+		}
+		stateSnapshots[id], err = snapshotServiceFile(filepath.Join(serviceRuntimePath(m.root, id), "state.json"))
+		if err != nil {
+			return err
+		}
+		eventSnapshots[id], err = snapshotServiceFile(filepath.Join(serviceRuntimePath(m.root, id), "events.jsonl"))
+		if err != nil {
+			return err
+		}
+	}
+
+	rollback := func(cause error) error {
+		rollbackErr := m.rollbackAppliedServicesLocked(changed, oldConfigs, oldGraph, runtimeSnapshots, definitionSnapshots, stateSnapshots, eventSnapshots)
+		return errors.Join(cause, rollbackErr)
+	}
+	for _, id := range changed {
+		cfg := requested[id]
+		if err := m.persistDefinitionLocked(cfg); err != nil {
+			return rollback(serviceDefinitionOperationError(m.runtimes[id], err))
+		}
+	}
+
+	m.configs, m.graph = next, graph
+	for _, id := range changed {
+		cfg := requested[id]
+		rt := m.runtimes[id]
+		if rt == nil {
+			rt = &serviceRuntime{config: cfg, status: initialServiceStatus(cfg)}
+			m.runtimes[id] = rt
+		} else {
+			rt.config = cfg
+			rt.status.Enabled = cfg.Enabled
+			rt.status.Readiness.Configured = cfg.Readiness != nil
+			rt.status.Cleanup.Configured = cfg.Cleanup != nil
+			if rt.process != nil || rt.status.ProcessGroup > 0 {
+				if err := m.stopProcessLocked(context.Background(), rt, false); err != nil {
+					return rollback(err)
+				}
+				rt.status.Readiness.Ready = false
+			}
+			if cfg.Enabled {
+				if rt.status.State == ServiceStateDisabled {
+					rt.status.State = ServiceStateStopped
+				}
+			} else {
+				rt.status.State = ServiceStateDisabled
+			}
+		}
+		rt.status.Dependencies = append([]string(nil), graph[id]...)
+		if err := m.persistStatusLocked(rt); err != nil {
+			return rollback(err)
+		}
+	}
+	if m.started && !m.stopping {
+		for _, id := range changed {
+			if err := m.reconcileOneLocked(context.Background(), m.runtimes[id], graph[id]); err != nil {
+				return rollback(err)
+			}
+		}
+	}
+	return nil
+}
+
+func snapshotServiceRuntimeConfig(rt *serviceRuntime) serviceRuntimeConfigSnapshot {
+	return serviceRuntimeConfigSnapshot{
+		runtime:               rt,
+		config:                rt.config,
+		status:                cloneServiceStatus(rt.status),
+		process:               rt.process,
+		exit:                  rt.exit,
+		started:               rt.started,
+		stableSince:           rt.stableSince,
+		environment:           append([]string(nil), rt.environment...),
+		secretValues:          append([]string(nil), rt.secretValues...),
+		secretNames:           cloneServiceSecretMetadataMap(rt.secretNames),
+		exportSecrets:         cloneStringMap(rt.exportSecrets),
+		exportAccepted:        rt.exportAccepted,
+		exportViolation:       rt.exportViolation,
+		rejectedExportSecrets: append([]string(nil), rt.rejectedExportSecrets...),
+		redactor:              rt.redactor,
+		exports:               cloneServiceExportFile(rt.exports),
+		logWriters:            append([]*serviceLogWriter(nil), rt.logWriters...),
+		terminationPending:    rt.terminationPending,
+		processOwnership:      rt.processOwnership,
+	}
+}
+
+func cloneServiceStatus(status ServiceStatus) ServiceStatus {
+	status.Dependencies = append([]string(nil), status.Dependencies...)
+	status.Exports.Variables = cloneStringMap(status.Exports.Variables)
+	status.Exports.Secrets = append([]ServiceSecretMetadata(nil), status.Exports.Secrets...)
+	return status
+}
+
+func cloneServiceSecretMetadataMap(values map[string]ServiceSecretMetadata) map[string]ServiceSecretMetadata {
+	if values == nil {
+		return nil
+	}
+	result := make(map[string]ServiceSecretMetadata, len(values))
+	for name, metadata := range values {
+		result[name] = metadata
+	}
+	return result
+}
+
+func cloneServiceExportFile(export ServiceExportFile) ServiceExportFile {
+	export.Variables = cloneStringMap(export.Variables)
+	export.Secrets = cloneStringMap(export.Secrets)
+	return export
+}
+
+func restoreServiceRuntimeConfig(rt *serviceRuntime, snapshot serviceRuntimeConfigSnapshot) {
+	rt.config = snapshot.config
+	rt.status = cloneServiceStatus(snapshot.status)
+	rt.process = snapshot.process
+	rt.exit = snapshot.exit
+	rt.started = snapshot.started
+	rt.stableSince = snapshot.stableSince
+	rt.environment = append([]string(nil), snapshot.environment...)
+	rt.secretValues = append([]string(nil), snapshot.secretValues...)
+	rt.secretNames = cloneServiceSecretMetadataMap(snapshot.secretNames)
+	rt.exportSecrets = cloneStringMap(snapshot.exportSecrets)
+	rt.exportAccepted = snapshot.exportAccepted
+	rt.exportViolation = snapshot.exportViolation
+	rt.rejectedExportSecrets = append([]string(nil), snapshot.rejectedExportSecrets...)
+	rt.redactor = snapshot.redactor
+	rt.exports = cloneServiceExportFile(snapshot.exports)
+	rt.logWriters = append([]*serviceLogWriter(nil), snapshot.logWriters...)
+	rt.terminationPending = snapshot.terminationPending
+	rt.processOwnership = snapshot.processOwnership
+}
+
+func snapshotServiceFile(path string) (serviceFileSnapshot, error) {
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return serviceFileSnapshot{path: path}, nil
+	}
+	if err != nil {
+		return serviceFileSnapshot{}, err
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return serviceFileSnapshot{}, err
+	}
+	return serviceFileSnapshot{path: path, data: data, mode: info.Mode().Perm(), exists: true}, nil
+}
+
+func restoreServiceFile(snapshot serviceFileSnapshot) error {
+	if !snapshot.exists {
+		if err := os.Remove(snapshot.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+	return writeServiceDataAtomic(snapshot.path, snapshot.data, snapshot.mode, os.Rename)
+}
+
+func (m *ServiceManager) rollbackAppliedServicesLocked(ids []string, configs map[string]ServiceConfig, graph serviceDependencyGraph, runtimes map[string]serviceRuntimeConfigSnapshot, definitions, states, events map[string]serviceFileSnapshot) error {
+	var result error
+	for index := len(ids) - 1; index >= 0; index-- {
+		id := ids[index]
+		rt := m.runtimes[id]
+		snapshot, existed := runtimes[id]
+		if rt != nil && rt.process != nil && (!existed || rt.process != snapshot.process) {
+			result = errors.Join(result, m.stopProcessLocked(context.Background(), rt, false))
+		}
+	}
+	m.configs, m.graph = configs, graph
+	restart := make([]string, 0)
+	for _, id := range ids {
+		snapshot, existed := runtimes[id]
+		if !existed {
+			delete(m.runtimes, id)
+			continue
+		}
+		rt := snapshot.runtime
+		current := m.runtimes[id]
+		processPreserved := current != nil && current.process != nil && current.process == snapshot.process
+		restoreServiceRuntimeConfig(rt, snapshot)
+		m.runtimes[id] = rt
+		if snapshot.process != nil && !processPreserved {
+			rt.process = nil
+			rt.exit = nil
+			rt.logWriters = nil
+			rt.status.PID, rt.status.ProcessGroup = 0, 0
+			rt.status.Readiness.Ready = false
+			rt.status.State = ServiceStateStopped
+			rt.processOwnership = serviceProcessOwnershipReconstructed
+			restart = append(restart, id)
+		}
+	}
+	for _, snapshots := range []map[string]serviceFileSnapshot{definitions, states, events} {
+		for index := len(ids) - 1; index >= 0; index-- {
+			result = errors.Join(result, restoreServiceFile(snapshots[ids[index]]))
+		}
+	}
+	for _, id := range restart {
+		if m.started && !m.stopping {
+			result = errors.Join(result, m.reconcileOneLocked(context.Background(), m.runtimes[id], graph[id]))
+		}
+	}
+	return result
+}
+
 func (m *ServiceManager) Apply(cfg ServiceConfig) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -2267,17 +2559,21 @@ func writeServiceJSON(path string, value any, mode os.FileMode) error {
 }
 
 func writeServiceJSONWithRename(path string, value any, mode os.FileMode, rename func(string, string) error) error {
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	return writeServiceDataAtomic(path, data, mode, rename)
+}
+
+func writeServiceDataAtomic(path string, data []byte, mode os.FileMode, rename func(string, string) error) error {
 	if rename == nil {
 		rename = os.Rename
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(value, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
 	temp, err := os.CreateTemp(filepath.Dir(path), ".service-*.tmp")
 	if err != nil {
 		return err

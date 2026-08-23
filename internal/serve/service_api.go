@@ -30,11 +30,9 @@ func (s *server) handleWorkspaceServices(w http.ResponseWriter, r *http.Request,
 				writeError(w, err, http.StatusBadRequest)
 				return
 			}
-			for _, cfg := range body.Services {
-				if err := manager.Apply(cfg); err != nil {
-					writeError(w, err, http.StatusBadRequest)
-					return
-				}
+			if err := manager.ApplyAll(body.Services); err != nil {
+				writeError(w, err, http.StatusBadRequest)
+				return
 			}
 			writeJSON(w, map[string]any{"services": manager.List()})
 		default:

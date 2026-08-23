@@ -355,7 +355,6 @@ const (
 	ServiceStateStopped           ServiceState = "stopped"
 	ServiceStateBlocked           ServiceState = "blocked"
 	ServiceStateStarting          ServiceState = "starting"
-	ServiceStateRunning           ServiceState = "running"
 	ServiceStateReady             ServiceState = "ready"
 	ServiceStateBackoff           ServiceState = "backoff"
 	ServiceStateAttentionRequired ServiceState = "attention_required"

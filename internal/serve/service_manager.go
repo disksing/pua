@@ -1269,7 +1269,7 @@ func (m *ServiceManager) resolveTemplateLocked(template string) (string, string,
 }
 
 func (m *ServiceManager) recoverOrphanLocked(rt *serviceRuntime) {
-	if rt.status.PID <= 0 || (rt.status.State != ServiceStateRunning && rt.status.State != ServiceStateStarting && rt.status.State != ServiceStateReady) {
+	if rt.status.PID <= 0 {
 		return
 	}
 	if rt.status.ProcessGroup > 0 && processIdentityMatches(rt.status.PID, rt.status.ProcessGroup, rt.status.ProcessStartID, rt.status.InstanceToken, rt.status.CommandDigest) {

@@ -87,6 +87,14 @@ func TestProcessIdentityMatchesNativeChild(t *testing.T) {
 }
 
 func TestServiceManagerReplacesVerifiedOrphanProcess(t *testing.T) {
+	for _, state := range []ServiceState{ServiceStateReady, ServiceState("unknown")} {
+		t.Run(string(state), func(t *testing.T) {
+			testServiceManagerReplacesVerifiedOrphanProcess(t, state)
+		})
+	}
+}
+
+func testServiceManagerReplacesVerifiedOrphanProcess(t *testing.T, state ServiceState) {
 	root := t.TempDir()
 	cfg := ServiceConfig{
 		SchemaVersion: serviceSchemaVersion,
@@ -121,7 +129,7 @@ func TestServiceManagerReplacesVerifiedOrphanProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	orphanStatus := initialServiceStatus(cfg)
-	orphanStatus.State = ServiceStateReady
+	orphanStatus.State = state
 	orphanStatus.PID = orphanPID
 	orphanStatus.ProcessGroup = orphanPID
 	orphanStatus.ProcessStartID = orphanIdentity.startID

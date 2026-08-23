@@ -74,7 +74,6 @@ func TestServiceManagerStateWireValues(t *testing.T) {
 		ServiceStateStopped,
 		ServiceStateBlocked,
 		ServiceStateStarting,
-		ServiceStateRunning,
 		ServiceStateReady,
 		ServiceStateBackoff,
 		ServiceStateAttentionRequired,
@@ -83,7 +82,7 @@ func TestServiceManagerStateWireValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(data), `["disabled","stopped","blocked","starting","running","ready","backoff","attention_required"]`; got != want {
+	if got, want := string(data), `["disabled","stopped","blocked","starting","ready","backoff","attention_required"]`; got != want {
 		t.Fatalf("service state wire values = %s, want %s", got, want)
 	}
 }

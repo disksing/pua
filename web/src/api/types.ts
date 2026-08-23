@@ -71,7 +71,6 @@ export type ServiceState =
   | "stopped"
   | "blocked"
   | "starting"
-  | "running"
   | "ready"
   | "backoff"
   | "attention_required";

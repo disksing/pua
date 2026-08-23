@@ -37,6 +37,8 @@ import (
 
 var staticFiles = web.Assets
 
+var errWorkspaceRemovalSupervisionRestoreFailed = errors.New("workspace remains configured, but service supervision could not be restored; inspect attention-required service state and retry")
+
 type config struct {
 	Version            int                 `json:"version"`
 	ActiveID           string              `json:"activeId,omitempty"`
@@ -1854,9 +1856,23 @@ func (s *server) removeWorkspace(id string) error {
 			return errWorkspaceRemovalServicesActive
 		}
 	}
-	if err := s.saveConfig(nextConfig); err != nil {
-		s.finishServiceManagerRemoval(removal, err)
-		return err
+	if saveErr := s.saveConfig(nextConfig); saveErr != nil {
+		result := saveErr
+		if removal.manager != nil {
+			s.serviceMu.Lock()
+			serviceContext := s.serviceContext
+			s.serviceMu.Unlock()
+			if serviceContext == nil {
+				serviceContext = context.Background()
+			}
+			if restartErr := removal.manager.Start(serviceContext); restartErr != nil {
+				// Service status stores the redacted cause. Keep command diagnostics
+				// out of the API error while preserving the original save failure.
+				result = errors.Join(saveErr, errWorkspaceRemovalSupervisionRestoreFailed)
+			}
+		}
+		s.finishServiceManagerRemoval(removal, result)
+		return result
 	}
 	if err := s.detachServiceManagerRemoval(removal); err != nil {
 		// The in-flight marker prevents ordinary registry mutation, so this is

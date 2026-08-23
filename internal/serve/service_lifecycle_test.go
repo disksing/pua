@@ -285,6 +285,120 @@ func TestRemoveWorkspaceRetainsManagerAndLockWhenServiceStopFails(t *testing.T) 
 	}
 }
 
+func TestRemoveWorkspaceRestartsServicesWhenConfigSaveFails(t *testing.T) {
+	root := t.TempDir()
+	launchesPath := filepath.Join(root, "launches")
+	cleanupMarker := filepath.Join(root, "config-save-failure-injected")
+	configBase := t.TempDir()
+	configDir := filepath.Join(configBase, "config")
+	backupDir := filepath.Join(configBase, "config-backup")
+	configPath := filepath.Join(configDir, "serve.json")
+	if err := os.Mkdir(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cleanupScript := "if test ! -e " + shellQuote(cleanupMarker) + "; then " +
+		"touch " + shellQuote(cleanupMarker) + " && " +
+		"mv " + shellQuote(configDir) + " " + shellQuote(backupDir) + " && " +
+		": > " + shellQuote(configDir) + "; fi"
+	writeTestService(t, root, ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "worker",
+		Enabled:       true,
+		Command: []string{"/bin/sh", "-c",
+			"printf 'launched\\n' >> " + shellQuote(launchesPath) + "; exec sleep 30"},
+		Cleanup: &ServiceCleanupConfig{
+			Command: []string{"/bin/sh", "-c", cleanupScript},
+			Timeout: time.Second,
+		},
+	})
+
+	workspace := serveWorkspace{ID: "workspace-one", Path: root}
+	s := &server{config: configPath, locks: newWorkspaceLockManager("127.0.0.1:4936", configPath)}
+	if err := s.saveConfig(config{Version: agentHubConfigVersion, Workspaces: []serveWorkspace{workspace}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.locks.acquire(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.locks.closeAll)
+	if err := s.initializeServiceManagers(); err != nil {
+		t.Fatal(err)
+	}
+	manager, _, err := s.serviceManagerForWorkspace(workspace.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serviceContext, cancelServices := context.WithCancel(context.Background())
+	t.Cleanup(cancelServices)
+	s.serviceContext = serviceContext
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = manager.Stop(ctx)
+	})
+	if err := manager.Start(serviceContext); err != nil {
+		t.Fatal(err)
+	}
+	waitForLaunches(t, launchesPath, 1)
+
+	removeErr := s.removeWorkspace(workspace.ID)
+	if removeErr == nil {
+		t.Fatal("removeWorkspace succeeded despite the injected config save failure")
+	}
+	var pathErr *os.PathError
+	if !errors.As(removeErr, &pathErr) {
+		t.Fatalf("removeWorkspace error lost the original config save failure: %v", removeErr)
+	}
+	if errors.Is(removeErr, errWorkspaceRemovalSupervisionRestoreFailed) {
+		t.Fatalf("removeWorkspace reported a supervision restore failure after relaunch: %v", removeErr)
+	}
+	if serviceManagerIsStopping(manager) {
+		t.Fatal("failed removal left the retained service manager stopping")
+	}
+	waitForLaunches(t, launchesPath, 2)
+	restarted, err := manager.Show("worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restarted.State != ServiceStateReady || restarted.PID <= 0 || restarted.ProcessGroup <= 0 {
+		t.Fatalf("service after removal rollback = %#v, want relaunched ready process", restarted)
+	}
+
+	if err := os.Remove(configDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(backupDir, configDir); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := s.loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Workspaces) != 1 || cfg.Workspaces[0].ID != workspace.ID {
+		t.Fatalf("failed removal discarded Workspace config: %#v", cfg.Workspaces)
+	}
+	retained, _, err := s.serviceManagerForWorkspace(workspace.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retained != manager {
+		t.Fatal("failed removal replaced the authoritative service manager")
+	}
+	if !s.locks.owns(workspace.Path) {
+		t.Fatal("failed removal released Workspace ownership")
+	}
+
+	if err := s.removeWorkspace(workspace.ID); err != nil {
+		t.Fatalf("removeWorkspace retry failed: %v", err)
+	}
+	if s.locks.owns(workspace.Path) {
+		t.Fatal("successful retry retained Workspace ownership")
+	}
+	if _, _, err := s.serviceManagerForWorkspace(workspace.ID); err == nil || !strings.Contains(err.Error(), "workspace not found") {
+		t.Fatalf("successful retry retained Workspace manager lookup: %v", err)
+	}
+}
+
 func TestConcurrentWorkspaceRemovalStopsAndReleasesOnce(t *testing.T) {
 	s, workspace, manager := newWorkspaceRemovalTestServer(t)
 	var present atomic.Bool

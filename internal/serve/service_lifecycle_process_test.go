@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -587,6 +588,92 @@ func TestServiceManagerManualStopRecoversReconstructedResidualGroup(t *testing.T
 	}
 	if stopped.State != ServiceStateStopped || !stopped.ManualStop || stopped.AttentionRequired || stopped.PID != 0 || stopped.ProcessGroup != 0 {
 		t.Fatalf("reconstructed manual-stop status = %#v", stopped)
+	}
+}
+
+func TestServiceManagerOrphanRecoveryPreservesFailedManualStop(t *testing.T) {
+	if !serviceProcessIdentityInspectionAvailable() {
+		t.Skip("native service process identity is unavailable")
+	}
+	root := t.TempDir()
+	launchPath := filepath.Join(root, "launches")
+	writeTestService(t, root, ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "worker",
+		Enabled:       true,
+		Command: []string{"/bin/sh", "-c",
+			"printf '%s\\n' \"$PUA_SERVICE_INSTANCE_TOKEN\" >> " + shellQuote(launchPath) + "; exec sleep 30"},
+	})
+
+	original, err := NewServiceManager(root, ServiceManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := original.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	running := waitForServiceState(t, original, "worker", ServiceStateReady)
+	waitForLaunches(t, launchPath, 1)
+	t.Cleanup(func() { _ = terminateProcessGroup(running.ProcessGroup, true) })
+
+	failingPlatform := *nativeServiceProcessPlatform()
+	failingPlatform.signalProcessGroup = func(int, syscall.Signal) error {
+		return context.DeadlineExceeded
+	}
+	original.processPlatform = &failingPlatform
+	if err := original.StopService(context.Background(), "worker"); err == nil {
+		t.Fatal("manual stop succeeded despite injected process-group signal failure")
+	}
+	failed, err := original.Show("worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !failed.ManualStop || !failed.AttentionRequired || failed.PID != running.PID || failed.ProcessGroup != running.ProcessGroup {
+		t.Fatalf("failed manual-stop status = %#v, want retained ownership and intent", failed)
+	}
+	if !processExists(running.PID) {
+		t.Fatal("failed manual stop did not leave the service process for recovery")
+	}
+	original = nil
+
+	recovered, err := NewServiceManager(root, ServiceManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopProcessTestManager(t, &recovered)
+	if err := recovered.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	waitForProcessGone(t, running.PID)
+	stopped, err := recovered.Show("worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stopped.State != ServiceStateStopped || !stopped.ManualStop || stopped.AttentionRequired || stopped.PID != 0 || stopped.ProcessGroup != 0 {
+		t.Fatalf("recovered manual-stop status = %#v", stopped)
+	}
+
+	if err := recovered.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	stillStopped, err := recovered.Show("worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stillStopped.State != ServiceStateStopped || !stillStopped.ManualStop || stillStopped.PID != 0 {
+		t.Fatalf("reconcile relaunched recovered manual stop: %#v", stillStopped)
+	}
+
+	if err := recovered.StartService(context.Background(), "worker"); err != nil {
+		t.Fatal(err)
+	}
+	waitForLaunches(t, launchPath, 2)
+	started, err := recovered.Show("worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if started.State != ServiceStateReady || started.ManualStop || started.PID <= 0 {
+		t.Fatalf("explicit start status = %#v", started)
 	}
 }
 

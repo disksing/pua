@@ -1615,7 +1615,9 @@ func (m *ServiceManager) recoverOrphanLocked(rt *serviceRuntime) error {
 	rt.processOwnership = serviceProcessOwnershipReconstructed
 	rt.status.PID, rt.status.ProcessGroup = 0, 0
 	rt.status.State = ServiceStateStopped
-	rt.status.ManualStop = false
+	// Successful orphan reaping resolves process ownership, not operator
+	// intent. A failed manual stop persists this bit so reconciliation remains
+	// suppressed until an explicit Start, Restart, or Enable clears it.
 	rt.status.AttentionRequired = false
 	rt.status.LastError = ""
 	return m.persistStatusLocked(rt)

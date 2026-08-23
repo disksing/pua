@@ -1018,35 +1018,29 @@ func (m *ServiceManager) resolveEnvironmentLocked(cfg ServiceConfig) ([]string, 
 
 func (m *ServiceManager) resolveEnvironmentValueLocked(entry ServiceEnvironment) (string, string, error) {
 	if entry.SecretName != "" {
-		if m.resolver == nil {
-			m.resolver = EnvironmentSecretResolver{}
-		}
-		value, source, err := m.resolver.ResolveSecret(entry.SecretName)
-		if err != nil {
-			return "", "", fmt.Errorf("secret %q is unavailable", entry.SecretName)
-		}
-		if strings.ContainsRune(value, '\x00') {
-			return "", "", fmt.Errorf("secret %q contains NUL", entry.SecretName)
-		}
-		return value, source, nil
+		return m.resolveSecretLocked(entry.SecretName)
 	}
 	if entry.Template == "" {
 		return entry.Literal, "literal", nil
 	}
 	if matches := secretTemplatePattern.FindStringSubmatch(entry.Template); len(matches) == 2 && matches[0] == entry.Template {
-		if m.resolver == nil {
-			m.resolver = EnvironmentSecretResolver{}
-		}
-		value, source, err := m.resolver.ResolveSecret(matches[1])
-		if err != nil {
-			return "", "", fmt.Errorf("secret %q is unavailable", matches[1])
-		}
-		if strings.ContainsRune(value, '\x00') {
-			return "", "", fmt.Errorf("secret %q contains NUL", matches[1])
-		}
-		return value, source, nil
+		return m.resolveSecretLocked(matches[1])
 	}
 	return m.resolveTemplateLocked(entry.Template)
+}
+
+func (m *ServiceManager) resolveSecretLocked(name string) (string, string, error) {
+	if m.resolver == nil {
+		m.resolver = EnvironmentSecretResolver{}
+	}
+	value, source, err := m.resolver.ResolveSecret(name)
+	if err != nil {
+		return "", "", fmt.Errorf("secret %q is unavailable", name)
+	}
+	if strings.ContainsRune(value, '\x00') {
+		return "", "", fmt.Errorf("secret %q contains NUL", name)
+	}
+	return value, source, nil
 }
 
 func (m *ServiceManager) resolveTemplateLocked(template string) (string, string, error) {

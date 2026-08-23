@@ -3,6 +3,7 @@ package serve
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -122,6 +123,112 @@ func TestServiceManagerStartsProcessAndPersistsRedactedLogs(t *testing.T) {
 	}
 	if strings.Contains(string(state), "secret-value") {
 		t.Fatalf("secret persisted in state: %s", state)
+	}
+}
+
+func TestServiceManagerNamedSecretResolutionParity(t *testing.T) {
+	type scenario struct {
+		name            string
+		secretName      string
+		resolver        ServiceSecretResolver
+		configure       func(*testing.T)
+		wantValue       string
+		wantSource      string
+		wantError       string
+		sensitiveValues []string
+	}
+
+	const fallbackSecretName = "pua-review-secret-resolution-fallback"
+	fallbackValue := "fallback-secret-value"
+	scenarios := []scenario{
+		{
+			name:       "default resolver fallback",
+			secretName: fallbackSecretName,
+			configure: func(t *testing.T) {
+				t.Setenv(fallbackSecretName, fallbackValue)
+			},
+			wantValue:  fallbackValue,
+			wantSource: "environment:" + fallbackSecretName,
+		},
+		{
+			name:       "missing secret",
+			secretName: "pua-review-secret-resolution-missing",
+			configure: func(t *testing.T) {
+				for _, key := range []string{"pua-review-secret-resolution-missing", "PUA_SECRET_PUA_REVIEW_SECRET_RESOLUTION_MISSING"} {
+					value, present := os.LookupEnv(key)
+					if err := os.Unsetenv(key); err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(func() {
+						if present {
+							if err := os.Setenv(key, value); err != nil {
+								t.Errorf("restore %s: %v", key, err)
+							}
+						}
+					})
+				}
+			},
+			wantError: `secret "pua-review-secret-resolution-missing" is unavailable`,
+		},
+		{
+			name:       "resolver error",
+			secretName: "resolver-error",
+			resolver: ServiceSecretResolverFunc(func(string) (string, string, error) {
+				return "resolver-error-secret-value", "backend", errors.New("backend exposed resolver-error-secret-value")
+			}),
+			wantError:       `secret "resolver-error" is unavailable`,
+			sensitiveValues: []string{"resolver-error-secret-value", "backend exposed"},
+		},
+		{
+			name:       "NUL value",
+			secretName: "nul-value",
+			resolver: ServiceSecretResolverFunc(func(string) (string, string, error) {
+				return "nul-secret-value\x00tail", "backend", nil
+			}),
+			wantError:       `secret "nul-value" contains NUL`,
+			sensitiveValues: []string{"nul-secret-value", "tail"},
+		},
+	}
+	references := []struct {
+		name  string
+		entry func(string) ServiceEnvironment
+	}{
+		{name: "SecretName", entry: func(name string) ServiceEnvironment { return ServiceEnvironment{SecretName: name} }},
+		{name: "complete template", entry: func(name string) ServiceEnvironment { return ServiceEnvironment{Template: "${secret." + name + "}"} }},
+	}
+
+	for _, scenario := range scenarios {
+		t.Run(scenario.name, func(t *testing.T) {
+			if scenario.configure != nil {
+				scenario.configure(t)
+			}
+			for _, reference := range references {
+				t.Run(reference.name, func(t *testing.T) {
+					manager := &ServiceManager{resolver: scenario.resolver}
+					value, source, err := manager.resolveEnvironmentValueLocked(reference.entry(scenario.secretName))
+					if scenario.wantError == "" {
+						if err != nil {
+							t.Fatal("named secret resolution unexpectedly failed")
+						}
+						if value != scenario.wantValue || source != scenario.wantSource {
+							t.Fatal("named secret resolution returned unexpected value or source")
+						}
+						return
+					}
+					if err == nil || err.Error() != scenario.wantError {
+						t.Fatal("named secret resolution did not return the safe error contract")
+					}
+					if value != "" || source != "" {
+						t.Fatal("failed named secret resolution returned a value or source")
+					}
+					for _, sensitive := range scenario.sensitiveValues {
+						if strings.Contains(err.Error(), sensitive) {
+							t.Fatal("named secret resolution error leaked sensitive resolver data")
+						}
+					}
+				})
+			}
+		})
 	}
 }
 

@@ -1596,6 +1596,151 @@ func TestNativeSchedulerPauseResumeSkipsPausedOccurrences(t *testing.T) {
 	}
 }
 
+func TestNativeSchedulerPausedOneTimeUsesExactDeadline(t *testing.T) {
+	t.Run("pause through native scheduler", func(t *testing.T) {
+		manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+		puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		at := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+		before := at.Add(-time.Minute)
+		created, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+			Description: "Once", Condition: "at the configured time", Target: "workspace",
+			Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: at.Format(time.RFC3339Nano)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		manager.now = func() time.Time { return before }
+		native := newNativeScheduler(manager, workspace)
+		paused, err := native.Change(context.Background(), NativeSchedulerChange{Operation: app.ScheduleChangePause, ID: created.ID})
+		if err != nil || paused.State != app.ScheduleStatePaused {
+			t.Fatalf("pause = %#v, %v", paused, err)
+		}
+
+		snapshot, err := native.Snapshot(before)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(snapshot.Schedules) != 1 || snapshot.Schedules[0].EffectiveState != app.ScheduleStatePaused || snapshot.Schedules[0].NextRunAt != at.Format(time.RFC3339Nano) || snapshot.NextWakeAt != at.Format(time.RFC3339Nano) {
+			t.Fatalf("paused one-time snapshot = %#v", snapshot)
+		}
+		runtime, err := native.schedulerRuntime(created.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if deadline := schedulerRuntimeDeadline(runtime, before); !deadline.Equal(at) {
+			t.Fatalf("paused one-time runtime deadline = %s, want %s; runtime=%#v", deadline, at, runtime)
+		}
+
+		justBefore := at.Add(-time.Nanosecond)
+		deadline, err := native.Reconcile(context.Background(), justBefore)
+		if err != nil || !deadline.Equal(at) {
+			t.Fatalf("just-before reconcile deadline = %s, want %s; err=%v", deadline, at, err)
+		}
+		snapshot, err = native.Snapshot(justBefore)
+		if err != nil || snapshot.Schedules[0].EffectiveState != app.ScheduleStatePaused || snapshot.Schedules[0].NextRunAt != at.Format(time.RFC3339Nano) || snapshot.NextWakeAt != at.Format(time.RFC3339Nano) {
+			t.Fatalf("just-before paused snapshot = %#v, %v", snapshot, err)
+		}
+		if messages := scheduleOccurrenceMessages(t, workspace.Path, "workspace"); len(messages) != 0 {
+			t.Fatalf("paused one-time occurrence was delivered before deadline: %#v", messages)
+		}
+
+		deadline, err = native.Reconcile(context.Background(), at)
+		if err != nil || !deadline.IsZero() {
+			t.Fatalf("boundary reconcile deadline = %s, want zero; err=%v", deadline, err)
+		}
+		snapshot, err = native.Snapshot(at)
+		if err != nil || snapshot.Schedules[0].EffectiveState != app.ScheduleStateCompleted || snapshot.Schedules[0].LastOutcome != schedulerOutcomePaused || snapshot.Schedules[0].LastOccurrenceAt != at.Format(time.RFC3339Nano) || snapshot.Schedules[0].NextRunAt != "" || snapshot.NextWakeAt != "" {
+			t.Fatalf("boundary paused snapshot = %#v, %v", snapshot, err)
+		}
+		runtime, err = native.schedulerRuntime(created.ID)
+		if err != nil || !schedulerRuntimeDeadline(runtime, at).IsZero() {
+			t.Fatalf("terminal paused runtime = %#v, %v", runtime, err)
+		}
+		if messages := scheduleOccurrenceMessages(t, workspace.Path, "workspace"); len(messages) != 0 {
+			t.Fatalf("paused one-time occurrence was delivered at deadline: %#v", messages)
+		}
+	})
+
+	t.Run("restart reconstructs checkpoint", func(t *testing.T) {
+		manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+		puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		at := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+		created, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+			Description: "Once", Condition: "across restart", Target: "workspace",
+			Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: at.Format(time.RFC3339Nano)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		paused, err := puaWorkspace.PauseSchedule(created.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		restartedManager := newAgentManager(manager.server)
+		restarted := newNativeScheduler(restartedManager, workspace)
+		before := at.Add(-time.Nanosecond)
+		deadline, err := restarted.Reconcile(context.Background(), before)
+		if err != nil || !deadline.Equal(at) {
+			t.Fatalf("reconstructed deadline = %s, want %s; err=%v", deadline, at, err)
+		}
+		runtime, err := restarted.schedulerRuntime(created.ID)
+		if err != nil || runtime.Revision != paused.Revision || runtime.EffectiveState != app.ScheduleStatePaused || runtime.NextRunAt != at.Format(time.RFC3339Nano) || !schedulerRuntimeDeadline(runtime, before).Equal(at) {
+			t.Fatalf("reconstructed paused runtime = %#v, %v", runtime, err)
+		}
+		snapshot, err := restarted.Snapshot(before)
+		if err != nil || snapshot.Schedules[0].NextRunAt != at.Format(time.RFC3339Nano) || snapshot.NextWakeAt != at.Format(time.RFC3339Nano) {
+			t.Fatalf("reconstructed paused snapshot = %#v, %v", snapshot, err)
+		}
+		if messages := scheduleOccurrenceMessages(t, workspace.Path, "workspace"); len(messages) != 0 {
+			t.Fatalf("reconstruction delivered paused occurrence: %#v", messages)
+		}
+	})
+}
+
+func TestNativeSchedulerPausedRepeatingHasNoDeadline(t *testing.T) {
+	manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	anchor := time.Now().UTC().Truncate(time.Second)
+	created, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Repeat", Condition: "every minute", Target: "workspace",
+		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerInterval, EverySeconds: 60, AnchorAt: anchor.Format(time.RFC3339Nano)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.now = func() time.Time { return anchor.Add(time.Second) }
+	native := newNativeScheduler(manager, workspace)
+	paused, err := native.Change(context.Background(), NativeSchedulerChange{Operation: app.ScheduleChangePause, ID: created.ID})
+	if err != nil || paused.State != app.ScheduleStatePaused {
+		t.Fatalf("pause repeating schedule = %#v, %v", paused, err)
+	}
+	deadline, err := native.Reconcile(context.Background(), anchor.Add(10*time.Minute))
+	if err != nil || !deadline.IsZero() {
+		t.Fatalf("paused repeating deadline = %s, want zero; err=%v", deadline, err)
+	}
+	runtime, err := native.schedulerRuntime(created.ID)
+	if err != nil || runtime.EffectiveState != app.ScheduleStatePaused || runtime.NextRunAt != "" || !schedulerRuntimeDeadline(runtime, anchor).IsZero() {
+		t.Fatalf("paused repeating runtime = %#v, %v", runtime, err)
+	}
+	snapshot, err := native.Snapshot(anchor.Add(10 * time.Minute))
+	if err != nil || snapshot.Schedules[0].EffectiveState != app.ScheduleStatePaused || snapshot.Schedules[0].NextRunAt != "" || snapshot.NextWakeAt != "" {
+		t.Fatalf("paused repeating snapshot = %#v, %v", snapshot, err)
+	}
+	if messages := scheduleOccurrenceMessages(t, workspace.Path, "workspace"); len(messages) != 0 {
+		t.Fatalf("paused repeating occurrences were delivered: %#v", messages)
+	}
+}
+
 func TestExpiredOneTimePauseRuntimePathsMatch(t *testing.T) {
 	manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
 	at := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)

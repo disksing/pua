@@ -193,6 +193,16 @@ func (n *NativeScheduler) Change(ctx context.Context, change NativeSchedulerChan
 			break
 		}
 		paused, err := workspace.PauseSchedule(change.ID)
+		if err == nil {
+			pauseBoundary := n.manager.now()
+			if pausing.ID != "" {
+				pauseBoundary, err = time.Parse(time.RFC3339Nano, paused.UpdatedAt)
+				if err != nil {
+					return app.Schedule{}, err
+				}
+			}
+			return paused, n.reconcileSchedule(ctx, paused, pauseBoundary)
+		}
 		if !errors.Is(err, app.ErrScheduleOccurrenceDue) {
 			return paused, err
 		}
@@ -428,7 +438,9 @@ func initialScheduleRuntime(schedule app.Schedule, now time.Time) (schedulerSche
 		return runtime, nil
 	}
 	if schedule.State == app.ScheduleStatePaused {
-		completeExpiredOneTimeWhilePaused(&runtime, schedule.Trigger, now)
+		if !completeExpiredOneTimeWhilePaused(&runtime, schedule.Trigger, now) && schedule.Trigger.Type == app.ScheduleTriggerAt {
+			runtime.NextRunAt = schedule.Trigger.At
+		}
 		return runtime, nil
 	}
 	updatedAt, err := time.Parse(time.RFC3339Nano, schedule.UpdatedAt)
@@ -451,11 +463,20 @@ func initialScheduleRuntime(schedule app.Schedule, now time.Time) (schedulerSche
 }
 
 func (n *NativeScheduler) reconcilePausedSchedule(schedule app.Schedule, runtime schedulerScheduleRuntime, now time.Time) error {
-	changed := runtime.Prepared != nil || runtime.NextRunAt != "" || runtime.RetryAt != "" || runtime.EffectiveState != app.ScheduleStatePaused
-	runtime.Prepared, runtime.NextRunAt, runtime.RetryAt = nil, "", ""
+	changed := runtime.Prepared != nil || runtime.RetryAt != "" || runtime.EffectiveState != app.ScheduleStatePaused
+	runtime.Prepared, runtime.RetryAt = nil, ""
 	runtime.EffectiveState = app.ScheduleStatePaused
 	if completeExpiredOneTimeWhilePaused(&runtime, schedule.Trigger, now) {
 		changed = true
+	} else {
+		nextRunAt := ""
+		if schedule.Trigger != nil && schedule.Trigger.Type == app.ScheduleTriggerAt {
+			nextRunAt = schedule.Trigger.At
+		}
+		if runtime.NextRunAt != nextRunAt {
+			runtime.NextRunAt = nextRunAt
+			changed = true
+		}
 	}
 	if !changed {
 		return nil
@@ -679,8 +700,11 @@ func (n *NativeScheduler) storeSchedulerRuntime(id string, runtime schedulerSche
 }
 
 func schedulerRuntimeDeadline(runtime schedulerScheduleRuntime, now time.Time) time.Time {
-	if runtime.EffectiveState == app.ScheduleStatePaused || runtime.EffectiveState == app.ScheduleStateCompleted || runtime.EffectiveState == schedulerOutcomeAttention {
+	if runtime.EffectiveState == app.ScheduleStateCompleted || runtime.EffectiveState == schedulerOutcomeAttention {
 		return time.Time{}
+	}
+	if runtime.EffectiveState == app.ScheduleStatePaused {
+		return generationTime(runtime.NextRunAt)
 	}
 	if runtime.RetryAt != "" {
 		return generationTime(runtime.RetryAt)

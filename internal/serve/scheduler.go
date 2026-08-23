@@ -825,46 +825,302 @@ func schedulerRuntimeDeadline(runtime schedulerScheduleRuntime, now time.Time) t
 }
 
 func (n *NativeScheduler) cancelLegacyTicks(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	store, err := loadResourceMailboxStoreForRead(n.workspace.Path, app.SchedulerResourceID)
 	if err != nil {
 		return err
 	}
-	needsCancellation := false
+	queued := false
+	needsAgentHub := make([]resourceMailboxMessage, 0)
 	for _, message := range store.Mailbox.Messages {
 		if message.Type != resourceMessageTypeSchedulerTick {
 			continue
 		}
 		switch message.Status {
-		case resourceMessageQueued, resourceMessageDelivering, resourceMessageInterrupting:
-			needsCancellation = true
-		}
-		if needsCancellation {
-			break
+		case resourceMessageQueued:
+			queued = true
+		case resourceMessageDelivering, resourceMessageInterrupting, resourceMessageDeliveryUnknown:
+			needsAgentHub = append(needsAgentHub, message)
+		case resourceMessageDelivered:
+			// TurnTerminalAt is written only after observing the materialized
+			// canonical Turn as closed. It is the durable restart boundary for
+			// migration, whereas TerminalAt only means AgentHub accepted input.
+			if strings.TrimSpace(message.TurnTerminalAt) == "" {
+				needsAgentHub = append(needsAgentHub, message)
+			}
 		}
 	}
-	if !needsCancellation {
+	if !queued && len(needsAgentHub) == 0 {
 		return nil
 	}
-	_, err = mutateResourceMailboxStoreForResource(n.workspace.Path, app.SchedulerResourceID, func(store *resourceMailboxStore) error {
-		now := time.Now().Format(time.RFC3339Nano)
-		for index := range store.Mailbox.Messages {
-			message := &store.Mailbox.Messages[index]
-			if message.Type != resourceMessageTypeSchedulerTick {
-				continue
-			}
-			switch message.Status {
-			case resourceMessageQueued:
+	if queued {
+		_, err = mutateResourceMailboxStoreForResource(n.workspace.Path, app.SchedulerResourceID, func(store *resourceMailboxStore) error {
+			now := time.Now().Format(time.RFC3339Nano)
+			for index := range store.Mailbox.Messages {
+				message := &store.Mailbox.Messages[index]
+				if message.Type != resourceMessageTypeSchedulerTick || message.Status != resourceMessageQueued {
+					continue
+				}
 				message.Status = resourceMessageUndeliverable
-			case resourceMessageDelivering, resourceMessageInterrupting:
-				message.Status = resourceMessageDeliveryUnknown
-			default:
-				continue
+				message.TerminalAt, message.UpdatedAt = now, now
+				message.LastErrorCode = "scheduler_v1_retired"
+				message.LastError = "Legacy scheduler tick was retired before AgentHub delivery"
 			}
-			message.TerminalAt, message.UpdatedAt = now, now
-			message.LastErrorCode = "scheduler_v1_retired"
-			message.LastError = "Legacy scheduler tick was cancelled during native scheduler migration"
+			return ctx.Err()
+		})
+		if err != nil {
+			return err
 		}
-		return ctx.Err()
+	}
+	for _, message := range needsAgentHub {
+		if err := n.resolveLegacyTick(ctx, message); err != nil {
+			return fmt.Errorf("retire legacy Scheduler tick %s: %w", message.ID, err)
+		}
+	}
+	return nil
+}
+
+// resolveLegacyTick closes the only unsafe migration window: AgentHub may
+// have durably accepted a v1 tick while the local mailbox still says
+// delivering or delivery_unknown. Migration cannot proceed until the stable
+// input is proved absent, or its exact materialized Turn is terminal. Session
+// source validation and trigger ownership prevent a stale receipt from
+// interrupting an unrelated Scheduler conversation.
+func (n *NativeScheduler) resolveLegacyTick(ctx context.Context, message resourceMailboxMessage) error {
+	generationID := strings.TrimSpace(message.GenerationID)
+	if generationID == "" {
+		return errors.New("legacy tick has no generation identity")
+	}
+	record, found, err := generationRecordByID(n.workspace.Path, generationID)
+	if err != nil {
+		return err
+	}
+	if !found || normalizedResourceID(record.ResourceID) != app.SchedulerResourceID {
+		return fmt.Errorf("legacy tick generation %s is unavailable or belongs to another resource", generationID)
+	}
+	sessionID := strings.TrimSpace(record.AgentHubSessionID)
+	if sessionID == "" || (strings.TrimSpace(message.AgentHubSessionID) != "" && strings.TrimSpace(message.AgentHubSessionID) != sessionID) {
+		return errors.New("legacy tick AgentHub Session identity is ambiguous")
+	}
+	cfg, client, err := n.manager.agentHubRuntimeConfig()
+	if err != nil {
+		return err
+	}
+	session, err := client.GetSession(ctx, sessionID)
+	if err != nil {
+		return fmt.Errorf("inspect AgentHub Session %s: %w", sessionID, err)
+	}
+	if !agentHubSessionExactlyMatchesGeneration(cfg, record, session) {
+		return fmt.Errorf("AgentHub Session %s does not match generation %s", sessionID, generationID)
+	}
+	canonical, accepted, err := findCanonicalLegacyTickMessage(ctx, client, sessionID, message)
+	if err != nil {
+		return fmt.Errorf("inspect canonical input: %w", err)
+	}
+	if !accepted {
+		if message.Status == resourceMessageDelivered {
+			return errors.New("mailbox says delivered but AgentHub has no matching canonical input")
+		}
+		return n.markLegacyTickUnaccepted(message.ID)
+	}
+	if canonical.Steer {
+		return errors.New("canonical legacy tick is an inserted message, not a Turn opener")
+	}
+	turn, found, err := findLegacyTickTurn(ctx, client, sessionID, message, canonical.TurnID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return errors.New("canonical legacy tick has no materialized Turn yet")
+	}
+	turnID := firstNonEmpty(strings.TrimSpace(turn.TurnID), strings.TrimSpace(turn.ID))
+	if turnID == "" || !legacyTickOwnsTurn(turn, message) {
+		return errors.New("materialized Turn is not owned by the legacy tick")
+	}
+	if err := n.markLegacyTickAccepted(message.ID, generationID, sessionID, turnID); err != nil {
+		return err
+	}
+	if turn.Closed || terminalTurnStatus(turn.Status) {
+		return n.markLegacyTickTurnTerminal(message.ID, turn)
+	}
+	activeTurnID := activeAgentHubTurnID(session)
+	if activeTurnID != turnID {
+		if activeTurnID != "" {
+			return fmt.Errorf("legacy tick Turn %s is open while unrelated Turn %s is active", turnID, activeTurnID)
+		}
+		return fmt.Errorf("legacy tick Turn %s is not terminal yet", turnID)
+	}
+	if err := n.markLegacyTickInterruptIntent(message.ID, turnID); err != nil {
+		return err
+	}
+	interrupted, err := client.Interrupt(ctx, sessionID)
+	if err != nil {
+		return fmt.Errorf("interrupt legacy tick Turn %s: %w", turnID, err)
+	}
+	if !agentHubSessionExactlyMatchesGeneration(cfg, record, interrupted) {
+		return errors.New("AgentHub interrupt response changed Session identity")
+	}
+	terminal, _, err := client.SessionTurn(ctx, sessionID, turnID)
+	if err != nil {
+		return fmt.Errorf("confirm legacy tick Turn %s terminal: %w", turnID, err)
+	}
+	if !terminal.Closed && !terminalTurnStatus(terminal.Status) {
+		return fmt.Errorf("legacy tick Turn %s remains active after interrupt", turnID)
+	}
+	return n.markLegacyTickTurnTerminal(message.ID, terminal)
+}
+
+// findCanonicalLegacyTickMessage is receipt-aware. Terminal mailbox receipts
+// intentionally omit message text, so the ordinary exact-input matcher cannot
+// reconstruct their provider envelope. The stable AgentHub message ID, the
+// source-validated Session, and (for opaque v2 input) PUA's scheduler_tick
+// payload still give an exact application identity without retaining prompt
+// bodies forever in the receipt store.
+func findCanonicalLegacyTickMessage(ctx context.Context, client *agentHubClient, sessionID string, expected resourceMailboxMessage) (agentHubInboundMessage, bool, error) {
+	cursor := int64(0)
+	for {
+		frames, latest, err := client.SessionFrames(ctx, sessionID, cursor, agentHubEventMaxCount)
+		if err != nil {
+			return agentHubInboundMessage{}, false, err
+		}
+		for _, frame := range frames {
+			for _, event := range frame.Events {
+				if event.Type != "message.input" {
+					continue
+				}
+				var canonical agentHubInboundMessage
+				if json.Unmarshal(event.Data, &canonical) != nil || canonical.MessageID != expected.ID {
+					continue
+				}
+				matches := canonicalAgentHubMessageMatches(canonical, expected)
+				if strings.TrimSpace(expected.Text) == "" {
+					matches = canonicalLegacyTickReceiptMatches(canonical)
+				}
+				if !matches {
+					return agentHubInboundMessage{}, false, &resourceAPIError{Code: "message_conflict", Message: "stable message id conflicts with a different canonical AgentHub input"}
+				}
+				canonical.TurnID = event.TurnID
+				return canonical, true, nil
+			}
+		}
+		if len(frames) == 0 || frames[len(frames)-1].Cursor <= cursor || frames[len(frames)-1].Cursor >= latest {
+			return agentHubInboundMessage{}, false, nil
+		}
+		cursor = frames[len(frames)-1].Cursor
+	}
+}
+
+func canonicalLegacyTickReceiptMatches(canonical agentHubInboundMessage) bool {
+	if canonical.SchemaVersion == agentHubOpaqueMessageSchema {
+		payload, ok := decodePUAMessagePayload(canonical.Payload)
+		return ok && payload.Role == "system" && payload.Type == resourceMessageTypeSchedulerTick &&
+			payload.Causation != nil && payload.Causation.Type == resourceMessageTypeSchedulerTick &&
+			normalizedResourceID(payload.Causation.SourceResourceID) == app.SchedulerResourceID
+	}
+	return normalizedProviderMessageRole(canonical.Role) == "system"
+}
+
+func findLegacyTickTurn(ctx context.Context, client *agentHubClient, sessionID string, message resourceMailboxMessage, canonicalTurnID string) (agentHubTurn, bool, error) {
+	if turnID := firstNonEmpty(strings.TrimSpace(canonicalTurnID), strings.TrimSpace(message.TurnID)); turnID != "" {
+		turn, _, err := client.SessionTurn(ctx, sessionID, turnID)
+		if err != nil {
+			return agentHubTurn{}, false, err
+		}
+		if legacyTickOwnsTurn(turn, message) {
+			return turn, true, nil
+		}
+		return agentHubTurn{}, false, errors.New("canonical Turn does not belong to the legacy tick")
+	}
+	before, latest := int64(0), true
+	for {
+		page, err := client.SessionTurns(ctx, sessionID, before, latest, generationUsagePageSize)
+		if err != nil {
+			return agentHubTurn{}, false, err
+		}
+		for _, turn := range page.Turns {
+			if legacyTickOwnsTurn(turn, message) {
+				return turn, true, nil
+			}
+		}
+		if !page.Page.HasMoreBefore {
+			return agentHubTurn{}, false, nil
+		}
+		if page.Page.NextBefore <= 0 || page.Page.NextBefore == before {
+			return agentHubTurn{}, false, errors.New("AgentHub Turn pagination did not advance")
+		}
+		before, latest = page.Page.NextBefore, false
+	}
+}
+
+func legacyTickOwnsTurn(turn agentHubTurn, message resourceMailboxMessage) bool {
+	if triggerID := strings.TrimSpace(turn.TriggerMessageID); triggerID != "" {
+		return triggerID == message.ID
+	}
+	if payload, ok := decodePUAMessagePayload(turn.TriggerPayload); ok {
+		return payload.Type == resourceMessageTypeSchedulerTick && payload.Text == message.Text && turn.TriggerRole == message.Role
+	}
+	for _, item := range turn.Items {
+		if strings.TrimSpace(item.MessageID) == message.ID {
+			return true
+		}
+	}
+	return false
+}
+
+func (n *NativeScheduler) markLegacyTickUnaccepted(messageID string) error {
+	_, err := updateMailboxMessage(n.workspace.Path, messageID, func(message *resourceMailboxMessage) {
+		now := time.Now().Format(time.RFC3339Nano)
+		message.Status = resourceMessageUndeliverable
+		message.TerminalAt, message.UpdatedAt = now, now
+		message.LastErrorCode = "scheduler_v1_retired"
+		message.LastError = "Legacy scheduler tick was retired after AgentHub confirmed no canonical input"
+	})
+	return err
+}
+
+func (n *NativeScheduler) markLegacyTickAccepted(messageID, generationID, sessionID, turnID string) error {
+	_, err := updateMailboxMessage(n.workspace.Path, messageID, func(message *resourceMailboxMessage) {
+		now := time.Now().Format(time.RFC3339Nano)
+		message.Status = resourceMessageDelivered
+		message.GenerationID = generationID
+		message.AgentHubSessionID = sessionID
+		message.TurnID = turnID
+		if message.DeliveredAt == "" {
+			message.DeliveredAt = now
+		}
+		if message.TerminalAt == "" {
+			message.TerminalAt = message.DeliveredAt
+		}
+		message.UpdatedAt = now
+		message.LastError, message.LastErrorCode = "", ""
+	})
+	return err
+}
+
+func (n *NativeScheduler) markLegacyTickInterruptIntent(messageID, turnID string) error {
+	_, err := updateMailboxMessage(n.workspace.Path, messageID, func(message *resourceMailboxMessage) {
+		if message.InterruptTurnID == "" {
+			message.InterruptTurnID = turnID
+			message.InterruptAt = time.Now().Format(time.RFC3339Nano)
+			message.UpdatedAt = message.InterruptAt
+		}
+	})
+	return err
+}
+
+func (n *NativeScheduler) markLegacyTickTurnTerminal(messageID string, turn agentHubTurn) error {
+	_, err := updateMailboxMessage(n.workspace.Path, messageID, func(message *resourceMailboxMessage) {
+		terminalAt := firstNonEmpty(strings.TrimSpace(turn.EndedAt), strings.TrimSpace(turn.CompletedAt))
+		if terminalAt == "" {
+			terminalAt = time.Now().Format(time.RFC3339Nano)
+		}
+		message.TurnTerminalAt = terminalAt
+		if turnID := firstNonEmpty(strings.TrimSpace(turn.TurnID), strings.TrimSpace(turn.ID)); turnID != "" {
+			message.TurnID = turnID
+		}
+		message.UpdatedAt = terminalAt
 	})
 	return err
 }

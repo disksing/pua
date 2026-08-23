@@ -336,9 +336,19 @@ func (f *runtimeFakeAgentHub) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		session := f.sessions[id]
 		switch action {
 		case "interrupt":
+			turnID := strings.TrimSpace(session.CurrentTurnID)
 			f.appendLocked(id, "turn.cancelled", map[string]any{"reason": "requested"})
 			f.appendLocked(id, "session.state", map[string]any{"state": "ready"})
+			if turnID != "" {
+				if turn, found := f.turns[id][turnID]; found {
+					turn.Status = "cancelled"
+					turn.Closed = true
+					turn.EndedAt = time.Now().UTC().Format(time.RFC3339Nano)
+					f.turns[id][turnID] = turn
+				}
+			}
 			session.State = "ready"
+			session.CurrentTurnID = ""
 		case "stop":
 			stopHook = f.stopHook
 			f.appendLocked(id, "session.state", map[string]any{"state": "stopping"})

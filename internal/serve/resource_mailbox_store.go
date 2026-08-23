@@ -1038,6 +1038,22 @@ func schedulerPreparedMessagePins(workspacePath string, store resourceMailboxSto
 	}
 
 	pins := make(map[string]bool)
+	if store.ResourceID == app.SchedulerResourceID {
+		for _, message := range store.Mailbox.Messages {
+			if message.Type != resourceMessageTypeSchedulerTick || strings.TrimSpace(message.TurnTerminalAt) != "" {
+				continue
+			}
+			switch message.Status {
+			case resourceMessageDelivering, resourceMessageInterrupting, resourceMessageDeliveryUnknown, resourceMessageDelivered:
+				// Native migration must reconcile uncertain acceptance and
+				// delivered Turns against AgentHub before discarding their
+				// identity. Otherwise startup compaction can erase the only
+				// receipt that distinguishes an obsolete active Turn from an
+				// unrelated Scheduler chat.
+				pins[strings.TrimSpace(message.ID)] = true
+			}
+		}
+	}
 	for _, runtime := range checkpoint.Schedules {
 		prepared := runtime.Prepared
 		if prepared == nil || strings.TrimSpace(prepared.MessageID) == "" {

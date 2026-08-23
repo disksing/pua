@@ -3,6 +3,7 @@ package serve
 import (
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -224,6 +225,48 @@ func TestHotMailboxCompactsDeliveredLegacySchedulerTicks(t *testing.T) {
 	}
 	if len(ids) != 0 {
 		t.Fatalf("terminal scheduler mailbox remained active: %#v", ids)
+	}
+}
+
+func TestUnresolvedLegacySchedulerTickSurvivesReceiptCompaction(t *testing.T) {
+	root := t.TempDir()
+	if _, err := app.Initialize(root, "en"); err != nil {
+		t.Fatal(err)
+	}
+	previousCount, previousWindow := resourceMailboxReceiptRetentionCount, resourceMailboxReceiptRetentionWindow
+	resourceMailboxReceiptRetentionCount = 1
+	resourceMailboxReceiptRetentionWindow = time.Hour
+	t.Cleanup(func() {
+		resourceMailboxReceiptRetentionCount, resourceMailboxReceiptRetentionWindow = previousCount, previousWindow
+	})
+	old := time.Now().UTC().Add(-8 * 24 * time.Hour).Format(time.RFC3339Nano)
+	_, err := mutateResourceMailboxForResource(root, app.SchedulerResourceID, func(mailbox *resourceMailbox) error {
+		mailbox.Messages = append(mailbox.Messages,
+			resourceMailboxMessage{
+				ID: "tick-unresolved", Sequence: 1, ResourceID: app.SchedulerResourceID,
+				Type: resourceMessageTypeSchedulerTick, Status: resourceMessageDelivered,
+				AcceptedAt: old, UpdatedAt: old, DeliveredAt: old, TerminalAt: old,
+				GenerationID: "generation-unresolved", AgentHubSessionID: "session-unresolved", TurnID: "turn-unresolved",
+			},
+			resourceMailboxMessage{
+				ID: "tick-terminal", Sequence: 2, ResourceID: app.SchedulerResourceID,
+				Type: resourceMessageTypeSchedulerTick, Status: resourceMessageDelivered,
+				AcceptedAt: old, UpdatedAt: old, DeliveredAt: old, TerminalAt: old, TurnTerminalAt: old,
+				GenerationID: "generation-terminal", AgentHubSessionID: "session-terminal", TurnID: "turn-terminal",
+			},
+		)
+		mailbox.NextSequence = 2
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unresolved, found, err := mailboxMessageByID(root, "tick-unresolved")
+	if err != nil || !found || !unresolved.receipt || unresolved.TurnTerminalAt != "" {
+		t.Fatalf("unresolved tick receipt = %#v, found=%v err=%v", unresolved, found, err)
+	}
+	if _, found, err := mailboxMessageByID(root, "tick-terminal"); err == nil || found || !strings.Contains(err.Error(), "receipt expired") {
+		t.Fatalf("terminal tick retention = found=%v err=%v", found, err)
 	}
 }
 

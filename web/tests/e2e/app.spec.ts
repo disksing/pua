@@ -1268,7 +1268,7 @@ test("keeps Scheduler schedules content inside a 440px viewport", async ({ page 
     expect(documentSize).toEqual({ bodyClient: 440, bodyScroll: 440, htmlClient: 440, htmlScroll: 440 });
   };
 
-  await expect(page.getByText("No schedules. The Server will not create empty Scheduler Turns.")).toBeVisible();
+  await expect(page.getByText("No schedules. Native Scheduler timing is idle.")).toBeVisible();
   await expectNoSchedulerOverflow();
 
   await page.getByLabel("Description").fill("Notify when the release is ready");

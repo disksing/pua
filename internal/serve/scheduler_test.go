@@ -164,49 +164,177 @@ func TestNativeSchedulerSkipsBusyRepeatingTargetButQueuesOneTime(t *testing.T) {
 	}
 }
 
-func TestNativeSchedulerReplaysPreparedOccurrenceWithoutDuplicate(t *testing.T) {
-	manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
-	puaWorkspace, _ := app.OpenWorkspace(workspace.Path)
-	at := time.Now().UTC().Add(time.Minute).Truncate(time.Second)
-	schedule, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
-		Description: "Replay safely", Condition: "every minute", Target: "workspace",
-		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerInterval, EverySeconds: 60, AnchorAt: at.Format(time.RFC3339Nano)},
-	})
+func TestNativeSchedulerCrashWindowReplayMatrix(t *testing.T) {
+	type crashWindow int
+	const (
+		crashBeforePrepared crashWindow = iota
+		crashWithPrepared
+		crashWithAcceptedMessage
+		crashAfterCheckpoint
+	)
+	tests := []struct {
+		name   string
+		window crashWindow
+	}{
+		{name: "before prepared persistence", window: crashBeforePrepared},
+		{name: "after prepared persistence", window: crashWithPrepared},
+		// No durable write separates prepared persistence from the mailbox
+		// acceptance call, so these two crash boundaries restart from the same
+		// checkpoint and must have the same outcome.
+		{name: "before mailbox acceptance", window: crashWithPrepared},
+		{name: "after mailbox acceptance", window: crashWithAcceptedMessage},
+		// Likewise, an accepted mailbox message plus the still-prepared source
+		// checkpoint is the durable state immediately before checkpoint commit.
+		{name: "before checkpoint commit", window: crashWithAcceptedMessage},
+		{name: "after checkpoint commit", window: crashAfterCheckpoint},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+			puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			at := time.Now().UTC().Add(time.Minute).Truncate(time.Second)
+			schedule, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+				Description: "Replay safely", Condition: "every minute", Target: "workspace",
+				Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerInterval, EverySeconds: 60, AnchorAt: at.Format(time.RFC3339Nano)},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := at.Add(time.Second)
+			next := at.Add(time.Minute)
+			native := newNativeScheduler(manager, workspace)
+			prepared, err := native.prepareOccurrence(schedule, at, at, next, 1, schedulerOccurrenceReasonTime)
+			if err != nil {
+				t.Fatal(err)
+			}
+			initial := schedulerScheduleRuntime{
+				Revision: schedule.Revision, EffectiveState: app.ScheduleStateActive,
+				NextRunAt: at.Format(time.RFC3339Nano),
+			}
+			if err := native.storeSchedulerRuntime(schedule.ID, initial); err != nil {
+				t.Fatal(err)
+			}
+
+			switch test.window {
+			case crashBeforePrepared:
+				// The due cursor is durable, but no immutable occurrence has been
+				// prepared. Restart must derive the same stable identifiers.
+			case crashWithPrepared:
+				initial.Prepared = &prepared
+				if err := native.storeSchedulerRuntime(schedule.ID, initial); err != nil {
+					t.Fatal(err)
+				}
+			case crashWithAcceptedMessage:
+				initial.Prepared = &prepared
+				if err := native.storeSchedulerRuntime(schedule.ID, initial); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := acceptGeneratedMailboxMessage(workspace.Path, preparedOccurrenceMessage(prepared)); err != nil {
+					t.Fatal(err)
+				}
+			case crashAfterCheckpoint:
+				initial.Prepared = &prepared
+				if err := native.storeSchedulerRuntime(schedule.ID, initial); err != nil {
+					t.Fatal(err)
+				}
+				if err := native.deliverPrepared(context.Background(), schedule, initial, now); err != nil {
+					t.Fatal(err)
+				}
+			default:
+				t.Fatalf("unknown crash window %d", test.window)
+			}
+
+			wantBefore := 0
+			if test.window >= crashWithAcceptedMessage {
+				wantBefore = 1
+			}
+			assertSingleDurableOccurrence(t, workspace.Path, prepared, wantBefore)
+
+			// A fresh manager has no in-memory resource controller or Scheduler
+			// instance, so only the durable workspace state crosses this boundary.
+			restartedManager := newAgentManager(manager.server)
+			restartedManager.now = func() time.Time { return now }
+			manager.server.agents = restartedManager
+			restarted := newNativeScheduler(restartedManager, workspace)
+			recomputed, err := restarted.prepareOccurrence(schedule, at, at, next, 1, schedulerOccurrenceReasonTime)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if recomputed.OccurrenceID != prepared.OccurrenceID || recomputed.MessageID != prepared.MessageID {
+				t.Fatalf("stable identifiers changed after restart: got %s/%s, want %s/%s", recomputed.OccurrenceID, recomputed.MessageID, prepared.OccurrenceID, prepared.MessageID)
+			}
+			if _, err := restarted.Reconcile(context.Background(), now); err != nil {
+				t.Fatal(err)
+			}
+			assertSingleDurableOccurrence(t, workspace.Path, prepared, 1)
+
+			runtime, err := restarted.schedulerRuntime(schedule.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if runtime.Prepared != nil || runtime.LastOutcome != schedulerOutcomeAccepted || runtime.LastOccurrenceAt != at.Format(time.RFC3339Nano) || runtime.NextRunAt != next.Format(time.RFC3339Nano) {
+				t.Fatalf("replayed checkpoint = %#v", runtime)
+			}
+
+			// A second restart proves a committed replay cannot append either a
+			// hot mailbox duplicate or an additional compacted receipt.
+			secondManager := newAgentManager(manager.server)
+			secondManager.now = func() time.Time { return now }
+			manager.server.agents = secondManager
+			if _, err := newNativeScheduler(secondManager, workspace).Reconcile(context.Background(), now); err != nil {
+				t.Fatal(err)
+			}
+			assertSingleDurableOccurrence(t, workspace.Path, prepared, 1)
+		})
+	}
+}
+
+func preparedOccurrenceMessage(prepared schedulerPreparedOccurrence) resourceMailboxMessage {
+	return resourceMailboxMessage{
+		ID: prepared.MessageID, ResourceID: prepared.Target, Text: prepared.Text,
+		RequestedMode: resourceMessageModeEnqueue, ActualMode: resourceMessageModeEnqueue, ModeFrozen: true,
+		Type: resourceMessageTypeScheduleOccurrence, Causation: cloneMailboxCausation(prepared.Causation),
+		SenderWorkspaceInstanceID: prepared.Causation.SourceWorkspaceInstanceID,
+	}
+}
+
+func assertSingleDurableOccurrence(t *testing.T, workspacePath string, prepared schedulerPreparedOccurrence, want int) {
+	t.Helper()
+	messages := scheduleOccurrenceMessages(t, workspacePath, prepared.Target)
+	matching := 0
+	for _, message := range messages {
+		if message.ID == prepared.MessageID {
+			matching++
+			if message.Causation == nil || message.Causation.OccurrenceID != prepared.OccurrenceID {
+				t.Fatalf("occurrence causation changed: %#v", message)
+			}
+		}
+	}
+	if matching != want || len(messages) != want {
+		t.Fatalf("durable occurrence copies = %d in %#v, want %d", matching, messages, want)
+	}
+
+	store, err := loadResourceMailboxStoreForRead(workspacePath, prepared.Target)
 	if err != nil {
 		t.Fatal(err)
 	}
-	native := newNativeScheduler(manager, workspace)
-	runtime, err := initialScheduleRuntime(schedule, at.Add(time.Second))
-	if err != nil {
-		t.Fatal(err)
+	hotCopies := 0
+	for _, message := range store.Mailbox.Messages {
+		if !message.receipt && message.ID == prepared.MessageID {
+			hotCopies++
+		}
 	}
-	next := at.Add(time.Minute)
-	prepared, err := native.prepareOccurrence(schedule, at, at, next, 1, schedulerOccurrenceReasonTime)
-	if err != nil {
-		t.Fatal(err)
+	receiptCopies := 0
+	for _, receipt := range store.Receipts.Receipts {
+		if receipt.ID == prepared.MessageID {
+			receiptCopies++
+		}
 	}
-	runtime.Prepared = &prepared
-	if err := native.storeSchedulerRuntime(schedule.ID, runtime); err != nil {
-		t.Fatal(err)
-	}
-	if err := native.deliverPrepared(context.Background(), schedule, runtime, at.Add(time.Second)); err != nil {
-		t.Fatal(err)
-	}
-	// Simulate a crash after target acceptance but before the source checkpoint
-	// commit by restoring the exact immutable prepared value.
-	if err := native.storeSchedulerRuntime(schedule.ID, runtime); err != nil {
-		t.Fatal(err)
-	}
-	if err := native.deliverPrepared(context.Background(), schedule, runtime, at.Add(2*time.Second)); err != nil {
-		t.Fatal(err)
-	}
-	messages := scheduleOccurrenceMessages(t, workspace.Path, "workspace")
-	if len(messages) != 1 || messages[0].ID != prepared.MessageID || messages[0].Causation.OccurrenceID != prepared.OccurrenceID {
-		t.Fatalf("prepared replay messages = %#v", messages)
-	}
-	snapshot, err := native.Snapshot(at.Add(2 * time.Second))
-	if err != nil || snapshot.Schedules[0].LastOutcome != schedulerOutcomeAccepted || snapshot.Schedules[0].NextRunAt != next.Format(time.RFC3339Nano) {
-		t.Fatalf("prepared replay was mistaken for a busy skip: %#v, %v", snapshot, err)
+	if hotCopies+receiptCopies != want {
+		t.Fatalf("physical occurrence copies = hot %d + receipts %d, want %d", hotCopies, receiptCopies, want)
 	}
 }
 

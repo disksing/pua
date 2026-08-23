@@ -133,10 +133,6 @@ type UpdateScheduleInput struct {
 	Trigger          *ScheduleTrigger
 }
 
-type SchedulerSettingsInput struct {
-	AgentBinding AgentBinding
-}
-
 type SchedulerSnapshot struct {
 	SchemaVersion int                `json:"schemaVersion"`
 	AgentBinding  AgentBinding       `json:"agentBinding"`
@@ -892,30 +888,6 @@ func (w *Workspace) changeScheduleState(id, state string) (Schedule, error) {
 		return Schedule{}, &APIError{Operation: state + " schedule", Kind: "scheduler", Workspace: w.root, Err: err}
 	}
 	return updated, nil
-}
-
-func (w *Workspace) SetSchedulerSettings(input SchedulerSettingsInput) (SchedulerConfig, error) {
-	if err := w.require(); err != nil {
-		return SchedulerConfig{}, err
-	}
-	binding, err := NormalizeAgentBinding(input.AgentBinding)
-	if err != nil {
-		return SchedulerConfig{}, err
-	}
-	var result SchedulerConfig
-	err = withWorkspaceMutationLock(w.root, func() error {
-		config, err := readSchedulerJSON(schedulerJSONPath(w.root))
-		if err != nil {
-			return err
-		}
-		config.AgentBinding = binding
-		if err := writeSchedulerJSON(schedulerJSONPath(w.root), config); err != nil {
-			return err
-		}
-		result = config
-		return nil
-	})
-	return result, err
 }
 
 func (w *Workspace) normalizeScheduleFields(description, condition, target string, validateTarget bool) (string, string, string, error) {

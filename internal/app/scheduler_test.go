@@ -173,27 +173,18 @@ func TestScheduleLifecycleValidatesTargets(t *testing.T) {
 	}
 }
 
-func TestSchedulerSettingsAndConcurrentScheduleWrites(t *testing.T) {
+func TestSchedulerResourceBindingAndConcurrentScheduleWrites(t *testing.T) {
 	workspace, err := app.Initialize(t.TempDir(), "en")
 	if err != nil {
 		t.Fatal(err)
-	}
-	config, err := workspace.SetSchedulerSettings(app.SchedulerSettingsInput{
-		AgentBinding: app.AgentBinding{Kind: "agent", Name: "reviewer"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if config.AgentBinding.Kind != "agent" || config.AgentBinding.Name != "reviewer" {
-		t.Fatalf("Scheduler settings = %#v", config)
 	}
 	binding := app.AgentBinding{Kind: "profile", Name: "fast"}
 	if got, err := workspace.SetResourceAgentBinding(app.SchedulerResourceID, binding); err != nil || got != binding {
 		t.Fatalf("set Scheduler resource binding = %#v, %v", got, err)
 	}
-	config, err = workspace.Scheduler()
+	config, err := workspace.Scheduler()
 	if err != nil || config.AgentBinding != binding {
-		t.Fatalf("resource binding update drifted Scheduler settings = %#v, %v", config, err)
+		t.Fatalf("Scheduler resource binding = %#v, %v", config, err)
 	}
 	const count = 16
 	var wait sync.WaitGroup

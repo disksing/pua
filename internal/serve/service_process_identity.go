@@ -19,21 +19,6 @@ type serviceProcessIdentity struct {
 	startID      string
 }
 
-// processIdentityMatches is deliberately fail-closed. A persisted PID is
-// owned only when native process metadata still identifies the recorded
-// launch and the process remains the expected process-group leader.
-func processIdentityMatches(pid, processGroup int, startID, token, digest string) bool {
-	if pid <= 0 || processGroup <= 0 || pid != processGroup || token == "" || digest == "" ||
-		strings.ContainsRune(token, '\x00') || strings.ContainsRune(digest, '\x00') {
-		return false
-	}
-	identity, err := readServiceProcessIdentity(pid)
-	if err != nil {
-		return false
-	}
-	return serviceProcessIdentityMatches(identity, processGroup, startID, token, digest)
-}
-
 func serviceProcessIdentityMatches(identity serviceProcessIdentity, processGroup int, startID, token, digest string) bool {
 	if strings.TrimSpace(identity.command) == "" || identity.processGroup != processGroup {
 		return false

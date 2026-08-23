@@ -138,7 +138,7 @@ func TestServiceProcessIdentityMatchingRejectsReuseAndSpoofing(t *testing.T) {
 	}
 }
 
-func TestProcessIdentityMatchesNativeChild(t *testing.T) {
+func TestServiceProcessIdentityMatchesNativeChild(t *testing.T) {
 	if !serviceProcessIdentityInspectionAvailable() {
 		t.Skip("native service process identity is unavailable")
 	}
@@ -163,14 +163,14 @@ func TestProcessIdentityMatchesNativeChild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !processIdentityMatches(pid, pid, identity.startID, token, digest) {
+	if !serviceProcessIdentityMatches(identity, pid, identity.startID, token, digest) {
 		identity, identityErr := readServiceProcessIdentity(pid)
 		t.Fatalf("native identity did not match for PID %d (identity %#v, error %v)", pid, identity, identityErr)
 	}
-	if processIdentityMatches(pid, pid+1, identity.startID, token, digest) {
+	if serviceProcessIdentityMatches(identity, pid+1, identity.startID, token, digest) {
 		t.Fatal("identity matched a replacement process group")
 	}
-	if processIdentityMatches(pid, pid, identity.startID+"-reused", token, digest) {
+	if serviceProcessIdentityMatches(identity, pid, identity.startID+"-reused", token, digest) {
 		t.Fatal("identity matched a replacement PID incarnation")
 	}
 }

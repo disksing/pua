@@ -147,20 +147,6 @@ func (s *server) finishServiceManagerRemoval(removal *serviceManagerRemoval, res
 	s.serviceMu.Unlock()
 }
 
-func (s *server) removeServiceManagerLocked(workspace serveWorkspace) (*ServiceManager, error) {
-	key, keyErr := newServiceWorkspaceKey(workspace)
-	return s.removeServiceManagerForResolutionLocked(workspace, key, keyErr)
-}
-
-func (s *server) removeServiceManagerForResolutionLocked(workspace serveWorkspace, key serviceWorkspaceKey, keyErr error) (*ServiceManager, error) {
-	key, manager, err := s.registeredServiceManagerForResolutionLocked(workspace, key, keyErr)
-	if err != nil || manager == nil {
-		return manager, err
-	}
-	delete(s.services, key)
-	return manager, nil
-}
-
 func (s *server) serviceManagersLocked() []*ServiceManager {
 	managers := make([]*ServiceManager, 0, len(s.services))
 	for key, manager := range s.services {

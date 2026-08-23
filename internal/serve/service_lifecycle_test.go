@@ -163,7 +163,7 @@ func TestServiceRegistryCanonicalizesWorkspacePathAliases(t *testing.T) {
 	}
 }
 
-func TestRemoveWorkspaceFindsRegisteredManagerAfterCanonicalizationError(t *testing.T) {
+func TestRegisteredServiceManagerFindsWorkspaceAfterCanonicalizationError(t *testing.T) {
 	root := t.TempDir()
 	workspace := serveWorkspace{ID: "workspace-one", Path: root}
 	s := newServiceLifecycleTestServer(t, workspace)
@@ -174,7 +174,7 @@ func TestRemoveWorkspaceFindsRegisteredManagerAfterCanonicalizationError(t *test
 
 	resolutionErr := errors.New("canonicalization failed")
 	s.serviceMu.Lock()
-	removed, err := s.removeServiceManagerForResolutionLocked(
+	key, registered, err := s.registeredServiceManagerForResolutionLocked(
 		workspace,
 		serviceWorkspaceKey{},
 		resolutionErr,
@@ -183,23 +183,8 @@ func TestRemoveWorkspaceFindsRegisteredManagerAfterCanonicalizationError(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if removed != manager {
-		t.Fatal("canonicalization failure did not resolve the registered manager by Workspace identity")
-	}
-	if err := removed.Stop(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	if !serviceManagerIsStopping(manager) {
-		t.Fatal("canonicalization failure orphaned the registered manager")
-	}
-	if got := len(s.services); got != 0 {
-		t.Fatalf("service manager count after removal = %d, want 0", got)
-	}
-	s.serviceMu.Lock()
-	removed, err = s.removeServiceManagerForResolutionLocked(workspace, serviceWorkspaceKey{}, resolutionErr)
-	s.serviceMu.Unlock()
-	if removed != nil || !errors.Is(err, resolutionErr) {
-		t.Fatalf("missing manager resolution = (%v, %v), want (nil, canonicalization error)", removed, err)
+	if registered != manager || key.workspaceID != workspace.ID || key.root != root {
+		t.Fatalf("canonicalization failure resolved (%#v, %p), want registered Workspace (%q, %q, %p)", key, registered, workspace.ID, root, manager)
 	}
 }
 

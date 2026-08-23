@@ -8,9 +8,29 @@ import (
 	"time"
 
 	"github.com/disksing/pua/internal/app"
+	"github.com/disksing/pua/internal/localize"
 )
 
-const stallWatchdogRecoveryText = "Automatic recovery detected that the previous Turn had no effective activity for the configured timeout. The Turn was stopped and this same Session was resumed. Inspect the current workspace and task state before continuing, and avoid blindly repeating a command that may be stuck."
+func stallWatchdogRecoveryText(language string) string {
+	return strings.TrimSpace(localize.MustRender(language, "turn-stall-recovery.md", nil))
+}
+
+// frozenStallWatchdogRecoveryText preserves a message that was durably
+// accepted before a language migration or binary upgrade. The deterministic
+// message id must keep the original localized body across retries.
+func frozenStallWatchdogRecoveryText(workspacePath, messageID, language string) (string, error) {
+	localized := stallWatchdogRecoveryText(language)
+	existing, found, err := mailboxMessageByID(workspacePath, messageID)
+	if err != nil || !found || existing.Type != resourceMessageTypeTurnStallRecovery {
+		return localized, err
+	}
+	for _, supportedLanguage := range []string{localize.English, localize.SimplifiedChinese} {
+		if existing.Text == stallWatchdogRecoveryText(supportedLanguage) {
+			return existing.Text, nil
+		}
+	}
+	return localized, nil
+}
 
 // reconcileStallWatchdogLocked observes one Session's semantic activity clock.
 // It is called from the same resource controller that owns mailbox and
@@ -171,8 +191,16 @@ func (m *agentManager) startStallWatchdogRecoveryLocked(ctx context.Context, cfg
 	instanceID := strings.TrimSpace(runtimeConfig.InstanceID)
 	resourceID := normalizedResourceID(latest.ResourceID)
 	messageID := notificationMessageID(resourceMessageTypeTurnStallRecovery, instanceID, resourceID, latest.GenerationID, current.ID, turnID, "1")
+	language, err := puaWorkspace.Language()
+	if err != nil {
+		return err
+	}
+	recoveryText, err := frozenStallWatchdogRecoveryText(workspace.Path, messageID, language)
+	if err != nil {
+		return err
+	}
 	message := resourceMailboxMessage{
-		ID: messageID, ResourceID: resourceID, Text: stallWatchdogRecoveryText,
+		ID: messageID, ResourceID: resourceID, Text: recoveryText,
 		Role: "system", RequestedMode: resourceMessageModeEnqueue, ActualMode: resourceMessageModeEnqueue,
 		ModeFrozen: true, Type: resourceMessageTypeTurnStallRecovery,
 		Causation: &resourceMessageCausation{

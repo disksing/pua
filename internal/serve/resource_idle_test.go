@@ -351,13 +351,14 @@ func TestResourceIdleSleepSchedulerMigrationResumesCurrentGeneration(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+	migrateSchedulerV1ForTest(t, puaWorkspace, schedulerV1TestDefinition{
+		ID:          "schedule-666666666666666666666666",
 		Description: "Inspect the workspace",
 		Condition:   "when the workspace needs review",
 		Target:      "workspace",
-	}); err != nil {
-		t.Fatal(err)
-	}
+		CreatedAt:   "2026-08-01T00:00:00Z",
+		UpdatedAt:   "2026-08-01T00:00:00Z",
+	})
 	deadline := time.Date(2026, 8, 1, 0, 30, 0, 0, time.UTC)
 	manager.now = func() time.Time { return deadline }
 	record := idleTestGeneration(workspace, app.SchedulerResourceID, "gen-idle-scheduler", "ses-idle-scheduler", deadline)

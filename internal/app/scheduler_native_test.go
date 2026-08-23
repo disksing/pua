@@ -11,22 +11,32 @@ import (
 	"github.com/disksing/pua/internal/app"
 )
 
-func TestSchedulerV1MigrationPreservesDefinitionsForCompilation(t *testing.T) {
-	workspace, err := app.Initialize(t.TempDir(), "en")
+type schedulerV1TestDefinition struct {
+	ID          string `json:"id"`
+	Description string `json:"description"`
+	Condition   string `json:"condition"`
+	Target      string `json:"target"`
+	CreatedAt   string `json:"createdAt"`
+	UpdatedAt   string `json:"updatedAt"`
+}
+
+func migrateSchedulerV1ForTest(t *testing.T, workspace *app.Workspace, definitions ...schedulerV1TestDefinition) ([]app.Schedule, []byte) {
+	t.Helper()
+	legacy := struct {
+		SchemaVersion       int                         `json:"schemaVersion"`
+		AgentBinding        map[string]string           `json:"agentBinding"`
+		WakeIntervalMinutes int                         `json:"wakeIntervalMinutes"`
+		Schedules           []schedulerV1TestDefinition `json:"schedules"`
+	}{
+		SchemaVersion:       1,
+		AgentBinding:        map[string]string{"kind": "profile", "name": "default"},
+		WakeIntervalMinutes: 45,
+		Schedules:           definitions,
+	}
+	data, err := json.MarshalIndent(legacy, "", "  ")
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacy := map[string]any{
-		"schemaVersion":       1,
-		"agentBinding":        map[string]string{"kind": "profile", "name": "default"},
-		"wakeIntervalMinutes": 45,
-		"schedules": []map[string]any{{
-			"id": "schedule-0123456789abcdef01234567", "description": "Keep action",
-			"condition": "tomorrow morning when green", "target": "workspace",
-			"createdAt": "2026-08-01T00:00:00Z", "updatedAt": "2026-08-02T00:00:00Z",
-		}},
-	}
-	data, _ := json.MarshalIndent(legacy, "", "  ")
 	data = append(data, '\n')
 	if err := os.WriteFile(filepath.Join(workspace.Root(), "scheduler", "scheduler.json"), data, 0o644); err != nil {
 		t.Fatal(err)
@@ -35,16 +45,77 @@ func TestSchedulerV1MigrationPreservesDefinitionsForCompilation(t *testing.T) {
 		t.Fatal(err)
 	}
 	config, err := workspace.Scheduler()
-	if err != nil || config.SchemaVersion != 2 || len(config.Schedules) != 1 {
-		t.Fatalf("migrated config = %#v, %v", config, err)
+	if err != nil {
+		t.Fatal(err)
 	}
-	schedule := config.Schedules[0]
-	if schedule.Revision != 1 || schedule.State != app.ScheduleStateNeedsCompilation || schedule.Trigger != nil || schedule.Description != "Keep action" || schedule.Condition != "tomorrow morning when green" {
+	return config.Schedules, data
+}
+
+func TestSchedulerV1MigrationPreservesDefinitionsForCompilation(t *testing.T) {
+	workspace, err := app.Initialize(t.TempDir(), "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	schedules, legacyData := migrateSchedulerV1ForTest(t, workspace, schedulerV1TestDefinition{
+		ID:          "schedule-0123456789abcdef01234567",
+		Description: "Keep action",
+		Condition:   "tomorrow morning when green",
+		Target:      "workspace",
+		CreatedAt:   "2026-08-01T00:00:00Z",
+		UpdatedAt:   "2026-08-02T00:00:00Z",
+	})
+	if len(schedules) != 1 {
+		t.Fatalf("migrated schedules = %#v", schedules)
+	}
+	schedule := schedules[0]
+	if schedule.Revision != 1 || schedule.State != app.ScheduleStateNeedsCompilation || schedule.Trigger != nil ||
+		schedule.Description != "Keep action" || schedule.Condition != "tomorrow morning when green" || schedule.Target != "workspace" ||
+		schedule.CreatedAt != "2026-08-01T00:00:00Z" || schedule.UpdatedAt != "2026-08-02T00:00:00Z" {
 		t.Fatalf("migrated schedule = %#v", schedule)
 	}
 	raw, _ := os.ReadFile(filepath.Join(workspace.Root(), "scheduler", "scheduler.json"))
-	if string(raw) == "" || string(raw) == string(data) {
+	if string(raw) == "" || string(raw) == string(legacyData) {
 		t.Fatal("migration did not atomically replace the v1 definition")
+	}
+	trigger := app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: "2030-08-30T12:00:00Z"}
+	compiled, err := workspace.UpdateSchedule(app.UpdateScheduleInput{ID: schedule.ID, ExpectedRevision: schedule.Revision, Trigger: &trigger})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compiled.Revision != 2 || compiled.State != app.ScheduleStateActive || compiled.Trigger == nil || *compiled.Trigger != trigger ||
+		compiled.Description != schedule.Description || compiled.Condition != schedule.Condition || compiled.Target != schedule.Target {
+		t.Fatalf("compiled migrated schedule = %#v", compiled)
+	}
+}
+
+func TestAddScheduleRequiresTriggerWithoutMutation(t *testing.T) {
+	workspace, err := app.Initialize(t.TempDir(), "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(workspace.Root(), "scheduler", "scheduler.json")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = workspace.AddSchedule(app.CreateScheduleInput{Description: "Compile me", Condition: "tomorrow", Target: "workspace"})
+	if !errors.Is(err, app.ErrScheduleTriggerRequired) || err.Error() != "add schedule: schedule trigger is required" {
+		t.Fatalf("triggerless create error = %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) || !os.SameFile(beforeInfo, afterInfo) {
+		t.Fatalf("triggerless create mutated scheduler.json:\nbefore=%s\nafter=%s", before, after)
 	}
 }
 
@@ -74,6 +145,9 @@ func TestScheduleTriggerValidationAndRevisionCAS(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if created.Revision != 1 || created.State != app.ScheduleStateActive || created.Trigger == nil || created.Trigger.At != "2026-08-30T12:00:00Z" {
+		t.Fatalf("valid create = %#v", created)
 	}
 	description := "Changed"
 	if _, err := workspace.UpdateSchedule(app.UpdateScheduleInput{ID: created.ID, Description: &description}); err == nil {
@@ -130,10 +204,15 @@ func TestNeedsCompilationScheduleCannotEnterInvalidPausedState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	created, err := workspace.AddSchedule(app.CreateScheduleInput{Description: "Compile me", Condition: "tomorrow", Target: "workspace"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	schedules, _ := migrateSchedulerV1ForTest(t, workspace, schedulerV1TestDefinition{
+		ID:          "schedule-111111111111111111111111",
+		Description: "Compile me",
+		Condition:   "tomorrow",
+		Target:      "workspace",
+		CreatedAt:   "2026-08-01T00:00:00Z",
+		UpdatedAt:   "2026-08-01T00:00:00Z",
+	})
+	created := schedules[0]
 	if _, err := workspace.PauseSchedule(created.ID); err == nil {
 		t.Fatal("uncompiled schedule unexpectedly paused")
 	}

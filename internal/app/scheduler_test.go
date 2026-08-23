@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/disksing/pua/internal/app"
 )
@@ -138,6 +139,7 @@ func TestScheduleLifecycleValidatesTargets(t *testing.T) {
 		Description: "  Remind the target  ",
 		Condition:   "  tomorrow morning  ",
 		Target:      task.ID,
+		Trigger:     &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -154,13 +156,19 @@ func TestScheduleLifecycleValidatesTargets(t *testing.T) {
 	if updated.Condition != condition || updated.Target != target || updated.CreatedAt != created.CreatedAt {
 		t.Fatalf("updated schedule = %#v", updated)
 	}
-	if _, err := workspace.AddSchedule(app.CreateScheduleInput{Description: "Bad", Condition: "now", Target: "project999.task999"}); err == nil {
+	if _, err := workspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Bad", Condition: "now", Target: "project999.task999",
+		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)},
+	}); err == nil {
 		t.Fatal("missing cross-resource target unexpectedly accepted")
 	}
 	if _, err := workspace.ArchiveResource(task.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := workspace.AddSchedule(app.CreateScheduleInput{Description: "Archived", Condition: "now", Target: task.ID}); err == nil {
+	if _, err := workspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Archived", Condition: "now", Target: task.ID,
+		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)},
+	}); err == nil {
 		t.Fatal("archived target unexpectedly accepted")
 	}
 	removed, err := workspace.RemoveSchedule(created.ID)
@@ -197,6 +205,7 @@ func TestSchedulerResourceBindingAndConcurrentScheduleWrites(t *testing.T) {
 				Description: fmt.Sprintf("Concurrent schedule %d", index),
 				Condition:   "when appropriate",
 				Target:      "workspace",
+				Trigger:     &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)},
 			})
 			if addErr != nil {
 				errors <- addErr
@@ -238,7 +247,10 @@ func TestMigratePreservesSchedulerContentAndRejectsUnsafeConflicts(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	created, err := workspace.AddSchedule(app.CreateScheduleInput{Description: "Keep me", Condition: "next week", Target: "workspace"})
+	created, err := workspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Keep me", Condition: "next week", Target: "workspace",
+		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

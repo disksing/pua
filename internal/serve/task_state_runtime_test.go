@@ -297,6 +297,7 @@ func TestWaitingTaskWithoutTargetScheduleGetsReminder(t *testing.T) {
 	}
 	if _, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
 		Description: "Wake Project", Condition: "when the project should resume", Target: "project1",
+		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerInterval, EverySeconds: 300, AnchorAt: time.Now().Add(time.Minute).Format(time.RFC3339Nano)},
 	}); err != nil {
 		t.Fatal(err)
 	}

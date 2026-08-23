@@ -19,6 +19,10 @@ import (
 
 var scheduleIDPattern = regexp.MustCompile(`^schedule-[0-9a-f]{24}$`)
 
+// ErrScheduleTriggerRequired identifies a normal create that omits the native
+// trigger required by the v2 Scheduler contract.
+var ErrScheduleTriggerRequired = errors.New("schedule trigger is required")
+
 const (
 	SchedulerResourceID         = "scheduler"
 	schedulerDir                = "scheduler"
@@ -708,6 +712,13 @@ func (w *Workspace) AddSchedule(input CreateScheduleInput) (Schedule, error) {
 	if err := w.require(); err != nil {
 		return Schedule{}, err
 	}
+	if input.Trigger == nil {
+		return Schedule{}, &APIError{Operation: "add schedule", Kind: "scheduler", Workspace: w.root, Err: ErrScheduleTriggerRequired}
+	}
+	trigger := *input.Trigger
+	if err := ValidateScheduleTrigger(trigger); err != nil {
+		return Schedule{}, &APIError{Operation: "add schedule", Kind: "scheduler", Workspace: w.root, Err: err}
+	}
 	var created Schedule
 	err := withWorkspaceMutationLock(w.root, func() error {
 		config, err := readSchedulerJSON(schedulerJSONPath(w.root))
@@ -722,22 +733,12 @@ func (w *Workspace) AddSchedule(input CreateScheduleInput) (Schedule, error) {
 		if len(guard) > maximumScheduleTextLength || strings.ContainsRune(guard, '\x00') {
 			return errors.New("schedule guard is invalid")
 		}
-		state := ScheduleStateNeedsCompilation
-		var trigger *ScheduleTrigger
-		if input.Trigger != nil {
-			copy := *input.Trigger
-			if err := ValidateScheduleTrigger(copy); err != nil {
-				return err
-			}
-			trigger = &copy
-			state = ScheduleStateActive
-		}
 		id, err := newScheduleID()
 		if err != nil {
 			return err
 		}
 		now := time.Now().Format(time.RFC3339Nano)
-		created = Schedule{ID: id, Revision: 1, Description: description, Condition: condition, Guard: guard, Target: target, State: state, Trigger: trigger, CreatedAt: now, UpdatedAt: now}
+		created = Schedule{ID: id, Revision: 1, Description: description, Condition: condition, Guard: guard, Target: target, State: ScheduleStateActive, Trigger: &trigger, CreatedAt: now, UpdatedAt: now}
 		config.Schedules = append(config.Schedules, created)
 		return writeSchedulerJSON(schedulerJSONPath(w.root), config)
 	})

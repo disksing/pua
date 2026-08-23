@@ -16,6 +16,64 @@ import (
 	"github.com/disksing/pua/internal/app"
 )
 
+type schedulerV1TestDefinition struct {
+	ID          string `json:"id"`
+	Description string `json:"description"`
+	Condition   string `json:"condition"`
+	Target      string `json:"target"`
+	CreatedAt   string `json:"createdAt"`
+	UpdatedAt   string `json:"updatedAt"`
+}
+
+func migrateSchedulerV1ForTest(t *testing.T, workspace *app.Workspace, definitions ...schedulerV1TestDefinition) []app.Schedule {
+	t.Helper()
+	legacy := struct {
+		SchemaVersion       int                         `json:"schemaVersion"`
+		AgentBinding        map[string]string           `json:"agentBinding"`
+		WakeIntervalMinutes int                         `json:"wakeIntervalMinutes"`
+		Schedules           []schedulerV1TestDefinition `json:"schedules"`
+	}{
+		SchemaVersion:       1,
+		AgentBinding:        map[string]string{"kind": "profile", "name": "default"},
+		WakeIntervalMinutes: 30,
+		Schedules:           definitions,
+	}
+	data, err := json.MarshalIndent(legacy, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(filepath.Join(workspace.Root(), "scheduler", "scheduler.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := workspace.Migrate(""); err != nil {
+		t.Fatal(err)
+	}
+	config, err := workspace.Scheduler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.SchemaVersion != 2 || len(config.Schedules) != len(definitions) {
+		t.Fatalf("migrated Scheduler config = %#v", config)
+	}
+	return config.Schedules
+}
+
+func schedulerTestScheduleByID(t *testing.T, workspace *app.Workspace, id string) app.Schedule {
+	t.Helper()
+	config, err := workspace.Scheduler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, schedule := range config.Schedules {
+		if schedule.ID == id {
+			return schedule
+		}
+	}
+	t.Fatalf("schedule %q not found in %#v", id, config.Schedules)
+	return app.Schedule{}
+}
+
 func TestSchedulerHTTPAPIRoutesNaturalLanguageAndNativeChanges(t *testing.T) {
 	root := t.TempDir()
 	if _, err := app.Initialize(root, "en"); err != nil {
@@ -100,6 +158,15 @@ func TestSchedulerHTTPStructuredUpdateRequiresCompleteTrigger(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	migrated := migrateSchedulerV1ForTest(t, puaWorkspace, schedulerV1TestDefinition{
+		ID:          "schedule-222222222222222222222222",
+		Description: "Migrated",
+		Condition:   "ambiguous legacy rule",
+		Target:      "workspace",
+		CreatedAt:   "2026-08-01T00:00:00Z",
+		UpdatedAt:   "2026-08-01T00:00:00Z",
+	})
+	compiled := migrated[0]
 	originalAt := time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)
 	original, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
 		Description: "Review", Condition: "at the original time", Target: "workspace",
@@ -116,12 +183,8 @@ func TestSchedulerHTTPStructuredUpdateRequiresCompleteTrigger(t *testing.T) {
 	}
 	assertUnchanged := func(want app.Schedule) {
 		t.Helper()
-		config, err := puaWorkspace.Scheduler()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(config.Schedules) != 1 || !reflect.DeepEqual(config.Schedules[0], want) {
-			t.Fatalf("schedule changed after rejected update: got %#v, want %#v", config.Schedules, want)
+		if got := schedulerTestScheduleByID(t, puaWorkspace, want.ID); !reflect.DeepEqual(got, want) {
+			t.Fatalf("schedule changed after rejected update: got %#v, want %#v", got, want)
 		}
 	}
 
@@ -138,12 +201,6 @@ func TestSchedulerHTTPStructuredUpdateRequiresCompleteTrigger(t *testing.T) {
 	}
 	assertUnchanged(original)
 
-	compiled, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
-		Description: "Migrated", Condition: "ambiguous legacy rule", Target: "workspace",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	partialCompilation := request(`{"operation":"update","id":"` + compiled.ID + `","expectedRevision":1,"condition":"still ambiguous"}`)
 	if partialCompilation.Code != http.StatusBadRequest || !strings.Contains(partialCompilation.Body.String(), "schedule_trigger_required") {
 		t.Fatalf("partial compilation = %d %s", partialCompilation.Code, partialCompilation.Body.String())
@@ -152,7 +209,7 @@ func TestSchedulerHTTPStructuredUpdateRequiresCompleteTrigger(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(config.Schedules) != 2 || !reflect.DeepEqual(config.Schedules[1], compiled) {
+	if len(config.Schedules) != 2 || !reflect.DeepEqual(schedulerTestScheduleByID(t, puaWorkspace, compiled.ID), compiled) {
 		t.Fatalf("needs-compilation schedule changed after partial update: %#v", config.Schedules)
 	}
 
@@ -178,8 +235,8 @@ func TestSchedulerHTTPStructuredUpdateRequiresCompleteTrigger(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(config.Schedules[0], updated) {
-		t.Fatalf("schedule changed after stale update: got %#v, want %#v", config.Schedules[0], updated)
+	if got := schedulerTestScheduleByID(t, puaWorkspace, updated.ID); !reflect.DeepEqual(got, updated) {
+		t.Fatalf("schedule changed after stale update: got %#v, want %#v", got, updated)
 	}
 
 	malformed := request(`{"operation":"update","id":"` + original.ID + `","expectedRevision":2,"trigger":{"type":"at"}}`)
@@ -190,8 +247,8 @@ func TestSchedulerHTTPStructuredUpdateRequiresCompleteTrigger(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(config.Schedules[0], updated) {
-		t.Fatalf("schedule changed after malformed trigger: got %#v, want %#v", config.Schedules[0], updated)
+	if got := schedulerTestScheduleByID(t, puaWorkspace, updated.ID); !reflect.DeepEqual(got, updated) {
+		t.Fatalf("schedule changed after malformed trigger: got %#v, want %#v", got, updated)
 	}
 }
 
@@ -206,11 +263,27 @@ func TestNativeSchedulerStructuredUpdateRequiresCompleteTrigger(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		created, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
-			Description: "Review", Condition: "at the original time", Target: "workspace", Trigger: trigger,
-		})
-		if err != nil {
-			t.Fatal(err)
+		var created app.Schedule
+		if trigger == nil {
+			migrated := migrateSchedulerV1ForTest(t, puaWorkspace, schedulerV1TestDefinition{
+				ID:          "schedule-333333333333333333333333",
+				Description: "Review",
+				Condition:   "at the original time",
+				Target:      "workspace",
+				CreatedAt:   "2026-08-01T00:00:00Z",
+				UpdatedAt:   "2026-08-01T00:00:00Z",
+			})
+			created = migrated[0]
+			if created.Revision != 1 || created.State != app.ScheduleStateNeedsCompilation || created.Trigger != nil {
+				t.Fatalf("migrated fixture = %#v", created)
+			}
+		} else {
+			created, err = puaWorkspace.AddSchedule(app.CreateScheduleInput{
+				Description: "Review", Condition: "at the original time", Target: "workspace", Trigger: trigger,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
 		}
 		return newNativeScheduler(nil, serveWorkspace{Path: root}), puaWorkspace, created
 	}
@@ -1206,13 +1279,25 @@ func TestNativeSchedulerMigrationMessagesProgressByDigest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{Description: "First", Condition: "tomorrow", Target: "workspace"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{Description: "Second", Condition: "next week", Target: "workspace"}); err != nil {
-		t.Fatal(err)
-	}
+	migrated := migrateSchedulerV1ForTest(t, puaWorkspace,
+		schedulerV1TestDefinition{
+			ID:          "schedule-444444444444444444444444",
+			Description: "First",
+			Condition:   "tomorrow",
+			Target:      "workspace",
+			CreatedAt:   "2026-08-01T00:00:00Z",
+			UpdatedAt:   "2026-08-01T00:00:00Z",
+		},
+		schedulerV1TestDefinition{
+			ID:          "schedule-555555555555555555555555",
+			Description: "Second",
+			Condition:   "next week",
+			Target:      "workspace",
+			CreatedAt:   "2026-08-02T00:00:00Z",
+			UpdatedAt:   "2026-08-02T00:00:00Z",
+		},
+	)
+	first := migrated[0]
 	if err := manager.reconcileSchedulerLocked(context.Background(), workspace); err != nil {
 		// The compilation message is accepted before the intentionally absent
 		// AgentHub endpoint fails to wake; that wake error is recoverable.

@@ -343,6 +343,87 @@ func TestScheduleTriggerValidationAndRevisionCAS(t *testing.T) {
 	}
 }
 
+func TestMissingScheduleMutationsAreTypedAndAtomic(t *testing.T) {
+	root := t.TempDir()
+	workspace, err := app.Initialize(root, "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	trigger := app.ScheduleTrigger{
+		Type: app.ScheduleTriggerInterval, EverySeconds: 60,
+		AnchorAt: time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano),
+	}
+	created, err := workspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Keep this definition", Condition: "every minute",
+		Target: "workspace", Trigger: &trigger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "scheduler", "scheduler.json")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missingID := "schedule-ffffffffffffffffffffffff"
+	description := "Missing"
+	operations := map[string]func() (app.Schedule, error){
+		"update": func() (app.Schedule, error) {
+			return workspace.UpdateSchedule(app.UpdateScheduleInput{
+				ID: missingID, ExpectedRevision: ^uint64(0), Description: &description,
+			})
+		},
+		"pause":  func() (app.Schedule, error) { return workspace.PauseSchedule(missingID) },
+		"resume": func() (app.Schedule, error) { return workspace.ResumeSchedule(missingID) },
+		"remove": func() (app.Schedule, error) { return workspace.RemoveSchedule(missingID) },
+	}
+	for name, operation := range operations {
+		t.Run(name, func(t *testing.T) {
+			_, mutationErr := operation()
+			var notFound *app.ScheduleNotFoundError
+			if !errors.Is(mutationErr, app.ErrScheduleNotFound) || !errors.As(mutationErr, &notFound) || notFound.ScheduleID != missingID {
+				t.Fatalf("missing schedule error = %#v, %v", notFound, mutationErr)
+			}
+			var conflict *app.ScheduleRevisionConflictError
+			if errors.As(mutationErr, &conflict) || errors.Is(mutationErr, app.ErrScheduleRevisionExhausted) {
+				t.Fatalf("missing schedule was reported as a revision failure: %v", mutationErr)
+			}
+			after, readErr := os.ReadFile(path)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if !bytes.Equal(after, before) {
+				t.Fatalf("missing %s changed scheduler.json:\nbefore=%s\nafter=%s", name, before, after)
+			}
+			config, readErr := workspace.Scheduler()
+			if readErr != nil || len(config.Schedules) != 1 || !reflect.DeepEqual(config.Schedules[0], created) {
+				t.Fatalf("missing %s changed Scheduler state: %#v, %v", name, config.Schedules, readErr)
+			}
+		})
+	}
+
+	removed, err := workspace.RemoveSchedule(created.ID)
+	if err != nil || removed.ID != created.ID {
+		t.Fatalf("first remove = %#v, %v", removed, err)
+	}
+	afterFirstRemove, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = workspace.RemoveSchedule(created.ID)
+	var notFound *app.ScheduleNotFoundError
+	if !errors.Is(err, app.ErrScheduleNotFound) || !errors.As(err, &notFound) || notFound.ScheduleID != created.ID {
+		t.Fatalf("second remove error = %#v, %v", notFound, err)
+	}
+	afterSecondRemove, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(afterSecondRemove, afterFirstRemove) {
+		t.Fatalf("second remove was not atomic:\nfirst=%s\nsecond=%s", afterFirstRemove, afterSecondRemove)
+	}
+}
+
 func TestScheduleIntervalMutationRequiresPersistableSuccessor(t *testing.T) {
 	workspace, err := app.Initialize(t.TempDir(), "en")
 	if err != nil {

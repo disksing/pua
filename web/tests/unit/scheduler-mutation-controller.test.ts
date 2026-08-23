@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { ApiError } from "../../src/api/client";
 import {
 	createSchedulerMutationController,
 	type SchedulerMutationContext,
 	type SchedulerMutationDependencies,
 	type SchedulerMutationLease,
+	type SchedulerMutationOperations,
 } from "../../src/controllers/scheduler-mutation-controller";
 
 interface PendingRequest {
@@ -91,6 +93,30 @@ describe("SchedulerMutationController", () => {
 		pending[3].resolve({});
 		await release(currentSave);
 		await release(remove);
+	});
+
+	it.each([
+		{ name: "pause", apply: (operations: SchedulerMutationOperations) => operations.setPaused("schedule-missing", true) },
+		{ name: "resume", apply: (operations: SchedulerMutationOperations) => operations.setPaused("schedule-missing", false) },
+		{ name: "remove", apply: (operations: SchedulerMutationOperations) => operations.remove("schedule-missing") },
+	])("propagates a current schedule_not_found response for $name", async ({ apply }) => {
+		const context: SchedulerMutationContext = { workspaceId: "alpha", navigationVersion: 1, selectedId: "scheduler" };
+		const failure = new ApiError(404, "schedule not found: schedule-missing", {
+			error: "schedule not found: schedule-missing",
+			code: "schedule_not_found",
+		});
+		const controller = createSchedulerMutationController({
+			context: () => context,
+			isCurrentWorkspace: (workspaceId, navigationVersion) => workspaceId === context.workspaceId && navigationVersion === context.navigationVersion,
+			resolveResourceTitle: () => null,
+			request: vi.fn(async () => { throw failure; }) as SchedulerMutationDependencies["request"],
+		});
+
+		await expect(apply(controller.operations())).rejects.toMatchObject({
+			status: 404,
+			code: "schedule_not_found",
+			message: "schedule not found: schedule-missing",
+		});
 	});
 
 	it.each(["success", "error"] as const)("rejects a stale Workspace switch after a late %s", async (settlement) => {

@@ -203,6 +203,68 @@ func TestSchedulerCommandsUseOwningServerForNativeSchedules(t *testing.T) {
 	})
 }
 
+func TestSchedulerMutationCommandsSurfaceNotFoundCode(t *testing.T) {
+	withTempCwd(t, func(root string) {
+		run(t, "init")
+		missingID := "schedule-ffffffffffffffffffffffff"
+		var received []app.ScheduleChangeOperation
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/scheduler/changes") {
+				http.NotFound(w, r)
+				return
+			}
+			var body schedulerChangePayload
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Error(err)
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if body.ID != missingID {
+				t.Errorf("schedule id = %q, want %q", body.ID, missingID)
+			}
+			received = append(received, body.Operation)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"code": "schedule_not_found", "error": "schedule not found: " + missingID,
+			})
+		}))
+		defer server.Close()
+		lock, err := json.Marshal(map[string]any{
+			"pid": os.Getpid(), "address": server.URL, "workspacePath": root,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, ".pua", "serve.lock"), lock, 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		operations := []struct {
+			name string
+			want app.ScheduleChangeOperation
+			args []string
+		}{
+			{name: "update", want: app.ScheduleChangeUpdate, args: []string{"scheduler", "update", "--id=" + missingID, "--revision=18446744073709551615", "--at=9999-08-30T12:00:00Z"}},
+			{name: "pause", want: app.ScheduleChangePause, args: []string{"scheduler", "pause", "--id=" + missingID}},
+			{name: "resume", want: app.ScheduleChangeResume, args: []string{"scheduler", "resume", "--id=" + missingID}},
+			{name: "remove", want: app.ScheduleChangeRemove, args: []string{"scheduler", "remove", "--id=" + missingID}},
+		}
+		for _, operation := range operations {
+			t.Run(operation.name, func(t *testing.T) {
+				_, err := runErr(t, operation.args...)
+				want := "PUA Server schedule_not_found: schedule not found: " + missingID
+				if err == nil || err.Error() != want {
+					t.Fatalf("scheduler %s error = %v, want %q", operation.name, err, want)
+				}
+				if len(received) == 0 || received[len(received)-1] != operation.want {
+					t.Fatalf("scheduler %s request operations = %#v", operation.name, received)
+				}
+			})
+		}
+	})
+}
+
 func TestSchedulerTriggerOptionsAreStructuredAndUnambiguous(t *testing.T) {
 	interval, present, err := schedulerTriggerFromOptions(map[string]string{"every": "5m", "anchor": "2026-08-23T09:00:00+08:00"})
 	if err != nil || !present || interval.Type != app.ScheduleTriggerInterval || interval.EverySeconds != 300 {

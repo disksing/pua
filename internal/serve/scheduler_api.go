@@ -154,6 +154,10 @@ func (s *server) applyDirectScheduleChange(w http.ResponseWriter, r *http.Reques
 }
 
 func writeSchedulerChangeError(w http.ResponseWriter, err error) {
+	if errors.Is(err, app.ErrScheduleNotFound) {
+		writeError(w, &resourceAPIError{Code: "schedule_not_found", Message: err.Error()}, http.StatusNotFound)
+		return
+	}
 	var conflict *app.ScheduleRevisionConflictError
 	if errors.As(err, &conflict) {
 		writeError(w, &resourceAPIError{Code: "schedule_revision_conflict", Message: conflict.Error()}, http.StatusConflict)

@@ -40,6 +40,9 @@ var ErrScheduleOccurrenceOutOfRange = errors.New("schedule occurrence is outside
 // incremented without wrapping the persisted uint64 value.
 var ErrScheduleRevisionExhausted = errors.New("schedule revision is exhausted")
 
+// ErrScheduleNotFound identifies a mutation whose schedule ID does not exist.
+var ErrScheduleNotFound = errors.New("schedule not found")
+
 // ErrScheduleTargetScheduler identifies an execution target that would wake
 // the Scheduler management/compiler resource for ordinary scheduled work.
 var ErrScheduleTargetScheduler = errors.New("the Scheduler resource cannot be a schedule target")
@@ -182,6 +185,20 @@ type ScheduleRevisionConflictError struct {
 	ScheduleID string
 	Expected   uint64
 	Actual     uint64
+}
+
+// ScheduleNotFoundError retains the stable ID of a missing schedule while
+// remaining matchable through ErrScheduleNotFound.
+type ScheduleNotFoundError struct {
+	ScheduleID string
+}
+
+func (e *ScheduleNotFoundError) Error() string {
+	return fmt.Sprintf("%s: %s", ErrScheduleNotFound, e.ScheduleID)
+}
+
+func (e *ScheduleNotFoundError) Unwrap() error {
+	return ErrScheduleNotFound
 }
 
 func (e *ScheduleRevisionConflictError) Error() string {
@@ -963,7 +980,7 @@ func (w *Workspace) UpdateSchedule(input UpdateScheduleInput) (Schedule, error) 
 		}
 		index := scheduleIndex(config.Schedules, input.ID)
 		if index < 0 {
-			return fmt.Errorf("schedule not found: %s", input.ID)
+			return &ScheduleNotFoundError{ScheduleID: input.ID}
 		}
 		updated = config.Schedules[index]
 		if input.ExpectedRevision != updated.Revision {
@@ -1033,7 +1050,7 @@ func (w *Workspace) RemoveSchedule(id string) (Schedule, error) {
 		}
 		index := scheduleIndex(config.Schedules, id)
 		if index < 0 {
-			return fmt.Errorf("schedule not found: %s", id)
+			return &ScheduleNotFoundError{ScheduleID: id}
 		}
 		removed = config.Schedules[index]
 		config.Schedules = append(config.Schedules[:index], config.Schedules[index+1:]...)
@@ -1066,7 +1083,7 @@ func (w *Workspace) changeScheduleState(id, state string) (Schedule, error) {
 		}
 		index := scheduleIndex(config.Schedules, id)
 		if index < 0 {
-			return fmt.Errorf("schedule not found: %s", id)
+			return &ScheduleNotFoundError{ScheduleID: id}
 		}
 		updated = config.Schedules[index]
 		if updated.State == state {

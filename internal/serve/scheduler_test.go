@@ -408,6 +408,106 @@ func TestSchedulerHTTPRevisionExhaustionIsConflict(t *testing.T) {
 	}
 }
 
+func TestNativeSchedulerMissingMutationsReturnTypedNotFound(t *testing.T) {
+	root := t.TempDir()
+	if _, err := app.Initialize(root, "en"); err != nil {
+		t.Fatal(err)
+	}
+	native := newNativeScheduler(nil, serveWorkspace{Path: root})
+	missingID := "schedule-ffffffffffffffffffffffff"
+	description := "Missing"
+	trigger := app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: "9999-08-30T12:00:00Z"}
+	changes := []NativeSchedulerChange{
+		{Operation: app.ScheduleChangeUpdate, ID: missingID, ExpectedRevision: ^uint64(0), Description: &description, Trigger: &trigger},
+		{Operation: app.ScheduleChangePause, ID: missingID},
+		{Operation: app.ScheduleChangeResume, ID: missingID},
+		{Operation: app.ScheduleChangeRemove, ID: missingID},
+	}
+	for _, change := range changes {
+		t.Run(string(change.Operation), func(t *testing.T) {
+			_, err := native.Change(context.Background(), change)
+			var notFound *app.ScheduleNotFoundError
+			if !errors.Is(err, app.ErrScheduleNotFound) || !errors.As(err, &notFound) || notFound.ScheduleID != missingID {
+				t.Fatalf("%s error = %#v, %v", change.Operation, notFound, err)
+			}
+			var conflict *app.ScheduleRevisionConflictError
+			if errors.As(err, &conflict) || errors.Is(err, app.ErrScheduleRevisionExhausted) {
+				t.Fatalf("missing %s was reported as a revision failure: %v", change.Operation, err)
+			}
+		})
+	}
+}
+
+func TestSchedulerHTTPMissingMutationsAreNotFound(t *testing.T) {
+	root := t.TempDir()
+	if _, err := app.Initialize(root, "en"); err != nil {
+		t.Fatal(err)
+	}
+	workspace := serveWorkspace{ID: "workspace-scheduler-missing", Name: "Scheduler Missing", Path: root}
+	s := &server{config: filepath.Join(t.TempDir(), "serve.json")}
+	if err := s.saveConfig(config{Version: agentHubConfigVersion, Workspaces: []serveWorkspace{workspace}}); err != nil {
+		t.Fatal(err)
+	}
+	s.agents = newAgentManager(s)
+	t.Cleanup(s.agents.waitBackground)
+	path := filepath.Join(root, "scheduler", "scheduler.json")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missingID := "schedule-ffffffffffffffffffffffff"
+	description := "Missing"
+	trigger := app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: "9999-08-30T12:00:00Z"}
+	requests := []struct {
+		name, method, path string
+		body               *schedulerChangeRequest
+	}{
+		{name: "changes update", method: http.MethodPost, path: "/scheduler/changes", body: &schedulerChangeRequest{Operation: string(app.ScheduleChangeUpdate), ID: missingID, ExpectedRevision: ^uint64(0), Description: &description, Trigger: &trigger}},
+		{name: "changes pause", method: http.MethodPost, path: "/scheduler/changes", body: &schedulerChangeRequest{Operation: string(app.ScheduleChangePause), ID: missingID}},
+		{name: "changes resume", method: http.MethodPost, path: "/scheduler/changes", body: &schedulerChangeRequest{Operation: string(app.ScheduleChangeResume), ID: missingID}},
+		{name: "changes remove", method: http.MethodPost, path: "/scheduler/changes", body: &schedulerChangeRequest{Operation: string(app.ScheduleChangeRemove), ID: missingID}},
+		{name: "web pause", method: http.MethodPost, path: "/scheduler/" + missingID + "/pause"},
+		{name: "web resume", method: http.MethodPost, path: "/scheduler/" + missingID + "/resume"},
+		{name: "web remove", method: http.MethodDelete, path: "/scheduler/" + missingID},
+	}
+	for _, requestCase := range requests {
+		t.Run(requestCase.name, func(t *testing.T) {
+			var body []byte
+			if requestCase.body != nil {
+				var marshalErr error
+				body, marshalErr = json.Marshal(requestCase.body)
+				if marshalErr != nil {
+					t.Fatal(marshalErr)
+				}
+			}
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(
+				requestCase.method,
+				"/api/workspaces/"+workspace.ID+requestCase.path,
+				bytes.NewReader(body),
+			)
+			s.handleWorkspace(recorder, request)
+			if recorder.Code != http.StatusNotFound {
+				t.Fatalf("%s status = %d, body %s", requestCase.name, recorder.Code, recorder.Body.String())
+			}
+			var response map[string]string
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if response["code"] != "schedule_not_found" || !strings.Contains(response["error"], missingID) {
+				t.Fatalf("%s response = %#v", requestCase.name, response)
+			}
+			after, readErr := os.ReadFile(path)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if !bytes.Equal(after, before) {
+				t.Fatalf("missing %s changed scheduler.json:\nbefore=%s\nafter=%s", requestCase.name, before, after)
+			}
+		})
+	}
+}
+
 func TestSchedulerNaturalLanguageAPIRequiresSelectedUserBeforeAcceptance(t *testing.T) {
 	root := t.TempDir()
 	puaWorkspace, err := app.Initialize(root, "en")

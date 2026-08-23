@@ -1823,12 +1823,13 @@ function renderChatPanel(_options: RenderOptions = {}): void {
 	const configured = (controllerState.config?.agents || []).find((agent) => agent.id === status?.resolvedAgent);
 	const agent = configured || selectedAgentConfig();
 	const runtime = findResource(resourceId)?.runtime;
+	const submitting = agentOperations.isSending(resourceMutationKey(controllerState.activeWorkspaceId, resourceId));
 	publisher.renderAgentPanelHeader({
 		identity: `${controllerState.activeWorkspaceId}:${resourceId}`,
 		workspaceId: controllerState.activeWorkspaceId,
 		resourceId,
 		status,
-		submitting: agentOperations.isSending(resourceMutationKey(controllerState.activeWorkspaceId, resourceId)),
+		submitting,
 		agentName: agentDisplayName(agent),
 		modelSummary: agentConfigSummary(agent),
 		turnNumber: Number(status?.generation?.turnNumber) || Number(runtime?.turnNumber) || 0,
@@ -1839,6 +1840,7 @@ function renderChatPanel(_options: RenderOptions = {}): void {
 		workspaceId: controllerState.activeWorkspaceId,
 		resourceId,
 		status,
+		submitting,
 		agentName: agentDisplayName(agent),
 		resolveResourceTitle,
 		onNavigate: (targetResourceId: string) => selectResource(targetResourceId).catch((err) => toast(errorMessage(err))),

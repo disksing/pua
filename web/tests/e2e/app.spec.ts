@@ -1525,6 +1525,39 @@ test("pages resource history, sends input, receives SSE, and preserves active re
   expect(harness.streamRequests).toContain("project1.task1");
 });
 
+test("multiline send restores single-line Enter and explicitly resumes timeline follow", async ({ page }) => {
+  const harness = await installMockApi(page);
+  await page.goto("/w/ws-test/r/project1.task1");
+
+  const timeline = page.locator("#chatTimeline");
+  await expect(timeline).toContainText("gen-1 baseline message 1");
+  await timeline.evaluate((log) => {
+    log.scrollTop = 0;
+    const bubble = log.querySelector(".agent-message-bubble");
+    if (!bubble) throw new Error("message bubble is unavailable");
+    const range = document.createRange();
+    range.selectNodeContents(bubble);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  });
+  await expect.poll(() => timeline.evaluate((log) => log.scrollHeight - log.scrollTop - log.clientHeight)).toBeGreaterThan(32);
+
+  const input = page.locator("#chatInput");
+  await input.fill("first line\nsecond line");
+  await input.press("Control+Enter");
+  await expect.poll(() => harness.inputBodies.length).toBe(1);
+  expect(harness.inputBodies[0]).toMatchObject({ text: "first line\nsecond line" });
+  await expect(input).toHaveValue("");
+  await expect.poll(() => timeline.evaluate((log) => log.scrollHeight - log.scrollTop - log.clientHeight)).toBeLessThanOrEqual(1);
+  await expect.poll(() => page.evaluate(() => window.getSelection()?.toString() || "")).toBe("");
+
+  await input.fill("next single-line message");
+  await input.press("Enter");
+  await expect.poll(() => harness.inputBodies.length).toBe(2);
+  expect(harness.inputBodies[1]).toMatchObject({ text: "next single-line message" });
+});
+
 test("shows waiting messages above the composer and inserts one through steer", async ({ page }) => {
   const harness = await installMockApi(page, "project1.task1", true);
   await page.goto("/w/ws-test/r/project1.task1");

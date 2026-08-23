@@ -70,7 +70,7 @@ function status(resourceId: string, generationId = `gen-${resourceId}`, generati
 function model(resourceId: string, nextStatus = status(resourceId), projector: (events: AgentEvent[]) => TimelineItem[] = project): EventTimelineModel {
   return {
     identity: `workspace-a:${resourceId}`, workspaceId: "workspace-a", resourceId,
-    status: nextStatus,
+    status: nextStatus, submitting: false,
     agentName: "Test Agent", resolveResourceTitle: () => null, onNavigate: vi.fn(), project: projector, onEvent: vi.fn(), onNotice: vi.fn(), onApproval: vi.fn(async () => undefined), onToast: vi.fn(),
   };
 }
@@ -628,6 +628,40 @@ describe("EventTimeline", () => {
     target.dispatchEvent(new Event("scroll"));
     metrics.scrollHeight = 1200;
     FakeEventSource.instances[0].onmessage?.({ data: JSON.stringify(semanticFrame({ id: 101, time: "2026-08-12T00:00:02Z", type: "message.assistant.delta", sessionId: "session-task-a", turnId: "turn-1", data: { text: "second reply" } })) } as MessageEvent);
+    await vi.waitFor(() => expect(metrics.scrollTop).toBe(1200 - 500));
+  });
+
+  it("clears an old timeline selection and resumes following when the user sends", async () => {
+    FakeEventSource.instances = [];
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const fixture = history("task-a");
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => new Response(JSON.stringify(String(input).includes("/history/turns/ref-") ? fixture.detail : fixture.page), { status: 200, headers: { "content-type": "application/json" } })));
+    const channel = createModelChannel(model("task-a"));
+    const target = document.body.appendChild(document.createElement("div"));
+    target.className = "chat-timeline";
+    const metrics = mockScrollMetrics(target, { scrollHeight: 1000, clientHeight: 500 });
+    const component = mount(EventTimeline, { target, props: { channel } });
+    cleanups.push(() => unmount(component));
+
+    await vi.waitFor(() => expect(target.textContent).toContain("message task-a"));
+    await vi.waitFor(() => expect(metrics.scrollTop).toBe(500));
+    target.scrollTop = 100;
+    target.dispatchEvent(new Event("scroll"));
+
+    const selected = target.querySelector<HTMLElement>(".agent-message-bubble")!;
+    const range = document.createRange();
+    range.selectNodeContents(selected);
+    window.getSelection()?.removeAllRanges();
+    window.getSelection()?.addRange(range);
+    expect(window.getSelection()?.toString()).toContain("message task-a");
+
+    channel.publish({ ...model("task-a"), submitting: true });
+    await vi.waitFor(() => expect(metrics.scrollTop).toBe(500));
+    expect(window.getSelection()?.rangeCount).toBe(0);
+
+    metrics.scrollHeight = 1200;
+    FakeEventSource.instances[0].onmessage?.({ data: JSON.stringify(semanticFrame({ id: 100, time: "2026-08-12T00:00:01Z", type: "message.assistant.delta", sessionId: "session-task-a", turnId: "turn-1", data: { text: "reply after send" } })) } as MessageEvent);
+    await vi.waitFor(() => expect(target.textContent).toContain("reply after send"));
     await vi.waitFor(() => expect(metrics.scrollTop).toBe(1200 - 500));
   });
 

@@ -20,7 +20,6 @@
   let pendingText = $state("");
   let error = $state("");
   let queueError = $state("");
-  let multiline = $state(false);
   let input: HTMLTextAreaElement | undefined = $state();
 
   const blocked = $derived(Boolean(model.unavailableReason) || sending || model.sending);
@@ -37,7 +36,6 @@
       pendingText = "";
       error = "";
       queueError = "";
-      multiline = false;
     } else if (next.draftResetVersion !== resetVersion) {
       resetVersion = next.draftResetVersion;
       draft = next.draft;
@@ -110,11 +108,8 @@
       void send();
       return;
     }
-    if (event.shiftKey) {
-      multiline = true;
-      return;
-    }
-    if (multiline) return;
+    if (event.shiftKey) return;
+    if ((event.currentTarget as HTMLTextAreaElement | null)?.value.includes("\n")) return;
     event.preventDefault();
     void send();
   }

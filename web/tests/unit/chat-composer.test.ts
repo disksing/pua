@@ -73,6 +73,70 @@ describe("ChatComposer", () => {
     expect(input.value).toBe("typed immediately");
   });
 
+  it("uses the draft's actual newlines to choose the Enter behavior", async () => {
+    const onSend = vi.fn(async (_text: string) => ({ accepted: true, clear: true }));
+    const channel = createModelChannel(model({ onSend }));
+    const target = document.body.appendChild(document.createElement("div"));
+    const component = mount(ChatComposer, { target, props: { channel } });
+    cleanups.push(() => unmount(component));
+    await tick();
+
+    const input = target.querySelector<HTMLTextAreaElement>("#chatInput")!;
+    input.value = "first line\nsecond line";
+    input.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    const multilineEnter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    input.dispatchEvent(multilineEnter);
+    expect(multilineEnter.defaultPrevented).toBe(false);
+    expect(onSend).not.toHaveBeenCalled();
+
+    input.value = "back to one line";
+    input.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    const singleLineEnter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    input.dispatchEvent(singleLineEnter);
+    expect(singleLineEnter.defaultPrevented).toBe(true);
+    await vi.waitFor(() => expect(onSend).toHaveBeenCalledWith("back to one line", expect.objectContaining({ resourceId: "task-a" })));
+  });
+
+  it("returns to single-line Enter sending after a multiline message is accepted", async () => {
+    const onSend = vi.fn(async (_text: string) => ({ accepted: true, clear: true }));
+    const channel = createModelChannel(model({ onSend }));
+    const target = document.body.appendChild(document.createElement("div"));
+    const component = mount(ChatComposer, { target, props: { channel } });
+    cleanups.push(() => unmount(component));
+    await tick();
+
+    const input = target.querySelector<HTMLTextAreaElement>("#chatInput")!;
+    input.value = "first line\nsecond line";
+    input.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true, cancelable: true }));
+    await vi.waitFor(() => expect(input.value).toBe(""));
+
+    input.value = "next message";
+    input.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    input.dispatchEvent(enter);
+    expect(enter.defaultPrevented).toBe(true);
+    await vi.waitFor(() => expect(onSend).toHaveBeenCalledTimes(2));
+    expect(onSend.mock.calls.map(([text]) => text)).toEqual(["first line\nsecond line", "next message"]);
+  });
+
+  it("does not send Enter while an input method is composing", async () => {
+    const onSend = vi.fn(async () => ({ accepted: true, clear: true }));
+    const channel = createModelChannel(model({ onSend }));
+    const target = document.body.appendChild(document.createElement("div"));
+    const component = mount(ChatComposer, { target, props: { channel } });
+    cleanups.push(() => unmount(component));
+    await tick();
+
+    const input = target.querySelector<HTMLTextAreaElement>("#chatInput")!;
+    input.value = "composing";
+    input.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    const enter = new KeyboardEvent("keydown", { key: "Enter", isComposing: true, bubbles: true, cancelable: true });
+    input.dispatchEvent(enter);
+    expect(enter.defaultPrevented).toBe(false);
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
   it("keeps an in-progress resource draft when metadata is republished", async () => {
     const channel = createModelChannel(model());
     const target = document.body.appendChild(document.createElement("div"));

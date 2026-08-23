@@ -33,8 +33,9 @@
   // scroller (composer send feedback, growing textarea, message queue) shrink
   // its clientHeight without firing a scroll event, so an instantaneous
   // isNearBottom probe at update time would falsely report that the user
-  // scrolled away and permanently drop follow. Only user scrolls may change
-  // this flag; layout shifts re-pin through the ResizeObserver below.
+  // scrolled away and permanently drop follow. User scrolls update this flag,
+  // while an explicit message submission restores it; layout shifts re-pin
+  // through the ResizeObserver below.
   let follow = true;
   let preview = $state<{ section: string; path: string } | null>(null);
   const client = new ApiClient();
@@ -67,6 +68,7 @@
     const unsubscribeSnapshot = controller.subscribe(receive);
     const unsubscribeModel = channel.subscribe((next) => {
       const previousIdentity = model.identity;
+      const followRequested = !model.submitting && next.submitting;
       const workingChanged = turnIsWorking(model.status) !== turnIsWorking(next.status);
       const followWorkingChange = workingChanged && follow;
       model = next;
@@ -78,9 +80,18 @@
         fillArmed = false;
         deferredTurnExpands.clear();
       }
+      if (followRequested) {
+        follow = true;
+        clearTimelineSelection();
+        if (deferredSnapshot) {
+          const deferred = deferredSnapshot;
+          deferredSnapshot = null;
+          applySnapshot(deferred);
+        }
+      }
       controller?.activate(next.workspaceId, next.resourceId, next.status);
       void tick().then(() => {
-        if (followWorkingChange && !hasActiveSelection()) scrollToBottom();
+        if ((followRequested || followWorkingChange) && !hasActiveSelection()) scrollToBottom();
       });
     });
     const selectionChanged = () => {
@@ -324,6 +335,14 @@
     const scroll = scroller();
     const selection = window.getSelection?.();
     return Boolean(scroll && selection && !selection.isCollapsed && selection.rangeCount && selection.getRangeAt(0).intersectsNode(scroll));
+  }
+
+  function clearTimelineSelection(): void {
+    const scroll = scroller();
+    const selection = window.getSelection?.();
+    if (scroll && selection && !selection.isCollapsed && selection.rangeCount && selection.getRangeAt(0).intersectsNode(scroll)) {
+      selection.removeAllRanges();
+    }
   }
 
   function isNearBottom(scroll: HTMLElement | null): boolean {

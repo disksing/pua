@@ -749,11 +749,7 @@ func (m *ServiceManager) readExportsLocked(rt *serviceRuntime) (ServiceExportFil
 }
 
 func requiresInitialExport(cfg ServiceConfig) bool {
-	// Readiness historically implied an initial export, so retaining that
-	// behavior keeps existing definitions compatible. Services without a
-	// readiness command opt in explicitly to avoid gating ordinary service
-	// logs when no export will ever be written.
-	return cfg.Exports || cfg.Readiness != nil
+	return cfg.Exports
 }
 
 func (m *ServiceManager) runReadinessLocked(ctx context.Context, rt *serviceRuntime) error {

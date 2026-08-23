@@ -232,7 +232,7 @@ func TestServiceManagerNamedSecretResolutionParity(t *testing.T) {
 	}
 }
 
-func TestServiceManagerRequiresInitialExportBeforeReadiness(t *testing.T) {
+func TestServiceManagerReadinessDoesNotRequireInitialExport(t *testing.T) {
 	root := t.TempDir()
 	cfg := ServiceConfig{SchemaVersion: serviceSchemaVersion, ID: "ready", Enabled: true, Command: []string{"/bin/sh", "-c", "sleep 2"}, Readiness: &ServiceReadinessConfig{Command: []string{"/bin/sh", "-c", "exit 0"}, Interval: time.Second, Timeout: time.Second}, Restart: ServiceRestartConfig{InitialDelay: time.Millisecond, Multiplier: 2, MaxDelay: time.Second}}
 	writeTestService(t, root, cfg)
@@ -247,11 +247,69 @@ func TestServiceManagerRequiresInitialExportBeforeReadiness(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.Readiness.Ready {
-		t.Fatal("service became ready without an initial export")
+	if !status.Readiness.Ready {
+		t.Fatalf("readiness-only service did not become ready: %s", status.LastError)
 	}
-	if status.State != ServiceStateBackoff && status.State != ServiceStateAttentionRequired {
-		t.Fatalf("state = %q, want backoff", status.State)
+	if status.State != ServiceStateReady {
+		t.Fatalf("state = %q, want ready", status.State)
+	}
+	if err := m.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestServiceManagerDeclaredExporterRequiresValidInitialHandoff(t *testing.T) {
+	for _, scenario := range []struct {
+		name       string
+		readiness  bool
+		exportData string
+	}{
+		{name: "missing without readiness"},
+		{name: "missing with readiness", readiness: true},
+		{name: "malformed without readiness", exportData: `{not-json`},
+		{name: "malformed with readiness", readiness: true, exportData: `{not-json`},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			root := t.TempDir()
+			command := "sleep 2"
+			if scenario.exportData != "" {
+				command = "printf '%s' '" + scenario.exportData + "' > \"$PUA_SERVICE_EXPORT_PATH\"; sleep 2"
+			}
+			cfg := ServiceConfig{
+				SchemaVersion: serviceSchemaVersion,
+				ID:            "exporter",
+				Enabled:       true,
+				Exports:       true,
+				Command:       []string{"/bin/sh", "-c", command},
+				Restart:       ServiceRestartConfig{InitialDelay: time.Millisecond, Multiplier: 2, MaxDelay: time.Second},
+			}
+			if scenario.readiness {
+				cfg.Readiness = &ServiceReadinessConfig{Command: []string{"/bin/sh", "-c", "exit 0"}, Interval: time.Second, Timeout: 100 * time.Millisecond}
+			}
+			writeTestService(t, root, cfg)
+			m, err := NewServiceManager(root, ServiceManagerOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			defer cancel()
+			if err := m.Start(ctx); err != nil {
+				t.Fatal(err)
+			}
+			status, err := m.Show("exporter")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if status.Readiness.Ready {
+				t.Fatal("declared exporter became ready without a valid initial hand-off")
+			}
+			if status.State != ServiceStateBackoff && status.State != ServiceStateAttentionRequired {
+				t.Fatalf("state = %q, want backoff", status.State)
+			}
+			if status.LastError == "" {
+				t.Fatal("missing or malformed initial hand-off was not reported")
+			}
+		})
 	}
 }
 
@@ -261,6 +319,7 @@ func TestServiceManagerBuffersReadinessLogsUntilExportSecretsAreKnown(t *testing
 		SchemaVersion: serviceSchemaVersion,
 		ID:            "buffered",
 		Enabled:       true,
+		Exports:       true,
 		Command: []string{"/bin/sh", "-c", `
 			printf '%s\n' 'exported-secret'
 			printf '%s' '{"schemaVersion":1,"secrets":{"TOKEN":"exported-secret"}}' > "$PUA_SERVICE_EXPORT_PATH"
@@ -374,6 +433,7 @@ func TestServiceManagerRetainsExportSecretsAcrossReadinessPolls(t *testing.T) {
 		SchemaVersion: serviceSchemaVersion,
 		ID:            "producer",
 		Enabled:       true,
+		Exports:       true,
 		Command: []string{"/bin/sh", "-c", `
 			tmp="$PUA_SERVICE_EXPORT_PATH.tmp"
 			printf '%s' '{"schemaVersion":1,"secrets":{"TOKEN":"retained-secret"}}' > "$tmp"

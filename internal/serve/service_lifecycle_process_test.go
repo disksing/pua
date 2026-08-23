@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -321,6 +322,189 @@ func TestServiceManagerPersistsBackoffAcrossReconstruction(t *testing.T) {
 	status = waitForServiceState(t, restarted, "crasher", ServiceStateBackoff)
 	if status.FailureCount != 2 {
 		t.Fatalf("failure count after due retry = %d, want 2", status.FailureCount)
+	}
+}
+
+func TestServiceManagerFailureSourcesShareBackoffPolicy(t *testing.T) {
+	type failureSource struct {
+		name      string
+		eventType string
+		lastError string
+		writesPID bool
+		configure func(root, pidPath string) ServiceConfig
+	}
+	sources := []failureSource{
+		{
+			name:      "start",
+			eventType: "start_failed",
+			lastError: "missing-service-command",
+			configure: func(root, _ string) ServiceConfig {
+				return ServiceConfig{Command: []string{filepath.Join(root, "missing-service-command")}}
+			},
+		},
+		{
+			name:      "readiness",
+			eventType: "readiness_failed",
+			lastError: "readiness failed",
+			writesPID: true,
+			configure: func(_, pidPath string) ServiceConfig {
+				return ServiceConfig{
+					Command: []string{"/bin/sh", "-c", "printf '%s\\n' \"$$\" > " + shellQuote(pidPath) + "; exec sleep 30"},
+					Readiness: &ServiceReadinessConfig{
+						Command:  []string{"/bin/sh", "-c", "while ! test -s " + shellQuote(pidPath) + "; do sleep 0.01; done; exit 23"},
+						Interval: 10 * time.Millisecond,
+						Timeout:  time.Second,
+					},
+				}
+			},
+		},
+		{
+			name:      "unexpected exit",
+			eventType: "exited",
+			lastError: "exit status 17",
+			writesPID: true,
+			configure: func(_, pidPath string) ServiceConfig {
+				return ServiceConfig{Command: []string{"/bin/sh", "-c", "printf '%s\\n' \"$$\" > " + shellQuote(pidPath) + "; exit 17"}}
+			},
+		},
+	}
+	thresholds := []struct {
+		name      string
+		seed      int
+		wantCount int
+		wantDelay time.Duration
+		wantState ServiceState
+		attention bool
+	}{
+		{name: "below attention threshold", seed: 0, wantCount: 1, wantDelay: 100 * time.Millisecond, wantState: ServiceStateBackoff},
+		{name: "at attention threshold", seed: 4, wantCount: 5, wantDelay: 1600 * time.Millisecond, wantState: ServiceStateAttentionRequired, attention: true},
+	}
+
+	for _, source := range sources {
+		source := source
+		for _, threshold := range thresholds {
+			threshold := threshold
+			t.Run(source.name+"/"+threshold.name, func(t *testing.T) {
+				root := t.TempDir()
+				pidPath := filepath.Join(root, "service.pid")
+				cleanupPath := filepath.Join(root, "cleanup.log")
+				now := time.Date(2026, time.August, 24, 4, 0, 0, 0, time.UTC)
+				cfg := source.configure(root, pidPath)
+				cfg.SchemaVersion = serviceSchemaVersion
+				cfg.ID = "worker"
+				cfg.Enabled = true
+				cfg.Restart = ServiceRestartConfig{
+					InitialDelay: 100 * time.Millisecond,
+					Multiplier:   2,
+					MaxDelay:     10 * time.Second,
+					ResetAfter:   time.Minute,
+				}
+				cfg.Cleanup = &ServiceCleanupConfig{
+					Command: []string{"/bin/sh", "-c", "printf 'cleanup\\n' >> " + shellQuote(cleanupPath)},
+					Timeout: time.Second,
+				}
+				writeTestService(t, root, cfg)
+
+				manager, err := NewServiceManager(root, ServiceManagerOptions{Now: func() time.Time { return now }})
+				if err != nil {
+					t.Fatal(err)
+				}
+				stopProcessTestManager(t, &manager)
+				manager.mu.Lock()
+				manager.runtimes["worker"].status.FailureCount = threshold.seed
+				manager.mu.Unlock()
+				if err := manager.Start(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+
+				status := waitForServiceState(t, manager, "worker", threshold.wantState)
+				wantRetry := now.Add(threshold.wantDelay).Format(time.RFC3339Nano)
+				if status.FailureCount != threshold.wantCount || status.AttentionRequired != threshold.attention || status.NextRetryAt != wantRetry {
+					t.Fatalf("failure policy status = %#v, want count=%d attention=%v retry=%q", status, threshold.wantCount, threshold.attention, wantRetry)
+				}
+				if !strings.Contains(status.LastError, source.lastError) {
+					t.Fatalf("last error = %q, want source detail %q", status.LastError, source.lastError)
+				}
+				persisted := readPersistedServiceStatus(t, root, "worker")
+				if persisted.State != status.State || persisted.FailureCount != status.FailureCount || persisted.AttentionRequired != status.AttentionRequired || persisted.NextRetryAt != status.NextRetryAt {
+					t.Fatalf("persisted failure policy = %#v, want runtime %#v", persisted, status)
+				}
+				cleanup, err := os.ReadFile(cleanupPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got, want := string(cleanup), "cleanup\n"; got != want {
+					t.Fatalf("cleanup output = %q, want %q", got, want)
+				}
+				events, err := os.ReadFile(filepath.Join(serviceRuntimePath(root, "worker"), "events.jsonl"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(string(events), `"type":"`+source.eventType+`"`) {
+					t.Fatalf("%s event missing: %s", source.eventType, events)
+				}
+				for _, other := range []string{"start_failed", "readiness_failed", "exited"} {
+					if other != source.eventType && strings.Contains(string(events), `"type":"`+other+`"`) {
+						t.Fatalf("failure source emitted %s instead of only %s: %s", other, source.eventType, events)
+					}
+				}
+				if source.writesPID {
+					data, err := os.ReadFile(pidPath)
+					if err != nil {
+						t.Fatal(err)
+					}
+					pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+					if err != nil {
+						t.Fatal(err)
+					}
+					waitForProcessGone(t, pid)
+				}
+			})
+		}
+	}
+}
+
+func TestServiceManagerUnexpectedExitResetsFailuresAfterStableRun(t *testing.T) {
+	root := t.TempDir()
+	releasePath := filepath.Join(root, "release")
+	now := time.Date(2026, time.August, 24, 5, 0, 0, 0, time.UTC)
+	writeTestService(t, root, ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "worker",
+		Enabled:       true,
+		Command: []string{"/bin/sh", "-c",
+			"while ! test -f " + shellQuote(releasePath) + "; do sleep 0.01; done; exit 19"},
+		Restart: ServiceRestartConfig{
+			InitialDelay: 100 * time.Millisecond,
+			Multiplier:   2,
+			MaxDelay:     10 * time.Second,
+			ResetAfter:   time.Minute,
+		},
+	})
+
+	manager, err := NewServiceManager(root, ServiceManagerOptions{Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopProcessTestManager(t, &manager)
+	manager.mu.Lock()
+	manager.runtimes["worker"].status.FailureCount = 4
+	manager.mu.Unlock()
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if status, err := manager.Show("worker"); err != nil || status.State != ServiceStateReady {
+		t.Fatalf("service did not enter its stable run: status=%#v err=%v", status, err)
+	}
+
+	now = now.Add(2 * time.Minute)
+	if err := os.WriteFile(releasePath, []byte("exit\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	status := waitForServiceState(t, manager, "worker", ServiceStateBackoff)
+	wantRetry := now.Add(100 * time.Millisecond).Format(time.RFC3339Nano)
+	if status.FailureCount != 1 || status.AttentionRequired || status.NextRetryAt != wantRetry {
+		t.Fatalf("stable-run reset status = %#v, want count=1 attention=false retry=%q", status, wantRetry)
 	}
 }
 

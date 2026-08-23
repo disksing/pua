@@ -68,6 +68,13 @@ type serviceProcessExit struct {
 	code int
 }
 
+type serviceFailureTransition struct {
+	at                  time.Time
+	lastError           string
+	resetAfterStableRun bool
+	requireAttention    bool
+}
+
 type serviceRuntime struct {
 	config                ServiceConfig
 	status                ServiceStatus
@@ -558,24 +565,19 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 
 func (m *ServiceManager) failStartLocked(ctx context.Context, rt *serviceRuntime, cause error) error {
 	message := security.NewRedactor(rt.secretValues...).RedactString(cause.Error())
-	rt.status.FailureCount++
-	rt.status.LastError = message
-	rt.status.AttentionRequired = rt.status.FailureCount >= 5
-	rt.status.State = ServiceStateBackoff
-	if rt.status.AttentionRequired {
-		rt.status.State = ServiceStateAttentionRequired
-	}
-	delay := restartDelay(rt.config.Restart, rt.status.FailureCount)
-	rt.status.NextRetryAt = m.now().Add(delay).Format(time.RFC3339Nano)
-	rt.status.UpdatedAt = m.now().Format(time.RFC3339Nano)
-	_ = m.appendEventLocked(rt, map[string]any{"type": "start_failed", "error": message, "time": rt.status.UpdatedAt})
+	transitionAt := m.now()
+	_ = m.appendEventLocked(rt, map[string]any{"type": "start_failed", "error": message, "time": transitionAt.Format(time.RFC3339Nano)})
+	requireAttention := false
 	if cleanupErr := m.runCleanupLocked(ctx, rt); cleanupErr != nil {
 		cleanupMessage := security.NewRedactor(rt.secretValues...).RedactString(cleanupErr.Error())
-		rt.status.AttentionRequired = true
-		rt.status.State = ServiceStateAttentionRequired
-		rt.status.LastError = message + "; " + cleanupMessage
+		message += "; " + cleanupMessage
+		requireAttention = true
 	}
-	m.persistStatusLocked(rt)
+	m.transitionServiceFailureLocked(rt, serviceFailureTransition{
+		at:               transitionAt,
+		lastError:        message,
+		requireAttention: requireAttention,
+	})
 	return nil
 }
 
@@ -933,20 +935,15 @@ func (m *ServiceManager) readinessFailedLocked(ctx context.Context, rt *serviceR
 	// because readiness did not establish that the service is safe to publish.
 	_, _ = m.readExportsLocked(rt)
 	cleanupErr := m.stopProcessLocked(ctx, rt, false)
-	rt.status.FailureCount++
-	rt.status.AttentionRequired = rt.status.FailureCount >= 5
-	rt.status.State = ServiceStateBackoff
-	if rt.status.AttentionRequired {
-		rt.status.State = ServiceStateAttentionRequired
-	}
-	rt.status.NextRetryAt = m.now().Add(restartDelay(rt.config.Restart, rt.status.FailureCount)).Format(time.RFC3339Nano)
 	if cleanupErr != nil {
-		rt.status.AttentionRequired = true
-		rt.status.State = ServiceStateAttentionRequired
 		cleanupMessage := security.NewRedactor(rt.secretValues...).RedactString(cleanupErr.Error())
-		rt.status.LastError = message + "; " + cleanupMessage
+		message += "; " + cleanupMessage
 	}
-	m.persistStatusLocked(rt)
+	m.transitionServiceFailureLocked(rt, serviceFailureTransition{
+		at:               m.now(),
+		lastError:        message,
+		requireAttention: cleanupErr != nil,
+	})
 	return nil
 }
 
@@ -981,26 +978,34 @@ func (m *ServiceManager) handleProcessExitLocked(ctx context.Context, rt *servic
 		m.persistStatusLocked(rt)
 		return
 	}
-	if rt.config.Restart.ResetAfter > 0 && !rt.stableSince.IsZero() && m.now().Sub(rt.stableSince) >= rt.config.Restart.ResetAfter {
+	transitionAt := m.now()
+	_ = m.appendEventLocked(rt, map[string]any{"type": "exited", "code": exit.code, "error": rt.status.ExitError, "time": rt.status.ExitedAt})
+	cleanupErr := m.runCleanupLocked(ctx, rt)
+	lastError := rt.status.ExitError
+	if cleanupErr != nil {
+		lastError = security.NewRedactor(rt.secretValues...).RedactString(cleanupErr.Error())
+	}
+	m.transitionServiceFailureLocked(rt, serviceFailureTransition{
+		at:                  transitionAt,
+		lastError:           lastError,
+		resetAfterStableRun: true,
+		requireAttention:    cleanupErr != nil,
+	})
+}
+
+func (m *ServiceManager) transitionServiceFailureLocked(rt *serviceRuntime, failure serviceFailureTransition) {
+	if failure.resetAfterStableRun && rt.config.Restart.ResetAfter > 0 && !rt.stableSince.IsZero() && failure.at.Sub(rt.stableSince) >= rt.config.Restart.ResetAfter {
 		rt.status.FailureCount = 0
 		rt.status.AttentionRequired = false
 	}
 	rt.status.FailureCount++
-	rt.status.AttentionRequired = rt.status.FailureCount >= 5
+	rt.status.AttentionRequired = rt.status.FailureCount >= 5 || failure.requireAttention
 	rt.status.State = ServiceStateBackoff
 	if rt.status.AttentionRequired {
 		rt.status.State = ServiceStateAttentionRequired
 	}
-	rt.status.LastError = rt.status.ExitError
-	rt.status.NextRetryAt = m.now().Add(restartDelay(rt.config.Restart, rt.status.FailureCount)).Format(time.RFC3339Nano)
-	rt.status.UpdatedAt = rt.status.ExitedAt
-	_ = m.appendEventLocked(rt, map[string]any{"type": "exited", "code": exit.code, "error": rt.status.ExitError, "time": rt.status.ExitedAt})
-	cleanupErr := m.runCleanupLocked(ctx, rt)
-	if cleanupErr != nil {
-		rt.status.AttentionRequired = true
-		rt.status.State = ServiceStateAttentionRequired
-		rt.status.LastError = security.NewRedactor(rt.secretValues...).RedactString(cleanupErr.Error())
-	}
+	rt.status.LastError = failure.lastError
+	rt.status.NextRetryAt = failure.at.Add(restartDelay(rt.config.Restart, rt.status.FailureCount)).Format(time.RFC3339Nano)
 	m.persistStatusLocked(rt)
 }
 

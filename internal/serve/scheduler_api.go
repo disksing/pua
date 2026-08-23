@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/disksing/pua/internal/app"
+	"github.com/disksing/pua/internal/localize"
 )
 
 type schedulerChangeRequest struct {
@@ -207,11 +208,19 @@ func (s *server) handleNaturalLanguageScheduleRequest(w http.ResponseWriter, r *
 		writeError(w, err, http.StatusBadRequest)
 		return
 	}
-	text := fmt.Sprintf("Please %s a native schedule", operation)
-	if id != "" {
-		text += " for " + id
+	language, err := workspaceContentLanguage(workspace.Path)
+	if err != nil {
+		writeError(w, err, http.StatusBadRequest)
+		return
 	}
-	text += fmt.Sprintf(".\n\nDescription: %s\nCondition: %s\nTarget: %s\n\nCompile this request into a structured trigger with the Scheduler CLI. If the timing, recurrence, or IANA timezone is ambiguous, ask me in this Turn and do not modify the existing definition.", description, condition, target)
+	text := strings.TrimSuffix(localize.MustRender(language, "scheduler-compilation.md", map[string]any{
+		"Operation":   string(operation),
+		"HasID":       id != "",
+		"ID":          id,
+		"Description": description,
+		"Condition":   condition,
+		"Target":      target,
+	}), "\n")
 	role, sender := agentHubMessageProvenance(userName)
 	var message resourceMailboxMessage
 	acceptErr := s.agents.withResourceController(r.Context(), workspace, app.SchedulerResourceID, func() error {

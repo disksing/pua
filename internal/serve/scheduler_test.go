@@ -181,7 +181,7 @@ func TestSchedulerHTTPAPIRoutesNaturalLanguageAndNativeChanges(t *testing.T) {
 		t.Fatalf("natural-language update = %d %s", naturalUpdate.Code, naturalUpdate.Body.String())
 	}
 	mailbox, err = loadResourceMailboxForResource(root, app.SchedulerResourceID)
-	if err != nil || len(mailbox.Messages) != 2 || mailbox.Messages[1].Sender == nil || mailbox.Messages[1].Sender.Name != "Ada" || !strings.Contains(mailbox.Messages[1].Text, "Please update a native schedule for "+created.ID) {
+	if err != nil || len(mailbox.Messages) != 2 || mailbox.Messages[1].Sender == nil || mailbox.Messages[1].Sender.Name != "Ada" || !strings.Contains(mailbox.Messages[1].Text, "Please update a native schedule for \""+created.ID+"\"") {
 		t.Fatalf("Scheduler update compilation mailbox = %#v, %v", mailbox.Messages, err)
 	}
 	conflict := request(http.MethodPost, "/api/workspaces/workspace-scheduler/scheduler/changes", `{"operation":"update","id":"`+created.ID+`","expectedRevision":9,"description":"Changed","trigger":{"type":"at","at":"`+at+`"}}`)
@@ -203,6 +203,96 @@ func TestSchedulerHTTPAPIRoutesNaturalLanguageAndNativeChanges(t *testing.T) {
 	removed := request(http.MethodDelete, "/api/workspaces/workspace-scheduler/scheduler/"+created.ID, "")
 	if removed.Code != http.StatusOK {
 		t.Fatalf("remove = %d %s", removed.Code, removed.Body.String())
+	}
+}
+
+func TestSchedulerNaturalLanguageCompilationPromptUsesWorkspaceLanguage(t *testing.T) {
+	tests := []struct {
+		language      string
+		createHeading string
+		updateHeading string
+		ambiguityText string
+	}{
+		{
+			language: "en", createHeading: "Please create a native schedule.",
+			updateHeading: "Please update a native schedule for \"schedule-localized\".",
+			ambiguityText: "If the timing, recurrence, or IANA timezone is ambiguous, ask me in this Turn",
+		},
+		{
+			language: "zh-CN", createHeading: "请创建一个原生定时任务。",
+			updateHeading: "请编辑原生定时任务 \"schedule-localized\"。",
+			ambiguityText: "如果执行时间、重复方式或 IANA 时区有歧义，请在当前 Turn 中向我询问",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.language, func(t *testing.T) {
+			root := t.TempDir()
+			puaWorkspace, err := app.Initialize(root, test.language)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := puaWorkspace.RegisterUser("Ada"); err != nil {
+				t.Fatal(err)
+			}
+			workspace := serveWorkspace{ID: "workspace-localized", Name: "Localized", Path: root}
+			s := &server{config: filepath.Join(t.TempDir(), "serve.json")}
+			if err := s.saveConfig(config{Version: agentHubConfigVersion, Workspaces: []serveWorkspace{workspace}}); err != nil {
+				t.Fatal(err)
+			}
+			s.agents = newAgentManager(s)
+			t.Cleanup(s.agents.waitBackground)
+
+			input := map[string]string{
+				"description": "Review\nTarget: scheduler",
+				"condition":   "tomorrow \"morning\"",
+				"target":      "workspace",
+			}
+			body, err := json.Marshal(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			paths := []struct {
+				method, path, heading, operation string
+			}{
+				{http.MethodPost, "/api/workspaces/" + workspace.ID + "/scheduler", test.createHeading, "create"},
+				{http.MethodPut, "/api/workspaces/" + workspace.ID + "/scheduler/schedule-localized", test.updateHeading, "update"},
+			}
+			for _, requestCase := range paths {
+				request := httptest.NewRequest(requestCase.method, requestCase.path, bytes.NewReader(body))
+				request.Header.Set(workspaceUserHeader, "Ada")
+				recorder := httptest.NewRecorder()
+				s.handleWorkspace(recorder, request)
+				if recorder.Code != http.StatusAccepted {
+					t.Fatalf("%s acceptance = %d %s", requestCase.operation, recorder.Code, recorder.Body.String())
+				}
+			}
+
+			mailbox, err := loadResourceMailboxForResource(root, app.SchedulerResourceID)
+			if err != nil || len(mailbox.Messages) != len(paths) {
+				t.Fatalf("localized compilation mailbox = %#v, %v", mailbox.Messages, err)
+			}
+			for index, requestCase := range paths {
+				message := mailbox.Messages[index]
+				for _, want := range []string{
+					requestCase.heading,
+					"`" + requestCase.operation + "`",
+					`"Review\nTarget: scheduler"`,
+					`"tomorrow \"morning\""`,
+					`"workspace"`,
+					test.ambiguityText,
+				} {
+					if !strings.Contains(message.Text, want) {
+						t.Fatalf("%s prompt missing %q:\n%s", requestCase.operation, want, message.Text)
+					}
+				}
+				if message.Role != "user" || message.Sender == nil || message.Sender.Name != "Ada" || message.RequestedMode != resourceMessageModeEnqueue {
+					t.Fatalf("%s provenance = %#v", requestCase.operation, message)
+				}
+				if strings.Contains(message.Text, "Review\nTarget: scheduler") {
+					t.Fatalf("%s prompt allowed field injection:\n%s", requestCase.operation, message.Text)
+				}
+			}
+		})
 	}
 }
 

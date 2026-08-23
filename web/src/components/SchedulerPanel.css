@@ -1,4 +1,3 @@
-:where([data-component-owner="scheduler-panel"]).scheduler-settings-card,
 :where([data-component-owner="scheduler-panel"]).schedule-editor,
 :where([data-component-owner="scheduler-panel"]).schedule-list article {
   background: var(--panel);
@@ -6,20 +5,8 @@
   border-radius: 10px;
 }
 
-:where([data-component-owner="scheduler-panel"]).scheduler-settings-card {
-  align-items: center;
-  display: flex;
-  gap: 14px;
-  margin-bottom: 16px;
-  padding: 14px;
-}
-
-:where([data-component-owner="scheduler-panel"]).scheduler-settings-card > div:first-child,
 :where([data-component-owner="scheduler-panel"]) .schedule-editor-heading > div { display: flex; flex: 1; flex-direction: column; gap: 3px; min-width: 0; }
-:where([data-component-owner="scheduler-panel"]).scheduler-settings-card span,
 :where([data-component-owner="scheduler-panel"]) .schedule-editor-heading span { color: var(--muted); font-size: 12px; }
-:where([data-component-owner="scheduler-panel"]).scheduler-settings-card label { align-items: center; display: flex; gap: 6px; }
-:where([data-component-owner="scheduler-panel"]).scheduler-settings-card input { width: 92px; }
 
 :where([data-component-owner="scheduler-panel"]).schedule-editor { display: grid; gap: 12px; margin-bottom: 16px; padding: 14px; }
 :where([data-component-owner="scheduler-panel"]) .schedule-editor-heading { align-items: flex-start; display: flex; gap: 12px; }
@@ -28,8 +15,7 @@
 :where([data-component-owner="scheduler-panel"]) .schedule-field-error { color: var(--red, var(--accent-deep)); font-size: 12px; }
 :where([data-component-owner="scheduler-panel"]).schedule-editor input[aria-invalid="true"] { border-color: var(--red, var(--accent-deep)); }
 :where([data-component-owner="scheduler-panel"]).schedule-editor input,
-:where([data-component-owner="scheduler-panel"]).schedule-editor textarea,
-:where([data-component-owner="scheduler-panel"]).scheduler-settings-card input {
+:where([data-component-owner="scheduler-panel"]).schedule-editor textarea {
   background: var(--panel);
   border: 1px solid var(--line-strong);
   border-radius: 7px;
@@ -84,6 +70,5 @@
 :where([data-component-owner="scheduler-panel"]).schedule-list .empty-list-row span { overflow-wrap: anywhere; white-space: normal; }
 
 @media (max-width: 720px) {
-  :where([data-component-owner="scheduler-panel"]).scheduler-settings-card { align-items: stretch; flex-direction: column; }
   :where([data-component-owner="scheduler-panel"]).schedule-list header { flex-direction: column; }
 }

@@ -5,8 +5,6 @@ import (
 	"log"
 	"path/filepath"
 	"strings"
-
-	"github.com/disksing/pua/internal/workspacepath"
 )
 
 func (s *server) initializeServiceManagers() error {
@@ -123,12 +121,4 @@ func (s *server) serviceEnvironment(workspace serveWorkspace) (map[string]string
 		return nil, nil, err
 	}
 	return manager.ResolveBindings()
-}
-
-// serviceRootExists is intentionally tiny and used by doctor/compatibility
-// callers to distinguish an old Workspace with no service directory from one
-// that has an invalid service tree.
-func serviceRootExists(root string) bool {
-	_, err := workspacepath.ResolveControlDir(root)
-	return err == nil
 }

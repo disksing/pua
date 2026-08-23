@@ -1896,17 +1896,6 @@ func LoadServiceConfig(path string) (ServiceConfig, error) {
 	return defaultServiceConfig(cfg), nil
 }
 
-func (m *ServiceManager) Logs(id string, follow bool) (io.ReadCloser, error) {
-	return m.LogsContext(context.Background(), id, "stdout", follow)
-}
-
-// LogsStream reads one of the private redacted service log streams. The
-// combined view is intentionally represented by stdout for compatibility;
-// callers that need ordering between streams should request both streams.
-func (m *ServiceManager) LogsStream(id, stream string, follow bool) (io.ReadCloser, error) {
-	return m.LogsContext(context.Background(), id, stream, follow)
-}
-
 func (m *ServiceManager) LogsContext(ctx context.Context, id, stream string, follow bool) (io.ReadCloser, error) {
 	m.mu.Lock()
 	rt := m.runtimes[id]

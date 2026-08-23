@@ -1,7 +1,6 @@
 package serve
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -223,11 +222,4 @@ func statusForServiceBindingsError(err error, fallback int) int {
 		return http.StatusConflict
 	}
 	return fallback
-}
-
-func contextOrBackground(ctx context.Context) context.Context {
-	if ctx == nil {
-		return context.Background()
-	}
-	return ctx
 }

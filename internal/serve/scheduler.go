@@ -56,6 +56,18 @@ func schedulerConfigDigest(config app.SchedulerConfig) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
+func schedulerTriggerDigest(trigger *app.ScheduleTrigger) (string, error) {
+	if trigger == nil {
+		return "", nil
+	}
+	data, err := json.Marshal(trigger)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
 func (n *NativeScheduler) Snapshot(now time.Time) (app.SchedulerSnapshot, error) {
 	workspace, err := app.OpenWorkspace(n.workspace.Path)
 	if err != nil {
@@ -172,6 +184,10 @@ func (n *NativeScheduler) Change(ctx context.Context, change NativeSchedulerChan
 		}
 		if runtimeCompletesSameOneTimeOccurrence(runtime, resumed) && runtime.Revision != resumed.Revision {
 			runtime.Revision = resumed.Revision
+			runtime.TriggerDigest, runtimeErr = schedulerTriggerDigest(resumed.Trigger)
+			if runtimeErr != nil {
+				return app.Schedule{}, runtimeErr
+			}
 			runtimeErr = n.storeSchedulerRuntime(change.ID, runtime)
 		}
 		if runtimeErr == nil && runtime.EffectiveState == schedulerOutcomeAttention {
@@ -250,10 +266,18 @@ func (n *NativeScheduler) reconcileSchedule(ctx context.Context, schedule app.Sc
 	if err != nil {
 		return err
 	}
-	if runtime.Revision != schedule.Revision {
-		if runtimeCompletesSameOneTimeOccurrence(runtime, schedule) {
+	triggerDigest, err := schedulerTriggerDigest(schedule.Trigger)
+	if err != nil {
+		return err
+	}
+	revisionChanged := runtime.Revision != schedule.Revision
+	triggerChanged := runtime.TriggerDigest != triggerDigest
+	if revisionChanged || triggerChanged {
+		sameKnownTrigger := runtime.TriggerDigest != "" && !triggerChanged
+		if runtimeCompletesSameOneTimeOccurrence(runtime, schedule) && (sameKnownTrigger || runtime.TriggerDigest == "") {
 			runtime.Revision = schedule.Revision
-		} else if runtime.EffectiveState == schedulerOutcomeAttention && runtime.AttentionTarget == schedule.Target && schedule.State == app.ScheduleStateActive {
+			runtime.TriggerDigest = triggerDigest
+		} else if revisionChanged && sameKnownTrigger && runtime.EffectiveState == schedulerOutcomeAttention && runtime.AttentionTarget == schedule.Target && schedule.State == app.ScheduleStateActive {
 			runtime.Revision = schedule.Revision
 		} else {
 			runtime, err = initialScheduleRuntime(schedule, now)
@@ -321,7 +345,11 @@ func runtimeCompletesSameOneTimeOccurrence(runtime schedulerScheduleRuntime, sch
 }
 
 func initialScheduleRuntime(schedule app.Schedule, now time.Time) (schedulerScheduleRuntime, error) {
-	runtime := schedulerScheduleRuntime{Revision: schedule.Revision, EffectiveState: schedule.State}
+	triggerDigest, err := schedulerTriggerDigest(schedule.Trigger)
+	if err != nil {
+		return schedulerScheduleRuntime{}, err
+	}
+	runtime := schedulerScheduleRuntime{Revision: schedule.Revision, TriggerDigest: triggerDigest, EffectiveState: schedule.State}
 	if schedule.Trigger == nil {
 		return runtime, nil
 	}

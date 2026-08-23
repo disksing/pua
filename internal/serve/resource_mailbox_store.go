@@ -173,6 +173,7 @@ type resourceSchedulerCheckpoint struct {
 
 type schedulerScheduleRuntime struct {
 	Revision         uint64                       `json:"revision"`
+	TriggerDigest    string                       `json:"triggerDigest,omitempty"`
 	EffectiveState   string                       `json:"effectiveState,omitempty"`
 	NextRunAt        string                       `json:"nextRunAt,omitempty"`
 	LastOccurrenceAt string                       `json:"lastOccurrenceAt,omitempty"`

@@ -276,7 +276,7 @@ func TestNativeSchedulerCrashWindowReplayMatrix(t *testing.T) {
 				t.Fatal(err)
 			}
 			initial := schedulerScheduleRuntime{
-				Revision: schedule.Revision, EffectiveState: app.ScheduleStateActive,
+				Revision: schedule.Revision, TriggerDigest: mustSchedulerTriggerDigest(t, schedule.Trigger), EffectiveState: app.ScheduleStateActive,
 				NextRunAt: at.Format(time.RFC3339Nano),
 			}
 			if err := native.storeSchedulerRuntime(schedule.ID, initial); err != nil {
@@ -364,6 +364,15 @@ func preparedOccurrenceMessage(prepared schedulerPreparedOccurrence) resourceMai
 		Type: resourceMessageTypeScheduleOccurrence, Causation: cloneMailboxCausation(prepared.Causation),
 		SenderWorkspaceInstanceID: prepared.Causation.SourceWorkspaceInstanceID,
 	}
+}
+
+func mustSchedulerTriggerDigest(t *testing.T, trigger *app.ScheduleTrigger) string {
+	t.Helper()
+	digest, err := schedulerTriggerDigest(trigger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return digest
 }
 
 func assertPreparedOccurrenceEqual(t *testing.T, got *schedulerPreparedOccurrence, want schedulerPreparedOccurrence) {
@@ -991,5 +1000,137 @@ func TestNativeSchedulerTargetEditReplacesPreparedOccurrence(t *testing.T) {
 	runtime, err = native.schedulerRuntime(created.ID)
 	if err != nil || runtime.Revision != retargeted.Revision || runtime.Prepared != nil || runtime.EffectiveState != app.ScheduleStateCompleted || runtime.LastOutcome != schedulerOutcomeAccepted {
 		t.Fatalf("retargeted attention checkpoint = %#v, %v", runtime, err)
+	}
+}
+
+func TestNativeSchedulerTriggerEditReplacesAttentionRuntime(t *testing.T) {
+	tests := []struct {
+		name         string
+		oldTrigger   func(time.Time) *app.ScheduleTrigger
+		overdueAt    func(app.Schedule) time.Time
+		newTrigger   func(time.Time, app.Schedule) app.ScheduleTrigger
+		changeNative bool
+		restart      bool
+	}{
+		{
+			name: "interval through native change",
+			oldTrigger: func(base time.Time) *app.ScheduleTrigger {
+				return &app.ScheduleTrigger{Type: app.ScheduleTriggerInterval, EverySeconds: 60, AnchorAt: base.Add(-time.Hour).Format(time.RFC3339Nano)}
+			},
+			overdueAt: func(schedule app.Schedule) time.Time {
+				return generationTime(schedule.UpdatedAt).Add(10 * time.Minute)
+			},
+			newTrigger: func(base time.Time, _ app.Schedule) app.ScheduleTrigger {
+				return app.ScheduleTrigger{Type: app.ScheduleTriggerInterval, EverySeconds: 300, AnchorAt: base.Add(-time.Hour).Format(time.RFC3339Nano)}
+			},
+			changeNative: true,
+		},
+		{
+			name: "cron after restart audit",
+			oldTrigger: func(time.Time) *app.ScheduleTrigger {
+				return &app.ScheduleTrigger{Type: app.ScheduleTriggerCron, Cron: "0 * * * * *", TimeZone: "UTC"}
+			},
+			overdueAt: func(schedule app.Schedule) time.Time {
+				return generationTime(schedule.UpdatedAt).Add(10 * time.Minute)
+			},
+			newTrigger: func(time.Time, app.Schedule) app.ScheduleTrigger {
+				return app.ScheduleTrigger{Type: app.ScheduleTriggerCron, Cron: "0 0 * * * *", TimeZone: "UTC"}
+			},
+			restart: true,
+		},
+		{
+			name: "one-time through portable revision",
+			oldTrigger: func(base time.Time) *app.ScheduleTrigger {
+				return &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: base.Add(time.Minute).Format(time.RFC3339Nano)}
+			},
+			overdueAt: func(schedule app.Schedule) time.Time {
+				return generationTime(schedule.Trigger.At).Add(time.Second)
+			},
+			newTrigger: func(_ time.Time, schedule app.Schedule) app.ScheduleTrigger {
+				return app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: generationTime(schedule.Trigger.At).Add(2 * time.Hour).Format(time.RFC3339Nano)}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fake := newRuntimeFakeAgentHub()
+			hub := httptest.NewServer(fake)
+			defer hub.Close()
+			manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+			puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			const targetID = "project1.task1"
+			target, err := puaWorkspace.ResourceValue(targetID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			base := time.Now().UTC().Truncate(time.Second)
+			created, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+				Description: "Replace frozen trigger", Condition: "old rule", Target: targetID,
+				Trigger: test.oldTrigger(base),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			archived, err := puaWorkspace.ArchiveResource(targetID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			targetPath := filepath.Join(workspace.Path, filepath.FromSlash(target.Path))
+			archivedPath := filepath.Join(workspace.Path, filepath.FromSlash(archived.Path))
+			native := newNativeScheduler(manager, workspace)
+			overdue := test.overdueAt(created)
+			if _, err := native.Reconcile(context.Background(), overdue); err != nil {
+				t.Fatal(err)
+			}
+			oldRuntime, err := native.schedulerRuntime(created.ID)
+			if err != nil || oldRuntime.EffectiveState != schedulerOutcomeAttention || oldRuntime.Prepared == nil {
+				t.Fatalf("overdue trigger attention runtime = %#v, %v", oldRuntime, err)
+			}
+			oldPrepared := *oldRuntime.Prepared
+
+			trigger := test.newTrigger(base, created)
+			var updated app.Schedule
+			if test.changeNative {
+				updated, err = native.Change(context.Background(), NativeSchedulerChange{
+					Operation: app.ScheduleChangeUpdate, ID: created.ID, ExpectedRevision: created.Revision, Trigger: &trigger,
+				})
+			} else {
+				// Model an audit discovering a portable definition revision that
+				// was written while this Server was not processing mutations.
+				updated, err = puaWorkspace.UpdateSchedule(app.UpdateScheduleInput{
+					ID: created.ID, ExpectedRevision: created.Revision, Trigger: &trigger,
+				})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(archivedPath, targetPath); err != nil {
+				t.Fatal(err)
+			}
+			mutationAt := generationTime(updated.UpdatedAt)
+			if test.restart {
+				manager = newAgentManager(manager.server)
+				manager.server.agents = manager
+				native = newNativeScheduler(manager, workspace)
+			}
+			if _, err := native.Reconcile(context.Background(), mutationAt); err != nil {
+				t.Fatal(err)
+			}
+
+			runtime, err := native.schedulerRuntime(created.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			next := generationTime(runtime.NextRunAt)
+			if runtime.Revision != updated.Revision || runtime.TriggerDigest != mustSchedulerTriggerDigest(t, updated.Trigger) || runtime.EffectiveState != app.ScheduleStateActive || runtime.Prepared != nil || runtime.AttentionTarget != "" || runtime.LastOccurrenceAt != "" || !next.After(mutationAt) {
+				t.Fatalf("replacement trigger runtime = %#v; mutation = %s", runtime, mutationAt)
+			}
+			if messages := scheduleOccurrenceMessages(t, workspace.Path, targetID); len(messages) != 0 {
+				t.Fatalf("trigger edit accepted old occurrence %s: %#v", oldPrepared.MessageID, messages)
+			}
+		})
 	}
 }

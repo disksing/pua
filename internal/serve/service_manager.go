@@ -78,6 +78,21 @@ func defaultServiceDefinitionStore() serviceDefinitionStore {
 	}
 }
 
+// serviceRuntimeStateStore is the durable ownership boundary for service
+// process state. Tests replace it to exercise read and write failures without
+// relying on platform-specific filesystem permissions.
+type serviceRuntimeStateStore struct {
+	readFile  func(string) ([]byte, error)
+	writeJSON func(string, any, os.FileMode) error
+}
+
+func defaultServiceRuntimeStateStore() serviceRuntimeStateStore {
+	return serviceRuntimeStateStore{
+		readFile:  os.ReadFile,
+		writeJSON: writeServiceJSON,
+	}
+}
+
 var errServiceBindingsPathEscape = errors.New("service bindings path escapes the workspace control directory")
 
 const defaultServiceProcessTerminationGrace = 5 * time.Second
@@ -131,6 +146,7 @@ type ServiceManager struct {
 	processTerminationGrace time.Duration
 	processPlatform         *serviceProcessPlatform
 	definitionStore         serviceDefinitionStore
+	runtimeStateStore       serviceRuntimeStateStore
 	stopping                bool
 	started                 bool
 }
@@ -138,6 +154,10 @@ type ServiceManager struct {
 // NewServiceManager loads versioned service definitions for root. A missing
 // .pua/services directory is a valid empty configuration for old Workspaces.
 func NewServiceManager(root string, options ServiceManagerOptions) (*ServiceManager, error) {
+	return newServiceManager(root, options, defaultServiceRuntimeStateStore())
+}
+
+func newServiceManager(root string, options ServiceManagerOptions, runtimeStateStore serviceRuntimeStateStore) (*ServiceManager, error) {
 	root, err := filepath.Abs(strings.TrimSpace(root))
 	if err != nil {
 		return nil, err
@@ -145,7 +165,14 @@ func NewServiceManager(root string, options ServiceManagerOptions) (*ServiceMana
 	if strings.TrimSpace(root) == "" {
 		return nil, errors.New("workspace root is required")
 	}
-	m := &ServiceManager{root: filepath.Clean(root), configs: map[string]ServiceConfig{}, graph: serviceDependencyGraph{}, runtimes: map[string]*serviceRuntime{}, resolver: options.Resolver, now: options.Now, processTerminationGrace: defaultServiceProcessTerminationGrace, processPlatform: nativeServiceProcessPlatform(), definitionStore: defaultServiceDefinitionStore()}
+	defaults := defaultServiceRuntimeStateStore()
+	if runtimeStateStore.readFile == nil {
+		runtimeStateStore.readFile = defaults.readFile
+	}
+	if runtimeStateStore.writeJSON == nil {
+		runtimeStateStore.writeJSON = defaults.writeJSON
+	}
+	m := &ServiceManager{root: filepath.Clean(root), configs: map[string]ServiceConfig{}, graph: serviceDependencyGraph{}, runtimes: map[string]*serviceRuntime{}, resolver: options.Resolver, now: options.Now, processTerminationGrace: defaultServiceProcessTerminationGrace, processPlatform: nativeServiceProcessPlatform(), definitionStore: defaultServiceDefinitionStore(), runtimeStateStore: runtimeStateStore}
 	if m.now == nil {
 		m.now = time.Now
 	}
@@ -221,7 +248,9 @@ func (m *ServiceManager) loadLocked() error {
 		} else {
 			rt.config = cfg
 		}
-		_ = m.loadStatusLocked(rt)
+		if err := m.loadStatusLocked(rt); err != nil {
+			return fmt.Errorf("load service %s runtime state: %w", id, err)
+		}
 		rt.status.Dependencies = append([]string(nil), graph[id]...)
 	}
 	for id := range m.runtimes {
@@ -269,7 +298,11 @@ func (m *ServiceManager) loadStatusLocked(rt *serviceRuntime) error {
 	if !pathWithinResolved(filepath.Join(m.root, ".pua"), path) {
 		return errors.New("service runtime state path escapes the workspace control directory")
 	}
-	data, err := os.ReadFile(path)
+	readFile := m.runtimeStateStore.readFile
+	if readFile == nil {
+		readFile = os.ReadFile
+	}
+	data, err := readFile(path)
 	if os.IsNotExist(err) {
 		rt.status = initialServiceStatus(rt.config)
 		return nil
@@ -324,7 +357,9 @@ func (m *ServiceManager) Start(ctx context.Context) error {
 	m.stopping = false
 	m.started = true
 	for _, rt := range m.runtimes {
-		m.recoverOrphanLocked(rt)
+		if err := m.recoverOrphanLocked(rt); err != nil {
+			return err
+		}
 	}
 	return m.reconcileLocked(ctx)
 }
@@ -366,7 +401,9 @@ func (m *ServiceManager) Stop(ctx context.Context) error {
 		if rt.process == nil && cleanupErr == nil {
 			rt.status.PID, rt.status.ProcessGroup = 0, 0
 		}
-		m.persistStatusLocked(rt)
+		if err := m.persistStatusLocked(rt); err != nil && first == nil {
+			first = err
+		}
 	}
 	return first
 }
@@ -411,7 +448,7 @@ func (m *ServiceManager) reconcileOneLocked(ctx context.Context, rt *serviceRunt
 	status.Dependencies = append([]string(nil), dependencies...)
 	if rt.terminationPending && rt.process != nil {
 		if err := m.stopProcessLocked(ctx, rt, status.ManualStop); err != nil {
-			return nil
+			return err
 		}
 	}
 	if rt.process == nil && status.ProcessGroup > 0 {
@@ -420,8 +457,7 @@ func (m *ServiceManager) reconcileOneLocked(ctx context.Context, rt *serviceRunt
 		if status.LastError == "" {
 			status.LastError = fmt.Sprintf("service process group %d ownership is unresolved", status.ProcessGroup)
 		}
-		m.persistStatusLocked(rt)
-		return nil
+		return m.persistStatusLocked(rt)
 	}
 	if !cfg.Enabled {
 		if rt.process != nil {
@@ -437,18 +473,18 @@ func (m *ServiceManager) reconcileOneLocked(ctx context.Context, rt *serviceRunt
 		if rt.process == nil && !status.AttentionRequired {
 			status.PID, status.ProcessGroup = 0, 0
 		}
-		m.persistStatusLocked(rt)
-		return nil
+		return m.persistStatusLocked(rt)
 	}
 	if status.ManualStop && rt.process == nil {
 		status.State = ServiceStateStopped
-		m.persistStatusLocked(rt)
-		return nil
+		return m.persistStatusLocked(rt)
 	}
 	if rt.process != nil {
 		select {
 		case exit := <-rt.exit:
-			m.handleProcessExitLocked(ctx, rt, exit)
+			if err := m.handleProcessExitLocked(ctx, rt, exit); err != nil {
+				return err
+			}
 		default:
 		}
 		if rt.process == nil {
@@ -460,8 +496,7 @@ func (m *ServiceManager) reconcileOneLocked(ctx context.Context, rt *serviceRunt
 			if err := m.stopProcessLocked(ctx, rt, false); err != nil {
 				status.AttentionRequired = true
 				status.State = ServiceStateAttentionRequired
-				m.persistStatusLocked(rt)
-				return nil
+				return m.persistStatusLocked(rt)
 			}
 		}
 		if status.AttentionRequired {
@@ -470,8 +505,7 @@ func (m *ServiceManager) reconcileOneLocked(ctx context.Context, rt *serviceRunt
 			status.State = ServiceStateBlocked
 		}
 		status.Readiness.Ready = false
-		m.persistStatusLocked(rt)
-		return nil
+		return m.persistStatusLocked(rt)
 	}
 	now := m.now()
 	if rt.process == nil {
@@ -635,8 +669,16 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 	rt.status.Cleanup = ServiceCleanupStatus{Configured: cfg.Cleanup != nil}
 	rt.status.Exports = publicExports(exports, names)
 	rt.status.UpdatedAt = rt.started.Format(time.RFC3339Nano)
+	if err := m.persistStatusLocked(rt); err != nil {
+		stopErr := m.stopProcessLocked(ctx, rt, false)
+		message := security.NewRedactor(rt.secretValues...).RedactString(err.Error())
+		rt.status.State = ServiceStateAttentionRequired
+		rt.status.AttentionRequired = true
+		rt.status.Readiness.Ready = false
+		rt.status.LastError = message
+		return errors.Join(err, stopErr)
+	}
 	_ = m.appendEventLocked(rt, map[string]any{"type": "started", "pid": cmd.Process.Pid, "time": rt.status.StartedAt})
-	m.persistStatusLocked(rt)
 	return m.observeReadyLocked(ctx, rt)
 }
 
@@ -650,12 +692,11 @@ func (m *ServiceManager) failStartLocked(ctx context.Context, rt *serviceRuntime
 		message += "; " + cleanupMessage
 		requireAttention = true
 	}
-	m.transitionServiceFailureLocked(rt, serviceFailureTransition{
+	return m.transitionServiceFailureLocked(rt, serviceFailureTransition{
 		at:               transitionAt,
 		lastError:        message,
 		requireAttention: requireAttention,
 	})
-	return nil
 }
 
 func (m *ServiceManager) observeReadyLocked(ctx context.Context, rt *serviceRuntime) error {
@@ -688,8 +729,7 @@ func (m *ServiceManager) observeReadyLocked(ctx context.Context, rt *serviceRunt
 		rt.status.State = ServiceStateReady
 		rt.status.Readiness.Ready = true
 		rt.status.Exports = publicExports(rt.exports, rt.secretNames)
-		m.persistStatusLocked(rt)
-		return nil
+		return m.persistStatusLocked(rt)
 	}
 	last, _ := time.Parse(time.RFC3339Nano, rt.status.Readiness.LastCheck)
 	if !last.IsZero() && now.Sub(last) < rt.config.Readiness.Interval && rt.status.Readiness.Ready {
@@ -715,8 +755,7 @@ func (m *ServiceManager) observeReadyLocked(ctx context.Context, rt *serviceRunt
 	rt.status.Readiness.LastError = ""
 	rt.status.Exports = publicExports(rt.exports, rt.secretNames)
 	rt.status.UpdatedAt = now.Format(time.RFC3339Nano)
-	m.persistStatusLocked(rt)
-	return nil
+	return m.persistStatusLocked(rt)
 }
 
 func (m *ServiceManager) waitForInitialExportLocked(ctx context.Context, rt *serviceRuntime) (ServiceExportFile, error) {
@@ -1061,17 +1100,16 @@ func (m *ServiceManager) readinessFailedLocked(ctx context.Context, rt *serviceR
 		cleanupMessage := security.NewRedactor(rt.secretValues...).RedactString(cleanupErr.Error())
 		message += "; " + cleanupMessage
 	}
-	m.transitionServiceFailureLocked(rt, serviceFailureTransition{
+	return m.transitionServiceFailureLocked(rt, serviceFailureTransition{
 		at:               m.now(),
 		lastError:        message,
 		requireAttention: cleanupErr != nil,
 	})
-	return nil
 }
 
-func (m *ServiceManager) handleProcessExitLocked(ctx context.Context, rt *serviceRuntime, exit serviceProcessExit) {
+func (m *ServiceManager) handleProcessExitLocked(ctx context.Context, rt *serviceRuntime, exit serviceProcessExit) error {
 	if rt.process == nil {
-		return
+		return nil
 	}
 	var exportErr error
 	if requiresInitialExport(rt.config) {
@@ -1097,14 +1135,12 @@ func (m *ServiceManager) handleProcessExitLocked(ctx context.Context, rt *servic
 	}
 	if groupErr != nil {
 		_ = m.appendEventLocked(rt, map[string]any{"type": "exited", "code": exit.code, "error": rt.status.ExitError, "time": rt.status.ExitedAt})
-		m.failOrphanRecoveryLocked(rt, groupErr)
-		return
+		return m.failOrphanRecoveryLocked(rt, groupErr)
 	}
 	rt.status.PID, rt.status.ProcessGroup = 0, 0
 	if rt.status.ManualStop || m.stopping || !rt.config.Enabled {
 		rt.status.State = ServiceStateStopped
-		m.persistStatusLocked(rt)
-		return
+		return m.persistStatusLocked(rt)
 	}
 	transitionAt := m.now()
 	_ = m.appendEventLocked(rt, map[string]any{"type": "exited", "code": exit.code, "error": rt.status.ExitError, "time": rt.status.ExitedAt})
@@ -1113,7 +1149,7 @@ func (m *ServiceManager) handleProcessExitLocked(ctx context.Context, rt *servic
 	if cleanupErr != nil {
 		lastError = security.NewRedactor(rt.secretValues...).RedactString(cleanupErr.Error())
 	}
-	m.transitionServiceFailureLocked(rt, serviceFailureTransition{
+	return m.transitionServiceFailureLocked(rt, serviceFailureTransition{
 		at:                  transitionAt,
 		lastError:           lastError,
 		resetAfterStableRun: true,
@@ -1121,7 +1157,7 @@ func (m *ServiceManager) handleProcessExitLocked(ctx context.Context, rt *servic
 	})
 }
 
-func (m *ServiceManager) transitionServiceFailureLocked(rt *serviceRuntime, failure serviceFailureTransition) {
+func (m *ServiceManager) transitionServiceFailureLocked(rt *serviceRuntime, failure serviceFailureTransition) error {
 	if failure.resetAfterStableRun && rt.config.Restart.ResetAfter > 0 && !rt.stableSince.IsZero() && failure.at.Sub(rt.stableSince) >= rt.config.Restart.ResetAfter {
 		rt.status.FailureCount = 0
 		rt.status.AttentionRequired = false
@@ -1134,7 +1170,7 @@ func (m *ServiceManager) transitionServiceFailureLocked(rt *serviceRuntime, fail
 	}
 	rt.status.LastError = failure.lastError
 	rt.status.NextRetryAt = failure.at.Add(restartDelay(rt.config.Restart, rt.status.FailureCount)).Format(time.RFC3339Nano)
-	m.persistStatusLocked(rt)
+	return m.persistStatusLocked(rt)
 }
 
 func (m *ServiceManager) stopProcessLocked(ctx context.Context, rt *serviceRuntime, manual bool) error {
@@ -1183,8 +1219,7 @@ func (m *ServiceManager) stopProcessLocked(ctx context.Context, rt *serviceRunti
 		rt.status.Cleanup.LastError = rt.status.LastError
 		rt.status.State = ServiceStateAttentionRequired
 		rt.status.AttentionRequired = true
-		m.persistStatusLocked(rt)
-		return err
+		return errors.Join(err, m.persistStatusLocked(rt))
 	}
 	return nil
 }
@@ -1246,8 +1281,7 @@ func (m *ServiceManager) failProcessTerminationLocked(rt *serviceRuntime, cause 
 	if appendFailure {
 		_ = m.appendEventLocked(rt, map[string]any{"type": "stop_failed", "error": message, "time": m.now().Format(time.RFC3339Nano)})
 	}
-	m.persistStatusLocked(rt)
-	return errors.New(message)
+	return errors.Join(errors.New(message), m.persistStatusLocked(rt))
 }
 
 func (m *ServiceManager) runCleanupLocked(ctx context.Context, rt *serviceRuntime) error {
@@ -1451,13 +1485,12 @@ func (m *ServiceManager) resolveTemplateLocked(template string) (string, string,
 	return result, "service-template", nil
 }
 
-func (m *ServiceManager) recoverOrphanLocked(rt *serviceRuntime) {
+func (m *ServiceManager) recoverOrphanLocked(rt *serviceRuntime) error {
 	if rt.status.PID <= 0 && rt.status.ProcessGroup <= 0 {
-		return
+		return nil
 	}
 	if err := m.terminateRuntimeProcessGroupLocked(context.Background(), rt, 500*time.Millisecond); err != nil {
-		m.failOrphanRecoveryLocked(rt, err)
-		return
+		return m.failOrphanRecoveryLocked(rt, err)
 	}
 	rt.processOwnership = serviceProcessOwnershipReconstructed
 	rt.status.PID, rt.status.ProcessGroup = 0, 0
@@ -1465,17 +1498,17 @@ func (m *ServiceManager) recoverOrphanLocked(rt *serviceRuntime) {
 	rt.status.ManualStop = false
 	rt.status.AttentionRequired = false
 	rt.status.LastError = ""
-	m.persistStatusLocked(rt)
+	return m.persistStatusLocked(rt)
 }
 
-func (m *ServiceManager) failOrphanRecoveryLocked(rt *serviceRuntime, cause error) {
+func (m *ServiceManager) failOrphanRecoveryLocked(rt *serviceRuntime, cause error) error {
 	message := security.NewRedactor(rt.secretValues...).RedactString(cause.Error())
 	rt.status.State = ServiceStateAttentionRequired
 	rt.status.AttentionRequired = true
 	rt.status.Readiness.Ready = false
 	rt.status.LastError = message
 	_ = m.appendEventLocked(rt, map[string]any{"type": "orphan_reap_failed", "error": message, "time": m.now().Format(time.RFC3339Nano)})
-	m.persistStatusLocked(rt)
+	return m.persistStatusLocked(rt)
 }
 
 func (m *ServiceManager) sortedIDsLocked() []string {
@@ -1492,13 +1525,21 @@ func (m *ServiceManager) sortedIDsLocked() []string {
 	return sortedServiceConfigIDs(m.configs)
 }
 
-func (m *ServiceManager) persistStatusLocked(rt *serviceRuntime) {
+func (m *ServiceManager) persistStatusLocked(rt *serviceRuntime) error {
 	rt.status.SchemaVersion = serviceSchemaVersion
 	rt.status.UpdatedAt = m.now().Format(time.RFC3339Nano)
 	path := filepath.Join(serviceRuntimePath(m.root, rt.status.ID), "state.json")
-	if pathWithinResolved(filepath.Join(m.root, ".pua"), path) {
-		_ = writeServiceJSON(path, rt.status, 0o600)
+	if !pathWithinResolved(filepath.Join(m.root, ".pua"), path) {
+		return errors.New("service runtime state path escapes the workspace control directory")
 	}
+	writeJSON := m.runtimeStateStore.writeJSON
+	if writeJSON == nil {
+		writeJSON = writeServiceJSON
+	}
+	if err := writeJSON(path, rt.status, 0o600); err != nil {
+		return fmt.Errorf("persist service %s runtime state: %w", rt.status.ID, err)
+	}
+	return nil
 }
 
 func (m *ServiceManager) releaseStartupLogsLocked(rt *serviceRuntime) error {
@@ -1885,7 +1926,9 @@ func (m *ServiceManager) Apply(cfg ServiceConfig) error {
 		rt = &serviceRuntime{config: cfg, status: initialServiceStatus(cfg)}
 		rt.status.Dependencies = append([]string(nil), graph[cfg.ID]...)
 		m.runtimes[cfg.ID] = rt
-		m.persistStatusLocked(rt)
+		if err := m.persistStatusLocked(rt); err != nil {
+			return err
+		}
 	} else {
 		rt.config = cfg
 		rt.status.Enabled = cfg.Enabled
@@ -1907,7 +1950,9 @@ func (m *ServiceManager) Apply(cfg ServiceConfig) error {
 				rt.status.State = ServiceStateDisabled
 			}
 		}
-		m.persistStatusLocked(rt)
+		if err := m.persistStatusLocked(rt); err != nil {
+			return err
+		}
 	}
 	if changed && m.started && !m.stopping {
 		return m.reconcileOneLocked(context.Background(), rt, graph[cfg.ID])
@@ -1961,7 +2006,9 @@ func (m *ServiceManager) Remove(ctx context.Context, id string) error {
 		rt.status.State = ServiceStateDisabled
 		rt.status.PID, rt.status.ProcessGroup = 0, 0
 	}
-	m.persistStatusLocked(rt)
+	if err := m.persistStatusLocked(rt); err != nil {
+		return err
+	}
 	if err := m.removeDefinitionLocked(id); err != nil {
 		return serviceDefinitionOperationError(rt, err)
 	}
@@ -2003,8 +2050,7 @@ func (m *ServiceManager) Enable(id string) error {
 	} else if rt.status.AttentionRequired {
 		rt.status.State = ServiceStateAttentionRequired
 	}
-	m.persistStatusLocked(rt)
-	return nil
+	return m.persistStatusLocked(rt)
 }
 func (m *ServiceManager) Disable(ctx context.Context, id string) error {
 	m.mu.Lock()
@@ -2041,8 +2087,7 @@ func (m *ServiceManager) Disable(ctx context.Context, id string) error {
 		rt.status.Readiness.Ready = false
 		rt.status.PID, rt.status.ProcessGroup = 0, 0
 	}
-	m.persistStatusLocked(rt)
-	return cleanupErr
+	return errors.Join(cleanupErr, m.persistStatusLocked(rt))
 }
 func (m *ServiceManager) StartService(ctx context.Context, id string) error {
 	m.mu.Lock()
@@ -2057,8 +2102,7 @@ func (m *ServiceManager) StartService(ctx context.Context, id string) error {
 		if rt.status.LastError == "" {
 			rt.status.LastError = fmt.Sprintf("service process group %d ownership is unresolved", rt.status.ProcessGroup)
 		}
-		m.persistStatusLocked(rt)
-		return errors.New(rt.status.LastError)
+		return errors.Join(errors.New(rt.status.LastError), m.persistStatusLocked(rt))
 	}
 	rt.status.ManualStop = false
 	rt.status.FailureCount = 0
@@ -2087,8 +2131,7 @@ func (m *ServiceManager) StopService(ctx context.Context, id string) error {
 		}
 	}
 	rt.status.State = ServiceStateStopped
-	m.persistStatusLocked(rt)
-	return nil
+	return m.persistStatusLocked(rt)
 }
 func (m *ServiceManager) RestartService(ctx context.Context, id string) error {
 	if err := m.StopService(ctx, id); err != nil {

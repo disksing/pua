@@ -287,6 +287,14 @@ func (f *runtimeFakeAgentHub) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 			resumeHook = f.resumeHook
 			f.resumeEnvironments = append(f.resumeEnvironments, resumeRequest.LaunchEnvironment)
 			f.resumeSecrets = append(f.resumeSecrets, resumeRequest.EphemeralEnvironment)
+			if f.sessions[id].EphemeralEnvironmentRequired && len(resumeRequest.EphemeralEnvironment) == 0 {
+				f.mu.Unlock()
+				w.WriteHeader(http.StatusConflict)
+				writeRuntimeFakeJSON(w, map[string]any{"error": map[string]any{
+					"code": "runtime_operation_failed", "message": "session requires a non-empty ephemeral environment for every provider start",
+				}})
+				return
+			}
 			if f.failNextResume {
 				f.failNextResume = false
 				status := f.resumeErrorStatus
@@ -427,7 +435,10 @@ func (f *runtimeFakeAgentHub) create(w http.ResponseWriter, r *http.Request) {
 	session := agentHubSession{
 		ID: id, Title: request.Title, Cwd: request.Cwd, AgentName: request.AgentName,
 		LaunchEnvironment: request.LaunchEnvironment, Source: request.Source, Provider: "fake",
-		State: "ready", CreatedAt: time.Now().Format(time.RFC3339), UpdatedAt: time.Now().Format(time.RFC3339),
+		EphemeralEnvironmentRequired: len(request.EphemeralEnvironment) > 0,
+		State:                        "ready",
+		CreatedAt:                    time.Now().Format(time.RFC3339),
+		UpdatedAt:                    time.Now().Format(time.RFC3339),
 	}
 	f.sessions[id] = session
 	f.appendLocked(id, "session.created", session)

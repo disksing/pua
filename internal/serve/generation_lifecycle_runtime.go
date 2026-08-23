@@ -71,6 +71,17 @@ func (m *agentManager) resumeStoppedGenerationLocked(ctx context.Context, worksp
 		// and its previous durable receipt for a later preflight retry.
 		return false, false, err
 	}
+	if observed.EphemeralEnvironmentRequired && len(overlay.EphemeralEnvironment) == 0 {
+		// AgentHub intentionally makes an ephemeral overlay a permanent
+		// requirement once this Session has received one. If the binding was
+		// removed, an empty Resume can never succeed; classify that known local
+		// boundary as terminal so mailbox ownership moves to a fresh generation
+		// instead of entering the transient Resume backoff loop.
+		return false, true, fmt.Errorf(
+			"AgentHub Session %s requires an ephemeral environment, but the current service bindings provide none",
+			observed.ID,
+		)
+	}
 
 	receipt := lifecycleResumeReceipt(plan)
 	if _, err := rt.mutateGeneration(func(current *generationRecord) {

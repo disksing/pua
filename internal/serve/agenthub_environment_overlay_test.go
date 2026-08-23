@@ -253,3 +253,91 @@ func TestResumeEnvironmentOverlayMatchesCreate(t *testing.T) {
 	}
 	assertWorkspaceSecretAbsent(t, workspace.Path, secret)
 }
+
+func TestRemovedSecretBindingReplacesEphemeralSessionBeforeResume(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	capabilities := append(append([]string(nil), requiredAgentHubCapabilities...), agentHubEphemeralEnvironmentCapability)
+	hub := httptest.NewServer(runtimeFakeAgentHubWithCapabilities(fake, capabilities))
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+	const secret = "removed-binding-replacement-secret"
+	writeRuntimeServiceBindings(t, workspace, secret)
+	cfg, client, err := manager.agentHubRuntimeConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := manager.resolveResourceAgent(workspace, "project1.task1", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := manager.createResourceGeneration(
+		context.Background(), workspace, "project1.task1", workspace.Path, cfg, client, resolved,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalRuntime := manager.runtimeByID(original.ID)
+	if originalRuntime == nil {
+		t.Fatal("created generation has no runtime")
+	}
+	stopped, err := client.Stop(context.Background(), original.AgentHubSessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalRuntime.applyAgentHubSessionState(manager, stopped)
+	original = originalRuntime.snapshotGeneration()
+	if stopped.State != "stopped" || !stopped.EphemeralEnvironmentRequired {
+		t.Fatalf("secret-backed Session did not reach the required stopped boundary: %#v", stopped)
+	}
+
+	if err := writeServiceJSON(serviceBindingsPath(workspace.Path), ServiceBindings{
+		SchemaVersion: serviceSchemaVersion,
+	}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	message, err := acceptMailboxMessage(workspace.Path, original.ResourceID, resourceMessageRequest{
+		Text: "continue without removed secret", Mode: resourceMessageModeEnqueue,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.withResourceController(context.Background(), workspace, original.ResourceID, func() error {
+		return manager.reconcileResourceMailboxLocked(context.Background(), workspace, original.ResourceID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	current, found, err := currentResourceGeneration(workspace.Path, original.ResourceID)
+	if err != nil || !found {
+		t.Fatalf("replacement generation lookup: found=%v err=%v", found, err)
+	}
+	updated, found, err := mailboxMessageByID(workspace.Path, message.ID)
+	if err != nil || !found {
+		t.Fatalf("replacement mailbox lookup: found=%v err=%v", found, err)
+	}
+	if current.Generation <= original.Generation || current.AgentHubSessionID == original.AgentHubSessionID {
+		t.Fatalf("marked stopped Session was not replaced: original=%#v current=%#v", original, current)
+	}
+	if updated.Status != resourceMessageDelivered || updated.GenerationID != current.GenerationID {
+		t.Fatalf("queued work did not progress on replacement: %#v", updated)
+	}
+	fake.mu.Lock()
+	originalSession := fake.sessions[original.AgentHubSessionID]
+	replacementSession := fake.sessions[current.AgentHubSessionID]
+	resumeAttempts := len(fake.resumeEnvironments)
+	requests := append([]agentHubCreateSessionRequest(nil), fake.createRequests...)
+	fake.mu.Unlock()
+	if resumeAttempts != 0 {
+		t.Fatalf("marked Session received %d empty Resume attempts before replacement", resumeAttempts)
+	}
+	if originalSession.State != "archived" || !originalSession.EphemeralEnvironmentRequired {
+		t.Fatalf("old marked Session was not retired: %#v", originalSession)
+	}
+	if replacementSession.EphemeralEnvironmentRequired {
+		t.Fatalf("replacement retained the removed ephemeral requirement: %#v", replacementSession)
+	}
+	if len(requests) != 2 || len(requests[0].EphemeralEnvironment) == 0 || len(requests[1].EphemeralEnvironment) != 0 {
+		t.Fatalf("create overlays did not follow binding removal: %#v", requests)
+	}
+	assertWorkspaceSecretAbsent(t, workspace.Path, secret)
+}

@@ -162,24 +162,27 @@ type agentHubInputCapabilities struct {
 }
 
 type agentHubSession struct {
-	ID                 string                    `json:"id"`
-	Title              string                    `json:"title"`
-	Cwd                string                    `json:"cwd"`
-	AgentName          string                    `json:"agentName,omitempty"`
-	LaunchEnvironment  map[string]string         `json:"launchEnvironment,omitempty"`
-	Source             *agentHubSource           `json:"source,omitempty"`
-	Provider           string                    `json:"provider,omitempty"`
-	InputCapabilities  agentHubInputCapabilities `json:"inputCapabilities"`
-	ProviderSessionID  string                    `json:"providerSessionId,omitempty"`
-	State              string                    `json:"state"`
-	StopReason         string                    `json:"stopReason,omitempty"`
-	CurrentTurnID      string                    `json:"currentTurnId,omitempty"`
-	PendingApprovalIDs []string                  `json:"pendingApprovalIds,omitempty"`
-	LastEventID        int64                     `json:"lastEventId"`
-	LastActivityAt     string                    `json:"lastActivityAt,omitempty"`
-	LastActivityTurnID string                    `json:"lastActivityTurnId,omitempty"`
-	CreatedAt          string                    `json:"createdAt"`
-	UpdatedAt          string                    `json:"updatedAt"`
+	ID                string            `json:"id"`
+	Title             string            `json:"title"`
+	Cwd               string            `json:"cwd"`
+	AgentName         string            `json:"agentName,omitempty"`
+	LaunchEnvironment map[string]string `json:"launchEnvironment,omitempty"`
+	// EphemeralEnvironmentRequired is AgentHub's durable, non-secret marker
+	// that every later Provider start needs a fresh one-shot overlay.
+	EphemeralEnvironmentRequired bool                      `json:"ephemeralEnvironmentRequired,omitempty"`
+	Source                       *agentHubSource           `json:"source,omitempty"`
+	Provider                     string                    `json:"provider,omitempty"`
+	InputCapabilities            agentHubInputCapabilities `json:"inputCapabilities"`
+	ProviderSessionID            string                    `json:"providerSessionId,omitempty"`
+	State                        string                    `json:"state"`
+	StopReason                   string                    `json:"stopReason,omitempty"`
+	CurrentTurnID                string                    `json:"currentTurnId,omitempty"`
+	PendingApprovalIDs           []string                  `json:"pendingApprovalIds,omitempty"`
+	LastEventID                  int64                     `json:"lastEventId"`
+	LastActivityAt               string                    `json:"lastActivityAt,omitempty"`
+	LastActivityTurnID           string                    `json:"lastActivityTurnId,omitempty"`
+	CreatedAt                    string                    `json:"createdAt"`
+	UpdatedAt                    string                    `json:"updatedAt"`
 }
 
 // agentHubMessageSender belongs to PUA's own message payload. The top-level

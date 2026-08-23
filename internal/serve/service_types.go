@@ -53,10 +53,12 @@ type ServiceConfig struct {
 	CWD           string                        `json:"cwd,omitempty"`
 	Environment   map[string]ServiceEnvironment `json:"environment,omitempty"`
 	DependsOn     []string                      `json:"dependsOn,omitempty"`
-	// Exports declares that the process atomically writes its complete initial
-	// export hand-off before startup output may be persisted. Variables may be
-	// replaced later, but exported secret names and values are immutable for the
-	// lifetime of the process.
+	// Exports declares that the process atomically writes
+	// PUA_SERVICE_EXPORT_PATH. Every writer must set this regardless of Readiness
+	// so the complete initial hand-off is accepted before startup output is
+	// persisted. When false, the supervisor neither waits for a hand-off nor
+	// gates logs. Variables may be replaced later, but exported secret names and
+	// values are immutable for the lifetime of the process.
 	Exports     bool                     `json:"exports,omitempty"`
 	Readiness   *ServiceReadinessConfig  `json:"readiness,omitempty"`
 	Cleanup     *ServiceCleanupConfig    `json:"cleanup,omitempty"`

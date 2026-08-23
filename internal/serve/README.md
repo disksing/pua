@@ -150,16 +150,21 @@ cleanup.
 
 Each service may provide readiness and cleanup commands, export variables and
 secrets through an atomically replaced `PUA_SERVICE_EXPORT_PATH`, and configure
-persisted exponential restart backoff. A service without readiness that writes
-exports sets `"exports": true`; the supervisor then waits up to the default
-readiness timeout for its complete initial hand-off and buffers startup logs
-until all exported secrets are registered. Readiness continues to imply this
-handshake for existing definitions. State and event/log files use private
-permissions and a shared streaming redactor. Later atomic hand-offs may update
-public variables, but their secret names and values must match the accepted
-initial hand-off. A secret change is scrubbed, blocks later log persistence,
-and fails the service because the one-way file protocol cannot safely
-coordinate dynamic secret rotation with stdout and stderr. Secret values are
-retained only in memory; API and CLI exports expose variables plus secret
-metadata, never secret values. `.pua/services/bindings.json` separates durable
-variable templates from one-shot secret overlays sent to AgentHub providers.
+persisted exponential restart backoff. Every service that writes
+`PUA_SERVICE_EXPORT_PATH` sets `"exports": true`, regardless of whether it also
+configures readiness. The supervisor then waits up to the readiness timeout (or
+the default timeout when readiness is absent) for the complete initial hand-off
+and buffers startup logs until all exported secrets are registered. Readiness
+neither implies nor replaces the export declaration: a readiness-only service
+omits `"exports"` and can become ready without a hand-off. The supervisor does
+not infer exporter behavior from readiness or file writes, so an exporter that
+omits the declaration receives no initial hand-off wait or log gate. State and
+event/log files use private permissions and a shared streaming redactor. Later
+atomic hand-offs may update public variables, but their secret names and values
+must match the accepted initial hand-off. A secret change is scrubbed, blocks
+later log persistence, and fails the service because the one-way file protocol
+cannot safely coordinate dynamic secret rotation with stdout and stderr. Secret
+values are retained only in memory; API and CLI exports expose variables plus
+secret metadata, never secret values. `.pua/services/bindings.json` separates
+durable variable templates from one-shot secret overlays sent to AgentHub
+providers.

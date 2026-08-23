@@ -105,12 +105,12 @@ func TestServiceConfigExportsDeclarationWire(t *testing.T) {
 	if !strings.Contains(string(data), `"exports":true`) {
 		t.Fatalf("exports declaration was not encoded: %s", data)
 	}
-	var legacy ServiceConfig
-	if err := json.Unmarshal([]byte(`{"schemaVersion":1,"id":"legacy","enabled":true,"command":["service"]}`), &legacy); err != nil {
+	var readinessOnly ServiceConfig
+	if err := json.Unmarshal([]byte(`{"schemaVersion":1,"id":"ready","enabled":true,"command":["service"],"readiness":{"command":["check"]}}`), &readinessOnly); err != nil {
 		t.Fatal(err)
 	}
-	if legacy.Exports {
-		t.Fatal("omitted exports declaration must remain disabled")
+	if readinessOnly.Exports {
+		t.Fatal("readiness must not enable an omitted exports declaration")
 	}
 }
 
@@ -275,7 +275,7 @@ func TestServiceManagerNamedSecretResolutionParity(t *testing.T) {
 
 func TestServiceManagerReadinessDoesNotRequireInitialExport(t *testing.T) {
 	root := t.TempDir()
-	cfg := ServiceConfig{SchemaVersion: serviceSchemaVersion, ID: "ready", Enabled: true, Command: []string{"/bin/sh", "-c", "sleep 2"}, Readiness: &ServiceReadinessConfig{Command: []string{"/bin/sh", "-c", "exit 0"}, Interval: time.Second, Timeout: time.Second}, Restart: ServiceRestartConfig{InitialDelay: time.Millisecond, Multiplier: 2, MaxDelay: time.Second}}
+	cfg := ServiceConfig{SchemaVersion: serviceSchemaVersion, ID: "ready", Enabled: true, Command: []string{"/bin/sh", "-c", "printf 'readiness-only-output\\n'; sleep 2"}, Readiness: &ServiceReadinessConfig{Command: []string{"/bin/sh", "-c", "exit 0"}, Interval: time.Second, Timeout: time.Second}, Restart: ServiceRestartConfig{InitialDelay: time.Millisecond, Multiplier: 2, MaxDelay: time.Second}}
 	writeTestService(t, root, cfg)
 	m, err := NewServiceManager(root, ServiceManagerOptions{})
 	if err != nil {
@@ -293,6 +293,10 @@ func TestServiceManagerReadinessDoesNotRequireInitialExport(t *testing.T) {
 	}
 	if status.State != ServiceStateReady {
 		t.Fatalf("state = %q, want ready", status.State)
+	}
+	waitForTestPath(t, filepath.Join(serviceRuntimePath(root, "ready"), "stdout.log"), "readiness-only-output")
+	if _, err := os.Stat(filepath.Join(serviceRuntimePath(root, "ready"), "export.json")); !os.IsNotExist(err) {
+		t.Fatalf("readiness-only service unexpectedly wrote an export hand-off: %v", err)
 	}
 	if err := m.Stop(context.Background()); err != nil {
 		t.Fatal(err)
@@ -356,17 +360,24 @@ func TestServiceManagerDeclaredExporterRequiresValidInitialHandoff(t *testing.T)
 
 func TestServiceManagerBuffersReadinessLogsUntilExportSecretsAreKnown(t *testing.T) {
 	root := t.TempDir()
+	startedPath := filepath.Join(root, "exporter-started")
+	releasePath := filepath.Join(root, "release-export")
 	cfg := ServiceConfig{
 		SchemaVersion: serviceSchemaVersion,
 		ID:            "buffered",
 		Enabled:       true,
 		Exports:       true,
-		Command: []string{"/bin/sh", "-c", `
-			printf '%s\n' 'exported-secret'
-			printf '%s' '{"schemaVersion":1,"secrets":{"TOKEN":"exported-secret"}}' > "$PUA_SERVICE_EXPORT_PATH"
+		Command: []string{"/bin/sh", "-c", fmt.Sprintf(`
+			printf '%%s\n' 'exported-secret'
+			: > %s
+			while [ ! -f %s ]; do sleep 0.01; done
+			tmp="$PUA_SERVICE_EXPORT_PATH.tmp"
+			printf '%%s' '{"schemaVersion":1,"secrets":{"TOKEN":"exported-secret"}}' > "$tmp"
+			mv "$tmp" "$PUA_SERVICE_EXPORT_PATH"
+			printf 'after-handoff\n'
 			sleep 1
-		`},
-		Readiness: &ServiceReadinessConfig{Command: []string{"/bin/sh", "-c", "exit 0"}, Interval: time.Second, Timeout: time.Second},
+		`, shellQuote(startedPath), shellQuote(releasePath))},
+		Readiness: &ServiceReadinessConfig{Command: []string{"/bin/sh", "-c", "exit 0"}, Interval: time.Second, Timeout: 3 * time.Second},
 		Restart:   ServiceRestartConfig{InitialDelay: time.Millisecond, Multiplier: 2, MaxDelay: time.Second},
 	}
 	writeTestService(t, root, cfg)
@@ -374,10 +385,41 @@ func TestServiceManagerBuffersReadinessLogsUntilExportSecretsAreKnown(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := m.Start(context.Background()); err != nil {
+	stopProcessTestManager(t, &m)
+	t.Cleanup(func() { _ = os.WriteFile(releasePath, nil, 0o600) })
+	started := make(chan error, 1)
+	go func() { started <- m.Start(context.Background()) }()
+	waitForTestFile(t, startedPath)
+	select {
+	case err := <-started:
+		t.Fatalf("declared exporter completed startup before its hand-off: %v", err)
+	default:
+	}
+	logPath := filepath.Join(serviceRuntimePath(root, "buffered"), "stdout.log")
+	gateDeadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(gateDeadline) {
+		data, err := os.ReadFile(logPath)
+		if err == nil && len(data) > 0 {
+			t.Fatal("declared exporter persisted startup output before its hand-off")
+		}
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := os.WriteFile(releasePath, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(filepath.Join(serviceRuntimePath(root, "buffered"), "stdout.log"))
+	select {
+	case err := <-started:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("declared exporter did not accept its initial hand-off")
+	}
+	waitForTestPath(t, logPath, "after-handoff")
+	data, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -394,8 +436,12 @@ func TestServiceManagerBuffersReadinessLogsUntilExportSecretsAreKnown(t *testing
 	if strings.Contains(string(exportData), "exported-secret") {
 		t.Fatalf("export secret remained on disk: %s", exportData)
 	}
-	if err := m.Stop(context.Background()); err != nil {
+	status, err := m.Show("buffered")
+	if err != nil {
 		t.Fatal(err)
+	}
+	if status.State != ServiceStateReady || !status.Readiness.Ready {
+		t.Fatalf("declared readiness exporter did not become ready: %#v", status)
 	}
 }
 

@@ -23,9 +23,9 @@ type serviceLogSink struct {
 	size     int64
 }
 
-// serviceLogWriter keeps startup output in a bounded private buffer until the
-// initial export handshake has registered every secret exported by the
-// service. This prevents a service that prints an exported secret before its
+// serviceLogWriter keeps a declared exporter's startup output in a bounded
+// private buffer until the initial hand-off has registered every exported
+// secret. This prevents a service that prints an exported secret before its
 // first export from leaking that value into the durable log.
 type serviceLogWriter struct {
 	mu          sync.Mutex

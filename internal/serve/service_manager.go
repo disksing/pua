@@ -933,6 +933,8 @@ func equalStringMap(left, right map[string]string) bool {
 }
 
 func requiresInitialExport(cfg ServiceConfig) bool {
+	// Export gating is an explicit protocol declaration. Readiness alone never
+	// implies that the process will write an export hand-off.
 	return cfg.Exports
 }
 

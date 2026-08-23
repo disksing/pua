@@ -72,10 +72,12 @@ bin/agenthub
 may declare dependencies and readiness/cleanup commands, and are restarted
 with persisted exponential backoff after unexpected exits. Runtime state,
 redacted logs, and validated exports live below `.pua/runtime/services/`.
-Services that export without a readiness command declare `"exports": true` so
-the supervisor can register their complete initial secret hand-off before it
-persists startup output. Later atomic hand-offs may update public variables;
-secret names and values are immutable until the service restarts.
+Every service that writes `PUA_SERVICE_EXPORT_PATH` must declare
+`"exports": true`, whether or not it has a readiness command. The supervisor
+then registers the complete initial secret hand-off before it persists startup
+output. Readiness-only services omit the flag and do not perform an export
+hand-off. Later atomic hand-offs may update public variables; secret names and
+values are immutable until the service restarts.
 
 Use `pua service list`, `show`, `apply`, `start`, `stop`, `restart`, `logs`,
 `exports`, and `validate` to inspect and control them. Secret references are

@@ -272,6 +272,8 @@ func printServiceHelp() {
   pua service validate
 
 Service definitions are stored in .pua/services/<id>.json and are owned by
-the pua serve process. Secret values are never printed or persisted by PUA.
+the pua serve process. Every service that writes PUA_SERVICE_EXPORT_PATH must
+set "exports": true, regardless of readiness. Readiness-only services omit the
+flag. Secret values are never printed or persisted by PUA.
 `)
 }

@@ -58,6 +58,7 @@ func TestSchedulerCommandsUseOwningServerForNativeSchedules(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		changeRequests := 0
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch {
 			case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/scheduler"):
@@ -73,6 +74,7 @@ func TestSchedulerCommandsUseOwningServerForNativeSchedules(t *testing.T) {
 				}
 				_ = json.NewEncoder(w).Encode(snapshot)
 			case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/scheduler/changes"):
+				changeRequests++
 				var body schedulerChangePayload
 				if decodeErr := json.NewDecoder(r.Body).Decode(&body); decodeErr != nil {
 					t.Error(decodeErr)
@@ -124,13 +126,50 @@ func TestSchedulerCommandsUseOwningServerForNativeSchedules(t *testing.T) {
 		if !strings.Contains(listed, created.ID+"\t1\tactive\tat ") {
 			t.Fatalf("schedule list = %q", listed)
 		}
-		updatedOutput := run(t, "scheduler", "update", "--id="+created.ID, "--revision=1", "--condition=at the agreed time when the release branch is green", "--target=scheduler")
+		for name, test := range map[string]struct {
+			args []string
+			want string
+		}{
+			"missing trigger": {
+				args: []string{"scheduler", "update", "--id=" + created.ID, "--revision=1", "--condition=at the agreed time when the release branch is green"},
+				want: schedulerUpdateUsage,
+			},
+			"incomplete trigger": {
+				args: []string{"scheduler", "update", "--id=" + created.ID, "--revision=1", "--every=5m"},
+				want: "--every and --anchor are required together",
+			},
+			"mixed triggers": {
+				args: []string{"scheduler", "update", "--id=" + created.ID, "--revision=1", "--at=" + at, "--cron=0 0 9 * * *", "--timezone=UTC"},
+				want: "exactly one trigger form is required",
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				if _, err := runErr(t, test.args...); err == nil || !strings.Contains(err.Error(), test.want) {
+					t.Fatalf("scheduler update error = %v, want %q", err, test.want)
+				}
+				if changeRequests != 1 {
+					t.Fatalf("scheduler change requests = %d, want create only", changeRequests)
+				}
+			})
+		}
+
+		updatedAt := time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339Nano)
+		updatedOutput := run(t, "scheduler", "update", "--id="+created.ID, "--revision=1", "--condition=at the agreed time when the release branch is green", "--target=scheduler", "--at="+updatedAt)
 		var updated app.Schedule
 		if err := json.Unmarshal([]byte(updatedOutput), &updated); err != nil {
 			t.Fatal(err)
 		}
-		if updated.Revision != 2 || updated.Condition != "at the agreed time when the release branch is green" || updated.Target != app.SchedulerResourceID || updated.CreatedAt != created.CreatedAt {
+		if updated.Revision != 2 || updated.Condition != "at the agreed time when the release branch is green" || updated.Target != app.SchedulerResourceID || updated.CreatedAt != created.CreatedAt || updated.Trigger == nil || updated.Trigger.At != updatedAt {
 			t.Fatalf("updated schedule = %#v", updated)
+		}
+		triggerOnlyAt := time.Now().UTC().Add(3 * time.Hour).Format(time.RFC3339Nano)
+		triggerOnlyOutput := run(t, "scheduler", "update", "--id="+created.ID, "--revision=2", "--at="+triggerOnlyAt)
+		var triggerOnly app.Schedule
+		if err := json.Unmarshal([]byte(triggerOnlyOutput), &triggerOnly); err != nil {
+			t.Fatal(err)
+		}
+		if triggerOnly.Revision != 3 || triggerOnly.Description != updated.Description || triggerOnly.Condition != updated.Condition || triggerOnly.Target != updated.Target || triggerOnly.Trigger == nil || triggerOnly.Trigger.At != triggerOnlyAt {
+			t.Fatalf("trigger-only update changed unrelated fields = %#v", triggerOnly)
 		}
 		shown := run(t, "scheduler", "show", "--id", created.ID)
 		if !strings.Contains(shown, `"target": "scheduler"`) {
@@ -172,6 +211,41 @@ func TestSchedulerTriggerOptionsAreStructuredAndUnambiguous(t *testing.T) {
 	parsed, err := parseSchedulerOptions([]string{"--guard="}, map[string]bool{"guard": true})
 	if err != nil || parsed["guard"] != "" {
 		t.Fatalf("empty guard cannot clear optional predicate: %#v, %v", parsed, err)
+	}
+}
+
+func TestSchedulerUpdateValidatesTriggerBeforeOwnerDiscovery(t *testing.T) {
+	withTempCwd(t, func(_ string) {
+		for name, test := range map[string]struct {
+			args []string
+			want string
+		}{
+			"missing trigger": {
+				args: []string{"scheduler", "update", "--id=schedule-1", "--revision=1", "--condition=changed"},
+				want: schedulerUpdateUsage,
+			},
+			"incomplete trigger": {
+				args: []string{"scheduler", "update", "--id=schedule-1", "--revision=1", "--every=5m"},
+				want: "--every and --anchor are required together",
+			},
+			"mixed triggers": {
+				args: []string{"scheduler", "update", "--id=schedule-1", "--revision=1", "--at=2026-08-23T09:00:00Z", "--cron=0 0 9 * * *", "--timezone=UTC"},
+				want: "exactly one trigger form is required",
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				if _, err := runErr(t, test.args...); err == nil || !strings.Contains(err.Error(), test.want) {
+					t.Fatalf("scheduler update error = %v, want %q", err, test.want)
+				}
+			})
+		}
+	})
+}
+
+func TestSchedulerHelpRequiresUpdateTrigger(t *testing.T) {
+	help := run(t, "scheduler", "help")
+	if strings.Contains(help, "optional trigger") || !strings.Contains(help, "pua scheduler update --id=<schedule> --revision=<n> [--description=<text>]") || !strings.Contains(help, "complete replacement trigger") {
+		t.Fatalf("scheduler help does not require an update trigger:\n%s", help)
 	}
 }
 

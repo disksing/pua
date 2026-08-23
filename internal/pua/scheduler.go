@@ -17,7 +17,7 @@ import (
 const (
 	schedulerAddUsage    = "usage: pua scheduler add --description=<text> --condition=<text> --target=<resource> [--guard=<text>] (--at=<rfc3339>|--every=<duration> --anchor=<rfc3339>|--cron=<six-fields> --timezone=<iana>) [--server=<url>]"
 	schedulerShowUsage   = "usage: pua scheduler show --id=<schedule> [--server=<url>]"
-	schedulerUpdateUsage = "usage: pua scheduler update --id=<schedule> --revision=<n> [--description=<text>] [--condition=<text>] [--guard=<text>] [--target=<resource>] [(--at=<rfc3339>|--every=<duration> --anchor=<rfc3339>|--cron=<six-fields> --timezone=<iana>)] [--server=<url>]"
+	schedulerUpdateUsage = "usage: pua scheduler update --id=<schedule> --revision=<n> [--description=<text>] [--condition=<text>] [--guard=<text>] [--target=<resource>] (--at=<rfc3339>|--every=<duration> --anchor=<rfc3339>|--cron=<six-fields> --timezone=<iana>) [--server=<url>]"
 	schedulerRemoveUsage = "usage: pua scheduler remove --id=<schedule> [--server=<url>]"
 )
 
@@ -55,6 +55,13 @@ func runScheduler(args []string) error {
 	remaining, serverURL, err := splitServerArg(args[1:], usage)
 	if err != nil {
 		return err
+	}
+	var updatePayload schedulerChangePayload
+	if subcommand == "update" {
+		updatePayload, err = parseSchedulerUpdatePayload(remaining)
+		if err != nil {
+			return err
+		}
 	}
 	client, _, err := newResourceServerClient(serverURL)
 	if err != nil {
@@ -123,29 +130,7 @@ func runScheduler(args []string) error {
 		}
 		return schedulerChangeRequest(client, basePath, payload)
 	case "update":
-		values, err := parseSchedulerOptions(remaining, schedulerMutationOptions(true))
-		if err != nil || values["id"] == "" || values["revision"] == "" {
-			return errors.New(schedulerUpdateUsage)
-		}
-		revision, err := strconv.ParseUint(values["revision"], 10, 64)
-		if err != nil || revision == 0 {
-			return errors.New(schedulerUpdateUsage)
-		}
-		trigger, triggerPresent, err := schedulerTriggerFromOptions(values)
-		if err != nil {
-			return err
-		}
-		payload := schedulerChangePayload{Operation: "update", ID: values["id"], ExpectedRevision: revision, Trigger: trigger}
-		for name, target := range map[string]**string{"description": &payload.Description, "condition": &payload.Condition, "guard": &payload.Guard, "target": &payload.Target} {
-			if value, ok := values[name]; ok {
-				copy := value
-				*target = &copy
-			}
-		}
-		if payload.Description == nil && payload.Condition == nil && payload.Guard == nil && payload.Target == nil && !triggerPresent {
-			return errors.New(schedulerUpdateUsage)
-		}
-		return schedulerChangeRequest(client, basePath, payload)
+		return schedulerChangeRequest(client, basePath, updatePayload)
 	case "pause", "resume", "remove":
 		values, err := parseSchedulerOptions(remaining, map[string]bool{"id": true})
 		if err != nil || values["id"] == "" {
@@ -155,6 +140,32 @@ func runScheduler(args []string) error {
 	default:
 		return fmt.Errorf("unknown scheduler subcommand %q", subcommand)
 	}
+}
+
+func parseSchedulerUpdatePayload(args []string) (schedulerChangePayload, error) {
+	values, err := parseSchedulerOptions(args, schedulerMutationOptions(true))
+	if err != nil || values["id"] == "" || values["revision"] == "" {
+		return schedulerChangePayload{}, errors.New(schedulerUpdateUsage)
+	}
+	revision, err := strconv.ParseUint(values["revision"], 10, 64)
+	if err != nil || revision == 0 {
+		return schedulerChangePayload{}, errors.New(schedulerUpdateUsage)
+	}
+	trigger, triggerPresent, err := schedulerTriggerFromOptions(values)
+	if err != nil {
+		return schedulerChangePayload{}, err
+	}
+	if !triggerPresent {
+		return schedulerChangePayload{}, errors.New(schedulerUpdateUsage)
+	}
+	payload := schedulerChangePayload{Operation: "update", ID: values["id"], ExpectedRevision: revision, Trigger: trigger}
+	for name, target := range map[string]**string{"description": &payload.Description, "condition": &payload.Condition, "guard": &payload.Guard, "target": &payload.Target} {
+		if value, ok := values[name]; ok {
+			copy := value
+			*target = &copy
+		}
+	}
+	return payload, nil
 }
 
 func schedulerSnapshot(client *resourceServerClient, path string) (app.SchedulerSnapshot, error) {

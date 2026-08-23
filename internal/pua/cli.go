@@ -560,7 +560,7 @@ func printSchedulerHelp() {
   pua scheduler list [--json] [--server=<url>]
   pua scheduler show --id=<schedule> [--server=<url>]
   pua scheduler add --description=<text> --condition=<text> --target=<resource> [--guard=<text>] (--at=<rfc3339>|--every=<duration> --anchor=<rfc3339>|--cron=<six-fields> --timezone=<iana>) [--server=<url>]
-  pua scheduler update --id=<schedule> --revision=<n> [fields and optional trigger] [--server=<url>]
+  pua scheduler update --id=<schedule> --revision=<n> [--description=<text>] [--condition=<text>] [--guard=<text>] [--target=<resource>] (--at=<rfc3339>|--every=<duration> --anchor=<rfc3339>|--cron=<six-fields> --timezone=<iana>) [--server=<url>]
   pua scheduler pause|resume|remove --id=<schedule> [--server=<url>]
 
 Commands:
@@ -576,7 +576,8 @@ Commands:
     frequently than once per 60 seconds.
 
   pua scheduler update ...
-    Compare-and-swap an existing definition using its current revision.
+    Compare-and-swap an existing definition using its current revision and one
+    complete replacement trigger.
 
   pua scheduler pause|resume|remove ...
     Deterministically change lifecycle state or remove a definition.

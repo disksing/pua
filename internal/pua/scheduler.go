@@ -32,54 +32,44 @@ type schedulerChangePayload struct {
 	Trigger          *app.ScheduleTrigger        `json:"trigger,omitempty"`
 }
 
+type schedulerCommandKind uint8
+
+const (
+	schedulerCommandList schedulerCommandKind = iota
+	schedulerCommandShow
+	schedulerCommandChange
+)
+
+type schedulerCommand struct {
+	kind       schedulerCommandKind
+	serverURL  string
+	jsonOutput bool
+	id         string
+	change     schedulerChangePayload
+}
+
 func runScheduler(args []string) error {
 	if len(args) > 0 && isHelpCommand(args[0]) {
 		printSchedulerHelp()
 		return nil
 	}
-	if len(args) == 0 {
-		return errors.New("scheduler requires a subcommand")
-	}
-	subcommand := args[0]
-	usage := "usage: pua scheduler " + subcommand + " [--server=<url>]"
-	if specific, ok := map[string]string{
-		"add": schedulerAddUsage, "update": schedulerUpdateUsage,
-		"show": schedulerShowUsage, "remove": schedulerRemoveUsage,
-	}[subcommand]; ok {
-		usage = specific
-	}
-	remaining, serverURL, err := splitServerArg(args[1:], usage)
+	command, err := parseSchedulerCommand(args)
 	if err != nil {
 		return err
 	}
-	operation, mutation := schedulerChangeOperation(subcommand)
-	var updatePayload schedulerChangePayload
-	if operation == app.ScheduleChangeUpdate {
-		updatePayload, err = parseSchedulerUpdatePayload(remaining)
-		if err != nil {
-			return err
-		}
-	}
-	client, _, err := newResourceServerClient(serverURL)
+	client, _, err := newResourceServerClient(command.serverURL)
 	if err != nil {
 		return err
 	}
 	basePath := fmt.Sprintf("/api/workspaces/%s/scheduler", url.PathEscape(client.workspaceID))
 
-	switch subcommand {
-	case "list":
-		jsonOutput := false
-		for _, arg := range remaining {
-			if arg != "--json" || jsonOutput {
-				return errors.New("usage: pua scheduler list [--json] [--server=<url>]")
-			}
-			jsonOutput = true
-		}
+	switch command.kind {
+	case schedulerCommandList:
 		snapshot, err := schedulerSnapshot(client, basePath)
 		if err != nil {
 			return err
 		}
-		if jsonOutput {
+		if command.jsonOutput {
 			return printJSON(snapshot)
 		}
 		for _, schedule := range snapshot.Schedules {
@@ -93,68 +83,114 @@ func runScheduler(args []string) error {
 			fmt.Fprintf(os.Stdout, "%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n", schedule.ID, schedule.Revision, schedule.EffectiveState, scheduleTriggerSummary(schedule.Trigger), nextRun, lastOutcome, schedule.Description, schedule.Target)
 		}
 		return nil
-	case "show":
-		values, err := parseSchedulerOptions(remaining, map[string]bool{"id": true})
-		if err != nil || values["id"] == "" {
-			return errors.New(schedulerShowUsage)
-		}
+	case schedulerCommandShow:
 		snapshot, err := schedulerSnapshot(client, basePath)
 		if err != nil {
 			return err
 		}
 		for _, schedule := range snapshot.Schedules {
-			if schedule.ID == values["id"] {
+			if schedule.ID == command.id {
 				return printJSON(schedule)
 			}
 		}
-		return fmt.Errorf("schedule not found: %s", values["id"])
+		return fmt.Errorf("schedule not found: %s", command.id)
+	case schedulerCommandChange:
+		return schedulerChangeRequest(client, basePath, command.change)
 	default:
-		if !mutation {
-			return fmt.Errorf("unknown scheduler subcommand %q", subcommand)
-		}
-		return runSchedulerChange(client, basePath, remaining, operation, updatePayload)
+		return errors.New("invalid parsed scheduler command")
 	}
 }
 
-func schedulerChangeOperation(subcommand string) (app.ScheduleChangeOperation, bool) {
-	if subcommand == "add" {
-		return app.ScheduleChangeCreate, true
+func parseSchedulerCommand(args []string) (schedulerCommand, error) {
+	if len(args) == 0 {
+		return schedulerCommand{}, errors.New("scheduler requires a subcommand")
 	}
-	operation, err := app.ParseScheduleChangeOperation(subcommand)
-	if err != nil || operation == app.ScheduleChangeCreate {
-		return "", false
+	subcommand := args[0]
+	switch subcommand {
+	case "list", "show", "add", "update", "pause", "resume", "remove":
+	default:
+		return schedulerCommand{}, fmt.Errorf("unknown scheduler subcommand %q", subcommand)
 	}
-	return operation, true
-}
 
-func runSchedulerChange(client *resourceServerClient, basePath string, args []string, operation app.ScheduleChangeOperation, updatePayload schedulerChangePayload) error {
-	if operation == app.ScheduleChangeCreate {
-		values, err := parseSchedulerOptions(args, schedulerMutationOptions(false))
-		if err != nil || values["description"] == "" || values["condition"] == "" || values["target"] == "" {
-			return errors.New(schedulerAddUsage)
-		}
-		trigger, present, err := schedulerTriggerFromOptions(values)
-		if err != nil || !present {
-			if err != nil {
-				return err
+	usage := "usage: pua scheduler " + subcommand + " [--server=<url>]"
+	if specific, ok := map[string]string{
+		"add": schedulerAddUsage, "update": schedulerUpdateUsage,
+		"show": schedulerShowUsage, "remove": schedulerRemoveUsage,
+	}[subcommand]; ok {
+		usage = specific
+	}
+	remaining, serverURL, err := splitServerArg(args[1:], usage)
+	if err != nil {
+		return schedulerCommand{}, err
+	}
+	command := schedulerCommand{serverURL: serverURL}
+	switch subcommand {
+	case "list":
+		command.kind = schedulerCommandList
+		for _, arg := range remaining {
+			if arg != "--json" || command.jsonOutput {
+				return schedulerCommand{}, errors.New("usage: pua scheduler list [--json] [--server=<url>]")
 			}
-			return errors.New(schedulerAddUsage)
+			command.jsonOutput = true
 		}
-		description, condition, target := values["description"], values["condition"], values["target"]
-		payload := schedulerChangePayload{Operation: operation, Description: &description, Condition: &condition, Target: &target, Trigger: trigger}
-		if guard, ok := values["guard"]; ok {
-			payload.Guard = &guard
+	case "show":
+		values, parseErr := parseSchedulerOptions(remaining, map[string]bool{"id": true})
+		if parseErr != nil || values["id"] == "" {
+			return schedulerCommand{}, errors.New(schedulerShowUsage)
 		}
-		return schedulerChangeRequest(client, basePath, payload)
+		command.kind, command.id = schedulerCommandShow, values["id"]
+	case "add":
+		command.kind = schedulerCommandChange
+		command.change, err = parseSchedulerAddPayload(remaining)
+	case "update":
+		command.kind = schedulerCommandChange
+		command.change, err = parseSchedulerUpdatePayload(remaining)
+	default:
+		command.kind = schedulerCommandChange
+		command.change, err = parseSchedulerStatePayload(subcommand, remaining)
 	}
-	if operation == app.ScheduleChangeUpdate {
-		return schedulerChangeRequest(client, basePath, updatePayload)
+	if err != nil {
+		return schedulerCommand{}, err
 	}
+	if command.serverURL != "" {
+		command.serverURL, err = normalizePUAServerURL(command.serverURL)
+		if err != nil {
+			return schedulerCommand{}, err
+		}
+	}
+	return command, nil
+}
+
+func parseSchedulerAddPayload(args []string) (schedulerChangePayload, error) {
+	values, err := parseSchedulerOptions(args, schedulerMutationOptions(false))
+	if err != nil || values["description"] == "" || values["condition"] == "" || values["target"] == "" {
+		return schedulerChangePayload{}, errors.New(schedulerAddUsage)
+	}
+	trigger, present, err := schedulerTriggerFromOptions(values)
+	if err != nil || !present {
+		if err != nil {
+			return schedulerChangePayload{}, err
+		}
+		return schedulerChangePayload{}, errors.New(schedulerAddUsage)
+	}
+	description, condition, target := values["description"], values["condition"], values["target"]
+	payload := schedulerChangePayload{Operation: app.ScheduleChangeCreate, Description: &description, Condition: &condition, Target: &target, Trigger: trigger}
+	if guard, ok := values["guard"]; ok {
+		payload.Guard = &guard
+	}
+	return payload, nil
+}
+
+func parseSchedulerStatePayload(subcommand string, args []string) (schedulerChangePayload, error) {
 	values, err := parseSchedulerOptions(args, map[string]bool{"id": true})
 	if err != nil || values["id"] == "" {
-		return errors.New("usage: pua scheduler " + string(operation) + " --id=<schedule> [--server=<url>]")
+		return schedulerChangePayload{}, errors.New("usage: pua scheduler " + subcommand + " --id=<schedule> [--server=<url>]")
 	}
-	return schedulerChangeRequest(client, basePath, schedulerChangePayload{Operation: operation, ID: values["id"]})
+	operation, err := app.ParseScheduleChangeOperation(subcommand)
+	if err != nil || operation == app.ScheduleChangeCreate || operation == app.ScheduleChangeUpdate {
+		return schedulerChangePayload{}, fmt.Errorf("unknown scheduler subcommand %q", subcommand)
+	}
+	return schedulerChangePayload{Operation: operation, ID: values["id"]}, nil
 }
 
 func parseSchedulerUpdatePayload(args []string) (schedulerChangePayload, error) {

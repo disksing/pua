@@ -252,6 +252,47 @@ func TestSchedulerUpdateValidatesTriggerBeforeOwnerDiscovery(t *testing.T) {
 	})
 }
 
+func TestSchedulerValidatesCommandsBeforeOwnerDiscovery(t *testing.T) {
+	t.Setenv(puaWorkspaceRootEnvironment, "")
+	t.Setenv(puaWorkspaceInstanceEnvironment, "")
+	t.Setenv(puaResourceIDEnvironment, "")
+	withTempCwd(t, func(_ string) {
+		validAt := "2030-08-23T09:00:00Z"
+		for _, test := range []struct {
+			name string
+			args []string
+			want string
+		}{
+			{name: "unknown subcommand", args: []string{"scheduler", "frobnicate"}, want: `unknown scheduler subcommand "frobnicate"`},
+			{name: "unknown subcommand before server parsing", args: []string{"scheduler", "frobnicate", "--server"}, want: `unknown scheduler subcommand "frobnicate"`},
+			{name: "duplicate list flag", args: []string{"scheduler", "list", "--json", "--json"}, want: "usage: pua scheduler list [--json] [--server=<url>]"},
+			{name: "unknown list flag", args: []string{"scheduler", "list", "--yaml"}, want: "usage: pua scheduler list [--json] [--server=<url>]"},
+			{name: "missing show id", args: []string{"scheduler", "show"}, want: schedulerShowUsage},
+			{name: "unknown add option", args: []string{"scheduler", "add", "--description=Review", "--condition=At review time", "--target=workspace", "--at=" + validAt, "--yaml=true"}, want: schedulerAddUsage},
+			{name: "incomplete add trigger", args: []string{"scheduler", "add", "--description=Review", "--condition=At review time", "--target=workspace", "--every=5m"}, want: "--every and --anchor are required together"},
+			{name: "missing update revision", args: []string{"scheduler", "update", "--id=schedule-1", "--at=" + validAt}, want: schedulerUpdateUsage},
+			{name: "zero update revision", args: []string{"scheduler", "update", "--id=schedule-1", "--revision=0", "--at=" + validAt}, want: schedulerUpdateUsage},
+			{name: "missing update trigger", args: []string{"scheduler", "update", "--id=schedule-1", "--revision=1"}, want: schedulerUpdateUsage},
+			{name: "incomplete update trigger", args: []string{"scheduler", "update", "--id=schedule-1", "--revision=1", "--cron=0 0 9 * * *"}, want: "--cron and --timezone are required together"},
+			{name: "missing pause id", args: []string{"scheduler", "pause"}, want: "usage: pua scheduler pause --id=<schedule> [--server=<url>]"},
+			{name: "missing resume id", args: []string{"scheduler", "resume"}, want: "usage: pua scheduler resume --id=<schedule> [--server=<url>]"},
+			{name: "missing remove id", args: []string{"scheduler", "remove"}, want: schedulerRemoveUsage},
+			{name: "duplicate server", args: []string{"scheduler", "list", "--server=http://127.0.0.1:1", "--server", "http://127.0.0.1:2"}, want: "usage: pua scheduler list [--server=<url>]"},
+			{name: "invalid server URL", args: []string{"scheduler", "list", "--server=ftp://127.0.0.1:1"}, want: `unsupported PUA Server URL scheme "ftp"`},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				if _, err := runErr(t, test.args...); err == nil || !strings.Contains(err.Error(), test.want) {
+					t.Fatalf("Run(%q) error = %v, want %q", test.args, err, test.want)
+				}
+			})
+		}
+
+		if _, err := runErr(t, "scheduler", "list"); err == nil || !strings.Contains(err.Error(), "could not find AgentWorkspace root; run pua init first") {
+			t.Fatalf("valid scheduler list error = %v, want owner discovery failure", err)
+		}
+	})
+}
+
 func TestSchedulerHelpRequiresUpdateTrigger(t *testing.T) {
 	help := run(t, "scheduler", "help")
 	if strings.Contains(help, "optional trigger") || !strings.Contains(help, "pua scheduler update --id=<schedule> --revision=<n> [--description=<text>]") || !strings.Contains(help, "complete replacement trigger") {

@@ -8,6 +8,6 @@ PUA 定时任务 occurrence {{.OccurrenceID}}。
 - 动作：{{.Action}}
 {{if .HasGuard}}- Guard：{{.Guard}}
 
-现在检查 guard。若为假，结束本 Turn，不执行动作。目标为 Task 时，先把 Task 从 `in_progress` 调整到合适状态，避免 Task 工作流生成自动续推。{{else}}- Guard：无
+现在检查 guard。若为假，结束本 Turn，不执行动作。{{else}}- Guard：无
 {{end}}
 Mailbox 采用 at-least-once 语义。产生外部副作用前，使用 occurrence ID 做幂等去重。

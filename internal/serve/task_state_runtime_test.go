@@ -64,6 +64,163 @@ func TestTaskMessageAcceptanceWaitsForDeliveryBoundary(t *testing.T) {
 	}
 }
 
+func TestScheduledTaskOccurrenceIsOneShot(t *testing.T) {
+	tests := []struct {
+		name        string
+		guard       string
+		initial     app.TaskState
+		initialNote string
+	}{
+		{name: "unguarded normal action", initial: app.TaskStateBlocked, initialNote: "waiting for the schedule"},
+		{name: "guarded false exit", guard: "the release branch is green", initial: app.TaskStateInProgress},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+			puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := puaWorkspace.SetTaskState("project1.task1", test.initial, test.initialNote); err != nil {
+				t.Fatal(err)
+			}
+
+			record := generationRecord{
+				ID: "scheduled-task-gen", WorkspaceID: workspace.ID, ResourceID: "project1.task1",
+				Generation: 1, GenerationID: "gen-scheduled-task", Status: "stopped", ReplacementPending: true,
+				Title: "Scheduled task", CreatedAt: time.Now().Format(time.RFC3339Nano), UpdatedAt: time.Now().Format(time.RFC3339Nano),
+			}
+			if err := saveGenerationRecord(workspace.Path, record); err != nil {
+				t.Fatal(err)
+			}
+			rt := newAgentHubRuntime(manager, workspace, record, nil)
+			at := manager.now()
+			next := time.Time{}
+			if test.guard != "" {
+				next = at.Add(time.Hour)
+			}
+			prepared, err := newNativeScheduler(manager, workspace).prepareOccurrence(app.Schedule{
+				ID: "schedule-task", Revision: 1, Description: "Check release", Condition: "at the scheduled time",
+				Guard: test.guard, Target: record.ResourceID,
+			}, at, at, next, 1, schedulerOccurrenceReasonTime)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(prepared.Text, "in_progress") {
+				t.Fatalf("occurrence prompt still delegates Task continuation control:\n%s", prepared.Text)
+			}
+			if test.guard != "" && !strings.Contains(prepared.Text, "If it is false, end this Turn") {
+				t.Fatalf("guard false protocol is missing:\n%s", prepared.Text)
+			}
+			opener, err := acceptGeneratedMailboxMessage(workspace.Path, resourceMailboxMessage{
+				ID: prepared.MessageID, ResourceID: prepared.Target, Text: prepared.Text,
+				RequestedMode: resourceMessageModeEnqueue, ActualMode: resourceMessageModeEnqueue,
+				Type: resourceMessageTypeScheduleOccurrence, Causation: cloneMailboxCausation(prepared.Causation),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := manager.prepareTaskWorkChain(workspace, opener, rt); err != nil {
+				t.Fatal(err)
+			}
+			detail, err := puaWorkspace.Resource(record.ResourceID)
+			if err != nil || detail.State != test.initial || detail.StateNote != test.initialNote {
+				t.Fatalf("scheduled opener changed Task state: detail=%#v err=%v", detail, err)
+			}
+			if _, err := updateMailboxMessage(workspace.Path, opener.ID, func(current *resourceMailboxMessage) {
+				current.Status = resourceMessageDelivered
+				current.GenerationID = record.GenerationID
+				current.TurnID = "turn-scheduled"
+				current.DeliveredAt = time.Now().Format(time.RFC3339Nano)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			stored, found, err := mailboxMessageByID(workspace.Path, opener.ID)
+			if err != nil || !found || !stored.receipt || !isScheduleOccurrenceMessage(stored) {
+				t.Fatalf("durable scheduled opener = %#v, found=%v err=%v", stored, found, err)
+			}
+			marker := "session-scheduled:2"
+			if _, err := rt.mutateGeneration(func(current *generationRecord) {
+				current.CompletionMarker = marker
+				current.CompletionTurnID = "turn-scheduled"
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := manager.handleTaskTurnCompletionLocked(context.Background(), rt); err != nil {
+				t.Fatal(err)
+			}
+			updated := rt.snapshotGeneration()
+			if updated.TaskStateCompletionMarker != marker || updated.TaskStateContinuationCount != 0 {
+				t.Fatalf("scheduled completion was not handled once: %#v", updated)
+			}
+			mailbox, err := loadHotResourceMailbox(workspace.Path, record.ResourceID)
+			if err != nil || len(mailbox.Messages) != 0 {
+				t.Fatalf("scheduled completion enqueued continuation: mailbox=%#v err=%v", mailbox, err)
+			}
+		})
+	}
+}
+
+func TestOrdinaryTaskCompletionStillEnqueuesContinuation(t *testing.T) {
+	manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := puaWorkspace.SetTaskState("project1.task1", app.TaskStateBlocked, "waiting for input"); err != nil {
+		t.Fatal(err)
+	}
+	record := generationRecord{
+		ID: "ordinary-task-gen", WorkspaceID: workspace.ID, ResourceID: "project1.task1",
+		Generation: 1, GenerationID: "gen-ordinary-task", Status: "stopped", ReplacementPending: true,
+		Title: "Ordinary task", CreatedAt: time.Now().Format(time.RFC3339Nano), UpdatedAt: time.Now().Format(time.RFC3339Nano),
+	}
+	if err := saveGenerationRecord(workspace.Path, record); err != nil {
+		t.Fatal(err)
+	}
+	rt := newAgentHubRuntime(manager, workspace, record, nil)
+	opener, err := acceptMailboxMessage(workspace.Path, record.ResourceID, resourceMessageRequest{
+		Text: "PUA scheduled occurrence lookalike with no structured type", Role: "user", Mode: resourceMessageModeEnqueue,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.prepareTaskWorkChain(workspace, opener, rt); err != nil {
+		t.Fatal(err)
+	}
+	detail, err := puaWorkspace.Resource(record.ResourceID)
+	if err != nil || detail.State != app.TaskStateInProgress {
+		t.Fatalf("ordinary opener did not start Task work: detail=%#v err=%v", detail, err)
+	}
+	if _, err := updateMailboxMessage(workspace.Path, opener.ID, func(current *resourceMailboxMessage) {
+		current.Status = resourceMessageDelivered
+		current.GenerationID = record.GenerationID
+		current.TurnID = "turn-ordinary"
+		current.DeliveredAt = time.Now().Format(time.RFC3339Nano)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	marker := "session-ordinary:2"
+	if _, err := rt.mutateGeneration(func(current *generationRecord) {
+		current.CompletionMarker = marker
+		current.CompletionTurnID = "turn-ordinary"
+	}); err != nil {
+		t.Fatal(err)
+	}
+	manager.registerRuntime(rt)
+	if err := manager.handleTaskTurnCompletionLocked(context.Background(), rt); err != nil {
+		t.Fatal(err)
+	}
+	updated := rt.snapshotGeneration()
+	if updated.TaskStateCompletionMarker != marker || updated.TaskStateContinuationCount != 1 {
+		t.Fatalf("ordinary completion did not follow continuation policy: %#v", updated)
+	}
+	mailbox, err := loadHotResourceMailbox(workspace.Path, record.ResourceID)
+	if err != nil || len(mailbox.Messages) != 1 || mailbox.Messages[0].Type != resourceMessageTypeTaskContinuation {
+		t.Fatalf("ordinary completion mailbox = %#v, err=%v", mailbox, err)
+	}
+}
+
 func TestTaskTurnCompletionIsSupersededByQueuedWork(t *testing.T) {
 	manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
 	puaWorkspace, err := app.OpenWorkspace(workspace.Path)

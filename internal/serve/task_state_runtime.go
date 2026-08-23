@@ -52,6 +52,21 @@ func taskDetail(workspacePath, resourceID string) (app.ResourceDetailView, bool,
 	return detail, detail.Type == "task", nil
 }
 
+func isScheduleOccurrenceMessage(message resourceMailboxMessage) bool {
+	return message.Type == resourceMessageTypeScheduleOccurrence &&
+		message.Causation != nil &&
+		message.Causation.Type == resourceMessageTypeScheduleOccurrence &&
+		normalizedResourceID(message.Causation.SourceResourceID) == app.SchedulerResourceID
+}
+
+func taskWorkChainStartedByScheduleOccurrence(workspacePath string, record generationRecord) (bool, error) {
+	opener, found, err := mailboxMessageByID(workspacePath, record.TaskStateChainID)
+	if err != nil || !found {
+		return false, err
+	}
+	return isScheduleOccurrenceMessage(opener), nil
+}
+
 func (m *agentManager) recordTaskStartFailure(workspace serveWorkspace, message resourceMailboxMessage, cause error) (bool, error) {
 	if cause == nil || !strings.Contains(normalizedResourceID(message.ResourceID), ".task") || message.GenerationID != "" {
 		return false, nil
@@ -104,6 +119,13 @@ func (m *agentManager) prepareTaskWorkChain(workspace serveWorkspace, message re
 		}); err != nil {
 			return err
 		}
+	}
+	// A scheduled occurrence owns exactly one Turn. Preserve the Task's
+	// workflow state instead of starting an ordinary Task work chain; terminal
+	// handling also uses this durable opener identity to suppress continuation
+	// when the Task was already in_progress before the occurrence.
+	if isScheduleOccurrenceMessage(message) {
+		return nil
 	}
 	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
 	if err != nil {
@@ -189,6 +211,13 @@ func (m *agentManager) handleTaskTurnCompletionLocked(ctx context.Context, rt *a
 		return err
 	}
 	if detail.State != app.TaskStateInProgress && detail.State != app.TaskStateWaiting {
+		return markTaskTurnCompletionHandled(rt, marker)
+	}
+	scheduled, err := taskWorkChainStartedByScheduleOccurrence(rt.workspace.Path, record)
+	if err != nil {
+		return err
+	}
+	if scheduled {
 		return markTaskTurnCompletionHandled(rt, marker)
 	}
 	superseded, err := taskCompletionSupersededByWork(rt.workspace.Path, record)

@@ -958,22 +958,15 @@ func (m *ServiceManager) runReadinessLocked(ctx context.Context, rt *serviceRunt
 	}
 	checkCtx, cancel := context.WithTimeout(ctx, rt.config.Readiness.Timeout)
 	defer cancel()
-	cmd := exec.CommandContext(checkCtx, command[0], command[1:]...)
-	cmd.Dir = serviceCWD(m.root, rt.config.CWD)
-	if !pathWithinResolved(m.root, cmd.Dir) {
+	dir := serviceCWD(m.root, rt.config.CWD)
+	if !pathWithinResolved(m.root, dir) {
 		return errors.New("readiness cwd escapes the workspace")
 	}
-	cmd.Env = rt.environment
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	var output bytes.Buffer
 	redactor := security.NewRedactor(rt.secretValues...)
 	stream := redactor.NewStream(&output)
 	defer stream.Close()
-	cmd.Stdout, cmd.Stderr = stream, stream
-	err := cmd.Run()
-	if err != nil && cmd.Process != nil {
-		_ = terminateProcessGroup(cmd.Process.Pid, true)
-	}
+	err := runServiceGroupCommand(checkCtx, command, dir, rt.environment, stream)
 	if err != nil {
 		text := strings.TrimSpace(redactor.RedactString(output.String()))
 		if text != "" {
@@ -1135,9 +1128,8 @@ func (m *ServiceManager) runCleanupLocked(ctx context.Context, rt *serviceRuntim
 	var last error
 	for attempt := 1; attempt <= attempts; attempt++ {
 		checkCtx, cancel := context.WithTimeout(ctx, cleanup.Timeout)
-		cmd := exec.CommandContext(checkCtx, cleanup.Command[0], cleanup.Command[1:]...)
-		cmd.Dir = serviceCWD(m.root, rt.config.CWD)
-		if !pathWithinResolved(m.root, cmd.Dir) {
+		dir := serviceCWD(m.root, rt.config.CWD)
+		if !pathWithinResolved(m.root, dir) {
 			cancel()
 			last = errors.New("cleanup cwd escapes the workspace")
 			rt.status.Cleanup.Attempts++
@@ -1145,16 +1137,10 @@ func (m *ServiceManager) runCleanupLocked(ctx context.Context, rt *serviceRuntim
 			rt.status.Cleanup.LastError = last.Error()
 			continue
 		}
-		cmd.Env = rt.environment
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		var output bytes.Buffer
 		redactor := security.NewRedactor(rt.secretValues...)
 		stream := redactor.NewStream(&output)
-		cmd.Stdout, cmd.Stderr = stream, stream
-		err := cmd.Run()
-		if err != nil && cmd.Process != nil {
-			_ = terminateProcessGroup(cmd.Process.Pid, true)
-		}
+		err := runServiceGroupCommand(checkCtx, cleanup.Command, dir, rt.environment, stream)
 		_ = stream.Close()
 		cancel()
 		rt.status.Cleanup.Attempts++

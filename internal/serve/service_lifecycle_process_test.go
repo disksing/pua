@@ -329,6 +329,123 @@ func TestServiceManagerRetriesTimedOutCleanup(t *testing.T) {
 	}
 }
 
+func TestServiceManagerReadinessTimeoutReapsBackgroundOutputHolder(t *testing.T) {
+	root := t.TempDir()
+	servicePIDPath := filepath.Join(root, "service.pid")
+	childPIDPath := filepath.Join(root, "readiness-child.pid")
+	writeTestService(t, root, ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "worker",
+		Enabled:       true,
+		Command: []string{"/bin/sh", "-c",
+			"printf '%s\\n' \"$$\" > " + shellQuote(servicePIDPath) + "; exec sleep 30"},
+		Readiness: &ServiceReadinessConfig{
+			Command: []string{"/bin/sh", "-c",
+				"sleep 10 & printf '%s\\n' \"$!\" > " + shellQuote(childPIDPath)},
+			Interval: time.Second,
+			Timeout:  100 * time.Millisecond,
+		},
+	})
+
+	manager, err := NewServiceManager(root, ServiceManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopProcessTestManager(t, &manager)
+	started := time.Now()
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("readiness timeout duration = %s, want bounded completion", elapsed)
+	}
+
+	childPIDData, err := os.ReadFile(childPIDPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	servicePIDData, err := os.ReadFile(servicePIDPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	servicePID, err := strconv.Atoi(strings.TrimSpace(string(servicePIDData)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForProcessGone(t, servicePID)
+	childPID, err := strconv.Atoi(strings.TrimSpace(string(childPIDData)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForProcessGone(t, childPID)
+	status, err := manager.Show("worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != ServiceStateBackoff || status.Readiness.Ready || !strings.Contains(status.Readiness.LastError, "readiness failed") {
+		t.Fatalf("readiness timeout status = %#v", status)
+	}
+	events, err := os.ReadFile(filepath.Join(serviceRuntimePath(root, "worker"), "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(events), `"type":"readiness_failed"`) {
+		t.Fatalf("readiness timeout event missing: %s", events)
+	}
+}
+
+func TestServiceManagerCleanupTimeoutReapsBackgroundOutputHolder(t *testing.T) {
+	root := t.TempDir()
+	childPIDPath := filepath.Join(root, "cleanup-child.pid")
+	writeTestService(t, root, ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "worker",
+		Enabled:       true,
+		Command:       []string{"/bin/sh", "-c", "exec sleep 30"},
+		Cleanup: &ServiceCleanupConfig{
+			Command: []string{"/bin/sh", "-c",
+				"sleep 10 & printf '%s\\n' \"$!\" > " + shellQuote(childPIDPath)},
+			Timeout: 100 * time.Millisecond,
+		},
+	})
+
+	manager, err := NewServiceManager(root, ServiceManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopProcessTestManager(t, &manager)
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	running, err := manager.Show("worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	err = manager.StopService(context.Background(), "worker")
+	if err == nil || !strings.Contains(err.Error(), "cleanup failed") {
+		t.Fatalf("cleanup timeout error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("cleanup timeout duration = %s, want bounded completion", elapsed)
+	}
+
+	waitForProcessGone(t, running.PID)
+	childPIDData, err := os.ReadFile(childPIDPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	childPID, err := strconv.Atoi(strings.TrimSpace(string(childPIDData)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForProcessGone(t, childPID)
+	status := readPersistedServiceStatus(t, root, "worker")
+	if status.State != ServiceStateAttentionRequired || !status.AttentionRequired || status.Cleanup.Attempts != 1 || status.Cleanup.Succeeded || !strings.Contains(status.Cleanup.LastError, "cleanup failed") {
+		t.Fatalf("cleanup timeout status = %#v", status)
+	}
+}
+
 func TestServiceManagerPersistsBackoffAcrossReconstruction(t *testing.T) {
 	root := t.TempDir()
 	launchPath := filepath.Join(root, "launches")

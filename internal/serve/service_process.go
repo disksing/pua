@@ -1,9 +1,11 @@
 package serve
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"syscall"
@@ -14,6 +16,8 @@ import (
 
 const serviceStartupLogBufferBytes = 1 << 20
 
+const serviceCommandWaitDelay = 250 * time.Millisecond
+
 type serviceLogSink struct {
 	mu       sync.Mutex
 	path     string
@@ -21,6 +25,90 @@ type serviceLogSink struct {
 	maxFiles int
 	file     *os.File
 	size     int64
+}
+
+// runServiceGroupCommand runs a bounded supervisor hook in its own process
+// group. A hook is complete only after both its leader and captured output are
+// finished: a background descendant that retains the output descriptor must
+// therefore be reaped when the command context expires.
+func runServiceGroupCommand(ctx context.Context, command []string, dir string, env []string, output io.Writer) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	cmd := exec.CommandContext(ctx, command[0], command[1:]...)
+	cmd.Dir = dir
+	cmd.Env = env
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.WaitDelay = serviceCommandWaitDelay
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return terminateProcessGroup(cmd.Process.Pid, true)
+	}
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	cmd.Stdout, cmd.Stderr = writer, writer
+	if err := cmd.Start(); err != nil {
+		_ = reader.Close()
+		_ = writer.Close()
+		return err
+	}
+	_ = writer.Close()
+
+	copied := make(chan error, 1)
+	go func() {
+		_, copyErr := io.Copy(output, reader)
+		copied <- copyErr
+	}()
+	waited := make(chan error, 1)
+	go func() { waited <- cmd.Wait() }()
+
+	var waitErr, copyErr error
+	waitComplete, copyComplete := false, false
+	cancelled := false
+	cancelledCh := ctx.Done()
+	var forceTimer *time.Timer
+	var forceCh <-chan time.Time
+	for !waitComplete || !copyComplete {
+		select {
+		case waitErr = <-waited:
+			waitComplete = true
+			waited = nil
+		case copyErr = <-copied:
+			copyComplete = true
+			copied = nil
+		case <-cancelledCh:
+			cancelled = true
+			cancelledCh = nil
+			// Kill the whole group before waiting for the leader or pipe reader.
+			_ = terminateProcessGroup(cmd.Process.Pid, true)
+			forceTimer = time.NewTimer(serviceCommandWaitDelay)
+			forceCh = forceTimer.C
+		case <-forceCh:
+			forceCh = nil
+			_ = cmd.Process.Kill()
+			_ = reader.Close()
+		}
+	}
+	if forceTimer != nil && !forceTimer.Stop() {
+		select {
+		case <-forceTimer.C:
+		default:
+		}
+	}
+	_ = terminateProcessGroup(cmd.Process.Pid, true)
+	_ = reader.Close()
+	if waitErr != nil {
+		return waitErr
+	}
+	if cancelled {
+		return ctx.Err()
+	}
+	return copyErr
 }
 
 // serviceLogWriter keeps a declared exporter's startup output in a bounded

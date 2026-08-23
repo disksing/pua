@@ -342,6 +342,154 @@ func TestCreateSessionRejectsInvalidLaunchEnvironment(t *testing.T) {
 	}
 }
 
+func TestEphemeralEnvironmentValidationDoesNotLeakInput(t *testing.T) {
+	root := t.TempDir()
+	store, err := session.Open(filepath.Join(root, "sessions"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{
+		Version:        1,
+		AgentProviders: []config.Provider{{ID: "provider", Type: "pi", Enabled: true, Command: "missing-test-command"}},
+		Agents:         []config.Agent{{Name: "Pi Agent", ProviderID: "provider"}},
+	}
+	manager := runtime.New(store, cfg)
+	t.Cleanup(manager.Close)
+	server := httptest.NewServer(New(store, "test", time.Now(), Dependencies{
+		Runtime:              manager,
+		EphemeralEnvironment: true,
+	}).Handler())
+	defer server.Close()
+
+	created, err := store.Create(session.CreateInput{Cwd: t.TempDir(), AgentName: "Pi Agent", Provider: "pi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baselineEvents, err := store.EventsAfter(created.ID, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name        string
+		path        string
+		invalidName string
+		value       string
+		valueMarker string
+	}{
+		{
+			name:        "create invalid name",
+			path:        "/v1/sessions",
+			invalidName: "EPHEMERAL_CREATE_NAME=PRIVATE",
+			value:       "ephemeral-create-name-value",
+			valueMarker: "ephemeral-create-name-value",
+		},
+		{
+			name:        "create invalid value",
+			path:        "/v1/sessions",
+			invalidName: "EPHEMERAL_CREATE_VALUE_PRIVATE",
+			value:       "ephemeral-create-value\x00private",
+			valueMarker: "ephemeral-create-value",
+		},
+		{
+			name:        "resume invalid name",
+			path:        "/v1/sessions/" + created.ID + "/resume",
+			invalidName: "EPHEMERAL_RESUME_NAME=PRIVATE",
+			value:       "ephemeral-resume-name-value",
+			valueMarker: "ephemeral-resume-name-value",
+		},
+		{
+			name:        "resume invalid value",
+			path:        "/v1/sessions/" + created.ID + "/resume",
+			invalidName: "EPHEMERAL_RESUME_VALUE_PRIVATE",
+			value:       "ephemeral-resume-value\x00private",
+			valueMarker: "ephemeral-resume-value",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := map[string]any{
+				"ephemeralEnvironment": map[string]string{test.invalidName: test.value},
+			}
+			if test.path == "/v1/sessions" {
+				body["cwd"] = t.TempDir()
+				body["agentName"] = "Pi Agent"
+			}
+			encoded, err := json.Marshal(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request, err := http.NewRequest(http.MethodPost, server.URL+test.path, bytes.NewReader(encoded))
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.Header.Set("Content-Type", "application/json")
+			response, err := http.DefaultClient.Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			responseBody, err := io.ReadAll(response.Body)
+			response.Body.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response.StatusCode != http.StatusUnprocessableEntity {
+				t.Fatalf("status = %d, want %d: %s", response.StatusCode, http.StatusUnprocessableEntity, responseBody)
+			}
+			var parsed struct {
+				Error struct {
+					Code    string `json:"code"`
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(responseBody, &parsed); err != nil {
+				t.Fatal(err)
+			}
+			if parsed.Error.Code != "invalid_ephemeral_environment" {
+				t.Fatalf("code = %q, want invalid_ephemeral_environment", parsed.Error.Code)
+			}
+			if parsed.Error.Message != "ephemeralEnvironment contains an invalid variable name or value" {
+				t.Fatalf("message = %q", parsed.Error.Message)
+			}
+			for _, secret := range []string{test.invalidName, test.valueMarker} {
+				if bytes.Contains(responseBody, []byte(secret)) {
+					t.Fatalf("response leaked ephemeral input %q: %s", secret, responseBody)
+				}
+			}
+		})
+	}
+
+	events, err := store.EventsAfter(created.ID, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != len(baselineEvents) {
+		t.Fatalf("rejected resumes appended events: got %d, want %d", len(events), len(baselineEvents))
+	}
+	if err := filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if info.IsDir() {
+			return nil
+		}
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for _, test := range tests {
+			for _, secret := range []string{test.invalidName, test.valueMarker} {
+				if bytes.Contains(contents, []byte(secret)) {
+					t.Fatalf("%s persisted ephemeral input %q", path, secret)
+				}
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSessionSourceAPIAndCombinedFilters(t *testing.T) {
 	root := t.TempDir()
 	store, err := session.Open(root)

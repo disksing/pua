@@ -767,7 +767,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := session.ValidateLaunchEnvironment(body.EphemeralEnvironment); err != nil {
-		writeAPIError(w, http.StatusUnprocessableEntity, "invalid_ephemeral_environment", err.Error(), nil)
+		writeInvalidEphemeralEnvironment(w)
 		return
 	}
 	if len(body.EphemeralEnvironment) > 0 && !s.ephemeralEnvironment {
@@ -1046,7 +1046,7 @@ func (s *Server) resumeSession(w http.ResponseWriter, r *http.Request, id string
 		return
 	}
 	if err := session.ValidateLaunchEnvironment(body.EphemeralEnvironment); err != nil {
-		writeAPIError(w, http.StatusUnprocessableEntity, "invalid_ephemeral_environment", err.Error(), nil)
+		writeInvalidEphemeralEnvironment(w)
 		return
 	}
 	if len(body.EphemeralEnvironment) > 0 && !s.ephemeralEnvironment {
@@ -1932,6 +1932,16 @@ func writeAPIError(w http.ResponseWriter, status int, code, message string, deta
 			"requestId": requestID,
 		},
 	})
+}
+
+func writeInvalidEphemeralEnvironment(w http.ResponseWriter) {
+	writeAPIError(
+		w,
+		http.StatusUnprocessableEntity,
+		"invalid_ephemeral_environment",
+		"ephemeralEnvironment contains an invalid variable name or value",
+		nil,
+	)
 }
 
 func retryableAPIError(code string) bool {

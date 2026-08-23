@@ -4,11 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -193,23 +191,11 @@ func (s *server) handleServiceBindings(w http.ResponseWriter, r *http.Request, w
 		writeError(w, ownershipErr, http.StatusConflict)
 		return
 	}
-	path := serviceBindingsPath(workspace.Path)
-	if !pathWithinResolved(filepath.Join(workspace.Path, ".pua"), path) {
-		writeError(w, errors.New("service bindings path escapes the workspace control directory"), http.StatusConflict)
-		return
-	}
 	switch r.Method {
 	case http.MethodGet:
-		bindings := ServiceBindings{SchemaVersion: serviceSchemaVersion, Variables: map[string]string{}, Secrets: map[string]string{}}
-		data, err := os.ReadFile(path)
-		if err == nil {
-			decoder := json.NewDecoder(strings.NewReader(string(data)))
-			if decodeErr := decoder.Decode(&bindings); decodeErr != nil {
-				writeError(w, decodeErr, http.StatusInternalServerError)
-				return
-			}
-		} else if !errors.Is(err, os.ErrNotExist) {
-			writeError(w, err, http.StatusInternalServerError)
+		bindings, err := manager.Bindings()
+		if err != nil {
+			writeError(w, err, statusForServiceBindingsError(err, http.StatusInternalServerError))
 			return
 		}
 		writeJSON(w, bindings)
@@ -221,15 +207,9 @@ func (s *server) handleServiceBindings(w http.ResponseWriter, r *http.Request, w
 			writeError(w, err, http.StatusBadRequest)
 			return
 		}
-		manager.mu.Lock()
-		validationErr := validateServiceBindingsLocked(bindings, manager)
-		if validationErr == nil {
-			bindings.SchemaVersion = serviceSchemaVersion
-			validationErr = writeServiceJSON(path, bindings, 0o600)
-		}
-		manager.mu.Unlock()
-		if validationErr != nil {
-			writeError(w, validationErr, http.StatusBadRequest)
+		bindings, err = manager.ApplyBindings(bindings)
+		if err != nil {
+			writeError(w, err, statusForServiceBindingsError(err, http.StatusBadRequest))
 			return
 		}
 		writeJSON(w, bindings)
@@ -238,73 +218,11 @@ func (s *server) handleServiceBindings(w http.ResponseWriter, r *http.Request, w
 	}
 }
 
-func validateServiceBindings(bindings ServiceBindings, manager *ServiceManager) error {
-	if manager == nil {
-		return validateServiceBindingsLocked(bindings, nil)
+func statusForServiceBindingsError(err error, fallback int) int {
+	if errors.Is(err, errServiceBindingsPathEscape) {
+		return http.StatusConflict
 	}
-	manager.mu.Lock()
-	defer manager.mu.Unlock()
-	return validateServiceBindingsLocked(bindings, manager)
-}
-
-func validateServiceBindingsLocked(bindings ServiceBindings, manager *ServiceManager) error {
-	if bindings.SchemaVersion != 0 && bindings.SchemaVersion != serviceSchemaVersion {
-		return fmt.Errorf("unsupported schema version %d", bindings.SchemaVersion)
-	}
-	for name, value := range bindings.Variables {
-		if !environmentNamePattern.MatchString(name) {
-			return fmt.Errorf("invalid variable name %q", name)
-		}
-		if reservedServiceBindingName(name) {
-			return fmt.Errorf("variable name %q is reserved for PUA provenance", name)
-		}
-		if secretTemplatePattern.MatchString(value) {
-			return fmt.Errorf("secret references must not appear in variable mapping %q", name)
-		}
-		if strings.Contains(value, "${") {
-			if manager == nil {
-				return fmt.Errorf("variable mapping %q references an unavailable service", name)
-			}
-			if err := validateEnvironmentTemplate(value, "", manager.configs); err != nil {
-				return fmt.Errorf("variable mapping %q: %w", name, err)
-			}
-		}
-		if strings.ContainsRune(value, '\x00') {
-			return fmt.Errorf("variable %q contains NUL", name)
-		}
-		if manager != nil {
-			if match := serviceTemplatePattern.FindStringSubmatch(value); len(match) == 3 && match[0] == value {
-				if rt := manager.runtimes[match[1]]; rt != nil {
-					if _, secret := rt.exports.Secrets[match[2]]; secret {
-						return fmt.Errorf("secret service export %q must be mapped under secrets", match[2])
-					}
-				}
-			}
-		}
-	}
-	for name, value := range bindings.Secrets {
-		if !environmentNamePattern.MatchString(name) {
-			return fmt.Errorf("invalid secret variable name %q", name)
-		}
-		if reservedServiceBindingName(name) {
-			return fmt.Errorf("secret variable name %q is reserved for PUA provenance", name)
-		}
-		if match := secretTemplatePattern.FindStringSubmatch(value); len(match) == 2 && match[0] == value && validSecretName(match[1]) {
-			continue
-		}
-		if match := serviceTemplatePattern.FindStringSubmatch(value); len(match) == 3 && match[0] == value {
-			if manager == nil {
-				return fmt.Errorf("secret mapping %q references unavailable service %q", name, match[1])
-			}
-			rt := manager.runtimes[match[1]]
-			if rt == nil {
-				return fmt.Errorf("secret mapping %q references unknown service %q", name, match[1])
-			}
-			continue
-		}
-		return fmt.Errorf("secret mapping %q must be a complete secret or service export reference", name)
-	}
-	return nil
+	return fallback
 }
 
 func contextOrBackground(ctx context.Context) context.Context {

@@ -63,6 +63,8 @@ type ServiceManagerOptions struct {
 	ReadinessContext time.Duration
 }
 
+var errServiceBindingsPathEscape = errors.New("service bindings path escapes the workspace control directory")
+
 type serviceProcessExit struct {
 	err  error
 	code int
@@ -199,7 +201,7 @@ func (m *ServiceManager) loadLocked() error {
 func (m *ServiceManager) validateBindingsFileLocked() error {
 	path := serviceBindingsPath(m.root)
 	if !pathWithinResolved(filepath.Join(m.root, ".pua"), path) {
-		return errors.New("service bindings path escapes the workspace control directory")
+		return errServiceBindingsPathEscape
 	}
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
@@ -214,7 +216,7 @@ func (m *ServiceManager) validateBindingsFileLocked() error {
 	if err := decoder.Decode(&bindings); err != nil {
 		return fmt.Errorf("decode service bindings: %w", err)
 	}
-	if err := validateServiceBindingsLocked(bindings, m); err != nil {
+	if err := m.validateBindingsLocked(bindings); err != nil {
 		return fmt.Errorf("service bindings: %w", err)
 	}
 	return nil
@@ -1344,6 +1346,116 @@ func (m *ServiceManager) Exports(id string) (ServiceExports, error) {
 	return publicExports(rt.exports, rt.secretNames), nil
 }
 
+// Bindings returns the persisted Workspace binding references. It never
+// resolves secret values, and a missing file is represented by an empty,
+// current-schema binding set.
+func (m *ServiceManager) Bindings() (ServiceBindings, error) {
+	if m == nil {
+		return ServiceBindings{}, errors.New("service manager is unavailable")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.readBindingsLocked()
+}
+
+func (m *ServiceManager) readBindingsLocked() (ServiceBindings, error) {
+	path := serviceBindingsPath(m.root)
+	if !pathWithinResolved(filepath.Join(m.root, ".pua"), path) {
+		return ServiceBindings{}, errServiceBindingsPathEscape
+	}
+	bindings := ServiceBindings{
+		SchemaVersion: serviceSchemaVersion,
+		Variables:     map[string]string{},
+		Secrets:       map[string]string{},
+	}
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return bindings, nil
+	}
+	if err != nil {
+		return ServiceBindings{}, err
+	}
+	if err := json.NewDecoder(bytes.NewReader(data)).Decode(&bindings); err != nil {
+		return ServiceBindings{}, err
+	}
+	return bindings, nil
+}
+
+// ApplyBindings validates and atomically persists Workspace binding
+// references while holding the same lock as service lifecycle updates. The
+// returned value is normalized to the current persistence schema.
+func (m *ServiceManager) ApplyBindings(bindings ServiceBindings) (ServiceBindings, error) {
+	if m == nil {
+		return ServiceBindings{}, errors.New("service manager is unavailable")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !pathWithinResolved(filepath.Join(m.root, ".pua"), serviceBindingsPath(m.root)) {
+		return ServiceBindings{}, errServiceBindingsPathEscape
+	}
+	bindings.Variables = cloneStringMap(bindings.Variables)
+	bindings.Secrets = cloneStringMap(bindings.Secrets)
+	if err := m.validateBindingsLocked(bindings); err != nil {
+		return ServiceBindings{}, err
+	}
+	bindings.SchemaVersion = serviceSchemaVersion
+	if err := writeServiceJSON(serviceBindingsPath(m.root), bindings, 0o600); err != nil {
+		return ServiceBindings{}, err
+	}
+	return bindings, nil
+}
+
+func (m *ServiceManager) validateBindingsLocked(bindings ServiceBindings) error {
+	if bindings.SchemaVersion != 0 && bindings.SchemaVersion != serviceSchemaVersion {
+		return fmt.Errorf("unsupported schema version %d", bindings.SchemaVersion)
+	}
+	for name, value := range bindings.Variables {
+		if !environmentNamePattern.MatchString(name) {
+			return fmt.Errorf("invalid variable name %q", name)
+		}
+		if reservedServiceBindingName(name) {
+			return fmt.Errorf("variable name %q is reserved for PUA provenance", name)
+		}
+		if secretTemplatePattern.MatchString(value) {
+			return fmt.Errorf("secret references must not appear in variable mapping %q", name)
+		}
+		if strings.Contains(value, "${") {
+			if err := validateEnvironmentTemplate(value, "", m.configs); err != nil {
+				return fmt.Errorf("variable mapping %q: %w", name, err)
+			}
+		}
+		if strings.ContainsRune(value, '\x00') {
+			return fmt.Errorf("variable %q contains NUL", name)
+		}
+		if match := serviceTemplatePattern.FindStringSubmatch(value); len(match) == 3 && match[0] == value {
+			if rt := m.runtimes[match[1]]; rt != nil {
+				if _, secret := rt.exports.Secrets[match[2]]; secret {
+					return fmt.Errorf("secret service export %q must be mapped under secrets", match[2])
+				}
+			}
+		}
+	}
+	for name, value := range bindings.Secrets {
+		if !environmentNamePattern.MatchString(name) {
+			return fmt.Errorf("invalid secret variable name %q", name)
+		}
+		if reservedServiceBindingName(name) {
+			return fmt.Errorf("secret variable name %q is reserved for PUA provenance", name)
+		}
+		if match := secretTemplatePattern.FindStringSubmatch(value); len(match) == 2 && match[0] == value && validSecretName(match[1]) {
+			continue
+		}
+		if match := serviceTemplatePattern.FindStringSubmatch(value); len(match) == 3 && match[0] == value {
+			if m.runtimes[match[1]] == nil {
+				return fmt.Errorf("secret mapping %q references unknown service %q", name, match[1])
+			}
+			continue
+		}
+		return fmt.Errorf("secret mapping %q must be a complete secret or service export reference", name)
+	}
+	return nil
+}
+
 func (m *ServiceManager) Apply(cfg ServiceConfig) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1574,7 +1686,7 @@ func (m *ServiceManager) ResolveBindings() (map[string]string, map[string]string
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if !pathWithinResolved(filepath.Join(m.root, ".pua"), serviceBindingsPath(m.root)) {
-		return nil, nil, errors.New("service bindings path escapes the workspace control directory")
+		return nil, nil, errServiceBindingsPathEscape
 	}
 	data, err := os.ReadFile(serviceBindingsPath(m.root))
 	if os.IsNotExist(err) {
@@ -1589,7 +1701,7 @@ func (m *ServiceManager) ResolveBindings() (map[string]string, map[string]string
 	if err := decoder.Decode(&bindings); err != nil {
 		return nil, nil, err
 	}
-	if err := validateServiceBindingsLocked(bindings, m); err != nil {
+	if err := m.validateBindingsLocked(bindings); err != nil {
 		return nil, nil, err
 	}
 	variables := make(map[string]string, len(bindings.Variables))

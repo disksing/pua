@@ -36,6 +36,10 @@ var ErrScheduleOccurrenceDue = errors.New("one-time schedule occurrence is due")
 // round-tripped through the Scheduler's RFC3339Nano runtime persistence.
 var ErrScheduleOccurrenceOutOfRange = errors.New("schedule occurrence is outside the RFC3339Nano persistence range")
 
+// ErrScheduleRevisionExhausted identifies a schedule whose revision cannot be
+// incremented without wrapping the persisted uint64 value.
+var ErrScheduleRevisionExhausted = errors.New("schedule revision is exhausted")
+
 const (
 	SchedulerResourceID         = "scheduler"
 	schedulerDir                = "scheduler"
@@ -178,6 +182,14 @@ type ScheduleRevisionConflictError struct {
 
 func (e *ScheduleRevisionConflictError) Error() string {
 	return fmt.Sprintf("schedule_revision_conflict: schedule %s revision is %d, expected %d", e.ScheduleID, e.Actual, e.Expected)
+}
+
+func incrementScheduleRevision(schedule *Schedule) error {
+	if schedule.Revision == ^uint64(0) {
+		return ErrScheduleRevisionExhausted
+	}
+	schedule.Revision++
+	return nil
 }
 
 func defaultSchedulerConfig() SchedulerConfig {
@@ -949,7 +961,9 @@ func (w *Workspace) UpdateSchedule(input UpdateScheduleInput) (Schedule, error) 
 		if updated.State == ScheduleStateNeedsCompilation && trigger != nil {
 			updated.State = ScheduleStateActive
 		}
-		updated.Revision++
+		if err := incrementScheduleRevision(&updated); err != nil {
+			return err
+		}
 		updated.UpdatedAt = mutationTime.Format(time.RFC3339Nano)
 		if err := validateSchedule(updated); err != nil {
 			return err
@@ -1032,7 +1046,9 @@ func (w *Workspace) changeScheduleState(id, state string) (Schedule, error) {
 			}
 		}
 		updated.State = state
-		updated.Revision++
+		if err := incrementScheduleRevision(&updated); err != nil {
+			return err
+		}
 		updated.UpdatedAt = mutationTime.Format(time.RFC3339Nano)
 		config.Schedules[index] = updated
 		return writeSchedulerJSON(schedulerJSONPath(w.root), config)

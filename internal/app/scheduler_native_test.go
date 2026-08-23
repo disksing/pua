@@ -1,10 +1,12 @@
 package app_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -331,6 +333,191 @@ func TestScheduleTriggerValidationAndRevisionCAS(t *testing.T) {
 	if err != nil || resumed.State != app.ScheduleStateActive || resumed.Revision != 3 {
 		t.Fatalf("resume = %#v, %v", resumed, err)
 	}
+}
+
+func schedulerRevisionFixture(t *testing.T, state string, revision uint64) (*app.Workspace, app.Schedule, string, []byte) {
+	t.Helper()
+	workspace, err := app.Initialize(t.TempDir(), "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := workspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Revision boundary", Condition: "every minute", Target: "workspace",
+		Trigger: &app.ScheduleTrigger{
+			Type: app.ScheduleTriggerInterval, EverySeconds: 60, AnchorAt: "2026-08-24T00:00:00Z",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := workspace.Scheduler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.Schedules[0].Revision = revision
+	config.Schedules[0].State = state
+	fixture, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture = append(fixture, '\n')
+	path := filepath.Join(workspace.Root(), "scheduler", "scheduler.json")
+	if err := os.WriteFile(path, fixture, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	created = config.Schedules[0]
+	return workspace, created, path, fixture
+}
+
+func assertSchedulerRevisionFixture(t *testing.T, workspace *app.Workspace, path string, before []byte, want app.Schedule) {
+	t.Helper()
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("rejected revision mutation changed scheduler.json:\nbefore=%s\nafter=%s", before, after)
+	}
+	config, err := workspace.Scheduler()
+	if err != nil {
+		t.Fatalf("Scheduler failed after rejected revision mutation: %v", err)
+	}
+	if len(config.Schedules) != 1 || !reflect.DeepEqual(config.Schedules[0], want) {
+		t.Fatalf("schedule changed after rejected revision mutation: got %#v, want %#v", config.Schedules, want)
+	}
+}
+
+func TestScheduleRevisionExhaustionIsAtomic(t *testing.T) {
+	maximumRevision := ^uint64(0)
+	tests := []struct {
+		name  string
+		state string
+		apply func(*app.Workspace, app.Schedule) (app.Schedule, error)
+	}{
+		{
+			name: "active to paused", state: app.ScheduleStateActive,
+			apply: func(workspace *app.Workspace, schedule app.Schedule) (app.Schedule, error) {
+				return workspace.PauseSchedule(schedule.ID)
+			},
+		},
+		{
+			name: "paused to active", state: app.ScheduleStatePaused,
+			apply: func(workspace *app.Workspace, schedule app.Schedule) (app.Schedule, error) {
+				return workspace.ResumeSchedule(schedule.ID)
+			},
+		},
+		{
+			name: "semantic update", state: app.ScheduleStateActive,
+			apply: func(workspace *app.Workspace, schedule app.Schedule) (app.Schedule, error) {
+				description := "Changed at the boundary"
+				return workspace.UpdateSchedule(app.UpdateScheduleInput{
+					ID: schedule.ID, ExpectedRevision: schedule.Revision, Description: &description,
+				})
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			workspace, original, path, before := schedulerRevisionFixture(t, test.state, maximumRevision)
+			_, err := test.apply(workspace, original)
+			if !errors.Is(err, app.ErrScheduleRevisionExhausted) {
+				t.Fatalf("revision exhaustion error = %v", err)
+			}
+			assertSchedulerRevisionFixture(t, workspace, path, before, original)
+		})
+	}
+}
+
+func TestScheduleRevisionExhaustionKeepsSameStateIdempotent(t *testing.T) {
+	maximumRevision := ^uint64(0)
+	tests := []struct {
+		name  string
+		state string
+		apply func(*app.Workspace, string) (app.Schedule, error)
+	}{
+		{name: "pause paused", state: app.ScheduleStatePaused, apply: (*app.Workspace).PauseSchedule},
+		{name: "resume active", state: app.ScheduleStateActive, apply: (*app.Workspace).ResumeSchedule},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			workspace, original, path, before := schedulerRevisionFixture(t, test.state, maximumRevision)
+			unchanged, err := test.apply(workspace, original.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(unchanged, original) {
+				t.Fatalf("idempotent state change = %#v, want %#v", unchanged, original)
+			}
+			assertSchedulerRevisionFixture(t, workspace, path, before, original)
+		})
+	}
+}
+
+func TestScheduleRevisionMaximumRemainsValid(t *testing.T) {
+	maximumRevision := ^uint64(0)
+	tests := []struct {
+		name  string
+		state string
+		apply func(*app.Workspace, app.Schedule) (app.Schedule, error)
+	}{
+		{
+			name: "pause", state: app.ScheduleStateActive,
+			apply: func(workspace *app.Workspace, schedule app.Schedule) (app.Schedule, error) {
+				return workspace.PauseSchedule(schedule.ID)
+			},
+		},
+		{
+			name: "resume", state: app.ScheduleStatePaused,
+			apply: func(workspace *app.Workspace, schedule app.Schedule) (app.Schedule, error) {
+				return workspace.ResumeSchedule(schedule.ID)
+			},
+		},
+		{
+			name: "update", state: app.ScheduleStateActive,
+			apply: func(workspace *app.Workspace, schedule app.Schedule) (app.Schedule, error) {
+				description := "Maximum revision"
+				return workspace.UpdateSchedule(app.UpdateScheduleInput{
+					ID: schedule.ID, ExpectedRevision: schedule.Revision, Description: &description,
+				})
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			workspace, original, _, _ := schedulerRevisionFixture(t, test.state, maximumRevision-1)
+			updated, err := test.apply(workspace, original)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if updated.Revision != maximumRevision {
+				t.Fatalf("revision = %d, want %d", updated.Revision, maximumRevision)
+			}
+			config, err := workspace.Scheduler()
+			if err != nil {
+				t.Fatalf("Scheduler failed at maximum revision: %v", err)
+			}
+			if len(config.Schedules) != 1 || config.Schedules[0].Revision != maximumRevision {
+				t.Fatalf("persisted maximum revision = %#v", config.Schedules)
+			}
+		})
+	}
+}
+
+func TestScheduleRevisionConflictPrecedesExhaustion(t *testing.T) {
+	maximumRevision := ^uint64(0)
+	workspace, original, path, before := schedulerRevisionFixture(t, app.ScheduleStateActive, maximumRevision)
+	description := "Stale update"
+	_, err := workspace.UpdateSchedule(app.UpdateScheduleInput{
+		ID: original.ID, ExpectedRevision: maximumRevision - 1, Description: &description,
+	})
+	var conflict *app.ScheduleRevisionConflictError
+	if !errors.As(err, &conflict) || conflict.Expected != maximumRevision-1 || conflict.Actual != maximumRevision {
+		t.Fatalf("stale maximum-revision update error = %#v, %v", conflict, err)
+	}
+	if errors.Is(err, app.ErrScheduleRevisionExhausted) {
+		t.Fatalf("stale update returned revision exhaustion: %v", err)
+	}
+	assertSchedulerRevisionFixture(t, workspace, path, before, original)
 }
 
 func TestPauseScheduleCommitsOnlyBeforeOneTimeDeadline(t *testing.T) {

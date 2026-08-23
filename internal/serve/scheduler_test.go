@@ -1,6 +1,7 @@
 package serve
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -182,6 +183,79 @@ func TestSchedulerHTTPAPIRoutesNaturalLanguageAndNativeChanges(t *testing.T) {
 	removed := request(http.MethodDelete, "/api/workspaces/workspace-scheduler/scheduler/"+created.ID, "")
 	if removed.Code != http.StatusOK {
 		t.Fatalf("remove = %d %s", removed.Code, removed.Body.String())
+	}
+}
+
+func TestSchedulerHTTPRevisionExhaustionIsConflict(t *testing.T) {
+	root := t.TempDir()
+	puaWorkspace, err := app.Initialize(root, "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	trigger := app.ScheduleTrigger{
+		Type: app.ScheduleTriggerInterval, EverySeconds: 60, AnchorAt: "2026-08-24T00:00:00Z",
+	}
+	created, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Revision boundary", Condition: "every minute", Target: "workspace", Trigger: &trigger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	schedulerConfig, err := puaWorkspace.Scheduler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	schedulerConfig.Schedules[0].Revision = ^uint64(0)
+	fixture, err := json.MarshalIndent(schedulerConfig, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture = append(fixture, '\n')
+	path := filepath.Join(root, "scheduler", "scheduler.json")
+	if err := os.WriteFile(path, fixture, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	workspace := serveWorkspace{ID: "workspace-scheduler-revision", Name: "Scheduler Revision", Path: root}
+	s := &server{config: filepath.Join(t.TempDir(), "serve.json")}
+	if err := s.saveConfig(config{Version: agentHubConfigVersion, Workspaces: []serveWorkspace{workspace}}); err != nil {
+		t.Fatal(err)
+	}
+	s.agents = newAgentManager(s)
+	t.Cleanup(s.agents.waitBackground)
+	description := "Cannot wrap"
+	body, err := json.Marshal(schedulerChangeRequest{
+		Operation: string(app.ScheduleChangeUpdate), ID: created.ID, ExpectedRevision: ^uint64(0),
+		Description: &description, Trigger: &trigger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(
+		http.MethodPost, "/api/workspaces/workspace-scheduler-revision/scheduler/changes", bytes.NewReader(body),
+	)
+	s.handleWorkspace(recorder, request)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("revision exhaustion status = %d, body %s", recorder.Code, recorder.Body.String())
+	}
+	var response map[string]string
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response["code"] != "schedule_revision_exhausted" || !strings.Contains(response["error"], app.ErrScheduleRevisionExhausted.Error()) {
+		t.Fatalf("revision exhaustion response = %#v", response)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, fixture) {
+		t.Fatalf("HTTP revision exhaustion changed scheduler.json:\nbefore=%s\nafter=%s", fixture, after)
+	}
+	loaded, err := puaWorkspace.Scheduler()
+	if err != nil || len(loaded.Schedules) != 1 || loaded.Schedules[0].Revision != ^uint64(0) {
+		t.Fatalf("Scheduler after HTTP revision exhaustion = %#v, %v", loaded.Schedules, err)
 	}
 }
 

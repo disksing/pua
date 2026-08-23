@@ -61,7 +61,6 @@ function model(overrides: Partial<DetailPanelModel> = {}): DetailPanelModel {
     onSaveGenerationPolicy: vi.fn(async () => undefined),
     onSaveStallWatchdogPolicy: vi.fn(async () => undefined),
     onSaveTaskDefault: vi.fn(async () => undefined),
-    onRefreshScheduler: vi.fn(async () => undefined),
     onToast: vi.fn(),
     ...overrides,
   };

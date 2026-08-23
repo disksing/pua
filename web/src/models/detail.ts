@@ -80,6 +80,20 @@ export interface WorkspaceAgentsModel extends Partial<FilePreviewModel> {
   error?: string;
 }
 
+export interface SchedulerSaveInput {
+  scheduleId?: string;
+  description: string;
+  condition: string;
+  target: string;
+}
+
+export interface SchedulerMutationCallbacks {
+  validateTarget: (target: string) => string;
+  save: (input: SchedulerSaveInput) => Promise<boolean>;
+  setPaused: (scheduleId: string, paused: boolean) => Promise<boolean>;
+  remove: (scheduleId: string) => Promise<boolean>;
+}
+
 export interface DetailPanelModel {
   identity: string;
   workspaceId: string;
@@ -118,6 +132,6 @@ export interface DetailPanelModel {
   onSaveGenerationPolicy: (policy: GenerationPolicyRecord) => Promise<void>;
   onSaveStallWatchdogPolicy: (policy: StallWatchdogPolicyRecord) => Promise<void>;
   onSaveTaskDefault: (projectId: string, binding: ResourceAgentBindingModel | null) => Promise<void>;
-  onRefreshScheduler?: () => Promise<void>;
+  schedulerActions?: SchedulerMutationCallbacks;
   onToast: (message: string) => void;
 }

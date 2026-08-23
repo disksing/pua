@@ -1,53 +1,22 @@
 <script lang="ts">
   import "./SchedulerPanel.css";
 
-  import { onDestroy } from "svelte";
-  import { ApiClient } from "../api/client";
   import { confirmDialog } from "../controllers/confirm-dialog-controller";
+  import type { SchedulerMutationCallbacks } from "../models/detail";
   import type { ScheduleRecord, SchedulerConfigRecord } from "../models/workspace";
   import Icon from "./Icon.svelte";
 
-  let { workspaceId, config, resolveResourceTitle, onChanged, onToast }: {
-    workspaceId: string;
+  let { config, actions }: {
     config: SchedulerConfigRecord;
-    resolveResourceTitle: (resourceId: string) => string | null;
-    onChanged: () => Promise<void>;
-    onToast: (message: string) => void;
+    actions: SchedulerMutationCallbacks;
   } = $props();
-  type OperationLease = { identity: string; key: string; generation: number };
-  const client = new ApiClient();
-  let disposed = false;
-  onDestroy(() => {
-    disposed = true;
-    client.dispose();
-  });
   let editingId = $state("");
   let description = $state("");
   let condition = $state("");
   let target = $state("workspace");
-  // The Scheduler resource is fixed, so its Workspace is the operation identity.
-  // svelte-ignore state_referenced_locally
-  let localIdentity = $state(workspaceId);
-  let operationGeneration = 0;
-  let pendingOperations = $state(new Map<string, OperationLease>());
-  const saving = $derived(pendingOperations.has("save"));
-  const targetError = $derived(validateTarget(target));
-
-  $effect(() => {
-    if (workspaceId === localIdentity) return;
-    localIdentity = workspaceId;
-    pendingOperations = new Map();
-    clearForm();
-  });
-
-  function validateTarget(value: string): string {
-    const resourceId = value.trim();
-    if (!resourceId) return "Target resource is required.";
-    if (resourceId === "workspace" || resourceId === "scheduler") return "";
-    return resolveResourceTitle(resourceId)
-      ? ""
-      : "Target must be an open resource in the current Workspace.";
-  }
+  let saving = $state(false);
+  let pendingScheduleIds = $state(new Set<string>());
+  const targetError = $derived(actions.validateTarget(target));
 
   function edit(schedule: ScheduleRecord): void {
     editingId = schedule.id;
@@ -63,29 +32,10 @@
     target = "workspace";
   }
 
-  function scheduleOperationKey(schedule: ScheduleRecord): string {
-    return `schedule:${schedule.id}`;
-  }
-
-  function beginOperation(key: string): OperationLease | null {
-    if (pendingOperations.has(key)) return null;
-    const lease = { identity: workspaceId, key, generation: ++operationGeneration };
-    pendingOperations = new Map(pendingOperations).set(key, lease);
-    return lease;
-  }
-
-  function operationIsCurrent(lease: OperationLease): boolean {
-    return !disposed
-      && workspaceId === lease.identity
-      && pendingOperations.get(lease.key)?.generation === lease.generation;
-  }
-
-  function finishOperation(lease: OperationLease): boolean {
-    if (!operationIsCurrent(lease)) return false;
-    const next = new Map(pendingOperations);
-    next.delete(lease.key);
-    pendingOperations = next;
-    return true;
+  function setSchedulePending(scheduleId: string, pending: boolean): void {
+    const next = new Set(pendingScheduleIds);
+    if (pending) next.add(scheduleId); else next.delete(scheduleId);
+    pendingScheduleIds = next;
   }
 
   function triggerLabel(schedule: ScheduleRecord): string {
@@ -97,61 +47,35 @@
   }
 
   async function saveSchedule(): Promise<void> {
-    if (!description.trim() || !condition.trim() || targetError) return;
-    const lease = beginOperation("save");
-    if (!lease) return;
-    const wasEditing = Boolean(editingId);
-    const scheduleId = editingId;
+    if (saving || !description.trim() || !condition.trim() || targetError) return;
+    saving = true;
     try {
-      const path = `/api/workspaces/${encodeURIComponent(lease.identity)}/scheduler${scheduleId ? `/${encodeURIComponent(scheduleId)}` : ""}`;
-      await client.request(path, {
-        method: scheduleId ? "PUT" : "POST",
-        body: JSON.stringify({ description, condition, target })
-      });
-      if (!operationIsCurrent(lease)) return;
-      clearForm();
-      await onChanged();
-      if (!operationIsCurrent(lease)) return;
-      onToast(wasEditing ? "Schedule update request sent." : "Schedule request sent.");
-    } catch (reason) {
-      if (operationIsCurrent(lease)) onToast(reason instanceof Error ? reason.message : String(reason));
+      const completed = await actions.save({ scheduleId: editingId || undefined, description, condition, target });
+      if (completed) clearForm();
     } finally {
-      finishOperation(lease);
+      saving = false;
     }
   }
 
   async function remove(schedule: ScheduleRecord): Promise<void> {
-    const lease = beginOperation(scheduleOperationKey(schedule));
-    if (!lease) return;
+    if (pendingScheduleIds.has(schedule.id)) return;
+    setSchedulePending(schedule.id, true);
     try {
       if (!(await confirmDialog({ title: "Remove schedule", message: `Remove schedule ${schedule.id}?`, confirmLabel: "Remove", danger: true }))) return;
-      if (!operationIsCurrent(lease)) return;
-      await client.request(`/api/workspaces/${encodeURIComponent(lease.identity)}/scheduler/${encodeURIComponent(schedule.id)}`, { method: "DELETE" });
-      if (!operationIsCurrent(lease)) return;
-      if (editingId === schedule.id) clearForm();
-      await onChanged();
-      if (!operationIsCurrent(lease)) return;
-      onToast("Schedule removed.");
-    } catch (reason) {
-      if (operationIsCurrent(lease)) onToast(reason instanceof Error ? reason.message : String(reason));
+      const completed = await actions.remove(schedule.id);
+      if (completed && editingId === schedule.id) clearForm();
     } finally {
-      finishOperation(lease);
+      setSchedulePending(schedule.id, false);
     }
   }
 
   async function setPaused(schedule: ScheduleRecord, paused: boolean): Promise<void> {
-    const lease = beginOperation(scheduleOperationKey(schedule));
-    if (!lease) return;
+    if (pendingScheduleIds.has(schedule.id)) return;
+    setSchedulePending(schedule.id, true);
     try {
-      await client.request(`/api/workspaces/${encodeURIComponent(lease.identity)}/scheduler/${encodeURIComponent(schedule.id)}/${paused ? "pause" : "resume"}`, { method: "POST" });
-      if (!operationIsCurrent(lease)) return;
-      await onChanged();
-      if (!operationIsCurrent(lease)) return;
-      onToast(paused ? "Schedule paused." : "Schedule resumed.");
-    } catch (reason) {
-      if (operationIsCurrent(lease)) onToast(reason instanceof Error ? reason.message : String(reason));
+      await actions.setPaused(schedule.id, paused);
     } finally {
-      finishOperation(lease);
+      setSchedulePending(schedule.id, false);
     }
   }
 </script>
@@ -168,7 +92,7 @@
   {#if config.schedules.length}
     {#each config.schedules as schedule (schedule.id)}
       <article class:editing={editingId === schedule.id}>
-        <header><div><strong>{schedule.description}</strong><code>{schedule.id} · r{schedule.revision}</code></div><div><button type="button" class="secondary-button" disabled={pendingOperations.has(scheduleOperationKey(schedule))} onclick={() => edit(schedule)}><Icon name="pencil" /><span>Edit</span></button>{#if schedule.effectiveState === "paused" || schedule.effectiveState === "attention_required"}<button type="button" class="secondary-button" disabled={pendingOperations.has(scheduleOperationKey(schedule))} onclick={() => setPaused(schedule, false)}><span>Resume</span></button>{:else if schedule.effectiveState === "active"}<button type="button" class="secondary-button" disabled={pendingOperations.has(scheduleOperationKey(schedule))} onclick={() => setPaused(schedule, true)}><span>Pause</span></button>{/if}<button type="button" class="danger-button" disabled={pendingOperations.has(scheduleOperationKey(schedule))} onclick={() => remove(schedule)}><Icon name="trash-2" /><span>Remove</span></button></div></header>
+        <header><div><strong>{schedule.description}</strong><code>{schedule.id} · r{schedule.revision}</code></div><div><button type="button" class="secondary-button" disabled={pendingScheduleIds.has(schedule.id)} onclick={() => edit(schedule)}><Icon name="pencil" /><span>Edit</span></button>{#if schedule.effectiveState === "paused" || schedule.effectiveState === "attention_required"}<button type="button" class="secondary-button" disabled={pendingScheduleIds.has(schedule.id)} onclick={() => setPaused(schedule, false)}><span>Resume</span></button>{:else if schedule.effectiveState === "active"}<button type="button" class="secondary-button" disabled={pendingScheduleIds.has(schedule.id)} onclick={() => setPaused(schedule, true)}><span>Pause</span></button>{/if}<button type="button" class="danger-button" disabled={pendingScheduleIds.has(schedule.id)} onclick={() => remove(schedule)}><Icon name="trash-2" /><span>Remove</span></button></div></header>
         <dl><div><dt>Trigger</dt><dd>{triggerLabel(schedule)}</dd></div><div><dt>Condition</dt><dd>{schedule.condition}</dd></div>{#if schedule.guard}<div><dt>Guard</dt><dd>{schedule.guard}</dd></div>{/if}<div><dt>Target</dt><dd><code>{schedule.target}</code></dd></div><div><dt>State</dt><dd>{schedule.effectiveState}</dd></div>{#if schedule.nextRunAt}<div><dt>Next run</dt><dd>{schedule.nextRunAt}</dd></div>{/if}{#if schedule.lastOutcome}<div><dt>Last outcome</dt><dd>{schedule.lastOutcome}</dd></div>{/if}{#if schedule.lastError}<div><dt>Error</dt><dd>{schedule.lastError}</dd></div>{/if}</dl>
       </article>
     {/each}

@@ -223,6 +223,13 @@ const resourceDetailController = createResourceDetailController({
 	nextDetailRequestVersion: () => ++controllerState.detailRequestVersion,
 	isCurrentWorkspace: (workspaceId, navigationVersion) => isCurrentWorkspaceView(workspaceId, navigationVersion),
 	request: (path, init) => api(path, init),
+	scheduler: {
+		resolveResourceTitle: (resourceId) => resolveResourceTitle(resourceId),
+		reloadTree: () => loadTree({ updateURL: false }),
+		reloadDetail: async () => { await loadDetail("scheduler", { force: true }); },
+		publish: () => publishViewModels(),
+		toast: (message) => toast(message),
+	},
 });
 const createDialogController = createCreateDialogController({
 	workspaceId: () => controllerState.activeWorkspaceId,
@@ -515,6 +522,7 @@ function selectWorkspaceUser(name: string): string {
 
 function beginWorkspaceUserTransition(name: string): void {
 	controllerState.navigationVersion++;
+	resourceDetailController.invalidateSchedulerOperations();
 	controllerState.autoRefreshVersion++;
 	controllerState.treeRequestVersion++;
 	controllerState.detailRequestVersion++;
@@ -558,6 +566,7 @@ async function resolveWorkspaceIdentity(workspaceId = controllerState.activeWork
 	if (controllerState.currentUserName) {
 		await saveUIState().catch((err) => console.warn("failed to save UI state before clearing user", err));
 		controllerState.navigationVersion++;
+		resourceDetailController.invalidateSchedulerOperations();
 		controllerState.autoRefreshVersion++;
 		controllerState.treeRequestVersion++;
 		controllerState.detailRequestVersion++;
@@ -1145,6 +1154,7 @@ async function switchWorkspace(id: string): Promise<void> {
 	setMobileSidebar(false);
 	flushAgentDraft();
 	controllerState.navigationVersion++;
+	resourceDetailController.invalidateSchedulerOperations();
 	controllerState.autoRefreshVersion++;
 	controllerState.treeRequestVersion++;
 	controllerState.detailRequestVersion++;
@@ -1296,6 +1306,7 @@ async function selectResource(id: string, options: SelectResourceOptions = {}): 
 	const forceDetail = selectionChanged || Boolean(options.forceDetail);
 	if (forceDetail) {
 		controllerState.navigationVersion++;
+		resourceDetailController.invalidateSchedulerOperations();
 		controllerState.autoRefreshVersion++;
 		controllerState.treeRequestVersion++;
 		controllerState.detailRequestVersion++;
@@ -1487,11 +1498,7 @@ function detailPanelModel(): DetailPanelModel {
 			publishViewModels();
 			toast(binding ? "Project Task default saved." : "Project Task default reset to inherit.");
 		},
-		onRefreshScheduler: async () => {
-			await loadTree({ updateURL: false });
-			if (controllerState.selectedId === "scheduler") await loadDetail("scheduler", { force: true });
-			publishViewModels();
-		},
+		schedulerActions: controllerState.selectedId === "scheduler" ? resourceDetailController.schedulerActions() : undefined,
 		onToast: toast
 	};
 	if (!controllerState.tree) return base;
@@ -2368,6 +2375,7 @@ export function stopPUAApp(): void {
 	notificationController = null;
 	userSettingsController = null;
 	agentOperations.reset();
+	resourceDetailController.invalidateSchedulerOperations();
 	clearAgentRenderTimer();
 	createDialogController.dispose();
 	lifecycle?.dispose();
@@ -2384,6 +2392,7 @@ async function handleHistoryNavigation(pathname: string): Promise<void> {
 	const previousSelectedId = controllerState.selectedId;
 	flushAgentDraft();
 	controllerState.navigationVersion++;
+	resourceDetailController.invalidateSchedulerOperations();
 	controllerState.autoRefreshVersion++;
 	controllerState.treeRequestVersion++;
 	controllerState.detailRequestVersion++;

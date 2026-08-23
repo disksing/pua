@@ -199,34 +199,41 @@ func (m *ServiceManager) loadLocked() error {
 			delete(m.runtimes, id)
 		}
 	}
-	if err := m.validateBindingsFileLocked(); err != nil {
+	if _, err := m.loadBindingsLocked(); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (m *ServiceManager) validateBindingsFileLocked() error {
+// loadBindingsLocked is the single persistence boundary for Workspace binding
+// references. Each call returns newly allocated maps so callers cannot mutate
+// another read, and a missing file has the same initialized default everywhere.
+func (m *ServiceManager) loadBindingsLocked() (ServiceBindings, error) {
 	path := serviceBindingsPath(m.root)
 	if !pathWithinResolved(filepath.Join(m.root, ".pua"), path) {
-		return errServiceBindingsPathEscape
+		return ServiceBindings{}, errServiceBindingsPathEscape
+	}
+	bindings := ServiceBindings{
+		SchemaVersion: serviceSchemaVersion,
+		Variables:     map[string]string{},
+		Secrets:       map[string]string{},
 	}
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		return nil
+		return bindings, nil
 	}
 	if err != nil {
-		return fmt.Errorf("read service bindings: %w", err)
+		return ServiceBindings{}, fmt.Errorf("read service bindings: %w", err)
 	}
-	var bindings ServiceBindings
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&bindings); err != nil {
-		return fmt.Errorf("decode service bindings: %w", err)
+		return ServiceBindings{}, fmt.Errorf("decode service bindings: %w", err)
 	}
 	if err := m.validateBindingsLocked(bindings); err != nil {
-		return fmt.Errorf("service bindings: %w", err)
+		return ServiceBindings{}, fmt.Errorf("service bindings: %w", err)
 	}
-	return nil
+	return bindings, nil
 }
 
 func (m *ServiceManager) loadStatusLocked(rt *serviceRuntime) error {
@@ -1532,30 +1539,7 @@ func (m *ServiceManager) Bindings() (ServiceBindings, error) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.readBindingsLocked()
-}
-
-func (m *ServiceManager) readBindingsLocked() (ServiceBindings, error) {
-	path := serviceBindingsPath(m.root)
-	if !pathWithinResolved(filepath.Join(m.root, ".pua"), path) {
-		return ServiceBindings{}, errServiceBindingsPathEscape
-	}
-	bindings := ServiceBindings{
-		SchemaVersion: serviceSchemaVersion,
-		Variables:     map[string]string{},
-		Secrets:       map[string]string{},
-	}
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return bindings, nil
-	}
-	if err != nil {
-		return ServiceBindings{}, err
-	}
-	if err := json.NewDecoder(bytes.NewReader(data)).Decode(&bindings); err != nil {
-		return ServiceBindings{}, err
-	}
-	return bindings, nil
+	return m.loadBindingsLocked()
 }
 
 // ApplyBindings validates and atomically persists Workspace binding
@@ -1857,23 +1841,8 @@ func (m *ServiceManager) ResolveBindings() (map[string]string, map[string]string
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if !pathWithinResolved(filepath.Join(m.root, ".pua"), serviceBindingsPath(m.root)) {
-		return nil, nil, errServiceBindingsPathEscape
-	}
-	data, err := os.ReadFile(serviceBindingsPath(m.root))
-	if os.IsNotExist(err) {
-		return nil, nil, nil
-	}
+	bindings, err := m.loadBindingsLocked()
 	if err != nil {
-		return nil, nil, err
-	}
-	var bindings ServiceBindings
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&bindings); err != nil {
-		return nil, nil, err
-	}
-	if err := m.validateBindingsLocked(bindings); err != nil {
 		return nil, nil, err
 	}
 	variables := make(map[string]string, len(bindings.Variables))

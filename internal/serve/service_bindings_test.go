@@ -13,6 +13,150 @@ import (
 	"testing"
 )
 
+func writeTestBindingsData(t *testing.T, root, data string) {
+	t.Helper()
+	path := serviceBindingsPath(root)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestServiceManagerBindingReadsShareStrictValidation(t *testing.T) {
+	tests := []struct {
+		name      string
+		data      string
+		sensitive string
+	}{
+		{
+			name:      "unknown field",
+			data:      `{"schemaVersion":1,"variables":{},"unknown":"unknown-field-secret"}`,
+			sensitive: "unknown-field-secret",
+		},
+		{
+			name:      "domain validation",
+			data:      `{"schemaVersion":1,"secrets":{"TOKEN":"domain-validation-secret"}}`,
+			sensitive: "domain-validation-secret",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			initialRoot := t.TempDir()
+			writeTestBindingsData(t, initialRoot, test.data)
+			_, initialErr := NewServiceManager(initialRoot, ServiceManagerOptions{})
+			if initialErr == nil {
+				t.Fatal("manager initialization accepted malformed bindings")
+			}
+
+			liveRoot := t.TempDir()
+			manager, err := NewServiceManager(liveRoot, ServiceManagerOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeTestBindingsData(t, liveRoot, test.data)
+			_, bindingsErr := manager.Bindings()
+			if bindingsErr == nil {
+				t.Fatal("Bindings accepted malformed bindings")
+			}
+			_, _, resolveErr := manager.ResolveBindings()
+			if resolveErr == nil {
+				t.Fatal("ResolveBindings accepted malformed bindings")
+			}
+
+			for entryPoint, got := range map[string]error{
+				"Bindings":        bindingsErr,
+				"ResolveBindings": resolveErr,
+			} {
+				if got.Error() != initialErr.Error() {
+					t.Errorf("%s error = %q, initialization error = %q", entryPoint, got, initialErr)
+				}
+			}
+			for entryPoint, got := range map[string]error{
+				"initialization":  initialErr,
+				"Bindings":        bindingsErr,
+				"ResolveBindings": resolveErr,
+			} {
+				if strings.Contains(got.Error(), test.sensitive) {
+					t.Errorf("%s error disclosed sensitive binding value: %v", entryPoint, got)
+				}
+			}
+		})
+	}
+}
+
+func TestServiceManagerBindingReadsShareMissingDefault(t *testing.T) {
+	manager, err := NewServiceManager(t.TempDir(), ServiceManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := ServiceBindings{
+		SchemaVersion: serviceSchemaVersion,
+		Variables:     map[string]string{},
+		Secrets:       map[string]string{},
+	}
+	bindings, err := manager.Bindings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(bindings, want) {
+		t.Fatalf("missing bindings = %#v, want %#v", bindings, want)
+	}
+	variables, secrets, err := manager.ResolveBindings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if variables == nil || len(variables) != 0 || secrets == nil || len(secrets) != 0 {
+		t.Fatalf("resolved missing bindings = %#v, %#v; want initialized empty maps", variables, secrets)
+	}
+
+	bindings.Variables["CALLER_MUTATION"] = "must-not-leak"
+	again, err := manager.Bindings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(again, want) {
+		t.Fatalf("caller mutation leaked into later binding read: %#v", again)
+	}
+}
+
+func TestServiceManagerBindingReadsShareValidData(t *testing.T) {
+	root := t.TempDir()
+	writeTestBindingsData(t, root, `{
+		"schemaVersion": 1,
+		"variables": {"PUBLIC_VALUE": "plain"},
+		"secrets": {"API_TOKEN": "${secret.api-token}"}
+	}`)
+	manager, err := NewServiceManager(root, ServiceManagerOptions{
+		Resolver: EnvironmentSecretResolver{Values: map[string]string{"api-token": "resolved-secret"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := ServiceBindings{
+		SchemaVersion: serviceSchemaVersion,
+		Variables:     map[string]string{"PUBLIC_VALUE": "plain"},
+		Secrets:       map[string]string{"API_TOKEN": "${secret.api-token}"},
+	}
+	bindings, err := manager.Bindings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(bindings, want) {
+		t.Fatalf("bindings = %#v, want %#v", bindings, want)
+	}
+	variables, secrets, err := manager.ResolveBindings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(variables, map[string]string{"PUBLIC_VALUE": "plain"}) ||
+		!reflect.DeepEqual(secrets, map[string]string{"API_TOKEN": "resolved-secret"}) {
+		t.Fatalf("resolved bindings = %#v, %#v", variables, secrets)
+	}
+}
+
 func TestServiceManagerReadsAndAppliesBindings(t *testing.T) {
 	root := t.TempDir()
 	writeTestService(t, root, ServiceConfig{

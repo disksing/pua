@@ -2057,7 +2057,14 @@ async function submitChatInput(rawText: string, context: ComposerContext): Promi
 		const clear = clearResourceDraftAfterAccepted({ workspaceId: context.workspaceId, resourceId: context.resourceId, key: context.draftKey, text: rawText, version });
 		if (clear) controllerState.agent.chatDraftResetVersion++;
 		if (clear && controllerState.stopNotice?.key === `${context.workspaceId}:${context.resourceId}`) controllerState.stopNotice = null;
-		await Promise.all([refreshResourceMessageStatus(context.workspaceId, context.resourceId), refreshTreeAfterResourceMutation()]);
+		// The message is durably accepted once the POST returns. Resolve the
+		// send immediately so the composer clears its submitting state, and
+		// refresh status/tree in the background: those requests share the
+		// resource's server-side job queue and can lag behind long-running
+		// reconciliation work (for example first-turn setup on large sessions).
+		void Promise.all([refreshResourceMessageStatus(context.workspaceId, context.resourceId), refreshTreeAfterResourceMutation()])
+			.then(publishViewModels)
+			.catch((err) => console.warn("post-send refresh failed", err));
 		publishViewModels();
 		return { accepted, clear };
 	} finally {

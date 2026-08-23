@@ -436,7 +436,7 @@ func (m *agentManager) reconcileTurnResultSubscriptions(ctx context.Context, wor
 				if !generationFound || strings.TrimSpace(generation.AgentHubSessionID) == "" || client == nil {
 					continue
 				}
-				canonical, canonicalFound, canonicalErr := findCanonicalAgentHubMessage(ctx, client, generation.AgentHubSessionID, message)
+				canonical, canonicalFound, canonicalErr := findCanonicalAgentHubMessage(ctx, client, generation.AgentHubSessionID, message, 0)
 				if canonicalErr != nil || !canonicalFound || strings.TrimSpace(canonical.TurnID) == "" {
 					continue
 				}

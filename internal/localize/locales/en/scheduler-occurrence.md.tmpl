@@ -2,8 +2,11 @@ PUA scheduled occurrence {{.OccurrenceID}}.
 
 - Schedule: {{.ScheduleID}} revision {{.Revision}}
 - Scheduled for: {{.ScheduledFor}}
-- Coalesced through: {{.CoalescedThrough}} ({{.CoalescedCount}} nominal occurrence(s))
-- Next occurrence: {{if .HasNext}}{{.NextRunAt}}{{else}}none{{end}}
+{{if .CronEnumerationCapped}}- Cron enumeration cap reached: yes
+- Enumerated through: {{.EnumeratedThrough}} (exactly {{.EnumeratedCount}} nominal occurrence(s) enumerated; total coalesced count is at least {{.EnumeratedCount}})
+- Recovery cutoff: {{.RecoveryCutoff}} (any additional nominal occurrences at or before this instant were also coalesced without enumeration; this cutoff is not asserted to be a nominal occurrence)
+{{else}}- Coalesced through: {{.CoalescedThrough}} ({{.CoalescedCount}} nominal occurrence(s))
+{{end}}- Next occurrence: {{if .HasNext}}{{.NextRunAt}}{{else}}none{{end}}
 - Original condition: {{.Condition}}
 - Action: {{.Action}}
 {{if .HasGuard}}- Guard: {{.Guard}}

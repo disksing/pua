@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -490,7 +491,7 @@ func TestNativeSchedulerCoalescesDowntimeAndUsesStableOccurrence(t *testing.T) {
 	if cause.ScheduleID != created.ID || cause.ScheduleRevision != 1 || cause.CoalescedCount != 4 || cause.Reason != schedulerOccurrenceReasonCoalesced {
 		t.Fatalf("occurrence causation = %#v\n%s", cause, messages[0].Text)
 	}
-	protocol, err := newNativeScheduler(manager, workspace).prepareOccurrence(created, anchor, anchor.Add(3*time.Minute), anchor.Add(4*time.Minute), 4, schedulerOccurrenceReasonCoalesced)
+	protocol, err := newNativeScheduler(manager, workspace).prepareOccurrence(created, anchor, anchor.Add(3*time.Minute), anchor.Add(4*time.Minute), 4, false, time.Time{}, schedulerOccurrenceReasonCoalesced)
 	if err != nil || !strings.Contains(protocol.Text, "Action: Check release") || !strings.Contains(protocol.Text, "Guard: the release branch is green") || !strings.Contains(protocol.Text, "Next occurrence: "+anchor.Add(4*time.Minute).Format(time.RFC3339Nano)) || !strings.Contains(protocol.Text, cause.OccurrenceID) {
 		t.Fatalf("occurrence guard protocol is incomplete: %v\n%s", err, protocol.Text)
 	}
@@ -508,6 +509,152 @@ func TestNativeSchedulerCoalescesDowntimeAndUsesStableOccurrence(t *testing.T) {
 	}
 	if deadline := manager.nextSchedulerReconcileDeadline(manager.now()); !deadline.Equal(anchor.Add(4 * time.Minute)) {
 		t.Fatalf("dynamic Scheduler deadline = %s", deadline)
+	}
+}
+
+func TestNativeSchedulerCappedCronFreezesTruthfulRecoveryBounds(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	hub := httptest.NewServer(fake)
+	defer hub.Close()
+
+	tests := []struct {
+		language       string
+		capText        string
+		recoveryText   string
+		nonNominalText string
+		ordinaryText   string
+	}{
+		{
+			language: "en", capText: "Cron enumeration cap reached: yes",
+			recoveryText: "Recovery cutoff:", nonNominalText: "not asserted to be a nominal occurrence",
+			ordinaryText: "Coalesced through:",
+		},
+		{
+			language: "zh-CN", capText: "Cron 枚举已达到上限：是",
+			recoveryText: "恢复截点：", nonNominalText: "不表示该截点本身是 nominal occurrence",
+			ordinaryText: "合并截至：",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.language, func(t *testing.T) {
+			manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+			puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.language != "en" {
+				if err := puaWorkspace.Migrate(test.language); err != nil {
+					t.Fatal(err)
+				}
+			}
+			schedule, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+				Description: "Recover capped cron work", Condition: "every minute", Target: "project1.task1",
+				Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerCron, Cron: "0 * * * * *", TimeZone: "UTC"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			first := time.Date(2026, time.January, 1, 0, 1, 0, 0, time.UTC)
+			recoveryCutoff := first.Add(100_001*time.Minute + 30*time.Second)
+			enumeratedThrough := first.Add(99_999 * time.Minute)
+			native := newNativeScheduler(manager, workspace)
+			runtime := schedulerScheduleRuntime{
+				Revision: schedule.Revision, TriggerDigest: mustSchedulerTriggerDigest(t, schedule.Trigger),
+				EffectiveState: app.ScheduleStateActive, NextRunAt: first.Format(time.RFC3339Nano),
+			}
+			if err := native.storeSchedulerRuntime(schedule.ID, runtime); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := puaWorkspace.ArchiveResource("project1.task1"); err != nil {
+				t.Fatal(err)
+			}
+			manager.now = func() time.Time { return recoveryCutoff }
+			if _, err := native.Reconcile(context.Background(), recoveryCutoff); err != nil {
+				t.Fatal(err)
+			}
+
+			persisted, err := native.schedulerRuntime(schedule.ID)
+			if err != nil || persisted.Prepared == nil {
+				t.Fatalf("capped occurrence checkpoint = %#v, %v", persisted, err)
+			}
+			prepared := *persisted.Prepared
+			cause := prepared.Causation
+			if !prepared.CronEnumerationCapped || prepared.EnumeratedThrough != enumeratedThrough.Format(time.RFC3339Nano) ||
+				prepared.EnumeratedCount != 100_000 || prepared.RecoveryCutoff != recoveryCutoff.Format(time.RFC3339Nano) ||
+				cause == nil || !cause.CronEnumerationCapped || cause.EnumeratedThrough != prepared.EnumeratedThrough ||
+				cause.EnumeratedCount != prepared.EnumeratedCount || cause.RecoveryCutoff != prepared.RecoveryCutoff {
+				t.Fatalf("capped occurrence metadata = prepared %#v, causation %#v", prepared, cause)
+			}
+			if prepared.CoalescedThrough != prepared.EnumeratedThrough || prepared.CoalescedCount != prepared.EnumeratedCount ||
+				cause.CoalescedThrough != cause.EnumeratedThrough || cause.CoalescedCount != cause.EnumeratedCount {
+				t.Fatalf("enumerated lower bound changed: prepared %#v, causation %#v", prepared, cause)
+			}
+			next, err := time.Parse(time.RFC3339Nano, prepared.NextRunAt)
+			if err != nil || !next.After(recoveryCutoff) {
+				t.Fatalf("next occurrence = %q after %s, %v", prepared.NextRunAt, recoveryCutoff, err)
+			}
+			instanceID, err := workspaceInstanceID(workspace.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			revision := strconv.FormatUint(schedule.Revision, 10)
+			if want := notificationMessageID("schedule-occurrence", instanceID, schedule.ID, revision, first.Format(time.RFC3339Nano)); prepared.OccurrenceID != want {
+				t.Fatalf("occurrence ID = %q, want first-keyed %q", prepared.OccurrenceID, want)
+			}
+			if want := notificationMessageID(resourceMessageTypeScheduleOccurrence, instanceID, schedule.ID, revision, first.Format(time.RFC3339Nano)); prepared.MessageID != want {
+				t.Fatalf("message ID = %q, want first-keyed %q", prepared.MessageID, want)
+			}
+			for _, want := range []string{test.capText, test.recoveryText, test.nonNominalText, prepared.EnumeratedThrough, prepared.RecoveryCutoff} {
+				if !strings.Contains(prepared.Text, want) {
+					t.Fatalf("capped occurrence prompt missing %q:\n%s", want, prepared.Text)
+				}
+			}
+			causationJSON, err := json.Marshal(cause)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range []string{`"cronEnumerationCapped":true`, `"enumeratedThrough":"` + prepared.EnumeratedThrough + `"`, `"enumeratedCount":100000`, `"recoveryCutoff":"` + prepared.RecoveryCutoff + `"`} {
+				if !strings.Contains(string(causationJSON), want) {
+					t.Fatalf("public causation JSON missing %s: %s", want, causationJSON)
+				}
+			}
+
+			restartedManager := newAgentManager(manager.server)
+			restartedManager.now = func() time.Time { return recoveryCutoff }
+			manager.server.agents = restartedManager
+			restarted := newNativeScheduler(restartedManager, workspace)
+			frozen, err := restarted.schedulerRuntime(schedule.ID)
+			if err != nil || !reflect.DeepEqual(frozen.Prepared, &prepared) {
+				t.Fatalf("restarted checkpoint = %#v, want %#v, %v", frozen.Prepared, prepared, err)
+			}
+			if _, err := restarted.Reconcile(context.Background(), recoveryCutoff); err != nil {
+				t.Fatal(err)
+			}
+			replayed, err := restarted.schedulerRuntime(schedule.ID)
+			if err != nil || !reflect.DeepEqual(replayed.Prepared, &prepared) {
+				t.Fatalf("replayed checkpoint changed = %#v, want %#v, %v", replayed.Prepared, prepared, err)
+			}
+
+			ordinary, err := restarted.prepareOccurrence(schedule, first, first, first.Add(time.Minute), 1, false, time.Time{}, schedulerOccurrenceReasonTime)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ordinary.OccurrenceID != prepared.OccurrenceID || ordinary.MessageID != prepared.MessageID ||
+				ordinary.CronEnumerationCapped || strings.Contains(ordinary.Text, test.capText) ||
+				strings.Contains(ordinary.Text, test.recoveryText) || !strings.Contains(ordinary.Text, test.ordinaryText) {
+				t.Fatalf("non-truncated occurrence protocol changed: %#v\n%s", ordinary, ordinary.Text)
+			}
+			ordinaryJSON, err := json.Marshal(ordinary)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, omitted := range []string{"cronEnumerationCapped", "enumeratedThrough", "enumeratedCount", "recoveryCutoff"} {
+				if strings.Contains(string(ordinaryJSON), omitted) {
+					t.Fatalf("non-truncated checkpoint includes %q: %s", omitted, ordinaryJSON)
+				}
+			}
+		})
 	}
 }
 
@@ -728,7 +875,7 @@ func TestNativeSchedulerCrashWindowReplayMatrix(t *testing.T) {
 			now := at.Add(time.Second)
 			next := at.Add(time.Minute)
 			native := newNativeScheduler(manager, workspace)
-			prepared, err := native.prepareOccurrence(schedule, at, at, next, 1, schedulerOccurrenceReasonTime)
+			prepared, err := native.prepareOccurrence(schedule, at, at, next, 1, false, time.Time{}, schedulerOccurrenceReasonTime)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -781,7 +928,7 @@ func TestNativeSchedulerCrashWindowReplayMatrix(t *testing.T) {
 			restartedManager.now = func() time.Time { return now }
 			manager.server.agents = restartedManager
 			restarted := newNativeScheduler(restartedManager, workspace)
-			recomputed, err := restarted.prepareOccurrence(schedule, at, at, next, 1, schedulerOccurrenceReasonTime)
+			recomputed, err := restarted.prepareOccurrence(schedule, at, at, next, 1, false, time.Time{}, schedulerOccurrenceReasonTime)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -913,7 +1060,7 @@ func TestNativeSchedulerHonorsPersistedDeliveryBackoff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := native.prepareOccurrence(schedule, anchor, anchor, anchor.Add(time.Minute), 1, schedulerOccurrenceReasonTime)
+	prepared, err := native.prepareOccurrence(schedule, anchor, anchor, anchor.Add(time.Minute), 1, false, time.Time{}, schedulerOccurrenceReasonTime)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1350,7 +1497,7 @@ func TestNativeSchedulerPausePreservesClaimedOneTimeOccurrence(t *testing.T) {
 			}
 			manager.now = func() time.Time { return at.Add(-time.Minute) }
 			native := newNativeScheduler(manager, workspace)
-			prepared, err := native.prepareOccurrence(schedule, at, at, time.Time{}, 1, schedulerOccurrenceReasonTime)
+			prepared, err := native.prepareOccurrence(schedule, at, at, time.Time{}, 1, false, time.Time{}, schedulerOccurrenceReasonTime)
 			if err != nil {
 				t.Fatal(err)
 			}

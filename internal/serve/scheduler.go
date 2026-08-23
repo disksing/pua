@@ -394,7 +394,7 @@ func (n *NativeScheduler) reconcileSchedule(ctx context.Context, schedule app.Sc
 	if count > 1 || truncated {
 		reason = schedulerOccurrenceReasonCoalesced
 	}
-	prepared, err := n.prepareOccurrence(schedule, due, last, next, count, reason)
+	prepared, err := n.prepareOccurrence(schedule, due, last, next, count, truncated, now, reason)
 	if err != nil {
 		return n.recordScheduleError(schedule.ID, runtime, now, err)
 	}
@@ -502,7 +502,7 @@ func completeExpiredOneTimeWhilePaused(runtime *schedulerScheduleRuntime, trigge
 	return true
 }
 
-func (n *NativeScheduler) prepareOccurrence(schedule app.Schedule, first, last, next time.Time, count int, reason string) (schedulerPreparedOccurrence, error) {
+func (n *NativeScheduler) prepareOccurrence(schedule app.Schedule, first, last, next time.Time, count int, cronEnumerationCapped bool, recoveryCutoff time.Time, reason string) (schedulerPreparedOccurrence, error) {
 	instanceID, err := workspaceInstanceID(n.workspace.Path)
 	if err != nil {
 		return schedulerPreparedOccurrence{}, err
@@ -514,18 +514,31 @@ func (n *NativeScheduler) prepareOccurrence(schedule app.Schedule, first, last, 
 	revision := fmt.Sprintf("%d", schedule.Revision)
 	occurrenceID := notificationMessageID("schedule-occurrence", instanceID, schedule.ID, revision, first.Format(time.RFC3339Nano))
 	messageID := notificationMessageID(resourceMessageTypeScheduleOccurrence, instanceID, schedule.ID, revision, first.Format(time.RFC3339Nano))
+	enumeratedThrough, enumeratedCount, recoveryCutoffText := "", 0, ""
+	if cronEnumerationCapped {
+		if recoveryCutoff.IsZero() {
+			return schedulerPreparedOccurrence{}, errors.New("capped cron occurrence requires a recovery cutoff")
+		}
+		enumeratedThrough = last.Format(time.RFC3339Nano)
+		enumeratedCount = count
+		recoveryCutoffText = recoveryCutoff.Format(time.RFC3339Nano)
+	}
 	causation := &resourceMessageCausation{
 		Type: resourceMessageTypeScheduleOccurrence, SourceWorkspaceInstanceID: instanceID,
 		SourceResourceID: app.SchedulerResourceID, Reason: reason,
 		ScheduleID: schedule.ID, ScheduleRevision: schedule.Revision,
 		OccurrenceID: occurrenceID, ScheduledFor: first.Format(time.RFC3339Nano),
 		CoalescedFrom: first.Format(time.RFC3339Nano), CoalescedThrough: last.Format(time.RFC3339Nano), CoalescedCount: count,
+		CronEnumerationCapped: cronEnumerationCapped, EnumeratedThrough: enumeratedThrough,
+		EnumeratedCount: enumeratedCount, RecoveryCutoff: recoveryCutoffText,
 	}
 	prepared := schedulerPreparedOccurrence{
 		ScheduleID: schedule.ID, ScheduleRevision: schedule.Revision,
 		OccurrenceID: occurrenceID, MessageID: messageID, Target: schedule.Target,
 		ScheduledFor: first.Format(time.RFC3339Nano), CoalescedThrough: last.Format(time.RFC3339Nano),
-		CoalescedCount: count, Reason: reason, Causation: causation,
+		CoalescedCount: count, CronEnumerationCapped: cronEnumerationCapped,
+		EnumeratedThrough: enumeratedThrough, EnumeratedCount: enumeratedCount,
+		RecoveryCutoff: recoveryCutoffText, Reason: reason, Causation: causation,
 	}
 	if !next.IsZero() {
 		prepared.NextRunAt = next.Format(time.RFC3339Nano)
@@ -534,7 +547,10 @@ func (n *NativeScheduler) prepareOccurrence(schedule app.Schedule, first, last, 
 		"OccurrenceID": occurrenceID, "ScheduleID": schedule.ID, "Revision": schedule.Revision,
 		"ScheduledFor": prepared.ScheduledFor, "CoalescedThrough": prepared.CoalescedThrough,
 		"CoalescedCount": count, "Action": schedule.Description, "Guard": schedule.Guard,
-		"HasGuard": schedule.Guard != "", "Condition": schedule.Condition,
+		"CronEnumerationCapped": prepared.CronEnumerationCapped,
+		"EnumeratedThrough":     prepared.EnumeratedThrough, "EnumeratedCount": prepared.EnumeratedCount,
+		"RecoveryCutoff": prepared.RecoveryCutoff,
+		"HasGuard":       schedule.Guard != "", "Condition": schedule.Condition,
 		"HasNext": prepared.NextRunAt != "", "NextRunAt": prepared.NextRunAt,
 	}), "\n")
 	return prepared, nil

@@ -141,7 +141,7 @@ func TestScheduledTaskOccurrenceIsOneShot(t *testing.T) {
 			prepared, err := newNativeScheduler(manager, workspace).prepareOccurrence(app.Schedule{
 				ID: "schedule-task", Revision: 1, Description: "Check release", Condition: "at the scheduled time",
 				Guard: test.guard, Target: record.ResourceID,
-			}, at, at, next, 1, schedulerOccurrenceReasonTime)
+			}, at, at, next, 1, false, time.Time{}, schedulerOccurrenceReasonTime)
 			if err != nil {
 				t.Fatal(err)
 			}

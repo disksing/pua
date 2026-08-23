@@ -186,18 +186,22 @@ type schedulerScheduleRuntime struct {
 }
 
 type schedulerPreparedOccurrence struct {
-	ScheduleID       string                    `json:"scheduleId"`
-	ScheduleRevision uint64                    `json:"scheduleRevision"`
-	OccurrenceID     string                    `json:"occurrenceId"`
-	MessageID        string                    `json:"messageId"`
-	Target           string                    `json:"target"`
-	Text             string                    `json:"text"`
-	ScheduledFor     string                    `json:"scheduledFor"`
-	CoalescedThrough string                    `json:"coalescedThrough,omitempty"`
-	CoalescedCount   int                       `json:"coalescedCount,omitempty"`
-	NextRunAt        string                    `json:"nextRunAt,omitempty"`
-	Reason           string                    `json:"reason"`
-	Causation        *resourceMessageCausation `json:"causation"`
+	ScheduleID            string                    `json:"scheduleId"`
+	ScheduleRevision      uint64                    `json:"scheduleRevision"`
+	OccurrenceID          string                    `json:"occurrenceId"`
+	MessageID             string                    `json:"messageId"`
+	Target                string                    `json:"target"`
+	Text                  string                    `json:"text"`
+	ScheduledFor          string                    `json:"scheduledFor"`
+	CoalescedThrough      string                    `json:"coalescedThrough,omitempty"`
+	CoalescedCount        int                       `json:"coalescedCount,omitempty"`
+	CronEnumerationCapped bool                      `json:"cronEnumerationCapped,omitempty"`
+	EnumeratedThrough     string                    `json:"enumeratedThrough,omitempty"`
+	EnumeratedCount       int                       `json:"enumeratedCount,omitempty"`
+	RecoveryCutoff        string                    `json:"recoveryCutoff,omitempty"`
+	NextRunAt             string                    `json:"nextRunAt,omitempty"`
+	Reason                string                    `json:"reason"`
+	Causation             *resourceMessageCausation `json:"causation"`
 }
 
 type resourceMailboxMeta struct {

@@ -168,6 +168,10 @@ type resourceMessageCausation struct {
 	CoalescedFrom             string   `json:"coalescedFrom,omitempty"`
 	CoalescedThrough          string   `json:"coalescedThrough,omitempty"`
 	CoalescedCount            int      `json:"coalescedCount,omitempty"`
+	CronEnumerationCapped     bool     `json:"cronEnumerationCapped,omitempty"`
+	EnumeratedThrough         string   `json:"enumeratedThrough,omitempty"`
+	EnumeratedCount           int      `json:"enumeratedCount,omitempty"`
+	RecoveryCutoff            string   `json:"recoveryCutoff,omitempty"`
 }
 
 type resourceNotificationReceipt struct {

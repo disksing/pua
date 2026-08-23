@@ -61,6 +61,23 @@ type ServiceManagerOptions struct {
 	Now      func() time.Time
 }
 
+// serviceDefinitionStore is the filesystem boundary for durable service
+// definitions. Keeping it manager-local lets tests inject precise failures
+// without changing process or runtime-state persistence.
+type serviceDefinitionStore struct {
+	writeJSON func(string, any, os.FileMode, func(string, string) error) error
+	rename    func(string, string) error
+	remove    func(string) error
+}
+
+func defaultServiceDefinitionStore() serviceDefinitionStore {
+	return serviceDefinitionStore{
+		writeJSON: writeServiceJSONWithRename,
+		rename:    os.Rename,
+		remove:    os.Remove,
+	}
+}
+
 var errServiceBindingsPathEscape = errors.New("service bindings path escapes the workspace control directory")
 
 const defaultServiceProcessTerminationGrace = 5 * time.Second
@@ -113,6 +130,7 @@ type ServiceManager struct {
 	// real-process tests that exercise graceful escalation deterministically.
 	processTerminationGrace time.Duration
 	processPlatform         *serviceProcessPlatform
+	definitionStore         serviceDefinitionStore
 	stopping                bool
 	started                 bool
 }
@@ -127,7 +145,7 @@ func NewServiceManager(root string, options ServiceManagerOptions) (*ServiceMana
 	if strings.TrimSpace(root) == "" {
 		return nil, errors.New("workspace root is required")
 	}
-	m := &ServiceManager{root: filepath.Clean(root), configs: map[string]ServiceConfig{}, graph: serviceDependencyGraph{}, runtimes: map[string]*serviceRuntime{}, resolver: options.Resolver, now: options.Now, processTerminationGrace: defaultServiceProcessTerminationGrace, processPlatform: nativeServiceProcessPlatform()}
+	m := &ServiceManager{root: filepath.Clean(root), configs: map[string]ServiceConfig{}, graph: serviceDependencyGraph{}, runtimes: map[string]*serviceRuntime{}, resolver: options.Resolver, now: options.Now, processTerminationGrace: defaultServiceProcessTerminationGrace, processPlatform: nativeServiceProcessPlatform(), definitionStore: defaultServiceDefinitionStore()}
 	if m.now == nil {
 		m.now = time.Now
 	}
@@ -1727,6 +1745,10 @@ func (m *ServiceManager) ApplyBindings(bindings ServiceBindings) (ServiceBinding
 }
 
 func (m *ServiceManager) validateBindingsLocked(bindings ServiceBindings) error {
+	return m.validateBindingsForConfigsLocked(bindings, m.configs)
+}
+
+func (m *ServiceManager) validateBindingsForConfigsLocked(bindings ServiceBindings, configs map[string]ServiceConfig) error {
 	if bindings.SchemaVersion != 0 && bindings.SchemaVersion != serviceSchemaVersion {
 		return fmt.Errorf("unsupported schema version %d", bindings.SchemaVersion)
 	}
@@ -1741,7 +1763,7 @@ func (m *ServiceManager) validateBindingsLocked(bindings ServiceBindings) error 
 			return fmt.Errorf("secret references must not appear in variable mapping %q", name)
 		}
 		if strings.Contains(value, "${") {
-			if err := validateEnvironmentTemplate(value, "", m.configs); err != nil {
+			if err := validateEnvironmentTemplate(value, "", configs); err != nil {
 				return fmt.Errorf("variable mapping %q: %w", name, err)
 			}
 		}
@@ -1767,7 +1789,7 @@ func (m *ServiceManager) validateBindingsLocked(bindings ServiceBindings) error 
 			continue
 		}
 		if match := serviceTemplatePattern.FindStringSubmatch(value); len(match) == 3 && match[0] == value {
-			if m.runtimes[match[1]] == nil {
+			if _, ok := configs[match[1]]; !ok {
 				return fmt.Errorf("secret mapping %q references unknown service %q", name, match[1])
 			}
 			continue
@@ -1775,6 +1797,71 @@ func (m *ServiceManager) validateBindingsLocked(bindings ServiceBindings) error 
 		return fmt.Errorf("secret mapping %q must be a complete secret or service export reference", name)
 	}
 	return nil
+}
+
+func cloneServiceConfigs(configs map[string]ServiceConfig) map[string]ServiceConfig {
+	result := make(map[string]ServiceConfig, len(configs))
+	for id, cfg := range configs {
+		result[id] = cfg
+	}
+	return result
+}
+
+func (m *ServiceManager) validateConfigTransactionLocked(configs map[string]ServiceConfig) (serviceDependencyGraph, error) {
+	graph, err := validatedServiceDependencyGraph(m.root, configs)
+	if err != nil {
+		return nil, err
+	}
+	bindings, err := m.loadBindingsLocked()
+	if err != nil {
+		return nil, err
+	}
+	if err := m.validateBindingsForConfigsLocked(bindings, configs); err != nil {
+		return nil, fmt.Errorf("service bindings: %w", err)
+	}
+	return graph, nil
+}
+
+func (m *ServiceManager) persistDefinitionLocked(cfg ServiceConfig) error {
+	path := serviceConfigPath(m.root, cfg.ID)
+	if !pathWithinResolved(filepath.Join(m.root, ".pua", serviceConfigDir), path) {
+		return errors.New("service definition path escapes the workspace control directory")
+	}
+	store := m.definitionStore
+	defaults := defaultServiceDefinitionStore()
+	if store.writeJSON == nil {
+		store.writeJSON = defaults.writeJSON
+	}
+	if store.rename == nil {
+		store.rename = defaults.rename
+	}
+	return store.writeJSON(path, cfg, 0o600, store.rename)
+}
+
+func (m *ServiceManager) removeDefinitionLocked(id string) error {
+	path := serviceConfigPath(m.root, id)
+	if !pathWithinResolved(filepath.Join(m.root, ".pua", serviceConfigDir), path) {
+		return errors.New("service definition path escapes the workspace control directory")
+	}
+	remove := m.definitionStore.remove
+	if remove == nil {
+		remove = os.Remove
+	}
+	if err := remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func serviceDefinitionOperationError(rt *serviceRuntime, err error) error {
+	if err == nil || rt == nil || len(rt.secretValues) == 0 {
+		return err
+	}
+	message := security.NewRedactor(rt.secretValues...).RedactString(err.Error())
+	if message == err.Error() {
+		return err
+	}
+	return errors.New(message)
 }
 
 func (m *ServiceManager) Apply(cfg ServiceConfig) error {
@@ -1841,17 +1928,47 @@ func (m *ServiceManager) Remove(ctx context.Context, id string) error {
 			return fmt.Errorf("service %q is required by %q", id, dependentID)
 		}
 	}
+	next := cloneServiceConfigs(m.configs)
+	delete(next, id)
+	graph, err := m.validateConfigTransactionLocked(next)
+	if err != nil {
+		return err
+	}
+	// Persist a disabled definition before any process side effect. If stopping
+	// or final deletion fails (or the daemon exits between those steps), the
+	// filesystem remains authoritative and reconstruction cannot restart the
+	// service being removed.
+	safeConfig := rt.config
+	safeConfig.Enabled = false
+	if err := m.persistDefinitionLocked(safeConfig); err != nil {
+		return serviceDefinitionOperationError(rt, err)
+	}
+	retained := cloneServiceConfigs(m.configs)
+	retained[id] = safeConfig
+	m.configs = retained
+	rt.config = safeConfig
+	rt.status.Enabled = false
 	if rt.process != nil || rt.status.ProcessGroup > 0 {
-		if err := m.stopProcessLocked(ctx, rt, true); err != nil {
+		if err := m.stopProcessLocked(ctx, rt, false); err != nil {
 			return err
 		}
 	}
-	delete(m.configs, id)
-	delete(m.graph, id)
-	delete(m.runtimes, id)
-	if err := os.Remove(serviceConfigPath(m.root, id)); err != nil && !os.IsNotExist(err) {
-		return err
+	// The disabled definition still exists until removeDefinitionLocked
+	// succeeds, so a failed removal retains a safely stopped manager whose
+	// visible state matches the durable source of truth.
+	rt.status.ManualStop = false
+	rt.status.Readiness.Ready = false
+	if !rt.status.AttentionRequired {
+		rt.status.State = ServiceStateDisabled
+		rt.status.PID, rt.status.ProcessGroup = 0, 0
 	}
+	m.persistStatusLocked(rt)
+	if err := m.removeDefinitionLocked(id); err != nil {
+		return serviceDefinitionOperationError(rt, err)
+	}
+	m.configs = next
+	m.graph = graph
+	delete(m.runtimes, id)
 	return nil
 }
 
@@ -1863,16 +1980,32 @@ func (m *ServiceManager) Enable(id string) error {
 		return os.ErrNotExist
 	}
 	cfg.Enabled = true
-	m.configs[id] = cfg
+	next := cloneServiceConfigs(m.configs)
+	next[id] = cfg
+	graph, err := m.validateConfigTransactionLocked(next)
+	if err != nil {
+		return err
+	}
 	rt := m.runtimes[id]
+	if err := m.persistDefinitionLocked(cfg); err != nil {
+		return serviceDefinitionOperationError(rt, err)
+	}
+	m.configs = next
+	m.graph = graph
 	rt.config = cfg
+	rt.status.Enabled = true
 	rt.status.ManualStop = false
-	rt.status.FailureCount = 0
-	rt.status.AttentionRequired = false
-	rt.status.LastError = ""
-	rt.status.NextRetryAt = ""
-	rt.status.State = ServiceStateStopped
-	return writeServiceJSON(serviceConfigPath(m.root, id), cfg, 0o600)
+	if rt.process == nil && rt.status.ProcessGroup <= 0 {
+		rt.status.FailureCount = 0
+		rt.status.AttentionRequired = false
+		rt.status.LastError = ""
+		rt.status.NextRetryAt = ""
+		rt.status.State = ServiceStateStopped
+	} else if rt.status.AttentionRequired {
+		rt.status.State = ServiceStateAttentionRequired
+	}
+	m.persistStatusLocked(rt)
+	return nil
 }
 func (m *ServiceManager) Disable(ctx context.Context, id string) error {
 	m.mu.Lock()
@@ -1882,9 +2015,20 @@ func (m *ServiceManager) Disable(ctx context.Context, id string) error {
 		return os.ErrNotExist
 	}
 	cfg.Enabled = false
-	m.configs[id] = cfg
+	next := cloneServiceConfigs(m.configs)
+	next[id] = cfg
+	graph, err := m.validateConfigTransactionLocked(next)
+	if err != nil {
+		return err
+	}
 	rt := m.runtimes[id]
+	if err := m.persistDefinitionLocked(cfg); err != nil {
+		return serviceDefinitionOperationError(rt, err)
+	}
+	m.configs = next
+	m.graph = graph
 	rt.config = cfg
+	rt.status.Enabled = false
 	var cleanupErr error
 	if rt.process != nil || rt.status.ProcessGroup > 0 {
 		cleanupErr = m.stopProcessLocked(ctx, rt, true)
@@ -1895,11 +2039,10 @@ func (m *ServiceManager) Disable(ctx context.Context, id string) error {
 		rt.status.State = ServiceStateAttentionRequired
 	} else {
 		rt.status.State = ServiceStateDisabled
+		rt.status.Readiness.Ready = false
+		rt.status.PID, rt.status.ProcessGroup = 0, 0
 	}
 	m.persistStatusLocked(rt)
-	if err := writeServiceJSON(serviceConfigPath(m.root, id), cfg, 0o600); err != nil {
-		return err
-	}
 	return cleanupErr
 }
 func (m *ServiceManager) StartService(ctx context.Context, id string) error {
@@ -1956,6 +2099,13 @@ func (m *ServiceManager) RestartService(ctx context.Context, id string) error {
 }
 
 func writeServiceJSON(path string, value any, mode os.FileMode) error {
+	return writeServiceJSONWithRename(path, value, mode, os.Rename)
+}
+
+func writeServiceJSONWithRename(path string, value any, mode os.FileMode, rename func(string, string) error) error {
+	if rename == nil {
+		rename = os.Rename
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
@@ -1985,7 +2135,7 @@ func writeServiceJSON(path string, value any, mode os.FileMode) error {
 	if err := temp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tempPath, path); err != nil {
+	if err := rename(tempPath, path); err != nil {
 		return err
 	}
 	if dir, err := os.Open(filepath.Dir(path)); err == nil {

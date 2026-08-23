@@ -53,10 +53,13 @@ type ServiceConfig struct {
 	CWD           string                        `json:"cwd,omitempty"`
 	Environment   map[string]ServiceEnvironment `json:"environment,omitempty"`
 	DependsOn     []string                      `json:"dependsOn,omitempty"`
-	Readiness     *ServiceReadinessConfig       `json:"readiness,omitempty"`
-	Cleanup       *ServiceCleanupConfig         `json:"cleanup,omitempty"`
-	Restart       ServiceRestartConfig          `json:"restart,omitempty"`
-	LogRotation   ServiceLogRotationConfig      `json:"logRotation,omitempty"`
+	// Exports declares that the process atomically writes its complete initial
+	// export hand-off before startup output may be persisted.
+	Exports     bool                     `json:"exports,omitempty"`
+	Readiness   *ServiceReadinessConfig  `json:"readiness,omitempty"`
+	Cleanup     *ServiceCleanupConfig    `json:"cleanup,omitempty"`
+	Restart     ServiceRestartConfig     `json:"restart,omitempty"`
+	LogRotation ServiceLogRotationConfig `json:"logRotation,omitempty"`
 }
 
 // ServiceEnvironment is intentionally a small sum type. A string is a

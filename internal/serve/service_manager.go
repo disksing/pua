@@ -69,20 +69,21 @@ type serviceProcessExit struct {
 }
 
 type serviceRuntime struct {
-	config       ServiceConfig
-	status       ServiceStatus
-	process      *exec.Cmd
-	exit         <-chan serviceProcessExit
-	started      time.Time
-	stableSince  time.Time
-	environment  []string
-	secretValues []string
-	secretNames  map[string]ServiceSecretMetadata
-	redactor     *security.Redactor
-	exports      ServiceExportFile
-	logStreams   []*security.Stream
-	logWriters   []*serviceLogWriter
-	logSinks     []*serviceLogSink
+	config        ServiceConfig
+	status        ServiceStatus
+	process       *exec.Cmd
+	exit          <-chan serviceProcessExit
+	started       time.Time
+	stableSince   time.Time
+	environment   []string
+	secretValues  []string
+	secretNames   map[string]ServiceSecretMetadata
+	exportSecrets map[string]string
+	redactor      *security.Redactor
+	exports       ServiceExportFile
+	logStreams    []*security.Stream
+	logWriters    []*serviceLogWriter
+	logSinks      []*serviceLogSink
 }
 
 // ServiceManager owns all mutable service state for one Workspace. It is the
@@ -452,6 +453,12 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 	if err := os.MkdirAll(serviceRuntimePath(m.root, cfg.ID), 0o700); err != nil {
 		return m.failStartLocked(ctx, rt, err)
 	}
+	if requiresInitialExport(cfg) {
+		exportPath := filepath.Join(serviceRuntimePath(m.root, cfg.ID), "export.json")
+		if err := os.Remove(exportPath); err != nil && !os.IsNotExist(err) {
+			return m.failStartLocked(ctx, rt, fmt.Errorf("clear previous service export: %w", err))
+		}
+	}
 	command := append(append([]string{}, cfg.Command...), cfg.Args...)
 	cmd := exec.Command(command[0], command[1:]...)
 	cwd := cfg.CWD
@@ -470,7 +477,7 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 	redactor := security.NewRedactor(secrets...)
 	stdoutSink := newServiceLogSink(filepath.Join(serviceRuntimePath(m.root, cfg.ID), "stdout.log"), cfg.LogRotation)
 	stderrSink := newServiceLogSink(filepath.Join(serviceRuntimePath(m.root, cfg.ID), "stderr.log"), cfg.LogRotation)
-	gatedLogs := cfg.Readiness != nil
+	gatedLogs := requiresInitialExport(cfg)
 	stdoutWriter := newServiceLogWriter(stdoutSink, redactor, gatedLogs)
 	stderrWriter := newServiceLogWriter(stderrSink, redactor, gatedLogs)
 	stdout := redactor.NewStream(stdoutWriter)
@@ -482,6 +489,7 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 	rt.environment = env
 	rt.secretValues = secrets
 	rt.secretNames = names
+	rt.exportSecrets = map[string]string{}
 	rt.redactor = redactor
 	rt.exports = exports
 	if err := cmd.Start(); err != nil {
@@ -506,6 +514,7 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 	rt.environment = env
 	rt.secretValues = secrets
 	rt.secretNames = names
+	rt.exportSecrets = map[string]string{}
 	rt.redactor = redactor
 	rt.exports = exports
 	rt.logStreams = []*security.Stream{stdout, stderr}
@@ -568,10 +577,14 @@ func (m *ServiceManager) observeReadyLocked(ctx context.Context, rt *serviceRunt
 	}
 	if rt.config.Readiness == nil {
 		exports, err := m.readExportsLocked(rt)
+		if err != nil && requiresInitialExport(rt.config) && strings.Contains(err.Error(), "initial export") {
+			exports, err = m.waitForInitialExportLocked(ctx, rt)
+		}
 		if err != nil {
 			return m.readinessFailedLocked(ctx, rt, err)
 		}
 		rt.exports = exports
+		m.releaseStartupLogsLocked(rt)
 		rt.status.State = ServiceStateReady
 		rt.status.Readiness.Ready = true
 		rt.status.Exports = publicExports(rt.exports, rt.secretNames)
@@ -608,7 +621,10 @@ func (m *ServiceManager) waitForInitialExportLocked(ctx context.Context, rt *ser
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	timeout := rt.config.Readiness.Timeout
+	timeout := time.Duration(0)
+	if rt.config.Readiness != nil {
+		timeout = rt.config.Readiness.Timeout
+	}
 	if timeout <= 0 {
 		timeout = defaultReadyTimeout
 	}
@@ -650,7 +666,7 @@ func (m *ServiceManager) readExportsLocked(rt *serviceRuntime) (ServiceExportFil
 	}
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		if rt.config.Readiness != nil {
+		if requiresInitialExport(rt.config) {
 			return ServiceExportFile{}, errors.New("service has not written its initial export")
 		}
 		return ServiceExportFile{SchemaVersion: serviceExportSchema, Variables: map[string]string{}}, nil
@@ -673,30 +689,36 @@ func (m *ServiceManager) readExportsLocked(rt *serviceRuntime) (ServiceExportFil
 	if export.Variables == nil {
 		export.Variables = map[string]string{}
 	}
-	for name, value := range export.Variables {
-		if !environmentNamePattern.MatchString(name) || strings.ContainsRune(value, '\x00') {
-			return ServiceExportFile{}, fmt.Errorf("invalid exported variable %q", name)
-		}
-		if rt.redactor != nil && rt.redactor.ContainsSecret([]byte(value)) {
-			return ServiceExportFile{}, fmt.Errorf("exported variable %q contains a secret; place it under secrets", name)
-		}
-	}
 	if rt.secretNames == nil {
 		rt.secretNames = map[string]ServiceSecretMetadata{}
 	}
+	knownSecrets := append([]string(nil), rt.secretValues...)
 	for name, value := range export.Secrets {
 		if !validSecretName(name) || strings.ContainsRune(value, '\x00') {
 			return ServiceExportFile{}, fmt.Errorf("invalid exported secret %q", name)
 		}
-		rt.secretNames[name] = ServiceSecretMetadata{Name: name, Source: "service-export", UpdatedAt: m.now().Format(time.RFC3339Nano)}
-		if !containsString(rt.secretValues, value) {
-			rt.secretValues = append(rt.secretValues, value)
+		knownSecrets = append(knownSecrets, value)
+	}
+	exportRedactor := security.NewRedactor(knownSecrets...)
+	for name, value := range export.Variables {
+		if !environmentNamePattern.MatchString(name) || strings.ContainsRune(value, '\x00') {
+			return ServiceExportFile{}, fmt.Errorf("invalid exported variable %q", name)
 		}
-		if rt.redactor != nil {
-			rt.redactor.Register(value)
+		if exportRedactor.ContainsSecret([]byte(value)) {
+			return ServiceExportFile{}, fmt.Errorf("exported variable %q contains a secret; place it under secrets", name)
 		}
 	}
 	if len(export.Secrets) > 0 {
+		rt.exportSecrets = cloneStringMap(export.Secrets)
+		for name, value := range export.Secrets {
+			rt.secretNames[name] = ServiceSecretMetadata{Name: name, Source: "service-export", UpdatedAt: m.now().Format(time.RFC3339Nano)}
+			if !containsString(rt.secretValues, value) {
+				rt.secretValues = append(rt.secretValues, value)
+			}
+			if rt.redactor != nil {
+				rt.redactor.Register(value)
+			}
+		}
 		// The export file is an IPC hand-off, not durable secret storage. Keep
 		// variables available for later reads but atomically replace the file
 		// with a secret-free representation as soon as its secret values have
@@ -705,8 +727,21 @@ func (m *ServiceManager) readExportsLocked(rt *serviceRuntime) (ServiceExportFil
 		if err := writeServiceJSON(path, sanitized, 0o600); err != nil {
 			return ServiceExportFile{}, fmt.Errorf("scrub exported secrets: %w", err)
 		}
+	} else {
+		// A scrubbed hand-off deliberately has no durable secret values. Restore
+		// the accepted values from process-local memory so readiness polls and
+		// later service bindings cannot erase the only usable copy.
+		export.Secrets = cloneStringMap(rt.exportSecrets)
 	}
 	return export, nil
+}
+
+func requiresInitialExport(cfg ServiceConfig) bool {
+	// Readiness historically implied an initial export, so retaining that
+	// behavior keeps existing definitions compatible. Services without a
+	// readiness command opt in explicitly to avoid gating ordinary service
+	// logs when no export will ever be written.
+	return cfg.Exports || cfg.Readiness != nil
 }
 
 func (m *ServiceManager) runReadinessLocked(ctx context.Context, rt *serviceRuntime) error {
@@ -779,7 +814,7 @@ func (m *ServiceManager) handleProcessExitLocked(ctx context.Context, rt *servic
 	if rt.process == nil {
 		return
 	}
-	if rt.config.Readiness != nil {
+	if requiresInitialExport(rt.config) {
 		_, _ = m.readExportsLocked(rt)
 	}
 	for _, stream := range rt.logStreams {

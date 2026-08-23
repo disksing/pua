@@ -26,10 +26,10 @@ type serviceLogSink struct {
 	size     int64
 }
 
-// serviceLogWriter keeps startup output in a bounded private buffer until a
-// readiness check has registered every secret exported by the service. This
-// prevents a service that prints an exported secret before its first export
-// from leaking that value into the durable log.
+// serviceLogWriter keeps startup output in a bounded private buffer until the
+// initial export handshake has registered every secret exported by the
+// service. This prevents a service that prints an exported secret before its
+// first export from leaking that value into the durable log.
 type serviceLogWriter struct {
 	mu       sync.Mutex
 	sink     *serviceLogSink
@@ -73,8 +73,8 @@ func (w *serviceLogWriter) writeUnlocked(data []byte) (int, error) {
 	return w.sink.Write(data)
 }
 
-// Release publishes the bounded startup buffer after the caller has loaded
-// and registered the service's initial export secrets.
+// Release publishes the bounded startup buffer after the caller has loaded and
+// registered the service's initial export secrets.
 func (w *serviceLogWriter) Release(redactor *security.Redactor) error {
 	if w == nil {
 		return nil
@@ -102,8 +102,8 @@ func (w *serviceLogWriter) Close() error {
 		return nil
 	}
 	w.mu.Lock()
-	// If readiness never succeeded, discard all gated output rather than
-	// flushing bytes whose secrets were not discoverable from an export.
+	// If the startup handshake never succeeded, discard all gated output rather
+	// than flushing bytes whose secrets were not discoverable from an export.
 	w.buffer = nil
 	w.gated = false
 	w.mu.Unlock()

@@ -150,7 +150,11 @@ cleanup.
 
 Each service may provide readiness and cleanup commands, export variables and
 secrets through an atomically replaced `PUA_SERVICE_EXPORT_PATH`, and configure
-persisted exponential restart backoff. State and event/log files use private
+persisted exponential restart backoff. A service without readiness that writes
+exports sets `"exports": true`; the supervisor then waits up to the default
+readiness timeout for its complete initial hand-off and buffers startup logs
+until all exported secrets are registered. Readiness continues to imply this
+handshake for existing definitions. State and event/log files use private
 permissions and a shared streaming redactor. Secret values are retained only
 in memory; API and CLI exports expose variables plus secret metadata, never
 secret values. `.pua/services/bindings.json` separates durable variable

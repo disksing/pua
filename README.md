@@ -72,6 +72,9 @@ bin/agenthub
 may declare dependencies and readiness/cleanup commands, and are restarted
 with persisted exponential backoff after unexpected exits. Runtime state,
 redacted logs, and validated exports live below `.pua/runtime/services/`.
+Services that export without a readiness command declare `"exports": true` so
+the supervisor can register their complete initial secret hand-off before it
+persists startup output.
 
 Use `pua service list`, `show`, `apply`, `start`, `stop`, `restart`, `logs`,
 `exports`, and `validate` to inspect and control them. Secret references are

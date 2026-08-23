@@ -510,6 +510,9 @@ func (m *ServiceManager) reconcileLocked(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if err := m.invalidateStaleServiceGenerationsLocked(ctx); err != nil {
+		return err
+	}
 	ids := m.sortedIDsLocked()
 	var first error
 	for _, id := range ids {
@@ -522,6 +525,37 @@ func (m *ServiceManager) reconcileLocked(ctx context.Context) error {
 		}
 	}
 	return first
+}
+
+// invalidateStaleServiceGenerationsLocked completes an Apply whose desired
+// definition was persisted but whose first dependent-first stop attempt did
+// not finish. Current-manager processes retain their immutable processConfig,
+// so reconciliation can retry the whole affected chain without ever starting
+// the changed dependency ahead of a stale consumer.
+func (m *ServiceManager) invalidateStaleServiceGenerationsLocked(ctx context.Context) error {
+	changed := make(map[string]struct{})
+	for id, rt := range m.runtimes {
+		if rt == nil || rt.process == nil || rt.processConfig == nil {
+			continue
+		}
+		if serviceConfigDigest(*rt.processConfig) != serviceConfigDigest(rt.config) {
+			changed[id] = struct{}{}
+		}
+	}
+	if len(changed) == 0 {
+		return nil
+	}
+	impacted := serviceDependencyChangeSet(m.graph, m.graph, changed)
+	stopOrder, err := serviceGraphSubsetStopOrder(m.graph, impacted)
+	if err != nil {
+		return err
+	}
+	for _, id := range stopOrder {
+		if err := m.stopRuntimeForDependencyChangeLocked(ctx, m.runtimes[id]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (m *ServiceManager) reconcileOneLocked(ctx context.Context, rt *serviceRuntime, dependencies []string) error {
@@ -684,7 +718,10 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 	gatedLogs := requiresInitialExport(cfg)
 	var exportGuard func() error
 	if gatedLogs {
-		exportGuard = func() error { return m.guardServiceLogExport(rt) }
+		// The pipe copier runs outside the manager mutex. Capture this process
+		// generation's immutable config so a concurrent Apply cannot make its
+		// export gate observe the replacement definition.
+		exportGuard = func() error { return m.guardServiceLogExportForConfig(rt, cfg) }
 	}
 	stdoutWriter := newServiceLogWriter(stdoutSink, redactor, gatedLogs, exportGuard)
 	stderrWriter := newServiceLogWriter(stderrSink, redactor, gatedLogs, exportGuard)
@@ -906,15 +943,19 @@ func (m *ServiceManager) readExportsLocked(rt *serviceRuntime) (ServiceExportFil
 	if rt.exportViolation != "" {
 		return ServiceExportFile{}, errors.New(rt.exportViolation)
 	}
-	return m.readExportsWithGateLocked(rt, false)
+	cfg := rt.config
+	if rt.processConfig != nil && (rt.process != nil || rt.status.ProcessGroup > 0) {
+		cfg = *rt.processConfig
+	}
+	return m.readExportsWithGateLocked(rt, cfg, false)
 }
 
-// guardServiceLogExport runs in the os/exec pipe copier before raw service
-// bytes enter the streaming redactor. Atomic export replacements are therefore
-// observed in process order before output written after the replacement can be
-// persisted. It never takes the manager mutex because shutdown closes writers
-// while holding that mutex.
-func (m *ServiceManager) guardServiceLogExport(rt *serviceRuntime) error {
+// guardServiceLogExportForConfig runs in the os/exec pipe copier before raw
+// service bytes enter the streaming redactor. Atomic export replacements are
+// therefore observed in process order before output written after the
+// replacement can be persisted. It never takes the manager mutex because
+// shutdown closes writers while holding that mutex.
+func (m *ServiceManager) guardServiceLogExportForConfig(rt *serviceRuntime, cfg ServiceConfig) error {
 	rt.exportMu.Lock()
 	defer rt.exportMu.Unlock()
 	if !rt.exportAccepted {
@@ -923,18 +964,18 @@ func (m *ServiceManager) guardServiceLogExport(rt *serviceRuntime) error {
 	if rt.exportViolation != "" {
 		return errors.New(rt.exportViolation)
 	}
-	_, err := m.readExportsWithGateLocked(rt, true)
+	_, err := m.readExportsWithGateLocked(rt, cfg, true)
 	return err
 }
 
-func (m *ServiceManager) readExportsWithGateLocked(rt *serviceRuntime, fromLog bool) (ServiceExportFile, error) {
-	path := filepath.Join(serviceRuntimePath(m.root, rt.config.ID), "export.json")
+func (m *ServiceManager) readExportsWithGateLocked(rt *serviceRuntime, cfg ServiceConfig, fromLog bool) (ServiceExportFile, error) {
+	path := filepath.Join(serviceRuntimePath(m.root, cfg.ID), "export.json")
 	if !pathWithinResolved(filepath.Join(m.root, ".pua"), path) {
 		return ServiceExportFile{}, m.rejectExportLocked(rt, errors.New("service export path escapes the workspace control directory"), nil, fromLog)
 	}
 	handoff, err := openServiceExportHandoffWithOpen(path, m.exportOpenFile)
 	if os.IsNotExist(err) {
-		if requiresInitialExport(rt.config) {
+		if requiresInitialExport(cfg) {
 			message := "service has not written its initial export"
 			if rt.exportAccepted {
 				message = "service removed its accepted export hand-off"
@@ -2258,6 +2299,10 @@ func (m *ServiceManager) ApplyAll(configs []ServiceConfig) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.applyAllLocked(configs, true)
+}
+
+func (m *ServiceManager) applyAllLocked(configs []ServiceConfig, rollbackLifecycle bool) error {
 	if len(configs) == 0 {
 		return nil
 	}
@@ -2296,11 +2341,33 @@ func (m *ServiceManager) ApplyAll(configs []ServiceConfig) error {
 	}
 
 	oldConfigs, oldGraph := m.configs, m.graph
-	runtimeSnapshots := make(map[string]serviceRuntimeConfigSnapshot, len(changed))
-	definitionSnapshots := make(map[string]serviceFileSnapshot, len(changed))
-	stateSnapshots := make(map[string]serviceFileSnapshot, len(changed))
-	eventSnapshots := make(map[string]serviceFileSnapshot, len(changed))
+	changedSet := make(map[string]struct{}, len(changed))
 	for _, id := range changed {
+		changedSet[id] = struct{}{}
+	}
+	impacted := serviceDependencyChangeSet(oldGraph, graph, changedSet)
+	oldOrder, err := serviceGraphSubsetOrder(oldGraph, impacted)
+	if err != nil {
+		return err
+	}
+	oldStopOrder, err := serviceGraphSubsetStopOrder(oldGraph, impacted)
+	if err != nil {
+		return err
+	}
+	newOrder, err := serviceGraphSubsetOrder(graph, impacted)
+	if err != nil {
+		return err
+	}
+	newStopOrder, err := serviceGraphSubsetStopOrder(graph, impacted)
+	if err != nil {
+		return err
+	}
+	transactionIDs := mergeServiceOrders(oldOrder, newOrder)
+	runtimeSnapshots := make(map[string]serviceRuntimeConfigSnapshot, len(transactionIDs))
+	definitionSnapshots := make(map[string]serviceFileSnapshot, len(transactionIDs))
+	stateSnapshots := make(map[string]serviceFileSnapshot, len(transactionIDs))
+	eventSnapshots := make(map[string]serviceFileSnapshot, len(transactionIDs))
+	for _, id := range transactionIDs {
 		if rt := m.runtimes[id]; rt != nil {
 			runtimeSnapshots[id] = snapshotServiceRuntimeConfig(rt)
 		}
@@ -2319,7 +2386,10 @@ func (m *ServiceManager) ApplyAll(configs []ServiceConfig) error {
 	}
 
 	rollback := func(cause error) error {
-		rollbackErr := m.rollbackAppliedServicesLocked(changed, oldConfigs, oldGraph, runtimeSnapshots, definitionSnapshots, stateSnapshots, eventSnapshots)
+		if !rollbackLifecycle {
+			return cause
+		}
+		rollbackErr := m.rollbackAppliedServicesLocked(transactionIDs, newStopOrder, oldOrder, oldConfigs, oldGraph, runtimeSnapshots, definitionSnapshots, stateSnapshots, eventSnapshots)
 		return errors.Join(cause, rollbackErr)
 	}
 	for _, id := range changed {
@@ -2341,12 +2411,6 @@ func (m *ServiceManager) ApplyAll(configs []ServiceConfig) error {
 			rt.status.Enabled = cfg.Enabled
 			rt.status.Readiness.Configured = cfg.Readiness != nil
 			rt.status.Cleanup.Configured = cfg.Cleanup != nil
-			if rt.process != nil || rt.status.ProcessGroup > 0 {
-				if err := m.stopProcessLocked(context.Background(), rt, false); err != nil {
-					return rollback(err)
-				}
-				rt.status.Readiness.Ready = false
-			}
 			if cfg.Enabled {
 				if rt.status.State == ServiceStateDisabled {
 					rt.status.State = ServiceStateStopped
@@ -2355,19 +2419,155 @@ func (m *ServiceManager) ApplyAll(configs []ServiceConfig) error {
 				rt.status.State = ServiceStateDisabled
 			}
 		}
+	}
+	for _, id := range newOrder {
+		if rt := m.runtimes[id]; rt != nil {
+			rt.status.Dependencies = append([]string(nil), graph[id]...)
+		}
+	}
+	// Existing processes reflect the old graph and old exports. Stop every
+	// affected running generation in reverse old topological order before
+	// reconciling the new graph. stopProcessLocked deliberately uses
+	// processConfig, so each cleanup runs with the generation it belongs to.
+	for _, id := range oldStopOrder {
+		rt := m.runtimes[id]
+		if rt == nil || (rt.process == nil && rt.status.ProcessGroup <= 0) {
+			continue
+		}
+		if err := m.stopRuntimeForDependencyChangeLocked(context.Background(), rt); err != nil {
+			return rollback(err)
+		}
+	}
+
+	for _, id := range newOrder {
+		rt := m.runtimes[id]
+		if rt == nil {
+			continue
+		}
 		rt.status.Dependencies = append([]string(nil), graph[id]...)
 		if err := m.persistStatusLocked(rt); err != nil {
 			return rollback(err)
 		}
 	}
 	if m.started && !m.stopping {
-		for _, id := range changed {
-			if err := m.reconcileOneLocked(context.Background(), m.runtimes[id], graph[id]); err != nil {
-				return rollback(err)
-			}
+		if err := m.reconcileLocked(context.Background()); err != nil {
+			return rollback(err)
 		}
 	}
 	return nil
+}
+
+// serviceDependencyChangeSet returns changed services plus every transitive
+// dependent in either graph. The old graph identifies processes whose current
+// environment may contain stale exports; the new graph covers newly affected
+// relationships in a batch transaction.
+func serviceDependencyChangeSet(oldGraph, newGraph serviceDependencyGraph, changed map[string]struct{}) map[string]struct{} {
+	result := make(map[string]struct{}, len(changed))
+	for id := range changed {
+		result[id] = struct{}{}
+	}
+	for _, graph := range []serviceDependencyGraph{oldGraph, newGraph} {
+		for added := true; added; {
+			added = false
+			for id, dependencies := range graph {
+				if _, ok := result[id]; ok {
+					continue
+				}
+				for _, dependency := range dependencies {
+					if _, ok := result[dependency]; ok {
+						result[id] = struct{}{}
+						added = true
+						break
+					}
+				}
+			}
+		}
+	}
+	return result
+}
+
+func serviceGraphSubsetOrder(graph serviceDependencyGraph, selected map[string]struct{}) ([]string, error) {
+	order, err := graph.topologicalOrder()
+	if err != nil {
+		return nil, err
+	}
+	result := make([]string, 0, len(selected))
+	for _, id := range order {
+		if _, ok := selected[id]; ok {
+			result = append(result, id)
+		}
+	}
+	return result, nil
+}
+
+func serviceGraphSubsetStopOrder(graph serviceDependencyGraph, selected map[string]struct{}) ([]string, error) {
+	if _, err := graph.topologicalOrder(); err != nil {
+		return nil, err
+	}
+	remaining := make(map[string]struct{}, len(selected))
+	for id := range selected {
+		if _, ok := graph[id]; ok {
+			remaining[id] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(remaining))
+	for len(remaining) > 0 {
+		candidates := make([]string, 0)
+		for id := range remaining {
+			hasDependent := false
+			for other := range remaining {
+				if other != id && containsString(graph[other], id) {
+					hasDependent = true
+					break
+				}
+			}
+			if !hasDependent {
+				candidates = append(candidates, id)
+			}
+		}
+		if len(candidates) == 0 {
+			return nil, ServiceValidationError{"dependencies", "dependency cycle"}
+		}
+		sort.Strings(candidates)
+		for _, id := range candidates {
+			delete(remaining, id)
+			result = append(result, id)
+		}
+	}
+	return result, nil
+}
+
+func mergeServiceOrders(orders ...[]string) []string {
+	seen := make(map[string]struct{})
+	var result []string
+	for _, order := range orders {
+		for _, id := range order {
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			result = append(result, id)
+		}
+	}
+	return result
+}
+
+func (m *ServiceManager) stopRuntimeForDependencyChangeLocked(ctx context.Context, rt *serviceRuntime) error {
+	if rt == nil || (rt.process == nil && rt.status.ProcessGroup <= 0) {
+		return nil
+	}
+	if err := m.stopProcessLocked(ctx, rt, false); err != nil {
+		return err
+	}
+	rt.status.Readiness.Ready = false
+	if !rt.status.AttentionRequired {
+		if rt.config.Enabled {
+			rt.status.State = ServiceStateStopped
+		} else {
+			rt.status.State = ServiceStateDisabled
+		}
+	}
+	return m.persistStatusLocked(rt)
 }
 
 func snapshotServiceRuntimeConfig(rt *serviceRuntime) serviceRuntimeConfigSnapshot {
@@ -2399,7 +2599,9 @@ func snapshotServiceRuntimeConfig(rt *serviceRuntime) serviceRuntimeConfigSnapsh
 func cloneServiceStatus(status ServiceStatus) ServiceStatus {
 	status.Dependencies = append([]string(nil), status.Dependencies...)
 	status.Exports.Variables = cloneStringMap(status.Exports.Variables)
-	status.Exports.Secrets = append([]ServiceSecretMetadata(nil), status.Exports.Secrets...)
+	if status.Exports.Secrets != nil {
+		status.Exports.Secrets = append([]ServiceSecretMetadata{}, status.Exports.Secrets...)
+	}
 	return status
 }
 
@@ -2476,10 +2678,9 @@ func restoreServiceFile(snapshot serviceFileSnapshot) error {
 	return writeServiceDataAtomic(snapshot.path, snapshot.data, snapshot.mode, os.Rename)
 }
 
-func (m *ServiceManager) rollbackAppliedServicesLocked(ids []string, configs map[string]ServiceConfig, graph serviceDependencyGraph, runtimes map[string]serviceRuntimeConfigSnapshot, definitions, states, events map[string]serviceFileSnapshot) error {
+func (m *ServiceManager) rollbackAppliedServicesLocked(ids, stopOrder, restartOrder []string, configs map[string]ServiceConfig, graph serviceDependencyGraph, runtimes map[string]serviceRuntimeConfigSnapshot, definitions, states, events map[string]serviceFileSnapshot) error {
 	var result error
-	for index := len(ids) - 1; index >= 0; index-- {
-		id := ids[index]
+	for _, id := range stopOrder {
 		rt := m.runtimes[id]
 		snapshot, existed := runtimes[id]
 		if rt != nil && rt.process != nil && (!existed || rt.process != snapshot.process) {
@@ -2487,7 +2688,7 @@ func (m *ServiceManager) rollbackAppliedServicesLocked(ids []string, configs map
 		}
 	}
 	m.configs, m.graph = configs, graph
-	restart := make([]string, 0)
+	restart := make(map[string]struct{})
 	for _, id := range ids {
 		snapshot, existed := runtimes[id]
 		if !existed {
@@ -2497,9 +2698,12 @@ func (m *ServiceManager) rollbackAppliedServicesLocked(ids []string, configs map
 		rt := snapshot.runtime
 		current := m.runtimes[id]
 		processPreserved := current != nil && current.process != nil && current.process == snapshot.process
+		if snapshot.process == nil && snapshot.status.ProcessGroup > 0 && current != nil && current.process == nil && current.status.ProcessGroup == snapshot.status.ProcessGroup {
+			processPreserved = true
+		}
 		restoreServiceRuntimeConfig(rt, snapshot)
 		m.runtimes[id] = rt
-		if snapshot.process != nil && !processPreserved {
+		if (snapshot.process != nil || snapshot.status.ProcessGroup > 0) && !processPreserved {
 			rt.process = nil
 			rt.exit = nil
 			rt.logWriters = nil
@@ -2507,7 +2711,7 @@ func (m *ServiceManager) rollbackAppliedServicesLocked(ids []string, configs map
 			rt.status.Readiness.Ready = false
 			rt.status.State = ServiceStateStopped
 			rt.processOwnership = serviceProcessOwnershipReconstructed
-			restart = append(restart, id)
+			restart[id] = struct{}{}
 		}
 	}
 	for _, snapshots := range []map[string]serviceFileSnapshot{definitions, states, events} {
@@ -2515,7 +2719,10 @@ func (m *ServiceManager) rollbackAppliedServicesLocked(ids []string, configs map
 			result = errors.Join(result, restoreServiceFile(snapshots[ids[index]]))
 		}
 	}
-	for _, id := range restart {
+	for _, id := range restartOrder {
+		if _, ok := restart[id]; !ok {
+			continue
+		}
 		if m.started && !m.stopping {
 			result = errors.Join(result, m.reconcileOneLocked(context.Background(), m.runtimes[id], graph[id]))
 		}
@@ -2524,58 +2731,12 @@ func (m *ServiceManager) rollbackAppliedServicesLocked(ids []string, configs map
 }
 
 func (m *ServiceManager) Apply(cfg ServiceConfig) error {
+	if m == nil {
+		return errors.New("service manager is unavailable")
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	cfg = defaultServiceConfig(cfg)
-	next := cloneServiceConfigs(m.configs)
-	next[cfg.ID] = cfg
-	graph, err := m.validateConfigTransactionLocked(next)
-	if err != nil {
-		return err
-	}
-	rt := m.runtimes[cfg.ID]
-	changed := rt == nil || serviceConfigDigest(rt.config) != serviceConfigDigest(cfg)
-	if err := m.persistDefinitionLocked(cfg); err != nil {
-		return serviceDefinitionOperationError(rt, err)
-	}
-	m.configs = next
-	m.graph = graph
-	if rt == nil {
-		rt = &serviceRuntime{config: cfg, status: initialServiceStatus(cfg)}
-		rt.status.Dependencies = append([]string(nil), graph[cfg.ID]...)
-		m.runtimes[cfg.ID] = rt
-		if err := m.persistStatusLocked(rt); err != nil {
-			return err
-		}
-	} else {
-		rt.config = cfg
-		rt.status.Enabled = cfg.Enabled
-		rt.status.Dependencies = append([]string(nil), graph[cfg.ID]...)
-		rt.status.Readiness.Configured = cfg.Readiness != nil
-		rt.status.Cleanup.Configured = cfg.Cleanup != nil
-		if changed && (rt.process != nil || rt.status.ProcessGroup > 0) {
-			if err := m.stopProcessLocked(context.Background(), rt, false); err != nil {
-				return err
-			}
-			rt.status.Readiness.Ready = false
-		}
-		if rt.process == nil {
-			if cfg.Enabled {
-				if rt.status.State == ServiceStateDisabled {
-					rt.status.State = ServiceStateStopped
-				}
-			} else {
-				rt.status.State = ServiceStateDisabled
-			}
-		}
-		if err := m.persistStatusLocked(rt); err != nil {
-			return err
-		}
-	}
-	if changed && m.started && !m.stopping {
-		return m.reconcileOneLocked(context.Background(), rt, graph[cfg.ID])
-	}
-	return nil
+	return m.applyAllLocked([]ServiceConfig{cfg}, false)
 }
 
 func (m *ServiceManager) Remove(ctx context.Context, id string) error {
@@ -2752,10 +2913,43 @@ func (m *ServiceManager) StopService(ctx context.Context, id string) error {
 	return m.persistStatusLocked(rt)
 }
 func (m *ServiceManager) RestartService(ctx context.Context, id string) error {
-	if err := m.StopService(ctx, id); err != nil {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rt := m.runtimes[id]
+	if rt == nil {
+		return os.ErrNotExist
+	}
+	changed := map[string]struct{}{id: {}}
+	impacted := serviceDependencyChangeSet(m.graph, m.graph, changed)
+	stopOrder, err := serviceGraphSubsetStopOrder(m.graph, impacted)
+	if err != nil {
 		return err
 	}
-	return m.StartService(ctx, id)
+	for _, candidateID := range stopOrder {
+		candidate := m.runtimes[candidateID]
+		if candidate == nil || (candidate.process == nil && candidate.status.ProcessGroup <= 0) {
+			continue
+		}
+		if err := m.stopRuntimeForDependencyChangeLocked(ctx, candidate); err != nil {
+			return err
+		}
+	}
+	rt.status.ManualStop = false
+	rt.status.FailureCount = 0
+	rt.status.AttentionRequired = false
+	rt.status.LastError = ""
+	rt.status.ExitError = ""
+	rt.status.NextRetryAt = ""
+	rt.status.Readiness.Ready = false
+	rt.status.State = ServiceStateStopped
+	if !m.started {
+		m.started = true
+		m.stopping = false
+	}
+	if err := m.persistStatusLocked(rt); err != nil {
+		return err
+	}
+	return m.reconcileLocked(ctx)
 }
 
 func writeServiceJSON(path string, value any, mode os.FileMode) error {

@@ -1274,7 +1274,7 @@ func TestServiceManagerPreservesExportReplacementForLogGuard(t *testing.T) {
 		newServiceLogSink(logPath, ServiceLogRotationConfig{}),
 		rt.redactor,
 		false,
-		func() error { return m.guardServiceLogExport(rt) },
+		func() error { return m.guardServiceLogExportForConfig(rt, rt.config) },
 	)
 	if written, err := writer.Write([]byte("ordinary-output " + rotatedSecret + "\n")); err == nil || written != 0 {
 		t.Fatalf("guarded write = %d, %v; want rejection before persistence", written, err)

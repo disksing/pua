@@ -478,6 +478,14 @@ func runMessageSend(args []string) error {
 	if err != nil {
 		return err
 	}
+	if options.Text == "-" {
+		text, readErr := readMessageTextFromStdin()
+		if readErr != nil {
+			return readErr
+		}
+		options.Text = text
+	}
+	warnLiteralEscapeSequences(options.Text)
 	senderID, senderInstanceID, err := resolveMessageSender()
 	if err != nil {
 		return err
@@ -503,6 +511,31 @@ func runMessageSend(args []string) error {
 		return err
 	}
 	return printJSON(response)
+}
+
+// readMessageTextFromStdin reads a multi-line message body from standard
+// input when the positional message argument is "-".
+func readMessageTextFromStdin() (string, error) {
+	data, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return "", fmt.Errorf("failed to read message from stdin: %w", err)
+	}
+	text := strings.TrimSpace(string(data))
+	if text == "" {
+		return "", errors.New("message read from stdin is empty")
+	}
+	return text, nil
+}
+
+// warnLiteralEscapeSequences hints when the message looks like it carries
+// shell-quoted escape sequences (a literal \n) instead of real newlines,
+// which would render verbatim for the receiving Agent and in the Web GUI.
+// The message is still sent unchanged.
+func warnLiteralEscapeSequences(text string) {
+	if text == "" || strings.Contains(text, "\n") || !strings.Contains(text, `\n`) {
+		return
+	}
+	fmt.Fprintln(os.Stderr, `pua: warning: the message contains literal \n sequences but no real newline; message text is sent verbatim. Use $'...\n...' quoting or pass - to read a multi-line message from stdin.`)
 }
 
 // isStableResourceTarget mirrors the Server's stable resource id vocabulary

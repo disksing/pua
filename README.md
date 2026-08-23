@@ -238,6 +238,8 @@ pua message send --to=project1.task2 --mode=interrupt "Stop the current approach
 pua message show --id=msg-run-0123456789abcdef
 ```
 
+Message text is sent verbatim and may use Markdown. For multi-line text use real newlines (for example `$'line1\nline2'` quoting or a heredoc), or pass `-` to read the message from standard input: `pua message send --to=project1.task2 - <<'EOF'`. The CLI warns when the text looks like it carries a literal `\n` escape sequence instead of a real newline.
+
 These commands infer the sending resource from the current directory, attach `role=agent` and its stable resource ID as provenance, and contact the owning `pua serve` address discovered from the selected control directory's `serve.lock`. `--server=<url>` is an explicit override. History lists and Turn/Event details default to formatted text for direct reading; pass `--json` for the complete structured response. `pua message show` returns a body only while the message is hot; a retained cold receipt is explicitly marked as a receipt and remains queryable by its status and provenance, while an aged-out ID returns `message_receipt_expired`/HTTP 410 and an ID beyond the expired-index window returns `message_not_found`.
 
 Useful overrides:

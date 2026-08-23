@@ -256,10 +256,9 @@
   color: #1a1a1a;
 }
 
-/* count pills: black capsules printed in sunflower ink */
-:root[data-theme="riso"] [data-component-owner="project-tree"] .unread-badge,
-:root[data-theme="riso"] [data-component-owner="project-tree"] .folder-item .folder-count,
-:root[data-theme="riso"] [data-component-owner="project-tree"] .project-task-summary-count {
+/* unread pills: black capsules printed in sunflower ink; the collapsed
+   project task summary and folder counts stay plain muted text */
+:root[data-theme="riso"] [data-component-owner="project-tree"] .unread-badge {
   background: #1a1a1a;
   color: var(--amber-bright);
   border: 1.5px solid #1a1a1a;

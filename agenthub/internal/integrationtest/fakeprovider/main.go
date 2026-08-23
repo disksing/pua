@@ -145,6 +145,13 @@ func (f *fake) emitEnvironment() {
 		f.resumed,
 		f.nativeID,
 	)
+	if os.Getenv("FAKE_REPORT_EPHEMERAL") == "1" {
+		value := os.Getenv("FAKE_EPHEMERAL_SECRET")
+		if value == "" {
+			value = "missing"
+		}
+		text += " ephemeral=" + value
+	}
 	f.notify("session/update", map[string]any{
 		"sessionId": f.nativeID,
 		"update": map[string]any{

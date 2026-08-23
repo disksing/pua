@@ -434,6 +434,93 @@ func assistantText(events []eventValue) string {
 	return result.String()
 }
 
+func assistantTextAfter(events []eventValue, sourceEventID int64) string {
+	filtered := make([]eventValue, 0, len(events))
+	for _, event := range events {
+		if event.SourceEventID > sourceEventID {
+			filtered = append(filtered, event)
+		}
+	}
+	return assistantText(filtered)
+}
+
+func (d *daemon) promptAndWait(id, text string) string {
+	d.t.Helper()
+	after := d.session(id).LastEventID
+	code, body := d.request(http.MethodPost, "/v1/sessions/"+id+"/messages", map[string]any{"text": text})
+	if code != http.StatusAccepted {
+		d.t.Fatalf("message: status=%d body=%v", code, body)
+	}
+	d.waitSession(id, func(current sessionValue) bool {
+		return current.CurrentTurnID == "" && current.LastEventID > after
+	})
+	return assistantTextAfter(d.events(id), after)
+}
+
+func (d *daemon) requireSessionSecretsAbsent(id string, secrets ...string) {
+	d.t.Helper()
+	responses := []struct {
+		label string
+		body  map[string]any
+	}{
+		{label: "session", body: mustRequest(d, http.MethodGet, "/v1/sessions/"+id)},
+		{label: "session list", body: mustRequest(d, http.MethodGet, "/v1/sessions?limit=100")},
+		{label: "event history", body: mustRequest(d, http.MethodGet, "/v1/sessions/"+id+"/events?limit=1000")},
+	}
+	for _, frame := range d.frames(id) {
+		responses = append(responses, struct {
+			label string
+			body  map[string]any
+		}{
+			label: fmt.Sprintf("raw event %d", frame.Cursor),
+			body:  mustRequest(d, http.MethodGet, fmt.Sprintf("/v1/sessions/%s/event/%d", id, frame.Cursor)),
+		})
+	}
+	for _, response := range responses {
+		data, err := json.Marshal(response.body)
+		if err != nil {
+			d.t.Fatal(err)
+		}
+		requireSecretsAbsent(d.t, response.label, data, secrets...)
+	}
+
+	directory := filepath.Join(d.root, "data", "sessions", id)
+	if err := filepath.WalkDir(directory, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		requireSecretsAbsent(d.t, path, data, secrets...)
+		return nil
+	}); err != nil {
+		d.t.Fatal(err)
+	}
+}
+
+func mustRequest(d *daemon, method, path string) map[string]any {
+	d.t.Helper()
+	status, body := d.request(method, path, nil)
+	if status != http.StatusOK {
+		d.t.Fatalf("%s %s: status=%d body=%v", method, path, status, body)
+	}
+	return body
+}
+
+func requireSecretsAbsent(t *testing.T, label string, data []byte, secrets ...string) {
+	t.Helper()
+	for _, secret := range secrets {
+		if bytes.Contains(data, []byte(secret)) {
+			t.Fatalf("%s contains ephemeral secret %q: %s", label, secret, data)
+		}
+	}
+}
+
 func requireOrdered(t *testing.T, types []string, wanted ...string) {
 	t.Helper()
 	position := 0
@@ -587,6 +674,102 @@ func TestPUAGateSourceEnvironmentResumeCapabilitiesAndErrors(t *testing.T) {
 			t.Errorf("error envelope missing %q: %v", key, errorBody)
 		}
 	}
+}
+
+func TestPUAGateEphemeralEnvironmentIsOneShotAndSecret(t *testing.T) {
+	gate := newGate(t)
+	const createSecret = "pua-create-ephemeral-7bcf27d2"
+	const resumeSecret = "pua-resume-ephemeral-fd352e91"
+
+	status, statusBody := gate.request(http.MethodGet, "/v1/status", nil)
+	if status != http.StatusOK {
+		t.Fatalf("status: status=%d body=%v", status, statusBody)
+	}
+	hasEphemeralEnvironment := false
+	for _, raw := range statusBody["capabilities"].([]any) {
+		if raw == "session.ephemeral-environment" {
+			hasEphemeralEnvironment = true
+			break
+		}
+	}
+	if !hasEphemeralEnvironment {
+		t.Fatal("refusing to send an ephemeral environment without the advertised capability")
+	}
+
+	code, createBody := gate.request(http.MethodPost, "/v1/sessions", map[string]any{
+		"title":     "PUA ephemeral environment contract",
+		"cwd":       gate.cwd,
+		"agentName": "Fake ACP",
+		"launchEnvironment": map[string]string{
+			"FAKE_REPORT_EPHEMERAL": "1",
+		},
+		"ephemeralEnvironment": map[string]string{
+			"FAKE_EPHEMERAL_SECRET": createSecret,
+		},
+	})
+	if code != http.StatusCreated {
+		t.Fatalf("create: status=%d body=%v", code, createBody)
+	}
+	requireSecretsAbsent(t, "create response", mustJSONBytes(t, createBody), createSecret)
+	value := decodeSession(t, createBody)
+	if text := gate.promptAndWait(value.ID, "observe create overlay"); !strings.Contains(text, "ephemeral=<redacted>") {
+		t.Fatalf("create process did not receive a redacted ephemeral value: %q", text)
+	}
+	gate.requireSessionSecretsAbsent(value.ID, createSecret)
+
+	root, cwd := gate.root, gate.cwd
+	gate.stop()
+	restarted := startGate(t, root, cwd)
+	restarted.requireSessionSecretsAbsent(value.ID, createSecret)
+
+	code, resumeBody := restarted.request(http.MethodPost, "/v1/sessions/"+value.ID+"/resume", map[string]any{})
+	if code != http.StatusOK {
+		t.Fatalf("resume without overlay: status=%d body=%v", code, resumeBody)
+	}
+	if text := restarted.promptAndWait(value.ID, "observe missing create overlay"); !strings.Contains(text, "ephemeral=missing") || strings.Contains(text, "<redacted>") {
+		t.Fatalf("create overlay was reused after restart: %q", text)
+	}
+
+	code, stopBody := restarted.request(http.MethodPost, "/v1/sessions/"+value.ID+"/stop", map[string]any{})
+	if code != http.StatusOK {
+		t.Fatalf("stop before resume overlay: status=%d body=%v", code, stopBody)
+	}
+	restarted.waitSession(value.ID, func(current sessionValue) bool { return current.State == "stopped" })
+	code, resumeBody = restarted.request(http.MethodPost, "/v1/sessions/"+value.ID+"/resume", map[string]any{
+		"ephemeralEnvironment": map[string]string{
+			"FAKE_EPHEMERAL_SECRET": resumeSecret,
+		},
+	})
+	if code != http.StatusOK {
+		t.Fatalf("resume with overlay: status=%d body=%v", code, resumeBody)
+	}
+	requireSecretsAbsent(t, "resume response", mustJSONBytes(t, resumeBody), createSecret, resumeSecret)
+	if text := restarted.promptAndWait(value.ID, "observe resume overlay"); !strings.Contains(text, "ephemeral=<redacted>") {
+		t.Fatalf("resumed process did not receive a redacted ephemeral value: %q", text)
+	}
+
+	code, stopBody = restarted.request(http.MethodPost, "/v1/sessions/"+value.ID+"/stop", map[string]any{})
+	if code != http.StatusOK {
+		t.Fatalf("stop after resume overlay: status=%d body=%v", code, stopBody)
+	}
+	restarted.waitSession(value.ID, func(current sessionValue) bool { return current.State == "stopped" })
+	code, resumeBody = restarted.request(http.MethodPost, "/v1/sessions/"+value.ID+"/resume", map[string]any{})
+	if code != http.StatusOK {
+		t.Fatalf("second resume without overlay: status=%d body=%v", code, resumeBody)
+	}
+	if text := restarted.promptAndWait(value.ID, "observe missing resume overlay"); !strings.Contains(text, "ephemeral=missing") || strings.Contains(text, "<redacted>") {
+		t.Fatalf("resume overlay was reused by a later process: %q", text)
+	}
+	restarted.requireSessionSecretsAbsent(value.ID, createSecret, resumeSecret)
+}
+
+func mustJSONBytes(t *testing.T, value any) []byte {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
 
 func TestPUAGateStrictStoppedFaultMatrix(t *testing.T) {

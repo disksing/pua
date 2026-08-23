@@ -633,8 +633,68 @@ func TestManagerStartFailureCleansUp(t *testing.T) {
 }
 
 func TestManagerRejectsSecretProviderIdentityBeforePersistence(t *testing.T) {
-	root := t.TempDir()
-	store, err := session.Open(root)
+	const (
+		ephemeralName  = "EPHEMERAL_NATIVE_ID_NAME"
+		ephemeralValue = "ephemeral-native-identity-value"
+	)
+	for _, leak := range []struct {
+		name  string
+		value string
+	}{
+		{name: "name", value: ephemeralName},
+		{name: "value", value: ephemeralValue},
+	} {
+		t.Run(leak.name, func(t *testing.T) {
+			store, err := session.Open(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			value, err := store.Create(session.CreateInput{Cwd: t.TempDir(), AgentName: "Fast Agent"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			manager := New(store, testConfig())
+			manager.factory = func(options provider.Options) (provider.Session, error) {
+				if options.Environment[ephemeralName] != ephemeralValue {
+					t.Fatalf("provider did not receive ephemeral overlay: %#v", options.Environment)
+				}
+				return &fakeSession{hooks: options.Hooks, nativeID: "provider-" + leak.value}, nil
+			}
+			_, startErr := manager.StartWithEnvironment(value.ID, map[string]string{ephemeralName: ephemeralValue})
+			if startErr == nil || !strings.Contains(startErr.Error(), "identity contains a registered secret") {
+				t.Fatalf("secret identity start error = %v", startErr)
+			}
+			if strings.Contains(startErr.Error(), leak.value) {
+				t.Fatalf("start error leaked ephemeral %s: %v", leak.name, startErr)
+			}
+			projected, err := store.Get(value.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if projected.ProviderSessionID != "" || projected.State != session.StateStopped || projected.StopReason != session.StopReasonStartupError {
+				t.Fatalf("secret identity reached session projection: %+v", projected)
+			}
+			events, err := store.EventsAfter(value.ID, 0, 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, event := range events {
+				if event.Type == "session.provider" {
+					t.Fatalf("secret provider identity reached history: %+v", event)
+				}
+			}
+			if data := string(mustJSON(struct {
+				Session session.Session
+				Events  []session.Event
+			}{projected, events})); strings.Contains(data, leak.value) {
+				t.Fatalf("ephemeral %s reached API/history data: %s", leak.name, data)
+			}
+		})
+	}
+}
+
+func TestManagerRedactsEphemeralEnvironmentFromProviderEvents(t *testing.T) {
+	store, err := session.Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -642,42 +702,57 @@ func TestManagerRejectsSecretProviderIdentityBeforePersistence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const secret = "ephemeral-native-identity"
+	const (
+		ephemeralName  = "EPHEMERAL_EVENT_NAME"
+		ephemeralValue = "ephemeral-event-value"
+	)
 	manager := New(store, testConfig())
+	var adapter *fakeSession
 	manager.factory = func(options provider.Options) (provider.Session, error) {
-		if options.Environment["SERVICE_TOKEN"] != secret {
-			t.Fatalf("provider did not receive ephemeral overlay: %#v", options.Environment)
+		adapter = &fakeSession{hooks: options.Hooks}
+		return adapter, nil
+	}
+	if _, err := manager.StartWithEnvironment(value.ID, map[string]string{ephemeralName: ephemeralValue}); err != nil {
+		t.Fatal(err)
+	}
+	adapter.hooks.Event(provider.Event{
+		Type: "provider.error",
+		Data: map[string]any{
+			"message":     ephemeralName + "=" + ephemeralValue,
+			ephemeralName: ephemeralValue,
+		},
+	})
+	events, err := store.EventsAfter(value.ID, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var redactedEvent map[string]any
+	for _, event := range events {
+		if event.Type == "provider.error" && strings.Contains(string(event.Data), `"message"`) {
+			var candidate map[string]any
+			if err := json.Unmarshal(event.Data, &candidate); err != nil {
+				t.Fatal(err)
+			}
+			if candidate["message"] == "<redacted>=<redacted>" {
+				redactedEvent = candidate
+			}
 		}
-		return &fakeSession{hooks: options.Hooks, nativeID: "provider-" + secret}, nil
 	}
-	_, startErr := manager.StartWithEnvironment(value.ID, map[string]string{"SERVICE_TOKEN": secret})
-	if startErr == nil || !strings.Contains(startErr.Error(), "identity contains a registered secret") {
-		t.Fatalf("secret identity start error = %v", startErr)
-	}
-	if strings.Contains(startErr.Error(), secret) {
-		t.Fatalf("start error leaked secret: %v", startErr)
+	if redactedEvent["<redacted>"] != "<redacted>" {
+		t.Fatalf("provider event was not redacted: %+v", redactedEvent)
 	}
 	projected, err := store.Get(value.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if projected.ProviderSessionID != "" || projected.State != session.StateStopped || projected.StopReason != session.StopReasonStartupError {
-		t.Fatalf("secret identity reached session projection: %+v", projected)
-	}
-	events, err := store.EventsAfter(value.ID, 0, 100)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, event := range events {
-		if event.Type == "session.provider" {
-			t.Fatalf("secret provider identity reached history: %+v", event)
-		}
-	}
-	if data := string(mustJSON(struct {
+	data := string(mustJSON(struct {
 		Session session.Session
 		Events  []session.Event
-	}{projected, events})); strings.Contains(data, secret) {
-		t.Fatalf("secret reached API/history data: %s", data)
+	}{projected, events}))
+	for _, secret := range []string{ephemeralName, ephemeralValue} {
+		if strings.Contains(data, secret) {
+			t.Fatalf("ephemeral environment reached API/history data: %s", data)
+		}
 	}
 }
 
@@ -690,15 +765,18 @@ func TestManagerRedactsProviderStartErrorEverywhere(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const secret = "ephemeral-start-error"
+	const (
+		ephemeralName  = "EPHEMERAL_START_ERROR_NAME"
+		ephemeralValue = "ephemeral-start-error-value"
+	)
 	manager := New(store, testConfig())
 	factoryCalls := 0
 	manager.factory = func(options provider.Options) (provider.Session, error) {
 		factoryCalls++
-		return &fakeSession{hooks: options.Hooks, startErr: errors.New("start failed with " + secret)}, nil
+		return &fakeSession{hooks: options.Hooks, startErr: errors.New("start failed with " + ephemeralName + "=" + ephemeralValue)}, nil
 	}
-	_, startErr := manager.StartWithEnvironment(value.ID, map[string]string{"SERVICE_TOKEN": secret})
-	if startErr == nil || strings.Contains(startErr.Error(), secret) || !strings.Contains(startErr.Error(), "<redacted>") {
+	_, startErr := manager.StartWithEnvironment(value.ID, map[string]string{ephemeralName: ephemeralValue})
+	if startErr == nil || strings.Contains(startErr.Error(), ephemeralName) || strings.Contains(startErr.Error(), ephemeralValue) || !strings.Contains(startErr.Error(), "<redacted>") {
 		t.Fatalf("returned start error was not redacted: %v", startErr)
 	}
 	events, err := store.EventsAfter(value.ID, 0, 100)
@@ -721,8 +799,8 @@ func TestManagerRedactsProviderStartErrorEverywhere(t *testing.T) {
 	if data := string(mustJSON(struct {
 		Session session.Session
 		Events  []session.Event
-	}{projected, events})); strings.Contains(data, secret) {
-		t.Fatalf("start error secret reached API/history data: %s", data)
+	}{projected, events})); strings.Contains(data, ephemeralName) || strings.Contains(data, ephemeralValue) {
+		t.Fatalf("start error ephemeral environment reached API/history data: %s", data)
 	}
 }
 
@@ -735,16 +813,19 @@ func TestManagerRedactsProviderCloseErrorEverywhere(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const secret = "ephemeral-close-error"
+	const (
+		ephemeralName  = "EPHEMERAL_CLOSE_ERROR_NAME"
+		ephemeralValue = "ephemeral-close-error-value"
+	)
 	manager := New(store, testConfig())
 	manager.factory = func(options provider.Options) (provider.Session, error) {
-		return &fakeSession{hooks: options.Hooks, closeErr: errors.New("close failed with " + secret)}, nil
+		return &fakeSession{hooks: options.Hooks, closeErr: errors.New("close failed with " + ephemeralName + "=" + ephemeralValue)}, nil
 	}
-	if _, err := manager.StartWithEnvironment(value.ID, map[string]string{"SERVICE_TOKEN": secret}); err != nil {
+	if _, err := manager.StartWithEnvironment(value.ID, map[string]string{ephemeralName: ephemeralValue}); err != nil {
 		t.Fatal(err)
 	}
 	closeErr := manager.Stop(value.ID)
-	if closeErr == nil || strings.Contains(closeErr.Error(), secret) || !strings.Contains(closeErr.Error(), "<redacted>") {
+	if closeErr == nil || strings.Contains(closeErr.Error(), ephemeralName) || strings.Contains(closeErr.Error(), ephemeralValue) || !strings.Contains(closeErr.Error(), "<redacted>") {
 		t.Fatalf("returned close error was not redacted: %v", closeErr)
 	}
 	events, err := store.EventsAfter(value.ID, 0, 100)
@@ -758,8 +839,8 @@ func TestManagerRedactsProviderCloseErrorEverywhere(t *testing.T) {
 	if data := string(mustJSON(struct {
 		Session session.Session
 		Events  []session.Event
-	}{projected, events})); strings.Contains(data, secret) {
-		t.Fatalf("close error secret reached API/history data: %s", data)
+	}{projected, events})); strings.Contains(data, ephemeralName) || strings.Contains(data, ephemeralValue) {
+		t.Fatalf("close error ephemeral environment reached API/history data: %s", data)
 	}
 }
 

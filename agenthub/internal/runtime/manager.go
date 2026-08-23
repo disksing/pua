@@ -620,7 +620,7 @@ func (m *Manager) ensureWithEphemeral(id string, ephemeral map[string]string) (*
 		m.mu.Unlock()
 		return nil, err
 	}
-	run := &active{turnID: value.CurrentTurnID, ready: make(chan struct{}), redactor: security.NewRedactor(environmentValues(ephemeral)...)}
+	run := &active{turnID: value.CurrentTurnID, ready: make(chan struct{}), redactor: ephemeralEnvironmentRedactor(ephemeral)}
 	adapter, err := m.factory(provider.Options{
 		ID: id, Cwd: value.Cwd, Title: value.Title, Agent: agent, Provider: providerConfig,
 		Environment: mergeEnvironmentWithEphemeral(agent.Environment, value.LaunchEnvironment, ephemeral),
@@ -933,12 +933,13 @@ func mergeEnvironmentWithEphemeral(agent, session, ephemeral map[string]string) 
 	return merged
 }
 
-func environmentValues(environment map[string]string) []string {
-	values := make([]string, 0, len(environment))
-	for _, value := range environment {
-		values = append(values, value)
+func ephemeralEnvironmentRedactor(environment map[string]string) *security.Redactor {
+	redactor := security.NewRedactor()
+	for key, value := range environment {
+		redactor.Register(key)
+		redactor.Register(value)
 	}
-	return values
+	return redactor
 }
 
 func cloneConfig(value config.Config) config.Config {

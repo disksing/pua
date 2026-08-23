@@ -101,6 +101,7 @@ type ServiceManager struct {
 	root     string
 	mu       sync.Mutex
 	configs  map[string]ServiceConfig
+	graph    serviceDependencyGraph
 	runtimes map[string]*serviceRuntime
 	resolver ServiceSecretResolver
 	now      func() time.Time
@@ -119,7 +120,7 @@ func NewServiceManager(root string, options ServiceManagerOptions) (*ServiceMana
 	if strings.TrimSpace(root) == "" {
 		return nil, errors.New("workspace root is required")
 	}
-	m := &ServiceManager{root: filepath.Clean(root), configs: map[string]ServiceConfig{}, runtimes: map[string]*serviceRuntime{}, resolver: options.Resolver, now: options.Now}
+	m := &ServiceManager{root: filepath.Clean(root), configs: map[string]ServiceConfig{}, graph: serviceDependencyGraph{}, runtimes: map[string]*serviceRuntime{}, resolver: options.Resolver, now: options.Now}
 	if m.now == nil {
 		m.now = time.Now
 	}
@@ -176,10 +177,12 @@ func (m *ServiceManager) loadLocked() error {
 		}
 		configs[id] = defaultServiceConfig(cfg)
 	}
-	if err := validateServiceGraph(m.root, configs); err != nil {
+	graph, err := validatedServiceDependencyGraph(m.root, configs)
+	if err != nil {
 		return err
 	}
 	m.configs = configs
+	m.graph = graph
 	for id, cfg := range configs {
 		rt := m.runtimes[id]
 		if rt == nil {
@@ -189,6 +192,7 @@ func (m *ServiceManager) loadLocked() error {
 			rt.config = cfg
 		}
 		_ = m.loadStatusLocked(rt)
+		rt.status.Dependencies = append([]string(nil), graph[id]...)
 	}
 	for id := range m.runtimes {
 		if _, ok := configs[id]; !ok && m.runtimes[id].process == nil {
@@ -361,18 +365,18 @@ func (m *ServiceManager) reconcileLocked(ctx context.Context) error {
 		if rt == nil {
 			continue
 		}
-		if err := m.reconcileOneLocked(ctx, rt); err != nil && first == nil {
+		if err := m.reconcileOneLocked(ctx, rt, m.graph[id]); err != nil && first == nil {
 			first = err
 		}
 	}
 	return first
 }
 
-func (m *ServiceManager) reconcileOneLocked(ctx context.Context, rt *serviceRuntime) error {
+func (m *ServiceManager) reconcileOneLocked(ctx context.Context, rt *serviceRuntime, dependencies []string) error {
 	status := &rt.status
 	cfg := rt.config
 	status.Enabled = cfg.Enabled
-	status.Dependencies = append([]string(nil), cfg.DependsOn...)
+	status.Dependencies = append([]string(nil), dependencies...)
 	if !cfg.Enabled {
 		if rt.process != nil {
 			if err := m.stopProcessLocked(ctx, rt, true); err != nil {
@@ -403,7 +407,7 @@ func (m *ServiceManager) reconcileOneLocked(ctx context.Context, rt *serviceRunt
 			return nil
 		}
 	}
-	if !m.dependenciesReadyLocked(cfg) {
+	if !m.dependenciesReadyLocked(dependencies) {
 		if rt.process != nil {
 			if err := m.stopProcessLocked(ctx, rt, false); err != nil {
 				status.AttentionRequired = true
@@ -433,8 +437,8 @@ func (m *ServiceManager) reconcileOneLocked(ctx context.Context, rt *serviceRunt
 	return m.observeReadyLocked(ctx, rt)
 }
 
-func (m *ServiceManager) dependenciesReadyLocked(cfg ServiceConfig) bool {
-	for _, dep := range cfg.DependsOn {
+func (m *ServiceManager) dependenciesReadyLocked(dependencies []string) bool {
+	for _, dep := range dependencies {
 		rt := m.runtimes[dep]
 		if rt == nil || rt.status.State != ServiceStateReady {
 			return false
@@ -1291,29 +1295,17 @@ func (m *ServiceManager) recoverOrphanLocked(rt *serviceRuntime) {
 }
 
 func (m *ServiceManager) sortedIDsLocked() []string {
-	ids := make([]string, 0, len(m.configs))
-	for id := range m.configs {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	// Stable topological order; lexical order breaks ties.
-	result := make([]string, 0, len(ids))
-	seen := map[string]bool{}
-	var visit func(string)
-	visit = func(id string) {
-		if seen[id] {
-			return
+	if len(m.graph) != len(m.configs) {
+		graph, err := buildServiceDependencyGraph(m.configs)
+		if err == nil {
+			m.graph = graph
 		}
-		seen[id] = true
-		for _, dep := range m.configs[id].DependsOn {
-			visit(dep)
-		}
-		result = append(result, id)
 	}
-	for _, id := range ids {
-		visit(id)
+	ids, err := m.graph.topologicalOrder()
+	if err == nil {
+		return ids
 	}
-	return result
+	return sortedServiceConfigIDs(m.configs)
 }
 
 func (m *ServiceManager) persistStatusLocked(rt *serviceRuntime) {
@@ -1651,7 +1643,8 @@ func (m *ServiceManager) Apply(cfg ServiceConfig) error {
 		next[id] = existing
 	}
 	next[cfg.ID] = cfg
-	if err := validateServiceGraph(m.root, next); err != nil {
+	graph, err := validatedServiceDependencyGraph(m.root, next)
+	if err != nil {
 		return err
 	}
 	if !pathWithinResolved(filepath.Join(m.root, ".pua"), filepath.Join(m.root, ".pua", serviceConfigDir)) {
@@ -1664,15 +1657,17 @@ func (m *ServiceManager) Apply(cfg ServiceConfig) error {
 		return err
 	}
 	m.configs[cfg.ID] = cfg
+	m.graph = graph
 	if m.runtimes[cfg.ID] == nil {
 		rt := &serviceRuntime{config: cfg, status: initialServiceStatus(cfg)}
+		rt.status.Dependencies = append([]string(nil), graph[cfg.ID]...)
 		m.runtimes[cfg.ID] = rt
 		m.persistStatusLocked(rt)
 	} else {
 		rt := m.runtimes[cfg.ID]
 		rt.config = cfg
 		rt.status.Enabled = cfg.Enabled
-		rt.status.Dependencies = append([]string(nil), cfg.DependsOn...)
+		rt.status.Dependencies = append([]string(nil), graph[cfg.ID]...)
 		rt.status.Readiness.Configured = cfg.Readiness != nil
 		rt.status.Cleanup.Configured = cfg.Cleanup != nil
 		if rt.process == nil {
@@ -1696,24 +1691,16 @@ func (m *ServiceManager) Remove(ctx context.Context, id string) error {
 	if rt == nil {
 		return os.ErrNotExist
 	}
-	for dependentID, cfg := range m.configs {
-		if dependentID != id && containsString(cfg.DependsOn, id) {
+	for dependentID, dependencies := range m.graph {
+		if dependentID != id && containsString(dependencies, id) {
 			return fmt.Errorf("service %q is required by %q", id, dependentID)
-		}
-		if dependentID != id {
-			for _, environment := range cfg.Environment {
-				for _, match := range serviceTemplatePattern.FindAllStringSubmatch(environment.Template, -1) {
-					if len(match) == 3 && match[1] == id {
-						return fmt.Errorf("service %q is referenced by %q", id, dependentID)
-					}
-				}
-			}
 		}
 	}
 	if rt.process != nil {
 		_ = m.stopProcessLocked(ctx, rt, true)
 	}
 	delete(m.configs, id)
+	delete(m.graph, id)
 	delete(m.runtimes, id)
 	if err := os.Remove(serviceConfigPath(m.root, id)); err != nil && !os.IsNotExist(err) {
 		return err
@@ -1784,7 +1771,7 @@ func (m *ServiceManager) StartService(ctx context.Context, id string) error {
 		m.stopping = false
 		m.ctx = context.Background()
 	}
-	return m.reconcileOneLocked(ctx, rt)
+	return m.reconcileOneLocked(ctx, rt, m.graph[id])
 }
 func (m *ServiceManager) StopService(ctx context.Context, id string) error {
 	m.mu.Lock()

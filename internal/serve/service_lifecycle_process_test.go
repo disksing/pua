@@ -176,6 +176,88 @@ func TestServiceManagerBlocksDependentsUntilReadiness(t *testing.T) {
 	}
 }
 
+func TestServiceManagerStartsTemplateDependenciesFirst(t *testing.T) {
+	root := t.TempDir()
+	orderPath := filepath.Join(root, "template-start-order")
+	readyPath := filepath.Join(root, "template-dependency-ready")
+	now := time.Date(2026, time.August, 24, 2, 0, 0, 0, time.UTC)
+	restart := ServiceRestartConfig{
+		InitialDelay: 100 * time.Millisecond,
+		Multiplier:   2,
+		MaxDelay:     time.Second,
+		ResetAfter:   time.Minute,
+	}
+	writeTestService(t, root, ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "alpha-consumer",
+		Enabled:       true,
+		Command: []string{"/bin/sh", "-c",
+			"printf 'consumer:%s\\n' \"$SOURCE_URL\" >> " + shellQuote(orderPath) + "; exec sleep 30"},
+		Environment: map[string]ServiceEnvironment{
+			"SOURCE_URL": {Template: "${service.zulu-producer.URL}"},
+		},
+		Restart: restart,
+	})
+	writeTestService(t, root, ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "zulu-producer",
+		Enabled:       true,
+		Exports:       true,
+		Command: []string{"/bin/sh", "-c",
+			"printf 'producer\\n' >> " + shellQuote(orderPath) + "; " +
+				"tmp=\"$PUA_SERVICE_EXPORT_PATH.tmp\"; " +
+				"printf '%s' '{\"schemaVersion\":1,\"variables\":{\"URL\":\"ready\"}}' > \"$tmp\"; " +
+				"mv \"$tmp\" \"$PUA_SERVICE_EXPORT_PATH\"; exec sleep 30"},
+		Readiness: &ServiceReadinessConfig{
+			Command:  []string{"/bin/sh", "-c", "test -f " + shellQuote(readyPath)},
+			Interval: 10 * time.Millisecond,
+			Timeout:  500 * time.Millisecond,
+		},
+		Restart: restart,
+	})
+
+	manager, err := NewServiceManager(root, ServiceManagerOptions{Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopProcessTestManager(t, &manager)
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	consumer, err := manager.Show("alpha-consumer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if consumer.State != ServiceStateBlocked || consumer.PID != 0 {
+		t.Fatalf("unready template consumer status = %#v, want blocked without a process", consumer)
+	}
+	if launches := waitForLaunches(t, orderPath, 1); len(launches) != 1 || launches[0] != "producer" {
+		t.Fatalf("launch order before template dependency readiness = %#v, want producer only", launches)
+	}
+
+	if err := os.WriteFile(readyPath, []byte("ready\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Second)
+	if err := manager.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	launches := waitForLaunches(t, orderPath, 3)
+	if got := strings.Join(launches, ","); got != "producer,producer,consumer:ready" {
+		t.Fatalf("template dependency start order = %q, want producer,producer,consumer:ready", got)
+	}
+	consumer, err = manager.Show("alpha-consumer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if consumer.State != ServiceStateReady || consumer.PID <= 0 {
+		t.Fatalf("template consumer status = %#v, want ready process", consumer)
+	}
+	if got, want := strings.Join(consumer.Dependencies, ","), "zulu-producer"; got != want {
+		t.Fatalf("template consumer dependencies = %q, want %q", got, want)
+	}
+}
+
 func TestServiceManagerRetriesTimedOutCleanup(t *testing.T) {
 	root := t.TempDir()
 	attemptPath := filepath.Join(root, "cleanup-attempt")

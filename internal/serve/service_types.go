@@ -492,7 +492,7 @@ func reservedServiceBindingName(name string) bool {
 	}
 }
 
-func validateServiceConfig(root string, configs map[string]ServiceConfig, candidate ServiceConfig) error {
+func validateServiceConfig(root string, candidate ServiceConfig) error {
 	candidate = defaultServiceConfig(candidate)
 	if candidate.SchemaVersion != serviceSchemaVersion {
 		return ServiceValidationError{"schemaVersion", fmt.Sprintf("unsupported schema version %d", candidate.SchemaVersion)}
@@ -532,7 +532,13 @@ func validateServiceConfig(root string, configs map[string]ServiceConfig, candid
 	if _, err := os.Stat(abs); err != nil && !os.IsNotExist(err) {
 		return ServiceValidationError{"cwd", err.Error()}
 	}
-	for name, value := range candidate.Environment {
+	environmentNames := make([]string, 0, len(candidate.Environment))
+	for name := range candidate.Environment {
+		environmentNames = append(environmentNames, name)
+	}
+	sort.Strings(environmentNames)
+	for _, name := range environmentNames {
+		value := candidate.Environment[name]
 		if !environmentNamePattern.MatchString(name) {
 			return ServiceValidationError{"environment." + name, "invalid environment variable name"}
 		}
@@ -540,19 +546,8 @@ func validateServiceConfig(root string, configs map[string]ServiceConfig, candid
 			return ServiceValidationError{"environment." + name, "invalid secret reference"}
 		}
 		if value.Template != "" {
-			if err := validateEnvironmentTemplate(value.Template, candidate.ID, configs); err != nil {
+			if err := validateEnvironmentTemplateSyntax(value.Template); err != nil {
 				return ServiceValidationError{"environment." + name, err.Error()}
-			}
-			for _, match := range serviceTemplatePattern.FindAllStringSubmatch(value.Template, -1) {
-				if match[0] == "" {
-					return ServiceValidationError{"environment." + name, "invalid service template"}
-				}
-				if match[1] == candidate.ID {
-					return ServiceValidationError{"environment." + name, "service cannot reference itself"}
-				}
-				if _, ok := configs[match[1]]; !ok {
-					return ServiceValidationError{"environment." + name, fmt.Sprintf("unknown service %q", match[1])}
-				}
 			}
 		}
 	}
@@ -561,16 +556,10 @@ func validateServiceConfig(root string, configs map[string]ServiceConfig, candid
 		if !serviceIDPattern.MatchString(dep) {
 			return ServiceValidationError{"dependsOn", fmt.Sprintf("invalid service id %q", dep)}
 		}
-		if dep == candidate.ID {
-			return ServiceValidationError{"dependsOn", "service cannot depend on itself"}
-		}
 		if seenDeps[dep] {
 			return ServiceValidationError{"dependsOn", fmt.Sprintf("duplicate dependency %q", dep)}
 		}
 		seenDeps[dep] = true
-		if _, ok := configs[dep]; !ok {
-			return ServiceValidationError{"dependsOn", fmt.Sprintf("unknown service %q", dep)}
-		}
 	}
 	for field, command := range map[string][]string{"readiness.command": readinessCommand(candidate), "cleanup.command": cleanupCommand(candidate)} {
 		for index, value := range command {
@@ -592,6 +581,21 @@ func validateServiceConfig(root string, configs map[string]ServiceConfig, candid
 }
 
 func validateEnvironmentTemplate(value, serviceID string, configs map[string]ServiceConfig) error {
+	if err := validateEnvironmentTemplateSyntax(value); err != nil {
+		return err
+	}
+	for _, dependency := range serviceTemplateDependencies(value) {
+		if dependency == serviceID {
+			return errors.New("service cannot reference itself")
+		}
+		if _, ok := configs[dependency]; !ok {
+			return fmt.Errorf("unknown service %q", dependency)
+		}
+	}
+	return nil
+}
+
+func validateEnvironmentTemplateSyntax(value string) error {
 	if !strings.Contains(value, "${") {
 		return nil
 	}
@@ -612,12 +616,6 @@ func validateEnvironmentTemplate(value, serviceID string, configs map[string]Ser
 	for _, match := range serviceMatches {
 		if len(match) != 3 {
 			return errors.New("invalid service template")
-		}
-		if match[1] == serviceID {
-			return errors.New("service cannot reference itself")
-		}
-		if _, ok := configs[match[1]]; !ok {
-			return fmt.Errorf("unknown service %q", match[1])
 		}
 	}
 	for offset := 0; ; {
@@ -644,6 +642,16 @@ func validateEnvironmentTemplate(value, serviceID string, configs map[string]Ser
 	return nil
 }
 
+func serviceTemplateDependencies(value string) []string {
+	dependencies := make([]string, 0)
+	for _, match := range serviceTemplatePattern.FindAllStringSubmatch(value, -1) {
+		if len(match) == 3 {
+			dependencies = append(dependencies, match[1])
+		}
+	}
+	return dependencies
+}
+
 func readinessCommand(cfg ServiceConfig) []string {
 	if cfg.Readiness == nil {
 		return nil
@@ -657,79 +665,131 @@ func cleanupCommand(cfg ServiceConfig) []string {
 	return cfg.Cleanup.Command
 }
 
-func validateServiceGraph(root string, configs map[string]ServiceConfig) error {
-	for id, cfg := range configs {
-		cfg = defaultServiceConfig(cfg)
-		cfg.ID = id
-		if err := validateServiceConfig(root, configs, cfg); err != nil {
-			return err
+type serviceDependencyGraph map[string][]string
+
+func buildServiceDependencyGraph(configs map[string]ServiceConfig) (serviceDependencyGraph, error) {
+	graph := make(serviceDependencyGraph, len(configs))
+	ids := sortedServiceConfigIDs(configs)
+	for _, id := range ids {
+		cfg := configs[id]
+		graph[id] = nil
+		seen := make(map[string]struct{})
+		add := func(field, dependency string) error {
+			if dependency == id {
+				message := "service cannot reference itself"
+				if field == "dependsOn" {
+					message = "service cannot depend on itself"
+				}
+				return ServiceValidationError{field, message}
+			}
+			if _, ok := configs[dependency]; !ok {
+				return ServiceValidationError{field, fmt.Sprintf("unknown service %q", dependency)}
+			}
+			if _, ok := seen[dependency]; ok {
+				return nil
+			}
+			seen[dependency] = struct{}{}
+			graph[id] = append(graph[id], dependency)
+			return nil
 		}
+		for _, dependency := range cfg.DependsOn {
+			if err := add("dependsOn", dependency); err != nil {
+				return nil, err
+			}
+		}
+		environmentNames := make([]string, 0, len(cfg.Environment))
+		for name := range cfg.Environment {
+			environmentNames = append(environmentNames, name)
+		}
+		sort.Strings(environmentNames)
+		for _, name := range environmentNames {
+			for _, dependency := range serviceTemplateDependencies(cfg.Environment[name].Template) {
+				if err := add("environment."+name, dependency); err != nil {
+					return nil, err
+				}
+			}
+		}
+		sort.Strings(graph[id])
 	}
-	state := make(map[string]uint8)
+	return graph, nil
+}
+
+func (g serviceDependencyGraph) topologicalOrder() ([]string, error) {
+	ids := make([]string, 0, len(g))
+	for id := range g {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	state := make(map[string]uint8, len(g))
+	stack := make([]string, 0, len(g))
+	result := make([]string, 0, len(g))
 	var visit func(string) error
 	visit = func(id string) error {
 		switch state[id] {
 		case 1:
-			return ServiceValidationError{"dependsOn", fmt.Sprintf("dependency cycle includes %q", id)}
+			cycleStart := 0
+			for index := len(stack) - 1; index >= 0; index-- {
+				if stack[index] == id {
+					cycleStart = index
+					break
+				}
+			}
+			cycle := append(append([]string(nil), stack[cycleStart:]...), id)
+			return ServiceValidationError{"dependencies", "dependency cycle: " + strings.Join(cycle, " -> ")}
 		case 2:
 			return nil
 		}
 		state[id] = 1
-		for _, dep := range configs[id].DependsOn {
-			if err := visit(dep); err != nil {
+		stack = append(stack, id)
+		for _, dependency := range g[id] {
+			if err := visit(dependency); err != nil {
 				return err
 			}
 		}
+		stack = stack[:len(stack)-1]
 		state[id] = 2
+		result = append(result, id)
 		return nil
 	}
+	for _, id := range ids {
+		if err := visit(id); err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
+}
+
+func sortedServiceConfigIDs(configs map[string]ServiceConfig) []string {
 	ids := make([]string, 0, len(configs))
 	for id := range configs {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
-	for _, id := range ids {
-		if err := visit(id); err != nil {
-			return err
+	return ids
+}
+
+func validatedServiceDependencyGraph(root string, configs map[string]ServiceConfig) (serviceDependencyGraph, error) {
+	for _, id := range sortedServiceConfigIDs(configs) {
+		cfg := configs[id]
+		cfg = defaultServiceConfig(cfg)
+		cfg.ID = id
+		if err := validateServiceConfig(root, cfg); err != nil {
+			return nil, err
 		}
 	}
-	// Service export templates are edges in the same readiness graph. A
-	// template cycle must fail closed instead of leaving two services blocked
-	// forever at runtime.
-	templateEdges := make(map[string][]string, len(configs))
-	for id, cfg := range configs {
-		for _, value := range cfg.Environment {
-			for _, match := range serviceTemplatePattern.FindAllStringSubmatch(value.Template, -1) {
-				if len(match) == 3 {
-					templateEdges[id] = append(templateEdges[id], match[1])
-				}
-			}
-		}
+	graph, err := buildServiceDependencyGraph(configs)
+	if err != nil {
+		return nil, err
 	}
-	state = make(map[string]uint8)
-	var visitTemplate func(string) error
-	visitTemplate = func(id string) error {
-		switch state[id] {
-		case 1:
-			return ServiceValidationError{"environment", fmt.Sprintf("service template cycle includes %q", id)}
-		case 2:
-			return nil
-		}
-		state[id] = 1
-		for _, dep := range templateEdges[id] {
-			if err := visitTemplate(dep); err != nil {
-				return err
-			}
-		}
-		state[id] = 2
-		return nil
+	if _, err := graph.topologicalOrder(); err != nil {
+		return nil, err
 	}
-	for _, id := range ids {
-		if err := visitTemplate(id); err != nil {
-			return err
-		}
-	}
-	return nil
+	return graph, nil
+}
+
+func validateServiceGraph(root string, configs map[string]ServiceConfig) error {
+	_, err := validatedServiceDependencyGraph(root, configs)
+	return err
 }
 
 func pathWithin(root, target string) bool {

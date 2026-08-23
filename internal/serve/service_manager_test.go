@@ -129,6 +129,147 @@ func TestValidateServiceGraphRejectsCyclesAndSecretArguments(t *testing.T) {
 	}
 }
 
+func TestValidateServiceGraphRejectsMixedDependencyCycles(t *testing.T) {
+	root := t.TempDir()
+	tests := []struct {
+		name    string
+		configs map[string]ServiceConfig
+	}{
+		{
+			name: "two services",
+			configs: map[string]ServiceConfig{
+				"alpha": {
+					SchemaVersion: serviceSchemaVersion,
+					ID:            "alpha",
+					Command:       []string{"echo"},
+					DependsOn:     []string{"beta"},
+				},
+				"beta": {
+					SchemaVersion: serviceSchemaVersion,
+					ID:            "beta",
+					Command:       []string{"echo"},
+					Environment: map[string]ServiceEnvironment{
+						"URL": {Template: "${service.alpha.URL}"},
+					},
+				},
+			},
+		},
+		{
+			name: "three services",
+			configs: map[string]ServiceConfig{
+				"alpha": {
+					SchemaVersion: serviceSchemaVersion,
+					ID:            "alpha",
+					Command:       []string{"echo"},
+					DependsOn:     []string{"beta"},
+				},
+				"beta": {
+					SchemaVersion: serviceSchemaVersion,
+					ID:            "beta",
+					Command:       []string{"echo"},
+					Environment: map[string]ServiceEnvironment{
+						"URL": {Template: "${service.charlie.URL}"},
+					},
+				},
+				"charlie": {
+					SchemaVersion: serviceSchemaVersion,
+					ID:            "charlie",
+					Command:       []string{"echo"},
+					DependsOn:     []string{"alpha"},
+				},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateServiceGraph(root, test.configs)
+			if err == nil || !strings.Contains(err.Error(), "dependency cycle") {
+				t.Fatalf("mixed dependency validation error = %v, want dependency cycle", err)
+			}
+		})
+	}
+}
+
+func TestServiceDependencyGraphUnionsAndDeduplicatesEdges(t *testing.T) {
+	configs := map[string]ServiceConfig{
+		"alpha": {
+			DependsOn: []string{"beta"},
+			Environment: map[string]ServiceEnvironment{
+				"A_FIRST":  {Template: "${service.beta.URL}"},
+				"B_AGAIN":  {Template: "${service.beta.PORT}:${service.charlie.PORT}"},
+				"C_SECRET": {Template: "${secret.token}"},
+				"D_DIRECT": {SecretName: "another-token"},
+			},
+		},
+		"beta":    {},
+		"charlie": {},
+	}
+
+	graph, err := buildServiceDependencyGraph(configs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(graph), len(configs); got != want {
+		t.Fatalf("dependency graph service count = %d, want %d", got, want)
+	}
+	if got, want := strings.Join(graph["alpha"], ","), "beta,charlie"; got != want {
+		t.Fatalf("alpha dependency edges = %q, want %q", got, want)
+	}
+	if len(graph["beta"]) != 0 || len(graph["charlie"]) != 0 {
+		t.Fatalf("unrelated dependency edges = %#v", graph)
+	}
+	order, err := graph.topologicalOrder()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(order, ","), "beta,charlie,alpha"; got != want {
+		t.Fatalf("topological order = %q, want %q", got, want)
+	}
+}
+
+func TestServiceDependencyGraphReportsReferenceField(t *testing.T) {
+	tests := []struct {
+		name      string
+		config    ServiceConfig
+		wantError string
+	}{
+		{
+			name:      "unknown explicit dependency",
+			config:    ServiceConfig{DependsOn: []string{"missing"}},
+			wantError: `dependsOn: unknown service "missing"`,
+		},
+		{
+			name: "unknown template dependency",
+			config: ServiceConfig{Environment: map[string]ServiceEnvironment{
+				"URL": {Template: "${service.missing.URL}"},
+			}},
+			wantError: `environment.URL: unknown service "missing"`,
+		},
+		{
+			name:      "explicit self dependency",
+			config:    ServiceConfig{DependsOn: []string{"alpha"}},
+			wantError: "dependsOn: service cannot depend on itself",
+		},
+		{
+			name: "template self dependency",
+			config: ServiceConfig{Environment: map[string]ServiceEnvironment{
+				"URL": {Template: "${service.alpha.URL}"},
+			}},
+			wantError: "environment.URL: service cannot reference itself",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := buildServiceDependencyGraph(map[string]ServiceConfig{"alpha": test.config})
+			if err == nil || err.Error() != test.wantError {
+				t.Fatalf("dependency graph error = %v, want %q", err, test.wantError)
+			}
+		})
+	}
+}
+
 func TestServiceManagerStartsProcessAndPersistsRedactedLogs(t *testing.T) {
 	root := t.TempDir()
 	cfg := ServiceConfig{SchemaVersion: serviceSchemaVersion, ID: "worker", Enabled: true, Command: []string{"/bin/sh", "-c", "printf '%s\\n' \"$TOKEN\"; exit 7"}, Environment: map[string]ServiceEnvironment{"TOKEN": {SecretName: "token"}}, Restart: ServiceRestartConfig{InitialDelay: 10 * time.Millisecond, Multiplier: 2, MaxDelay: time.Second, ResetAfter: time.Minute}}

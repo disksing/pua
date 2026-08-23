@@ -4,11 +4,11 @@ package security
 
 import (
 	"bytes"
-	"encoding/json"
 	"io"
-	"sort"
 	"strings"
 	"sync"
+	"unicode/utf16"
+	"unicode/utf8"
 )
 
 const redactedValue = "<redacted>"
@@ -17,10 +17,8 @@ const redactedValue = "<redacted>"
 // intentionally treats data as bytes: provider output can contain invalid
 // UTF-8 and must still be scrubbed before it reaches a log or event sink.
 type Redactor struct {
-	mu       sync.RWMutex
-	secrets  [][]byte
-	escaped  [][]byte
-	maxLen   int
+	mu      sync.RWMutex
+	secrets [][]byte
 }
 
 // NewRedactor returns a redactor initialized with non-empty secret values.
@@ -49,34 +47,6 @@ func (r *Redactor) Register(value string) {
 		}
 	}
 	r.secrets = append(r.secrets, append([]byte(nil), b...))
-	if len(b) > r.maxLen {
-		r.maxLen = len(b)
-	}
-	// Structured provider events are JSON-encoded before the shared redactor
-	// sees them. Register the escaped string form as well so values containing
-	// quotes, controls, or HTML characters cannot bypass redaction merely by
-	// crossing a JSON boundary.
-	if encoded, err := json.Marshal(value); err == nil && len(encoded) >= 2 {
-		escaped := encoded[1 : len(encoded)-1]
-		if !bytes.Equal(escaped, b) && len(escaped) > 0 {
-			duplicate := false
-			for _, existing := range r.escaped {
-				if bytes.Equal(existing, escaped) {
-					duplicate = true
-					break
-				}
-			}
-			if !duplicate {
-				r.escaped = append(r.escaped, append([]byte(nil), escaped...))
-			}
-			if len(escaped) > r.maxLen {
-				r.maxLen = len(escaped)
-			}
-		}
-	}
-	// Longer values first makes overlapping values deterministic and avoids
-	// leaving a suffix of a longer secret exposed after a shorter match.
-	sort.SliceStable(r.secrets, func(i, j int) bool { return len(r.secrets[i]) > len(r.secrets[j]) })
 }
 
 // Secrets returns only lengths of the registered values. It is useful for
@@ -100,14 +70,9 @@ func (r *Redactor) Redact(data []byte) []byte {
 	if r == nil || len(data) == 0 {
 		return append([]byte(nil), data...)
 	}
-	r.mu.RLock()
-	secrets := r.allSecretsLocked()
-	r.mu.RUnlock()
-	sort.SliceStable(secrets, func(i, j int) bool { return len(secrets[i]) > len(secrets[j]) })
-	result := append([]byte(nil), data...)
-	for _, secret := range secrets {
-		result = bytes.ReplaceAll(result, secret, []byte(redactedValue))
-	}
+	snapshot := r.snapshot()
+	result, _, _ := snapshot.scan(data, true, snapshot.replacement)
+	result, _ = snapshot.stabilize(result, true)
 	return result
 }
 
@@ -129,6 +94,7 @@ type Stream struct {
 	dst      io.Writer
 	mu       sync.Mutex
 	pending  []byte
+	staged   []byte
 	closed   bool
 }
 
@@ -157,58 +123,46 @@ func (s *Stream) Flush() error {
 }
 
 func (s *Stream) flush(final bool) error {
-	if len(s.pending) == 0 {
+	if len(s.pending) == 0 && len(s.staged) == 0 {
 		return nil
 	}
-	keep := 0
-	if s.redactor != nil {
-		r := s.redactor
-		r.mu.RLock()
-		max := r.maxLen
-		secrets := r.allSecretsLocked()
-		r.mu.RUnlock()
-		sort.SliceStable(secrets, func(i, j int) bool { return len(secrets[i]) > len(secrets[j]) })
-		// First replace complete matches. Then retain the longest suffix that
-		// is a prefix of any registered secret.
-		for _, secret := range secrets {
-			s.pending = bytes.ReplaceAll(s.pending, secret, []byte(redactedValue))
+	if s.redactor == nil {
+		if len(s.pending) > 0 {
+			s.staged = append(s.staged, s.pending...)
+			s.pending = nil
 		}
-		if !final && max > 1 {
-			limit := max - 1
-			if limit > len(s.pending) {
-				limit = len(s.pending)
-			}
-			for n := limit; n > 0; n-- {
-				suffix := s.pending[len(s.pending)-n:]
-				for _, secret := range secrets {
-					if len(secret) >= n && bytes.Equal(suffix, secret[:n]) {
-						if n > keep {
-							keep = n
-						}
-						break
-					}
-				}
-				if keep == n {
-					break
-				}
-			}
-		}
+		return s.writeStaged()
 	}
-	if keep > len(s.pending) {
-		keep = len(s.pending)
+
+	snapshot := s.redactor.snapshot()
+	redacted, pending, _ := snapshot.scan(s.pending, final, snapshot.replacement)
+	staged := append(append([]byte(nil), s.staged...), redacted...)
+	out, staged := snapshot.stabilize(staged, final)
+	if err := writeBytes(s.dst, out); err != nil {
+		return err
 	}
-	out := s.pending[:len(s.pending)-keep]
-	if len(out) > 0 && s.dst != nil {
-		if _, err := s.dst.Write(out); err != nil {
-			return err
-		}
-	}
-	if keep > 0 {
-		s.pending = append([]byte(nil), s.pending[len(s.pending)-keep:]...)
-	} else {
-		s.pending = nil
-	}
+	s.pending = append(s.pending[:0], pending...)
+	s.staged = append(s.staged[:0], staged...)
 	return nil
+}
+
+func (s *Stream) writeStaged() error {
+	if err := writeBytes(s.dst, s.staged); err != nil {
+		return err
+	}
+	s.staged = nil
+	return nil
+}
+
+func writeBytes(dst io.Writer, data []byte) error {
+	if dst == nil || len(data) == 0 {
+		return nil
+	}
+	n, err := dst.Write(data)
+	if err == nil && n != len(data) {
+		return io.ErrShortWrite
+	}
+	return err
 }
 
 // Close flushes the retained suffix and closes the destination when it also
@@ -240,21 +194,243 @@ func (r *Redactor) ContainsSecret(data []byte) bool {
 	if r == nil {
 		return false
 	}
+	return r.snapshot().contains(data)
+}
+
+type redactionPattern struct {
+	raw   []byte
+	runes []rune
+}
+
+type redactionSnapshot struct {
+	patterns    []redactionPattern
+	replacement []byte
+}
+
+func (r *Redactor) snapshot() redactionSnapshot {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	for _, secret := range r.allSecretsLocked() {
-		if bytes.Contains(data, secret) {
+	snapshot := redactionSnapshot{patterns: make([]redactionPattern, 0, len(r.secrets))}
+	for _, secret := range r.secrets {
+		pattern := redactionPattern{raw: append([]byte(nil), secret...)}
+		if utf8.Valid(secret) {
+			pattern.runes = []rune(string(secret))
+		}
+		snapshot.patterns = append(snapshot.patterns, pattern)
+	}
+	candidate := []byte(redactedValue)
+	if !snapshot.contains(candidate) {
+		snapshot.replacement = candidate
+	}
+	return snapshot
+}
+
+// scan applies leftmost-longest replacement. On a non-final scan it retains
+// the first suffix that could become a match when more bytes arrive. Waiting
+// even when a shorter match is already complete is what makes prefix-overlap
+// safe (for example, "abc" and "abcdef").
+func (s redactionSnapshot) scan(data []byte, final bool, replacement []byte) (out, pending []byte, changed bool) {
+	if len(s.patterns) == 0 {
+		return append([]byte(nil), data...), nil, false
+	}
+	out = make([]byte, 0, len(data))
+	for pos := 0; pos < len(data); {
+		matched, partial := s.matchAt(data[pos:])
+		if partial && !final {
+			return out, append([]byte(nil), data[pos:]...), changed
+		}
+		if matched > 0 {
+			out = append(out, replacement...)
+			pos += matched
+			changed = true
+			continue
+		}
+		out = append(out, data[pos])
+		pos++
+	}
+	return out, nil, changed
+}
+
+// stabilize removes matches created where replacement or removal joined two
+// formerly separate spans. Every changed pass gets shorter, so it terminates.
+func (s redactionSnapshot) stabilize(data []byte, final bool) (out, pending []byte) {
+	current := append([]byte(nil), data...)
+	for {
+		out, pending, changed := s.scan(current, final, nil)
+		if !changed {
+			return out, pending
+		}
+		current = append(out, pending...)
+	}
+}
+
+func (s redactionSnapshot) contains(data []byte) bool {
+	for pos := range data {
+		matched, _ := s.matchAt(data[pos:])
+		if matched > 0 {
 			return true
 		}
 	}
 	return false
 }
 
-func (r *Redactor) allSecretsLocked() [][]byte {
-	result := make([][]byte, 0, len(r.secrets)+len(r.escaped))
-	result = append(result, r.secrets...)
-	result = append(result, r.escaped...)
-	return result
+func (s redactionSnapshot) matchAt(data []byte) (matched int, partial bool) {
+	for _, pattern := range s.patterns {
+		if len(data) >= len(pattern.raw) && bytes.Equal(data[:len(pattern.raw)], pattern.raw) {
+			if len(pattern.raw) > matched {
+				matched = len(pattern.raw)
+			}
+		} else if len(data) < len(pattern.raw) && bytes.Equal(data, pattern.raw[:len(data)]) {
+			partial = true
+		}
+
+		if len(pattern.runes) > 0 {
+			consumed, status := matchJSONRunes(data, pattern.runes)
+			switch status {
+			case jsonMatchComplete:
+				if consumed > matched {
+					matched = consumed
+				}
+			case jsonMatchPartial:
+				partial = true
+			}
+		}
+	}
+	return matched, partial
+}
+
+type jsonMatchStatus uint8
+
+const (
+	jsonMatchNone jsonMatchStatus = iota
+	jsonMatchPartial
+	jsonMatchComplete
+)
+
+func matchJSONRunes(data []byte, target []rune) (int, jsonMatchStatus) {
+	consumed := 0
+	for _, want := range target {
+		n, status := matchJSONRune(data[consumed:], want)
+		if status != jsonMatchComplete {
+			return 0, status
+		}
+		consumed += n
+	}
+	return consumed, jsonMatchComplete
+}
+
+func matchJSONRune(data []byte, target rune) (int, jsonMatchStatus) {
+	if len(data) == 0 {
+		return 0, jsonMatchPartial
+	}
+	if data[0] != '\\' {
+		encoded := []byte(string(target))
+		if len(data) < len(encoded) {
+			if bytes.Equal(data, encoded[:len(data)]) {
+				return 0, jsonMatchPartial
+			}
+			return 0, jsonMatchNone
+		}
+		if bytes.Equal(data[:len(encoded)], encoded) {
+			return len(encoded), jsonMatchComplete
+		}
+		return 0, jsonMatchNone
+	}
+	if len(data) == 1 {
+		return 0, jsonMatchPartial
+	}
+	if decoded, ok := shortJSONEscape(data[1]); ok {
+		if decoded == target {
+			return 2, jsonMatchComplete
+		}
+		return 0, jsonMatchNone
+	}
+	if data[1] != 'u' {
+		return 0, jsonMatchNone
+	}
+	first, status := parseJSONCodeUnit(data)
+	if status != jsonMatchComplete {
+		return 0, status
+	}
+	if first < 0xd800 || first > 0xdfff {
+		if rune(first) == target {
+			return 6, jsonMatchComplete
+		}
+		return 0, jsonMatchNone
+	}
+	if first > 0xdbff {
+		return 0, jsonMatchNone
+	}
+	second, status := parseJSONCodeUnit(data[6:])
+	if status != jsonMatchComplete {
+		return 0, status
+	}
+	if second < 0xdc00 || second > 0xdfff {
+		return 0, jsonMatchNone
+	}
+	if utf16.DecodeRune(rune(first), rune(second)) == target {
+		return 12, jsonMatchComplete
+	}
+	return 0, jsonMatchNone
+}
+
+func shortJSONEscape(value byte) (rune, bool) {
+	switch value {
+	case '"', '\\', '/':
+		return rune(value), true
+	case 'b':
+		return '\b', true
+	case 'f':
+		return '\f', true
+	case 'n':
+		return '\n', true
+	case 'r':
+		return '\r', true
+	case 't':
+		return '\t', true
+	default:
+		return 0, false
+	}
+}
+
+func parseJSONCodeUnit(data []byte) (uint16, jsonMatchStatus) {
+	if len(data) == 0 {
+		return 0, jsonMatchPartial
+	}
+	if data[0] != '\\' {
+		return 0, jsonMatchNone
+	}
+	if len(data) == 1 {
+		return 0, jsonMatchPartial
+	}
+	if data[1] != 'u' {
+		return 0, jsonMatchNone
+	}
+	value := uint16(0)
+	for i := 2; i < 6; i++ {
+		if i >= len(data) {
+			return 0, jsonMatchPartial
+		}
+		digit, ok := hexValue(data[i])
+		if !ok {
+			return 0, jsonMatchNone
+		}
+		value = value<<4 | uint16(digit)
+	}
+	return value, jsonMatchComplete
+}
+
+func hexValue(value byte) (byte, bool) {
+	switch {
+	case value >= '0' && value <= '9':
+		return value - '0', true
+	case value >= 'a' && value <= 'f':
+		return value - 'a' + 10, true
+	case value >= 'A' && value <= 'F':
+		return value - 'A' + 10, true
+	default:
+		return 0, false
+	}
 }
 
 // NormalizeSecretValues removes duplicate/empty values and trims only the

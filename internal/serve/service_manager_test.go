@@ -604,6 +604,194 @@ func TestServiceManagerRejectedExportJSONIsScrubbedAndOpaque(t *testing.T) {
 	}
 }
 
+func TestServiceManagerWriteOpenFailureRemovesSecretHandoff(t *testing.T) {
+	const secret = "write-open-failure-secret"
+	root := t.TempDir()
+	path := filepath.Join(serviceRuntimePath(root, "exporter"), "export.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"schemaVersion":1,"secrets":{"TOKEN":"`+secret+`"}}`), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	manager := &ServiceManager{
+		root: root,
+		now:  time.Now,
+		exportOpenFile: func(path string, flag int, perm os.FileMode) (*os.File, error) {
+			if flag&os.O_RDWR != 0 {
+				return nil, errors.New("injected write-open failure")
+			}
+			return os.OpenFile(path, flag, perm)
+		},
+	}
+	runtime := &serviceRuntime{
+		config:   ServiceConfig{SchemaVersion: serviceSchemaVersion, ID: "exporter", Exports: true},
+		redactor: security.NewRedactor(),
+	}
+	if _, err := manager.readExportsLocked(runtime); err == nil {
+		t.Fatal("export with an unwritable hand-off was accepted")
+	}
+	if data, err := os.ReadFile(path); err == nil && bytes.Contains(data, []byte(secret)) {
+		t.Fatalf("failed hand-off retained its secret: %s", data)
+	} else if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	matches, err := filepath.Glob(filepath.Join(filepath.Dir(path), ".export-handoff-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, match := range matches {
+		data, err := os.ReadFile(match)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(data, []byte(secret)) {
+			t.Fatalf("failed hand-off quarantine retained its secret: %s", data)
+		}
+	}
+}
+
+func TestServiceManagerReadOnlySecretHandoffIsAcceptedAndScrubbed(t *testing.T) {
+	const secret = "read-only-export-secret"
+	root := t.TempDir()
+	path := filepath.Join(serviceRuntimePath(root, "exporter"), "export.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	export := ServiceExportFile{
+		SchemaVersion: serviceExportSchema,
+		Variables:     map[string]string{"PUBLIC": "visible"},
+		Secrets:       map[string]string{"TOKEN": secret},
+	}
+	data, err := json.Marshal(export)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	manager := &ServiceManager{root: root, now: time.Now}
+	runtime := &serviceRuntime{
+		config:        ServiceConfig{SchemaVersion: serviceSchemaVersion, ID: "exporter", Exports: true},
+		secretNames:   map[string]ServiceSecretMetadata{},
+		exportSecrets: map[string]string{},
+		redactor:      security.NewRedactor(),
+	}
+	accepted, err := manager.readExportsLocked(runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accepted.Variables["PUBLIC"] != "visible" || accepted.Secrets["TOKEN"] != secret {
+		t.Fatalf("accepted export = %#v", accepted)
+	}
+	scrubbed, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(scrubbed, []byte(secret)) || !bytes.Contains(scrubbed, []byte("visible")) {
+		t.Fatalf("read-only export was not scrubbed: %s", scrubbed)
+	}
+	if info, err := os.Stat(path); err != nil {
+		t.Fatal(err)
+	} else if info.Mode().Perm() != 0o600 {
+		t.Fatalf("scrubbed export mode = %o, want 600", info.Mode().Perm())
+	}
+}
+
+func TestServiceManagerSecretHandoffDoesNotFollowSymlink(t *testing.T) {
+	const secret = "symlink-target-secret"
+	root := t.TempDir()
+	runtimeDir := serviceRuntimePath(root, "exporter")
+	path := filepath.Join(runtimeDir, "export.json")
+	target := filepath.Join(runtimeDir, "target.json")
+	if err := os.MkdirAll(runtimeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	original := []byte(`{"schemaVersion":1,"secrets":{"TOKEN":"` + secret + `"}}`)
+	if err := os.WriteFile(target, original, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	manager := &ServiceManager{root: root, now: time.Now}
+	runtime := &serviceRuntime{
+		config:   ServiceConfig{SchemaVersion: serviceSchemaVersion, ID: "exporter", Exports: true},
+		redactor: security.NewRedactor(),
+	}
+	if _, err := manager.readExportsLocked(runtime); err == nil {
+		t.Fatal("symlink export hand-off was accepted")
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(data, original) {
+		t.Fatalf("symlink target was changed: %s", data)
+	}
+	if info, err := os.Lstat(path); err != nil {
+		t.Fatal(err)
+	} else if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("export replacement mode = %v, want symlink", info.Mode())
+	}
+}
+
+func TestServiceManagerWriteOpenFailurePreservesReplacementHandoff(t *testing.T) {
+	const (
+		originalSecret    = "failed-original-secret"
+		replacementSecret = "preserved-replacement-secret"
+	)
+	root := t.TempDir()
+	path := filepath.Join(serviceRuntimePath(root, "exporter"), "export.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"schemaVersion":1,"secrets":{"TOKEN":"`+originalSecret+`"}}`), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	replacement := ServiceExportFile{
+		SchemaVersion: serviceExportSchema,
+		Secrets:       map[string]string{"TOKEN": replacementSecret},
+	}
+	manager := &ServiceManager{root: root, now: time.Now}
+	manager.exportOpenFile = func(openPath string, flag int, perm os.FileMode) (*os.File, error) {
+		if flag&os.O_RDWR != 0 {
+			if err := writeServiceJSON(path, replacement, 0o600); err != nil {
+				return nil, err
+			}
+			return nil, errors.New("injected write-open failure after replacement")
+		}
+		return os.OpenFile(openPath, flag, perm)
+	}
+	runtime := &serviceRuntime{
+		config:   ServiceConfig{SchemaVersion: serviceSchemaVersion, ID: "exporter", Exports: true},
+		redactor: security.NewRedactor(),
+	}
+	if _, err := manager.readExportsLocked(runtime); err == nil {
+		t.Fatal("replaced hand-off was accepted during the failed read")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(data, []byte(originalSecret)) || !bytes.Contains(data, []byte(replacementSecret)) {
+		t.Fatalf("replacement hand-off was removed or changed: %s", data)
+	}
+	matches, err := filepath.Glob(filepath.Join(filepath.Dir(path), ".export-handoff-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, match := range matches {
+		data, err := os.ReadFile(match)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(data, []byte(originalSecret)) {
+			t.Fatalf("replaced original remained in quarantine: %s", data)
+		}
+	}
+}
+
 func TestServiceManagerRejectedExportScrubsOpenedDescriptorBeforeReplacement(t *testing.T) {
 	const (
 		openedSecret      = "opened-rejected-secret"

@@ -147,6 +147,7 @@ type ServiceManager struct {
 	processPlatform         *serviceProcessPlatform
 	definitionStore         serviceDefinitionStore
 	runtimeStateStore       serviceRuntimeStateStore
+	exportOpenFile          func(string, int, os.FileMode) (*os.File, error)
 	stopping                bool
 	started                 bool
 }
@@ -833,7 +834,7 @@ func (m *ServiceManager) readExportsWithGateLocked(rt *serviceRuntime, fromLog b
 	if !pathWithinResolved(filepath.Join(m.root, ".pua"), path) {
 		return ServiceExportFile{}, m.rejectExportLocked(rt, errors.New("service export path escapes the workspace control directory"), nil, fromLog)
 	}
-	handoff, err := openServiceExportHandoff(path)
+	handoff, err := openServiceExportHandoffWithOpen(path, m.exportOpenFile)
 	if os.IsNotExist(err) {
 		if requiresInitialExport(rt.config) {
 			message := "service has not written its initial export"
@@ -852,6 +853,7 @@ func (m *ServiceManager) readExportsWithGateLocked(rt *serviceRuntime, fromLog b
 }
 
 type serviceExportHandoff struct {
+	path string
 	file *os.File
 	data []byte
 }
@@ -860,27 +862,89 @@ type serviceExportHandoff struct {
 // scrubbing. A service may atomically replace the pathname after this read; the
 // replacement must remain untouched so the next log guard can inspect it.
 func openServiceExportHandoff(path string) (*serviceExportHandoff, error) {
-	file, err := os.OpenFile(path, os.O_RDWR, 0)
+	return openServiceExportHandoffWithOpen(path, nil)
+}
+
+func openServiceExportHandoffWithOpen(path string, openFile func(string, int, os.FileMode) (*os.File, error)) (*serviceExportHandoff, error) {
+	if openFile == nil {
+		openFile = os.OpenFile
+	}
+	readFile, err := openFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
-	data, err := io.ReadAll(file)
+	readInfo, err := readFile.Stat()
 	if err != nil {
-		_ = file.Close()
+		_ = readFile.Close()
 		return nil, err
 	}
-	return &serviceExportHandoff{file: file, data: data}, nil
+	pathInfo, err := os.Lstat(path)
+	if err != nil {
+		_ = readFile.Close()
+		return nil, err
+	}
+	if !readInfo.Mode().IsRegular() || !pathInfo.Mode().IsRegular() || !os.SameFile(readInfo, pathInfo) {
+		_ = readFile.Close()
+		return nil, errors.New("service export hand-off must be a regular file")
+	}
+	data, err := io.ReadAll(readFile)
+	if err != nil {
+		cleanupErr := removeVerifiedServiceExportHandoff(path, readFile)
+		_ = readFile.Close()
+		if cleanupErr != nil {
+			return nil, fmt.Errorf("read service export hand-off: %v; remove unreadable hand-off: %w", err, cleanupErr)
+		}
+		return nil, fmt.Errorf("read service export hand-off: %w", err)
+	}
+	// Exporters may deliberately create a read-only hand-off. Changing the mode
+	// through the verified descriptor targets that inode even if the exporter
+	// concurrently replaces the pathname.
+	if err := readFile.Chmod(0o600); err != nil {
+		cleanupErr := removeVerifiedServiceExportHandoff(path, readFile)
+		_ = readFile.Close()
+		if cleanupErr != nil {
+			return nil, fmt.Errorf("prepare service export hand-off for scrubbing: %v; remove hand-off: %w", err, cleanupErr)
+		}
+		return nil, fmt.Errorf("prepare service export hand-off for scrubbing: %w", err)
+	}
+	writeFile, err := openFile(path, os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		cleanupErr := removeVerifiedServiceExportHandoff(path, readFile)
+		_ = readFile.Close()
+		if cleanupErr != nil {
+			return nil, fmt.Errorf("open service export hand-off for scrubbing: %v; remove hand-off: %w", err, cleanupErr)
+		}
+		return nil, fmt.Errorf("open service export hand-off for scrubbing: %w", err)
+	}
+	writeInfo, err := writeFile.Stat()
+	if err != nil || !os.SameFile(readInfo, writeInfo) {
+		_ = writeFile.Close()
+		cleanupErr := removeVerifiedServiceExportHandoff(path, readFile)
+		_ = readFile.Close()
+		if err != nil {
+			if cleanupErr != nil {
+				return nil, fmt.Errorf("verify service export hand-off for scrubbing: %v; remove hand-off: %w", err, cleanupErr)
+			}
+			return nil, fmt.Errorf("verify service export hand-off for scrubbing: %w", err)
+		}
+		if cleanupErr != nil {
+			return nil, fmt.Errorf("service export hand-off changed while opening for scrubbing; remove hand-off: %w", cleanupErr)
+		}
+		return nil, errors.New("service export hand-off changed while opening for scrubbing")
+	}
+	_ = readFile.Close()
+	return &serviceExportHandoff{path: path, file: writeFile, data: data}, nil
 }
 
 func (m *ServiceManager) readExportHandoffWithGateLocked(rt *serviceRuntime, handoff *serviceExportHandoff, fromLog bool) (ServiceExportFile, error) {
 	if len(handoff.data) > 1<<20 {
 		cause := errors.New("service export exceeds 1 MiB")
-		cause = scrubRejectedExport(handoff.file, serviceExportSchema, cause)
+		cause = scrubRejectedExport(handoff, serviceExportSchema, cause)
 		return ServiceExportFile{}, m.rejectExportLocked(rt, cause, nil, fromLog)
 	}
 	var export ServiceExportFile
 	if err := decodeStrictServiceJSON(bytes.NewReader(handoff.data), &export); err != nil {
-		cause := scrubRejectedExport(handoff.file, serviceExportSchema, errors.New("decode export: invalid JSON hand-off"))
+		cause := scrubRejectedExport(handoff, serviceExportSchema, errors.New("decode export: invalid JSON hand-off"))
 		return ServiceExportFile{}, m.rejectExportLocked(rt, cause, nil, fromLog)
 	}
 	candidateSecrets := make([]string, 0, len(export.Secrets))
@@ -891,7 +955,7 @@ func (m *ServiceManager) readExportHandoffWithGateLocked(rt *serviceRuntime, han
 		}
 	}
 	if export.SchemaVersion != serviceExportSchema {
-		cause := scrubRejectedExport(handoff.file, serviceExportSchema, fmt.Errorf("unsupported export schema version %d", export.SchemaVersion))
+		cause := scrubRejectedExport(handoff, serviceExportSchema, fmt.Errorf("unsupported export schema version %d", export.SchemaVersion))
 		return ServiceExportFile{}, m.rejectExportLocked(rt, cause, candidateSecrets, fromLog)
 	}
 	if export.Variables == nil {
@@ -902,24 +966,24 @@ func (m *ServiceManager) readExportHandoffWithGateLocked(rt *serviceRuntime, han
 	}
 	for name, value := range export.Secrets {
 		if !validSecretName(name) || strings.ContainsRune(value, '\x00') {
-			cause := scrubRejectedExport(handoff.file, export.SchemaVersion, errors.New("invalid exported secret name or value"))
+			cause := scrubRejectedExport(handoff, export.SchemaVersion, errors.New("invalid exported secret name or value"))
 			return ServiceExportFile{}, m.rejectExportLocked(rt, cause, candidateSecrets, fromLog)
 		}
 	}
 	candidateRedactor := security.NewRedactor(candidateSecrets...)
 	for name, value := range export.Variables {
 		if !environmentNamePattern.MatchString(name) || strings.ContainsRune(value, '\x00') {
-			cause := scrubRejectedExport(handoff.file, export.SchemaVersion, errors.New("invalid exported variable name or value"))
+			cause := scrubRejectedExport(handoff, export.SchemaVersion, errors.New("invalid exported variable name or value"))
 			return ServiceExportFile{}, m.rejectExportLocked(rt, cause, candidateSecrets, fromLog)
 		}
 		if candidateRedactor.ContainsSecret([]byte(value)) || rt.redactor != nil && rt.redactor.ContainsSecret([]byte(value)) {
-			cause := scrubRejectedExport(handoff.file, export.SchemaVersion, errors.New("exported variable contains a secret; place it under secrets"))
+			cause := scrubRejectedExport(handoff, export.SchemaVersion, errors.New("exported variable contains a secret; place it under secrets"))
 			return ServiceExportFile{}, m.rejectExportLocked(rt, cause, candidateSecrets, fromLog)
 		}
 	}
 	if rt.exportAccepted && export.Secrets != nil && !equalStringMap(export.Secrets, rt.exportSecrets) {
 		sanitized := ServiceExportFile{SchemaVersion: export.SchemaVersion, Variables: cloneStringMap(export.Variables)}
-		if err := writeSanitizedExport(handoff.file, sanitized); err != nil {
+		if err := writeSanitizedExportHandoff(handoff, sanitized); err != nil {
 			return ServiceExportFile{}, m.rejectExportLocked(rt, fmt.Errorf("scrub rejected exported secrets: %w", err), candidateSecrets, fromLog)
 		}
 		return ServiceExportFile{}, m.rejectExportLocked(rt, errors.New("service exported secrets are immutable after the initial hand-off"), candidateSecrets, fromLog)
@@ -939,7 +1003,7 @@ func (m *ServiceManager) readExportHandoffWithGateLocked(rt *serviceRuntime, han
 		// with a secret-free representation as soon as its secret values have
 		// been registered in memory. A failure to scrub is fail-closed.
 		sanitized := ServiceExportFile{SchemaVersion: export.SchemaVersion, Variables: cloneStringMap(export.Variables)}
-		if err := writeSanitizedExport(handoff.file, sanitized); err != nil {
+		if err := writeSanitizedExportHandoff(handoff, sanitized); err != nil {
 			return ServiceExportFile{}, fmt.Errorf("scrub exported secrets: %w", err)
 		}
 	} else {
@@ -995,11 +1059,67 @@ func (m *ServiceManager) exportProtocolErrorLocked(rt *serviceRuntime) error {
 	return errors.New(rt.exportViolation)
 }
 
-func scrubRejectedExport(file *os.File, schemaVersion int, cause error) error {
-	if err := writeSanitizedExport(file, ServiceExportFile{SchemaVersion: schemaVersion, Variables: map[string]string{}}); err != nil {
+func scrubRejectedExport(handoff *serviceExportHandoff, schemaVersion int, cause error) error {
+	if err := writeSanitizedExportHandoff(handoff, ServiceExportFile{SchemaVersion: schemaVersion, Variables: map[string]string{}}); err != nil {
 		return fmt.Errorf("%v; scrub rejected export: %w", cause, err)
 	}
 	return cause
+}
+
+func writeSanitizedExportHandoff(handoff *serviceExportHandoff, export ServiceExportFile) error {
+	if err := writeSanitizedExport(handoff.file, export); err != nil {
+		if cleanupErr := removeVerifiedServiceExportHandoff(handoff.path, handoff.file); cleanupErr != nil {
+			return fmt.Errorf("%v; remove unsanitized export hand-off: %w", err, cleanupErr)
+		}
+		return err
+	}
+	return nil
+}
+
+// removeVerifiedServiceExportHandoff removes only the inode already held by
+// file. Renaming it to a private name before unlinking closes the lstat/remove
+// race; if the pathname changed, the replacement is left untouched.
+func removeVerifiedServiceExportHandoff(path string, file *os.File) error {
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	pathInfo, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !pathInfo.Mode().IsRegular() || !os.SameFile(openedInfo, pathInfo) {
+		return nil
+	}
+	temp, err := os.CreateTemp(filepath.Dir(path), ".export-handoff-*")
+	if err != nil {
+		return err
+	}
+	quarantinePath := temp.Name()
+	if closeErr := temp.Close(); closeErr != nil {
+		_ = os.Remove(quarantinePath)
+		return closeErr
+	}
+	if err := os.Rename(path, quarantinePath); err != nil {
+		_ = os.Remove(quarantinePath)
+		return err
+	}
+	quarantineInfo, err := os.Lstat(quarantinePath)
+	if err != nil {
+		return err
+	}
+	if os.SameFile(openedInfo, quarantineInfo) {
+		return os.Remove(quarantinePath)
+	}
+	// The path changed between verification and rename. Restore the moved
+	// replacement without overwriting a still newer hand-off.
+	if err := os.Link(quarantinePath, path); err != nil {
+		return fmt.Errorf("restore concurrently replaced export hand-off: %w", err)
+	}
+	return os.Remove(quarantinePath)
 }
 
 func writeSanitizedExport(file *os.File, export ServiceExportFile) error {

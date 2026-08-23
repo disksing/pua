@@ -1,8 +1,11 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import { sessionsQuery } from "../../src/agenthub/core/archive";
 import { buildCreatePayload } from "../../src/agenthub/core/new-session";
-import { activitySessions, SessionToneAllocator, TERMINAL_TONE_HOLD_MS } from "../../src/agenthub/companion/model";
+import { activitySessions, applyBalanceTotals, filterQuotaSnapshot, quotaVisibilityKey, SessionToneAllocator, TERMINAL_TONE_HOLD_MS } from "../../src/agenthub/companion/model";
 import { activityPlaybackPlan } from "../../src/agenthub/companion/schedule";
 import { buildProviderSwitches } from "../../src/agenthub/settings/provider-switches";
 
@@ -40,5 +43,28 @@ describe("AgentHub audit application", () => {
     expect((activityPlaybackPlan as any)(["a", "b", "c"], 2).map((entry: any) => entry.slot)).toEqual([0, 1, 3]);
     const allocator = new SessionToneAllocator(3);
     expect([allocator.assign("a"), allocator.assign("b"), allocator.assign("a")]).toEqual([0, 1, 0]);
+  });
+
+  it("applies balance totals and persisted quota visibility preferences", () => {
+    const snapshot = { providers: [{ provider: "deepseek", label: "DeepSeek", quotas: [{ kind: "balance", label: "Credit", value: 40, remainingPercent: 40 }] }] };
+    const quota = (applyBalanceTotals as any)(snapshot, { deepseek: 200 });
+    expect(quota.providers[0].quotas[0]).toMatchObject({ remainingPercent: 20, limit: 200 });
+    const hiddenKey = (quotaVisibilityKey as any)(quota.providers[0], quota.providers[0].quotas[0]);
+    expect((filterQuotaSnapshot as any)(quota, [hiddenKey]).providers).toEqual([]);
+  });
+
+  it("keeps inventory controls visible and restores the full-screen animated Beeper contract", () => {
+    const source = (name: string) => readFileSync(resolve(process.cwd(), "src/agenthub", name), "utf8");
+    const css = source("agenthub.css");
+    const inventory = source("SessionInventory.svelte");
+    const companion = source("Companion.svelte");
+    const settings = source("SettingsDialog.svelte");
+    expect(css).toContain(".session-table-wrap { min-height: 0; flex: 1; overflow: auto;");
+    expect(css).toContain(".companion-layer.standalone .companion-card { width: 100%; height: 100%; max-height: none;");
+    expect(css).toContain("animation: companion-thread-flash 10s");
+    expect(inventory).not.toContain("Agent activity and history");
+    expect(companion).toContain("`${session.sessionId}:${session.lastActiveAt}`");
+    expect(settings).toContain("Quota visibility");
+    expect(settings).toContain("Balance totals");
   });
 });

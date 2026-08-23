@@ -26,6 +26,8 @@ type Manager struct {
 	factory  func(provider.Options) (provider.Session, error)
 }
 
+var ErrEphemeralEnvironmentRequired = errors.New("session requires a non-empty ephemeral environment for every provider start")
+
 type active struct {
 	mu      sync.Mutex
 	adapter provider.Session
@@ -325,7 +327,12 @@ func (m *Manager) deliverMessageLocked(id string, message session.DurableMessage
 	run, err := m.ensure(id)
 	if err != nil {
 		m.recordDelivery(id, message, session.MessageDeliveryPending, err)
-		m.schedulePendingRetry(id)
+		// A fresh ephemeral overlay can only arrive through an explicit start
+		// or resume. Keep the durable message pending without spinning a timer
+		// that is incapable of satisfying that precondition.
+		if !errors.Is(err, ErrEphemeralEnvironmentRequired) {
+			m.schedulePendingRetry(id)
+		}
 		return false
 	}
 	run.setTurn(message.TurnID)
@@ -396,15 +403,23 @@ func (m *Manager) schedulePendingRetry(id string) {
 		m.mu.Lock()
 		delete(m.retrying, id)
 		m.mu.Unlock()
-		lock := m.inputLock(id)
-		lock.Lock()
-		value, err := m.store.Get(id)
-		if err == nil && value.State != session.StateStopping && value.State != session.StateArchived &&
-			!(value.State == session.StateStopped && value.StopReason == session.StopReasonRequested) {
-			m.deliverPendingLocked(id)
-		}
-		lock.Unlock()
+		m.retryPending(id)
 	}()
+}
+
+// retryPending is the deterministic callback behind the delayed retry. It
+// deliberately uses the implicit ensure path: Sessions that have consumed an
+// ephemeral environment stay stopped until an explicit caller supplies the
+// next overlay.
+func (m *Manager) retryPending(id string) {
+	lock := m.inputLock(id)
+	lock.Lock()
+	defer lock.Unlock()
+	value, err := m.store.Get(id)
+	if err == nil && value.State != session.StateStopping && value.State != session.StateArchived &&
+		!(value.State == session.StateStopped && value.StopReason == session.StopReasonRequested) {
+		m.deliverPendingLocked(id)
+	}
 }
 
 func promptAdapter(adapter provider.Session, input session.MessageInput) error {
@@ -578,6 +593,17 @@ func (m *Manager) ensureWithEphemeral(id string, ephemeral map[string]string) (*
 	if value.State == session.StateStopping {
 		m.mu.Unlock()
 		return nil, errors.New("session provider is stopping")
+	}
+	if len(ephemeral) > 0 && !value.EphemeralEnvironmentRequired {
+		if _, err := m.store.Append(id, session.EventEphemeralEnvironmentRequired, "", marshal(session.EphemeralEnvironmentRequiredEventData{Required: true})); err != nil {
+			m.mu.Unlock()
+			return nil, err
+		}
+		value.EphemeralEnvironmentRequired = true
+	}
+	if value.EphemeralEnvironmentRequired && len(ephemeral) == 0 {
+		m.mu.Unlock()
+		return nil, ErrEphemeralEnvironmentRequired
 	}
 	_, _ = m.store.Append(id, "session.state", "", marshal(session.StateEventData{State: session.StateStarting}))
 	cfg := cloneConfig(m.cfg)

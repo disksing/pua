@@ -33,6 +33,10 @@ const (
 	EventTurnCancelled   = "turn.cancelled"
 	EventMessageInput    = "message.input"
 	EventMessageDelivery = "message.delivery"
+	// EventEphemeralEnvironmentRequired records only that every future
+	// Provider process needs a fresh in-memory overlay. It never records the
+	// overlay's names or values.
+	EventEphemeralEnvironmentRequired = "session.ephemeral-environment-required"
 )
 
 const MessageSchemaOpaquePayload = 2
@@ -252,21 +256,25 @@ type TurnTerminalEventData struct {
 }
 
 type Session struct {
-	ID                 string            `json:"id"`
-	Title              string            `json:"title"`
-	Cwd                string            `json:"cwd"`
-	AgentName          string            `json:"agentName,omitempty"`
-	IdempotencyKey     string            `json:"idempotencyKey,omitempty"`
-	Source             *Source           `json:"source,omitempty"`
-	LaunchEnvironment  map[string]string `json:"launchEnvironment,omitempty"`
-	Provider           string            `json:"provider,omitempty"`
-	InputCapabilities  InputCapabilities `json:"inputCapabilities"`
-	ProviderSessionID  string            `json:"providerSessionId,omitempty"`
-	State              string            `json:"state"`
-	StopReason         string            `json:"stopReason,omitempty"`
-	CurrentTurnID      string            `json:"currentTurnId,omitempty"`
-	PendingApprovalIDs []string          `json:"pendingApprovalIds,omitempty"`
-	LastEventID        int64             `json:"lastEventId"`
+	ID                string            `json:"id"`
+	Title             string            `json:"title"`
+	Cwd               string            `json:"cwd"`
+	AgentName         string            `json:"agentName,omitempty"`
+	IdempotencyKey    string            `json:"idempotencyKey,omitempty"`
+	Source            *Source           `json:"source,omitempty"`
+	LaunchEnvironment map[string]string `json:"launchEnvironment,omitempty"`
+	// EphemeralEnvironmentRequired is a non-secret lifecycle marker. Once
+	// true, AgentHub refuses to create another Provider process unless the
+	// caller supplies a fresh non-empty ephemeral environment.
+	EphemeralEnvironmentRequired bool              `json:"ephemeralEnvironmentRequired,omitempty"`
+	Provider                     string            `json:"provider,omitempty"`
+	InputCapabilities            InputCapabilities `json:"inputCapabilities"`
+	ProviderSessionID            string            `json:"providerSessionId,omitempty"`
+	State                        string            `json:"state"`
+	StopReason                   string            `json:"stopReason,omitempty"`
+	CurrentTurnID                string            `json:"currentTurnId,omitempty"`
+	PendingApprovalIDs           []string          `json:"pendingApprovalIds,omitempty"`
+	LastEventID                  int64             `json:"lastEventId"`
 	// LastActivityAt is updated only by semantic work events within a Turn.
 	// Session lifecycle changes, provider metadata, and stderr do not refresh it.
 	LastActivityAt     *time.Time `json:"lastActivityAt,omitempty"`
@@ -453,6 +461,13 @@ type AgentRenameEventData struct {
 // overlay. The historical session.created snapshot is never rewritten.
 type LaunchEnvironmentEventData struct {
 	Environment map[string]string `json:"environment"`
+}
+
+// EphemeralEnvironmentRequiredEventData is deliberately limited to a
+// boolean marker so ephemeral environment names and values can never become
+// Session facts.
+type EphemeralEnvironmentRequiredEventData struct {
+	Required bool `json:"required"`
 }
 
 // ProviderEventData is the payload of the session.provider event. AgentName

@@ -1118,6 +1118,15 @@ func applyEvent(projected *Session, event Event) error {
 			return err
 		}
 		projected.LaunchEnvironment = cloneEnvironment(data.Environment)
+	case EventEphemeralEnvironmentRequired:
+		var data EphemeralEnvironmentRequiredEventData
+		if err := decodeCurrentEvent(event.Data, &data); err != nil {
+			return err
+		}
+		if !data.Required {
+			return errors.New("ephemeral environment requirement event must set required")
+		}
+		projected.EphemeralEnvironmentRequired = true
 	case "session.archived":
 		projected.State = StateArchived
 	case "turn.started":

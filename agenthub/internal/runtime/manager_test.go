@@ -692,7 +692,9 @@ func TestManagerRedactsProviderStartErrorEverywhere(t *testing.T) {
 	}
 	const secret = "ephemeral-start-error"
 	manager := New(store, testConfig())
+	factoryCalls := 0
 	manager.factory = func(options provider.Options) (provider.Session, error) {
+		factoryCalls++
 		return &fakeSession{hooks: options.Hooks, startErr: errors.New("start failed with " + secret)}, nil
 	}
 	_, startErr := manager.StartWithEnvironment(value.ID, map[string]string{"SERVICE_TOKEN": secret})
@@ -706,6 +708,15 @@ func TestManagerRedactsProviderStartErrorEverywhere(t *testing.T) {
 	projected, err := store.Get(value.ID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !projected.EphemeralEnvironmentRequired {
+		t.Fatalf("provider start failure lost ephemeral requirement: %+v", projected)
+	}
+	if _, err := manager.Start(value.ID); !errors.Is(err, ErrEphemeralEnvironmentRequired) {
+		t.Fatalf("implicit retry after provider start failure = %v", err)
+	}
+	if factoryCalls != 1 {
+		t.Fatalf("implicit retry after provider start failure called factory %d times", factoryCalls)
 	}
 	if data := string(mustJSON(struct {
 		Session session.Session
@@ -749,6 +760,183 @@ func TestManagerRedactsProviderCloseErrorEverywhere(t *testing.T) {
 		Events  []session.Event
 	}{projected, events})); strings.Contains(data, secret) {
 		t.Fatalf("close error secret reached API/history data: %s", data)
+	}
+}
+
+func TestEphemeralEnvironmentRequirementBlocksImplicitRetryAndSurvivesReplay(t *testing.T) {
+	root := t.TempDir()
+	store, err := session.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := store.Create(session.CreateInput{Cwd: t.TempDir(), AgentName: "Fast Agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const firstSecret = "ephemeral-first-7a130c"
+	const secondSecret = "ephemeral-second-026fc4"
+	const replaySecret = "ephemeral-replay-a5e10f"
+	var factoryEnvironments []map[string]string
+	first := &fakeSession{holdTurn: true, promptErrors: []error{errors.New("provider prompt failed")}}
+	second := &fakeSession{}
+	manager := New(store, testConfig())
+	manager.factory = func(options provider.Options) (provider.Session, error) {
+		factoryEnvironments = append(factoryEnvironments, cloneEnvironment(options.Environment))
+		switch len(factoryEnvironments) {
+		case 1:
+			first.hooks = options.Hooks
+			return first, nil
+		case 2:
+			second.hooks = options.Hooks
+			return second, nil
+		default:
+			t.Fatalf("unexpected provider factory call %d", len(factoryEnvironments))
+			return nil, errors.New("unexpected provider factory call")
+		}
+	}
+	if _, err := manager.StartWithEnvironment(value.ID, map[string]string{"SERVICE_TOKEN": firstSecret}); err != nil {
+		t.Fatal(err)
+	}
+	// Keep the ordinary retry scheduler from launching a goroutine, then invoke
+	// its callback synchronously below.
+	manager.mu.Lock()
+	manager.retrying[value.ID] = true
+	manager.mu.Unlock()
+	input := session.MessageInput{Text: "retry safely", Role: session.MessageRoleUser, MessageID: "ephemeral-retry"}
+	if _, err := manager.SendMessage(value.ID, input); err != nil {
+		t.Fatal(err)
+	}
+	first.hooks.ProcessEnd(errors.New("provider exited after prompt failure"))
+	stopped, err := store.Get(value.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stopped.State != session.StateStopped || stopped.StopReason != session.StopReasonProviderError {
+		t.Fatalf("provider exit projection = %+v", stopped)
+	}
+	// The real timer removes this entry immediately before its callback.
+	manager.mu.Lock()
+	delete(manager.retrying, value.ID)
+	manager.mu.Unlock()
+	manager.retryPending(value.ID)
+	if len(factoryEnvironments) != 1 {
+		t.Fatalf("implicit pending retry started %d providers, want only the original", len(factoryEnvironments))
+	}
+	stillStopped, err := store.Get(value.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stillStopped.State != session.StateStopped || stillStopped.StopReason != session.StopReasonProviderError {
+		t.Fatalf("blocked retry changed stopped boundary: %+v", stillStopped)
+	}
+	manager.mu.Lock()
+	retryRescheduled := manager.retrying[value.ID]
+	manager.mu.Unlock()
+	if retryRescheduled {
+		t.Fatal("blocked retry scheduled another implicit attempt without an overlay")
+	}
+	pending, found, err := store.DurableMessageByID(value.ID, input.MessageID)
+	if err != nil || !found || pending.Delivered {
+		t.Fatalf("blocked retry durable message = %+v, found=%v, err=%v", pending, found, err)
+	}
+	blockedHistory, err := store.EventsAfter(value.ID, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var blockedDelivery session.MessageDeliveryEventData
+	for _, event := range blockedHistory {
+		if event.Type == session.EventMessageDelivery {
+			if err := json.Unmarshal(event.Data, &blockedDelivery); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if blockedDelivery.State != session.MessageDeliveryPending || !strings.Contains(blockedDelivery.Error, "ephemeral environment") ||
+		strings.Contains(blockedDelivery.Error, firstSecret) {
+		t.Fatalf("blocked retry delivery event = %+v", blockedDelivery)
+	}
+	if _, err := manager.StartWithEnvironment(value.ID, map[string]string{}); err == nil || !strings.Contains(err.Error(), "ephemeral environment") {
+		t.Fatalf("explicit empty overlay error = %v", err)
+	}
+	if _, err := manager.StartWithEnvironment(value.ID, map[string]string{"SERVICE_TOKEN": secondSecret}); err != nil {
+		t.Fatal(err)
+	}
+	if len(factoryEnvironments) != 2 || factoryEnvironments[0]["SERVICE_TOKEN"] != firstSecret || factoryEnvironments[1]["SERVICE_TOKEN"] != secondSecret {
+		t.Fatalf("provider environments = %#v", factoryEnvironments)
+	}
+	message, found, err := store.DurableMessageByID(value.ID, input.MessageID)
+	if err != nil || !found || !message.Delivered {
+		t.Fatalf("message after explicit overlay retry = %+v, found=%v, err=%v", message, found, err)
+	}
+	if err := manager.Stop(value.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Force reconstruction from events.jsonl instead of trusting session.json.
+	if err := os.Remove(filepath.Join(root, value.ID, "session.json")); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := session.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := reopened.Get(value.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	history, err := reopened.EventsAfter(value.ID, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	durable := mustJSON(struct {
+		Session session.Session `json:"session"`
+		Events  []session.Event `json:"events"`
+	}{replayed, history})
+	if !strings.Contains(string(durable), `"ephemeralEnvironmentRequired":true`) {
+		t.Fatalf("replayed facts lack non-secret ephemeral requirement: %s", durable)
+	}
+	for _, secret := range []string{"SERVICE_TOKEN", firstSecret, secondSecret, replaySecret} {
+		if strings.Contains(string(durable), secret) {
+			t.Fatalf("durable facts contain ephemeral key/value %q: %s", secret, durable)
+		}
+	}
+
+	restarted := New(reopened, testConfig())
+	var replayFactoryCalls int
+	restarted.factory = func(options provider.Options) (provider.Session, error) {
+		replayFactoryCalls++
+		if options.Environment["SERVICE_TOKEN"] != replaySecret {
+			t.Fatalf("replay provider environment = %#v", options.Environment)
+		}
+		return &fakeSession{hooks: options.Hooks}, nil
+	}
+	if _, err := restarted.Start(value.ID); err == nil || !strings.Contains(err.Error(), "ephemeral environment") {
+		t.Fatalf("implicit replay start error = %v", err)
+	}
+	if replayFactoryCalls != 0 {
+		t.Fatalf("implicit replay start called provider factory %d times", replayFactoryCalls)
+	}
+	if _, err := restarted.StartWithEnvironment(value.ID, map[string]string{"SERVICE_TOKEN": replaySecret}); err != nil {
+		t.Fatal(err)
+	}
+	if replayFactoryCalls != 1 {
+		t.Fatalf("explicit replay start called provider factory %d times", replayFactoryCalls)
+	}
+	if err := restarted.Stop(value.ID); err != nil {
+		t.Fatal(err)
+	}
+	archived, err := reopened.Archive(value.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if archived.State != session.StateArchived || !archived.EphemeralEnvironmentRequired {
+		t.Fatalf("archive lost ephemeral requirement: %+v", archived)
+	}
+	if _, err := restarted.StartWithEnvironment(value.ID, map[string]string{"SERVICE_TOKEN": "archive-secret"}); !errors.Is(err, session.ErrArchived) {
+		t.Fatalf("archived overlay start error = %v", err)
+	}
+	if replayFactoryCalls != 1 {
+		t.Fatalf("archived overlay start called provider factory %d times", replayFactoryCalls)
 	}
 }
 

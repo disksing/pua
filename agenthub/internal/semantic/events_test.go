@@ -145,6 +145,13 @@ func TestLegacyCanonicalFieldsAreSanitized(t *testing.T) {
 	if strings.Contains(string(encoded), "secret") || eventData(t, unknown)["sourceType"] != "future.provider.payload" {
 		t.Fatalf("unknown frame = %s", encoded)
 	}
+	requirement := FrameFor(sourceEvent(t, 13, session.EventEphemeralEnvironmentRequired, map[string]any{
+		"required": true, "key": "secret-name", "value": "secret-value",
+	}), false)
+	requirementData := eventData(t, requirement)
+	if !reflect.DeepEqual(requirementData, map[string]any{"required": true}) {
+		t.Fatalf("ephemeral requirement frame = %#v", requirementData)
+	}
 }
 
 func TestFrameProjectionIsDeterministicAndAppendModeIsExplicit(t *testing.T) {

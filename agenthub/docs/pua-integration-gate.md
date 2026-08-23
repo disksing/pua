@@ -65,6 +65,13 @@ capability negotiation, and structured errors. PUA still owns:
   idempotency, and reconciling ambiguous message delivery through events;
 - deciding when a stopped session should be resumed or archived.
 
+When a Session reports `ephemeralEnvironmentRequired: true`, PUA must attach a
+fresh non-empty `ephemeralEnvironment` to every resume that can start a new
+Provider process. AgentHub retains only that boolean requirement across stop,
+archive, provider failure, and daemon replay; it never retains the overlay's
+names or values, and implicit delivery retries remain stopped until PUA
+explicitly supplies another overlay.
+
 PUA no longer exposes resource Session Locks, AutoRun/Self-Driving, a
 reserved Scheduler Profile, or public commands for manually creating,
 binding, heartbeating, or ending its local Session projections. Those local

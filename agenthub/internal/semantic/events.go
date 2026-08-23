@@ -130,7 +130,7 @@ func normalize(source session.Event) []Event {
 		return []Event{{Type: source.Type, Data: providerError(data)}}
 	case "turn.started", "turn.completed", "turn.failed", "turn.cancelled",
 		"session.created", "session.provider", "session.state", "session.archived",
-		"session.agent", "session.launch-environment":
+		"session.agent", "session.launch-environment", session.EventEphemeralEnvironmentRequired:
 		return []Event{{Type: source.Type, Data: canonicalData(source.Type, data)}}
 	default:
 		if strings.HasPrefix(source.Type, "provider.process.") {
@@ -201,6 +201,8 @@ func canonicalData(eventType string, data map[string]any) map[string]any {
 		return selectFields(data, "agentName")
 	case "session.launch-environment":
 		return selectFields(data, "environment")
+	case session.EventEphemeralEnvironmentRequired:
+		return selectFields(data, "required")
 	case "session.created":
 		return withoutRaw(data)
 	default:

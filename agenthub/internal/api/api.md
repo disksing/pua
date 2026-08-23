@@ -112,7 +112,7 @@ Current runtime-backed daemon instances advertise:
 | `turns.activity-items` | Compact Turn projections combine every uninterrupted thinking/tool run into one `activity` item with independent phase, update and tool-call counts. |
 | `session.launch-environment` | Durable per-session provider environment, including provider resume. |
 | `session.launch-environment-update` | Resume accepts a `launchEnvironment` overlay, persisted before provider start. |
-| `session.ephemeral-environment` | Create/resume accepts a one-shot `ephemeralEnvironment` overlay passed only to the Provider process; it is never stored in Session facts or API projections. |
+| `session.ephemeral-environment` | Create/resume accepts a one-shot `ephemeralEnvironment` overlay passed only to one Provider process. Names and values are never stored; after first use, the non-secret `ephemeralEnvironmentRequired: true` Session marker requires a fresh non-empty overlay for every later Provider start. |
 | `session.strict-stopped` | `stopped` is published only after provider exit is confirmed. |
 | `events.lossless-replay` | Durable exclusive cursors, paginated REST catch-up and gap-free SSE replay. |
 | `events.delta-merge` | Consecutive same-message text deltas are folded into one durable source Event; SSE delivers live folds as SemanticFrame append patches (`mode: "append"`) under the same cursor and re-sends the full replace frame on reconnect. |
@@ -584,9 +584,12 @@ turn before the response returns.
     Session API, so never put a secret here unless you intend it to be stored.**
   - `ephemeralEnvironment` (optional) — one-shot string-to-string overrides
     passed only to the Provider process. This field is accepted only when the
-    `session.ephemeral-environment` capability is advertised and is never
-    persisted or returned. Clients must fail closed when that capability is
-    absent; they must not copy these values into `launchEnvironment`.
+    `session.ephemeral-environment` capability is advertised. Its names and
+    values are never persisted or returned. After an overlay is first used,
+    the Session persists and returns only
+    `ephemeralEnvironmentRequired: true`; every later Provider start requires
+    another non-empty overlay. Clients must fail closed when the capability is
+    absent and must not copy these values into `launchEnvironment`.
   - `initialMessage` (optional) — first inbound message; it accepts the same
     `text`, `role`, `sender`, `steer`, and reserved correlation fields as the
     messages endpoint. An omitted role means `user`; when non-empty the first
@@ -1068,8 +1071,13 @@ restarts. Safe to call when the provider is already running.
   takes effect on the next provider start.
   `ephemeralEnvironment` (optional) is a one-shot string-to-string overlay
   passed only to the Provider process. It requires the
-  `session.ephemeral-environment` capability and is never persisted or
-  returned; clients must not downgrade it to `launchEnvironment`.
+  `session.ephemeral-environment` capability. Its names and values are never
+  persisted or returned; clients must not downgrade it to
+  `launchEnvironment`. A Session with `ephemeralEnvironmentRequired: true`
+  requires a fresh non-empty `ephemeralEnvironment` on every Provider start.
+  An empty body, `{}`, and an explicitly empty map all fail closed without
+  changing the stopped Session or invoking the Provider factory. Stop and
+  archive retain the marker; archived Sessions remain read-only.
 - **Success `200`:** `{"session": {...}}`.
 - **Errors:** `415 json_required`, `400 invalid_request` (malformed JSON or
   unknown fields), `404 session_not_found`,
@@ -1078,7 +1086,8 @@ restarts. Safe to call when the provider is already running.
   one-shot map contains an invalid name or NUL value), `409 session_archived`,
   `409 session_stopping`,
   `409 runtime_operation_failed` (the provider could not start, for example
-  because the recorded agent no longer exists),
+  because the recorded agent no longer exists, or a Session marked
+  `ephemeralEnvironmentRequired` was resumed without a non-empty overlay),
   `503 runtime_unavailable`.
 
 ```bash

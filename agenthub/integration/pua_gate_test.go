@@ -91,15 +91,16 @@ type daemon struct {
 }
 
 type sessionValue struct {
-	ID                 string            `json:"id"`
-	State              string            `json:"state"`
-	StopReason         string            `json:"stopReason"`
-	CurrentTurnID      string            `json:"currentTurnId"`
-	PendingApprovalIDs []string          `json:"pendingApprovalIds"`
-	ProviderSessionID  string            `json:"providerSessionId"`
-	LastEventID        int64             `json:"lastEventId"`
-	LaunchEnvironment  map[string]string `json:"launchEnvironment"`
-	Source             *sourceValue      `json:"source"`
+	ID                           string            `json:"id"`
+	State                        string            `json:"state"`
+	StopReason                   string            `json:"stopReason"`
+	CurrentTurnID                string            `json:"currentTurnId"`
+	PendingApprovalIDs           []string          `json:"pendingApprovalIds"`
+	ProviderSessionID            string            `json:"providerSessionId"`
+	LastEventID                  int64             `json:"lastEventId"`
+	LaunchEnvironment            map[string]string `json:"launchEnvironment"`
+	EphemeralEnvironmentRequired bool              `json:"ephemeralEnvironmentRequired"`
+	Source                       *sourceValue      `json:"source"`
 }
 
 type sourceValue struct {
@@ -688,7 +689,7 @@ func TestPUAGateSourceEnvironmentResumeCapabilitiesAndErrors(t *testing.T) {
 	}
 }
 
-func TestPUAGateEphemeralEnvironmentIsOneShotAndSecret(t *testing.T) {
+func TestPUAGateEphemeralEnvironmentIsOneShotRequiredAndSecret(t *testing.T) {
 	gate := newGate(t)
 	const ephemeralKey = "FAKE_EPHEMERAL_SECRET"
 	const createSecret = "pua-create-ephemeral-7bcf27d2"
@@ -725,6 +726,26 @@ func TestPUAGateEphemeralEnvironmentIsOneShotAndSecret(t *testing.T) {
 	}
 	requireSecretsAbsent(t, "create response", mustJSONBytes(t, createBody), ephemeralKey, createSecret)
 	value := decodeSession(t, createBody)
+	if !value.EphemeralEnvironmentRequired {
+		t.Fatalf("create response lacks ephemeral requirement marker: %+v", value)
+	}
+	var requirementEvents int
+	for _, event := range gate.events(value.ID) {
+		if event.Type != session.EventEphemeralEnvironmentRequired {
+			continue
+		}
+		requirementEvents++
+		var data map[string]any
+		if err := json.Unmarshal(event.Data, &data); err != nil {
+			t.Fatal(err)
+		}
+		if len(data) != 1 || data["required"] != true {
+			t.Fatalf("ephemeral requirement event data = %#v", data)
+		}
+	}
+	if requirementEvents != 1 {
+		t.Fatalf("ephemeral requirement events = %d, want 1", requirementEvents)
+	}
 	if text := gate.promptAndWait(value.ID, "observe create overlay"); !strings.Contains(text, "ephemeral=<redacted>") {
 		t.Fatalf("create process did not receive a redacted ephemeral value: %q", text)
 	}
@@ -736,21 +757,31 @@ func TestPUAGateEphemeralEnvironmentIsOneShotAndSecret(t *testing.T) {
 	gate.stop()
 	restarted := startGate(t, root, cwd)
 	restarted.requireSessionSecretsAbsent(value.ID, ephemeralKey, createSecret)
-
-	code, resumeBody := restarted.request(http.MethodPost, "/v1/sessions/"+value.ID+"/resume", map[string]any{})
-	if code != http.StatusOK {
-		t.Fatalf("resume without overlay: status=%d body=%v", code, resumeBody)
-	}
-	if text := restarted.promptAndWait(value.ID, "observe missing create overlay"); !strings.Contains(text, "ephemeral=missing") || strings.Contains(text, "<redacted>") {
-		t.Fatalf("create overlay was reused after restart: %q", text)
+	recovered := restarted.session(value.ID)
+	if !recovered.EphemeralEnvironmentRequired {
+		t.Fatalf("daemon replay lost ephemeral requirement marker: %+v", recovered)
 	}
 
-	code, stopBody := restarted.request(http.MethodPost, "/v1/sessions/"+value.ID+"/stop", map[string]any{})
-	if code != http.StatusOK {
-		t.Fatalf("stop before resume overlay: status=%d body=%v", code, stopBody)
+	blockedEventID := recovered.LastEventID
+	for name, requestBody := range map[string]map[string]any{
+		"omitted overlay": {},
+		"empty overlay":   {"ephemeralEnvironment": map[string]string{}},
+	} {
+		code, resumeBody := restarted.request(http.MethodPost, "/v1/sessions/"+value.ID+"/resume", requestBody)
+		if code != http.StatusConflict || errorCode(resumeBody) != "runtime_operation_failed" {
+			t.Fatalf("%s: status=%d body=%v", name, code, resumeBody)
+		}
+		message := resumeBody["error"].(map[string]any)["message"].(string)
+		if !strings.Contains(message, "non-empty ephemeral environment") || strings.Contains(message, ephemeralKey) || strings.Contains(message, createSecret) {
+			t.Fatalf("%s returned unsafe/unclear error: %q", name, message)
+		}
+		blocked := restarted.session(value.ID)
+		if blocked.State != "stopped" || blocked.LastEventID != blockedEventID {
+			t.Fatalf("%s changed stopped boundary: %+v", name, blocked)
+		}
 	}
-	restarted.waitSession(value.ID, func(current sessionValue) bool { return current.State == "stopped" })
-	code, resumeBody = restarted.request(http.MethodPost, "/v1/sessions/"+value.ID+"/resume", map[string]any{
+
+	code, resumeBody := restarted.request(http.MethodPost, "/v1/sessions/"+value.ID+"/resume", map[string]any{
 		"ephemeralEnvironment": map[string]string{
 			ephemeralKey: resumeSecret,
 		},
@@ -763,17 +794,19 @@ func TestPUAGateEphemeralEnvironmentIsOneShotAndSecret(t *testing.T) {
 		t.Fatalf("resumed process did not receive a redacted ephemeral value: %q", text)
 	}
 
-	code, stopBody = restarted.request(http.MethodPost, "/v1/sessions/"+value.ID+"/stop", map[string]any{})
+	code, stopBody := restarted.request(http.MethodPost, "/v1/sessions/"+value.ID+"/stop", map[string]any{})
 	if code != http.StatusOK {
 		t.Fatalf("stop after resume overlay: status=%d body=%v", code, stopBody)
 	}
 	restarted.waitSession(value.ID, func(current sessionValue) bool { return current.State == "stopped" })
+	beforeSecondBlockedResume := restarted.session(value.ID)
 	code, resumeBody = restarted.request(http.MethodPost, "/v1/sessions/"+value.ID+"/resume", map[string]any{})
-	if code != http.StatusOK {
+	if code != http.StatusConflict || errorCode(resumeBody) != "runtime_operation_failed" {
 		t.Fatalf("second resume without overlay: status=%d body=%v", code, resumeBody)
 	}
-	if text := restarted.promptAndWait(value.ID, "observe missing resume overlay"); !strings.Contains(text, "ephemeral=missing") || strings.Contains(text, "<redacted>") {
-		t.Fatalf("resume overlay was reused by a later process: %q", text)
+	afterSecondBlockedResume := restarted.session(value.ID)
+	if afterSecondBlockedResume.State != "stopped" || afterSecondBlockedResume.LastEventID != beforeSecondBlockedResume.LastEventID {
+		t.Fatalf("second blocked resume changed stopped boundary: before=%+v after=%+v", beforeSecondBlockedResume, afterSecondBlockedResume)
 	}
 	// The resume overlay is equally one-shot: it reaches only this Provider
 	// process and never becomes part of a durable session fact.

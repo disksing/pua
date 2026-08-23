@@ -110,7 +110,11 @@ func (m *doctorMonitor) scan(ctx context.Context) {
 		options.BindingCatalog = catalog
 	}
 	for _, workspace := range cfg.Workspaces {
-		report, scanErr := app.CheckWorkspace(workspace.Path, options)
+		workspaceOptions := options
+		if serviceErr := ValidateServices(workspace.Path); serviceErr != nil {
+			workspaceOptions.ServiceError = serviceErr.Error()
+		}
+		report, scanErr := app.CheckWorkspace(workspace.Path, workspaceOptions)
 		if scanErr != nil {
 			language, languageErr := workspaceContentLanguage(workspace.Path)
 			if languageErr != nil {

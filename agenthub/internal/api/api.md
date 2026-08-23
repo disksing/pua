@@ -112,6 +112,7 @@ Current runtime-backed daemon instances advertise:
 | `turns.activity-items` | Compact Turn projections combine every uninterrupted thinking/tool run into one `activity` item with independent phase, update and tool-call counts. |
 | `session.launch-environment` | Durable per-session provider environment, including provider resume. |
 | `session.launch-environment-update` | Resume accepts a `launchEnvironment` overlay, persisted before provider start. |
+| `session.ephemeral-environment` | Create/resume accepts a one-shot `ephemeralEnvironment` overlay passed only to the Provider process; it is never stored in Session facts or API projections. |
 | `session.strict-stopped` | `stopped` is published only after provider exit is confirmed. |
 | `events.lossless-replay` | Durable exclusive cursors, paginated REST catch-up and gap-free SSE replay. |
 | `events.delta-merge` | Consecutive same-message text deltas are folded into one durable source Event; SSE delivers live folds as SemanticFrame append patches (`mode: "append"`) under the same cursor and re-sends the full replace frame on reconnect. |
@@ -253,6 +254,7 @@ Daemon status, effective data paths and runtime summary.
     "recovery.closed-turns",
     "session.launch-environment",
     "session.launch-environment-update",
+    "session.ephemeral-environment",
     "session.strict-stopped"
   ],
   "version": "0.1.0",
@@ -536,6 +538,7 @@ turn before the response returns.
   "agentName": "Codex",
   "idempotencyKey": "pua-workspace-1-project7-task26-generation-1",
   "launchEnvironment": {"SESSION_CONTEXT_ID": "context-123"},
+  "ephemeralEnvironment": {"PUA_SERVICE_TOKEN": "one-shot-value"},
   "source": {
     "app": "pua",
     "instanceId": "mac-mini",
@@ -579,6 +582,11 @@ turn before the response returns.
     remains in effect after event replay, daemon restart and provider resume.
     **It is persisted in `events.jsonl` and `session.json` and returned by the
     Session API, so never put a secret here unless you intend it to be stored.**
+  - `ephemeralEnvironment` (optional) — one-shot string-to-string overrides
+    passed only to the Provider process. This field is accepted only when the
+    `session.ephemeral-environment` capability is advertised and is never
+    persisted or returned. Clients must fail closed when that capability is
+    absent; they must not copy these values into `launchEnvironment`.
   - `initialMessage` (optional) — first inbound message; it accepts the same
     `text`, `role`, `sender`, `steer`, and reserved correlation fields as the
     messages endpoint. An omitted role means `user`; when non-empty the first
@@ -593,6 +601,8 @@ turn before the response returns.
   `422 invalid_cwd`,
   `422 invalid_launch_environment` (an environment name is empty or contains
   `=`/NUL, or a value contains NUL),
+  `422 invalid_ephemeral_environment` (an environment name is empty or
+  contains `=`/NUL, or a value contains NUL),
   `409 idempotency_conflict`,
   `500 session_create_failed`,
   `502 provider_start_failed` (the provider handshake failed; the response
@@ -1056,11 +1066,17 @@ restarts. Safe to call when the provider is already running.
   is visible to any client that can read the session — never put secrets
   here. When the provider is already running, the overlay is recorded and
   takes effect on the next provider start.
+  `ephemeralEnvironment` (optional) is a one-shot string-to-string overlay
+  passed only to the Provider process. It requires the
+  `session.ephemeral-environment` capability and is never persisted or
+  returned; clients must not downgrade it to `launchEnvironment`.
 - **Success `200`:** `{"session": {...}}`.
 - **Errors:** `415 json_required`, `400 invalid_request` (malformed JSON or
   unknown fields), `404 session_not_found`,
   `422 invalid_launch_environment` (an empty variable name, `=` or NUL in a
-  name, or NUL in a value), `409 session_archived`, `409 session_stopping`,
+  name, or NUL in a value), `422 invalid_ephemeral_environment` (the
+  one-shot map contains an invalid name or NUL value), `409 session_archived`,
+  `409 session_stopping`,
   `409 runtime_operation_failed` (the provider could not start, for example
   because the recorded agent no longer exists),
   `503 runtime_unavailable`.
@@ -1198,6 +1214,7 @@ test "$(jq -r .apiVersion <<<"$STATUS")" = "1"
 for capability in session.source session.source-metadata \
   session.idempotent-create session.input-capabilities \
   session.launch-environment session.launch-environment-update \
+  session.ephemeral-environment \
   session.strict-stopped messages.idempotent messages.at-least-once \
   messages.opaque-payload-v2 turns.stable-index turns.materialized \
   events.lossless-replay events.semantic-v1 event.raw-v1 \

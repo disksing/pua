@@ -204,13 +204,14 @@ type agentHubInboundMessage struct {
 }
 
 type agentHubCreateSessionRequest struct {
-	Title             string                  `json:"title,omitempty"`
-	Cwd               string                  `json:"cwd"`
-	AgentName         string                  `json:"agentName"`
-	LaunchEnvironment map[string]string       `json:"launchEnvironment,omitempty"`
-	Source            *agentHubSource         `json:"source,omitempty"`
-	IdempotencyKey    string                  `json:"idempotencyKey,omitempty"`
-	InitialMessage    *agentHubInboundMessage `json:"initialMessage,omitempty"`
+	Title                string                  `json:"title,omitempty"`
+	Cwd                  string                  `json:"cwd"`
+	AgentName            string                  `json:"agentName"`
+	LaunchEnvironment    map[string]string       `json:"launchEnvironment,omitempty"`
+	EphemeralEnvironment map[string]string       `json:"ephemeralEnvironment,omitempty"`
+	Source               *agentHubSource         `json:"source,omitempty"`
+	IdempotencyKey       string                  `json:"idempotencyKey,omitempty"`
+	InitialMessage       *agentHubInboundMessage `json:"initialMessage,omitempty"`
 }
 
 type agentHubApprovalReply struct {
@@ -392,6 +393,15 @@ func validateAgentHubStatus(status agentHubStatus) error {
 		return fmt.Errorf("AgentHub is missing required capabilities: %s", strings.Join(missing, ", "))
 	}
 	return nil
+}
+
+func agentHubHasCapability(status agentHubStatus, capability string) bool {
+	for _, value := range status.Capabilities {
+		if value == capability {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *agentHubClient) Agents(ctx context.Context) (agentHubCatalog, error) {
@@ -578,18 +588,24 @@ func (c *agentHubClient) Stop(ctx context.Context, sessionID string) (agentHubSe
 // agentHubResumeRequest carries the optional launchEnvironment overlay that
 // replaces selected launch environment entries when a stopped session resumes.
 type agentHubResumeRequest struct {
-	LaunchEnvironment map[string]string `json:"launchEnvironment,omitempty"`
+	LaunchEnvironment    map[string]string `json:"launchEnvironment,omitempty"`
+	EphemeralEnvironment map[string]string `json:"ephemeralEnvironment,omitempty"`
 }
 
 // Resume reactivates the exact stopped AgentHub Session. The persisted
 // providerSessionId and history remain owned by AgentHub; PUA supplies no
 // new source tuple and therefore never creates a replacement here.
 func (c *agentHubClient) Resume(ctx context.Context, sessionID string, launchEnvironment map[string]string) (agentHubSession, error) {
+	return c.ResumeWithEnvironment(ctx, sessionID, launchEnvironment, nil)
+}
+
+func (c *agentHubClient) ResumeWithEnvironment(ctx context.Context, sessionID string, launchEnvironment, ephemeralEnvironment map[string]string) (agentHubSession, error) {
 	var response struct {
 		Session agentHubSession `json:"session"`
 	}
 	err := c.doJSON(ctx, http.MethodPost, sessionPath(sessionID)+"/resume", agentHubResumeRequest{
-		LaunchEnvironment: launchEnvironment,
+		LaunchEnvironment:    launchEnvironment,
+		EphemeralEnvironment: ephemeralEnvironment,
 	}, &response)
 	return response.Session, err
 }

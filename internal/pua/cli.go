@@ -55,6 +55,8 @@ func Run(args []string) error {
 		return runTemplate(args[1:])
 	case "agent":
 		return runAgent(args[1:])
+	case "service":
+		return runService(args[1:])
 	case "user":
 		return runUser(args[1:])
 	case "message":
@@ -283,6 +285,7 @@ Usage:
   pua template <command>
   pua agent <command>
   pua user <command>
+  pua service <command>
   pua workspace <command>
   pua message <command>
   pua history <command>
@@ -327,6 +330,11 @@ Commands:
   pua agent <command>
     Query the AgentHub agent catalog through the owning pua serve process.
     Subcommands: list.
+
+  pua service <command>
+    Manage Workspace-level services owned by pua serve. Subcommands: list,
+    show, apply, remove, enable, disable, start, stop, restart, logs,
+    exports, validate.
 
   pua user <command>
     Manage Workspace-local users. Subcommands: list.
@@ -377,6 +385,8 @@ func runHelp(args []string) error {
 		printTemplateHelp()
 	case "agent":
 		printAgentHelp()
+	case "service":
+		printServiceHelp()
 	case "user":
 		printUserHelp()
 	case "workspace":

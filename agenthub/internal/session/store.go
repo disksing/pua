@@ -231,6 +231,9 @@ func (s *Store) CreateOrGet(input CreateInput) (Session, bool, error) {
 	if err := ValidateLaunchEnvironment(input.LaunchEnvironment); err != nil {
 		return Session{}, false, err
 	}
+	if err := ValidateLaunchEnvironment(input.EphemeralEnvironment); err != nil {
+		return Session{}, false, err
+	}
 	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
 	if strings.ContainsRune(input.IdempotencyKey, '\x00') || len(input.IdempotencyKey) > 4096 {
 		return Session{}, false, errors.New("invalid session idempotency key")

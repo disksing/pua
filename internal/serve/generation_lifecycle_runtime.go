@@ -77,7 +77,26 @@ func (m *agentManager) resumeStoppedGenerationLocked(ctx context.Context, worksp
 		return false, false, err
 	}
 
-	resumed, resumeErr := client.Resume(ctx, observed.ID, nil)
+	var launchEnvironment map[string]string
+	var ephemeralEnvironment map[string]string
+	if m.server != nil {
+		boundVariables, boundSecrets, bindingErr := m.server.serviceEnvironment(workspace)
+		if bindingErr != nil {
+			return false, false, bindingErr
+		}
+		launchEnvironment = boundVariables
+		if len(boundSecrets) > 0 {
+			status, statusErr := client.Status(ctx)
+			if statusErr != nil {
+				return false, false, statusErr
+			}
+			if !agentHubHasCapability(status, "session.ephemeral-environment") {
+				return false, false, errors.New("AgentHub does not support ephemeral service secrets")
+			}
+			ephemeralEnvironment = boundSecrets
+		}
+	}
+	resumed, resumeErr := client.ResumeWithEnvironment(ctx, observed.ID, launchEnvironment, ephemeralEnvironment)
 	if resumeErr != nil {
 		terminal := isTerminalResumeError(resumeErr)
 		receipt.State = GenerationReceiptUnknown

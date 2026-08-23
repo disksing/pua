@@ -10,6 +10,7 @@ import (
 
 	"github.com/disksing/pua/internal/app"
 	"github.com/disksing/pua/internal/localize"
+	"github.com/disksing/pua/internal/serve"
 )
 
 const doctorUsage = "usage: pua doctor [--json] [--server=<url>]"
@@ -74,6 +75,9 @@ func runDoctor(args []string) error {
 			}
 			options.BindingCatalog = catalog
 		}
+	}
+	if serviceErr := serve.ValidateServices(workspace.Root()); serviceErr != nil {
+		options.ServiceError = serviceErr.Error()
 	}
 	report, err := app.CheckWorkspace(workspace.Root(), options)
 	if err != nil {

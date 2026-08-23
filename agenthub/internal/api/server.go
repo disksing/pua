@@ -45,15 +45,18 @@ const (
 	// CapabilitySessionLaunchEnvironmentUpdate reports that resume accepts
 	// an optional launchEnvironment overlay persisted before provider start.
 	CapabilitySessionLaunchEnvironmentUpdate = "session.launch-environment-update"
-	CapabilitySessionStrictStopped           = "session.strict-stopped"
-	CapabilityEventsLosslessReplay           = "events.lossless-replay"
-	CapabilityEventsDeltaMerge               = "events.delta-merge"
-	CapabilityEventsBackwardPagination       = "events.backward-pagination"
-	CapabilityEventsCanonicalTerminal        = "events.canonical-turn-terminals"
-	CapabilityEventsSemanticV1               = "events.semantic-v1"
-	CapabilityEventRawV1                     = "event.raw-v1"
-	CapabilityActivityGlobalSSE              = "activity.global-sse"
-	CapabilityRecoveryClosedTurns            = "recovery.closed-turns"
+	// CapabilitySessionEphemeralEnvironment reports that callers may provide
+	// one-shot values for a Provider without persisting them in Session data.
+	CapabilitySessionEphemeralEnvironment = "session.ephemeral-environment"
+	CapabilitySessionStrictStopped        = "session.strict-stopped"
+	CapabilityEventsLosslessReplay        = "events.lossless-replay"
+	CapabilityEventsDeltaMerge            = "events.delta-merge"
+	CapabilityEventsBackwardPagination    = "events.backward-pagination"
+	CapabilityEventsCanonicalTerminal     = "events.canonical-turn-terminals"
+	CapabilityEventsSemanticV1            = "events.semantic-v1"
+	CapabilityEventRawV1                  = "event.raw-v1"
+	CapabilityActivityGlobalSSE           = "activity.global-sse"
+	CapabilityRecoveryClosedTurns         = "recovery.closed-turns"
 )
 
 // ModelLister enumerates the models of a built-in provider and can drop its
@@ -85,7 +88,8 @@ type Server struct {
 	allowedOrigins map[string]bool
 	// closing, when set, is closed once the HTTP server begins shutting
 	// down so long-lived handlers (SSE streams) can finish promptly.
-	closing <-chan struct{}
+	closing              <-chan struct{}
+	ephemeralEnvironment bool
 	// configMu serializes config mutations so a whole-config PUT and a
 	// single-provider toggle cannot interleave and lose each other's changes.
 	configMu sync.Mutex
@@ -119,6 +123,9 @@ type Dependencies struct {
 	// Closing, when set, is closed when the HTTP server starts shutting
 	// down; streaming handlers must return so Shutdown can complete.
 	Closing <-chan struct{}
+	// EphemeralEnvironment explicitly enables one-shot Provider environment
+	// overlays for compositions that have opted into the capability.
+	EphemeralEnvironment bool
 }
 
 func New(store *session.Store, version string, startedAt time.Time, dependencies ...Dependencies) *Server {
@@ -134,6 +141,7 @@ func New(store *session.Store, version string, startedAt time.Time, dependencies
 		server.models = dependencies[0].Models
 		server.quotas = companion.NewService(dependencies[0].QuotaHTTPClient)
 		server.closing = dependencies[0].Closing
+		server.ephemeralEnvironment = dependencies[0].EphemeralEnvironment
 		if origins := dependencies[0].AllowedOrigins; len(origins) > 0 {
 			server.allowedOrigins = make(map[string]bool, len(origins))
 			for _, origin := range origins {
@@ -286,6 +294,9 @@ func (s *Server) capabilities() []string {
 			CapabilitySessionLaunchEnvironmentUpdate,
 			CapabilitySessionStrictStopped,
 		)
+		if s.ephemeralEnvironment {
+			capabilities = append(capabilities, CapabilitySessionEphemeralEnvironment)
+		}
 	}
 	return capabilities
 }
@@ -708,13 +719,14 @@ func decodeSessionListCursor(value string) (sessionListCursor, error) {
 
 func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Title             string                 `json:"title"`
-		Cwd               string                 `json:"cwd"`
-		AgentName         string                 `json:"agentName"`
-		Source            *session.Source        `json:"source"`
-		IdempotencyKey    string                 `json:"idempotencyKey"`
-		LaunchEnvironment map[string]string      `json:"launchEnvironment"`
-		InitialMessage    *inboundMessageRequest `json:"initialMessage"`
+		Title                string                 `json:"title"`
+		Cwd                  string                 `json:"cwd"`
+		AgentName            string                 `json:"agentName"`
+		Source               *session.Source        `json:"source"`
+		IdempotencyKey       string                 `json:"idempotencyKey"`
+		LaunchEnvironment    map[string]string      `json:"launchEnvironment"`
+		EphemeralEnvironment map[string]string      `json:"ephemeralEnvironment"`
+		InitialMessage       *inboundMessageRequest `json:"initialMessage"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeAPIError(w, http.StatusBadRequest, "invalid_request", err.Error(), nil)
@@ -754,6 +766,14 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusUnprocessableEntity, "invalid_launch_environment", err.Error(), nil)
 		return
 	}
+	if err := session.ValidateLaunchEnvironment(body.EphemeralEnvironment); err != nil {
+		writeAPIError(w, http.StatusUnprocessableEntity, "invalid_ephemeral_environment", err.Error(), nil)
+		return
+	}
+	if len(body.EphemeralEnvironment) > 0 && !s.ephemeralEnvironment {
+		writeAPIError(w, http.StatusUnprocessableEntity, "ephemeral_environment_unavailable", "this AgentHub composition does not support ephemeral environments", nil)
+		return
+	}
 	// Persist the canonical configured name, not the spelling the client
 	// sent, so the session always records the user's display form.
 	canonicalName := agentName
@@ -780,7 +800,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.runtime != nil && value.State != session.StateArchived && value.State != session.StateStopped {
 		if created || value.State == session.StateReady || value.State == session.StateStarting {
-			started, err := s.runtime.Start(value.ID)
+			started, err := s.runtime.StartWithEnvironment(value.ID, body.EphemeralEnvironment)
 			if err != nil {
 				writeAPIError(w, http.StatusBadGateway, "provider_start_failed", err.Error(), map[string]any{"sessionId": value.ID})
 				return
@@ -1014,7 +1034,8 @@ func (s *Server) resumeSession(w http.ResponseWriter, r *http.Request, id string
 	// The body is optional: an empty body (or {}) resumes with the recorded
 	// environment, while launchEnvironment overlays entries onto it.
 	var body struct {
-		LaunchEnvironment map[string]string `json:"launchEnvironment"`
+		LaunchEnvironment    map[string]string `json:"launchEnvironment"`
+		EphemeralEnvironment map[string]string `json:"ephemeralEnvironment"`
 	}
 	if err := decodeOptionalJSON(r, &body); err != nil {
 		writeAPIError(w, http.StatusBadRequest, "invalid_request", err.Error(), nil)
@@ -1022,6 +1043,14 @@ func (s *Server) resumeSession(w http.ResponseWriter, r *http.Request, id string
 	}
 	if err := session.ValidateLaunchEnvironment(body.LaunchEnvironment); err != nil {
 		writeAPIError(w, http.StatusUnprocessableEntity, "invalid_launch_environment", err.Error(), nil)
+		return
+	}
+	if err := session.ValidateLaunchEnvironment(body.EphemeralEnvironment); err != nil {
+		writeAPIError(w, http.StatusUnprocessableEntity, "invalid_ephemeral_environment", err.Error(), nil)
+		return
+	}
+	if len(body.EphemeralEnvironment) > 0 && !s.ephemeralEnvironment {
+		writeAPIError(w, http.StatusUnprocessableEntity, "ephemeral_environment_unavailable", "this AgentHub composition does not support ephemeral environments", nil)
 		return
 	}
 	current, err := s.store.Get(id)
@@ -1047,7 +1076,7 @@ func (s *Server) resumeSession(w http.ResponseWriter, r *http.Request, id string
 			return
 		}
 	}
-	value, err := s.runtime.Start(id)
+	value, err := s.runtime.StartWithEnvironment(id, body.EphemeralEnvironment)
 	if err != nil {
 		s.writeRuntimeError(w, err)
 		return

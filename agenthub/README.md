@@ -187,6 +187,13 @@ Codex agents accept the options `model`, `sandbox`, `approval`, and `reasoning_e
 
 The map is deliberately persisted in the Session's `events.jsonl` and rebuildable `session.json`, and is returned by Session API responses. Do not put credentials or any other value in `launchEnvironment` that you do not want stored on disk. Session files remain private (`0600`), but that is not a substitute for secret storage.
 
+When the daemon advertises `session.ephemeral-environment`, create and resume
+requests may include an `ephemeralEnvironment` string map. It is merged last
+for that Provider process only and discarded when the process exits. The map
+is never written to Session events, `session.json`, API responses, or history.
+Clients that require this behavior must fail closed when the capability is
+absent; they must not fall back to `launchEnvironment`.
+
 ### Agent environment variables
 
 An agent configuration may also carry an optional string map named `environment`, editable in the Web UI's **Agents** panel or in `config.json`. When the daemon starts a Provider process for that agent, the agent environment is merged under the daemon environment and the session's `launchEnvironment` is merged on top, so the precedence is `daemon < agent < session launchEnvironment` (a per-session value wins over the agent default). Codex receives the merged process environment and each entry as `shell_environment_policy.set.<KEY>` on both `thread/start` and `thread/resume`; ACP and Pi receive the merged process environment.
@@ -245,7 +252,7 @@ actually exercise: `session.source`, `session.launch-environment`,
 `session.source-metadata`, `session.idempotent-create`,
 `session.input-capabilities`, `messages.idempotent`, `messages.at-least-once`,
 `messages.opaque-payload-v2`, `turns.stable-index`, `turns.materialized`, `turns.activity-items`,
-`session.launch-environment-update`,
+`session.launch-environment-update`, `session.ephemeral-environment`,
 `session.strict-stopped`, `events.lossless-replay`, `events.delta-merge`,
 `activity.global-sse`,
 `events.canonical-turn-terminals`, and `recovery.closed-turns`. Recovery closes interrupted delivered Turns, while a durably accepted input still awaiting Provider delivery remains on the at-least-once retry path. A client

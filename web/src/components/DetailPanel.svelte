@@ -14,6 +14,7 @@
   import MarkdownDocument from "./MarkdownDocument.svelte";
   import SchedulerPanel from "./SchedulerPanel.svelte";
   import ResourceSettingsPanel from "./ResourceSettingsPanel.svelte";
+  import ServicesPanel from "./ServicesPanel.svelte";
   import type { DetailPanelModel, FilePreviewModel, ResourceFileModel, ResourceRepoModel } from "./models";
 
   let { channel }: { channel: ModelChannel<DetailPanelModel> } = $props();
@@ -89,10 +90,11 @@
 
   function resourceTabs(): Array<{ id: string; label: string; icon: string }> {
     if (model.resourceType === "workspace") return [
-	  { id: "agents", label: "AGENTS.md", icon: "file-text" },
-	  { id: "wiki", label: "Wiki", icon: "book-open" },
-	  { id: "settings", label: "Settings", icon: "settings" }
-	];
+      { id: "agents", label: "AGENTS.md", icon: "file-text" },
+      { id: "wiki", label: "Wiki", icon: "book-open" },
+      { id: "services", label: "Services", icon: "server" },
+      { id: "settings", label: "Settings", icon: "settings" }
+    ];
     if (!model.detail) return [];
 	if (model.resourceType === "scheduler") return [
 	  { id: "schedules", label: "Schedules", icon: "calendar-clock" },
@@ -219,6 +221,7 @@
       {:else if !model.wiki?.exists}<div class="content-section"><div class="file-modal-empty wiki-status"><Icon name="book-open" /><strong>Wiki not initialized</strong><span>Run pua migrate to create wiki/index.md.</span></div></div>
       {:else}<FileBrowser title="Wiki" entries={model.wiki.entries || []} emptyMessage="No Wiki files yet." {expanded} activePath={activePreviewPath} onToggle={toggleFile} onPreview={openPreview} {rawURL} showHeading={false} />{/if}
     </div>
+    <div hidden={activeTab !== "services"}><ServicesPanel workspaceId={model.workspaceId} onToast={model.onToast} /></div>
     <div hidden={activeTab !== "settings"}><ResourceSettingsPanel {model} /></div>
   </div>
 {:else}

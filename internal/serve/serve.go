@@ -186,6 +186,9 @@ type server struct {
 	agents           *agentManager
 	doctor           *doctorMonitor
 	locks            *workspaceLockManager
+	serviceMu        sync.Mutex
+	services         map[string]*ServiceManager
+	serviceContext   context.Context
 	uiStateMu        sync.Mutex
 }
 
@@ -319,6 +322,7 @@ func Main(args []string) error {
 	}
 	defer s.locks.closeAll()
 	s.agents = newAgentManager(s)
+	s.services = make(map[string]*ServiceManager)
 	if initialWorkspace != "" {
 		if _, err := s.addWorkspace(signalContext, initialWorkspace); err != nil {
 			return fmt.Errorf("add initial workspace: %w", err)
@@ -332,6 +336,9 @@ func Main(args []string) error {
 		return err
 	}
 	if err := s.ensureConfiguredResourceRuntimes(); err != nil {
+		return err
+	}
+	if err := s.initializeServiceManagers(); err != nil {
 		return err
 	}
 	puaHandler, err := s.httpHandler()
@@ -382,6 +389,9 @@ func Main(args []string) error {
 		cancelLifecycle()
 		shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancelShutdown()
+		if err := s.stopServices(shutdownContext); err != nil {
+			log.Printf("stop workspace services: %v", err)
+		}
 		shutdownDone := make(chan error, 1)
 		go func() { shutdownDone <- httpServer.Shutdown(shutdownContext) }()
 		done := make(chan struct{})
@@ -400,6 +410,10 @@ func Main(args []string) error {
 			_ = httpServer.Close()
 		}
 	}()
+	s.serviceMu.Lock()
+	s.serviceContext = lifecycleContext
+	s.serviceMu.Unlock()
+	s.startServices(lifecycleContext)
 	s.agents.startAgentRecovery(lifecycleContext)
 	s.doctor = newDoctorMonitor(s)
 	s.doctor.start(lifecycleContext)
@@ -682,6 +696,14 @@ func (s *server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, detail)
 	case "scheduler":
 		s.handleScheduler(w, r, id, parts[2:])
+	case "services":
+		s.handleWorkspaceServices(w, r, id, parts[2:])
+	case "service-bindings":
+		if len(parts) != 2 {
+			http.NotFound(w, r)
+			return
+		}
+		s.handleServiceBindings(w, r, id)
 	case "users":
 		s.handleUsers(w, r, id, parts[2:])
 	case "messages":
@@ -1812,8 +1834,25 @@ func (s *server) removeWorkspace(id string) error {
 	if err := s.saveConfig(cfg); err != nil {
 		return err
 	}
+	root, rootErr := filepath.Abs(removedPath)
+	if rootErr == nil {
+		if canonical, evalErr := filepath.EvalSymlinks(root); evalErr == nil {
+			root = canonical
+		}
+		s.serviceMu.Lock()
+		manager := s.services[root]
+		delete(s.services, root)
+		s.serviceMu.Unlock()
+		if manager != nil {
+			stopContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if stopErr := manager.Stop(stopContext); stopErr != nil {
+				log.Printf("stop workspace services after removal: %v", stopErr)
+			}
+			cancel()
+		}
+	}
 	// The Workspace is no longer managed once it leaves the persisted config;
-	// release the serve lock so another instance can take ownership.
+	// release the serve lock only after its service process groups are stopped.
 	if s.locks != nil {
 		s.locks.release(removedPath)
 	}

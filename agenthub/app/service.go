@@ -113,6 +113,7 @@ func New(options Options) (*Service, error) {
 		Runtime: manager, ConfigPath: resolved.ConfigFile, WebDir: options.WebDir, WebFS: webFS,
 		Listen: listenAddress, Models: provider.NewModelCache(), LogsDir: resolved.LogsDir,
 		Closing: closing, AllowedOrigins: normalizedOrigins, PublicBasePath: BasePath,
+		EphemeralEnvironment: true,
 	}).Handler()
 	mux := http.NewServeMux()
 	mux.Handle(BasePath+"/", http.StripPrefix(BasePath, apiHandler))

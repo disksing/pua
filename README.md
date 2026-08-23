@@ -64,6 +64,20 @@ bin/agenthub
 
 `pua` provides the workspace CLI, PUA Web service, and embedded AgentHub.
 `agenthub` provides the same AgentHub application as a standalone CLI/service.
+
+### Workspace services
+
+`pua serve` can supervise long-running Workspace services declared in
+`.pua/services/<id>.json`. Definitions use argument arrays (never a shell),
+may declare dependencies and readiness/cleanup commands, and are restarted
+with persisted exponential backoff after unexpected exits. Runtime state,
+redacted logs, and validated exports live below `.pua/runtime/services/`.
+
+Use `pua service list`, `show`, `apply`, `start`, `stop`, `restart`, `logs`,
+`exports`, and `validate` to inspect and control them. Secret references are
+resolved only when a process starts; secret values are held in memory and are
+never written to service state, API responses, AgentHub Session events, or
+history. Workspace service bindings are stored in `.pua/services/bindings.json`.
 Both binaries embed their Web UI and have no Node runtime dependency. Pass
 another output directory to `scripts/build` if needed.
 

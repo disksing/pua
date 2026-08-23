@@ -139,3 +139,19 @@ PUA Web 在自身源码中维护 semantic Event 到连续 `activity`（思考与
 资源 generation 向 AgentHub Session 注入 `PUA_WORKSPACE_ROOT`、`PUA_WORKSPACE_INSTANCE_ID` 和 `PUA_RESOURCE_ID`，供本地 CLI 验证 Agent sender provenance。创建仍由 CLI 或 Web 界面委托 `internal/app` 完成，不经过 mailbox；创建没有初始消息或 generation。每条输入的 `subscribeResult` 省略时默认为 true，实际 delivered 后按 generation+Turn+稳定 sender 建立订阅；同一 sender 在同一 Turn 的多条输入聚合为一条 `turn_result`，payload 带全部源 message IDs，其他 sender 独立投递。`undeliverable`/终态 `delivery_unknown` 会生成 `delivery_terminal_notice`。两类系统通知在 durable accept 时请求 `steer` 且保持 `ModeFrozen=false`，交由普通 mailbox reconcile 按目标活动 Turn 与 steer capability 冻结为 `steer` 或降级为 `enqueue`（分别记录 `no_active_turn`/`steer_unsupported`）；已冻结模式重试不得漂移。结果和终态通知在源资源的独立 outbox 中保存可恢复 operation：目标 mailbox durable accepted 后清空生成正文，只保留 accepted/delivery 摘要，目标 delivery 进入明确终态后删除 operation 并把最小 notification 摘要写入源 receipt。目标 Workspace 必须已注册并由同一 Server 拥有。目标缺失、归档或未注册会写入 receipt 终态，系统生成消息强制 `subscribeResult=false`，不会再生成通知。
 
 持久 schema 升级是无损的：一次性版本化迁移会删除 Workspace/Project/Task 中旧的 `creator`/`createdBy` 字段，并把已 durable 的旧 callback/outbox 类型转换为当前 `turn_result`；已完成历史不会重新批量通知。旧 `<control-dir>/runtime/mailbox.json`、mailbox migration marker 和 generation `pendingMessages` 已退出在线兼容范围；当前版本忽略这些残留文件和字段，不主动清理生产数据。`<control-dir>/initializing.json` 表示可重试但尚未完成的 Workspace 初始化，正常打开会拒绝该半成品并提示重新执行 `pua init`。发布前可备份 Workspace；代码回滚不要求改写资源 JSON，回滚前应暂停跨 Workspace 通知。
+# Workspace service supervisor
+
+Workspace-owned services are defined by versioned JSON files in
+`.pua/services/`. The owning `pua serve` process is the sole writer of
+`.pua/runtime/services/` state and the sole process that starts or stops a
+service. Startup restores enabled definitions in dependency order; shutdown
+suppresses restart and performs graceful process-group termination followed by
+cleanup.
+
+Each service may provide readiness and cleanup commands, export variables and
+secrets through an atomically replaced `PUA_SERVICE_EXPORT_PATH`, and configure
+persisted exponential restart backoff. State and event/log files use private
+permissions and a shared streaming redactor. Secret values are retained only
+in memory; API and CLI exports expose variables plus secret metadata, never
+secret values. `.pua/services/bindings.json` separates durable variable
+templates from one-shot secret overlays sent to AgentHub providers.

@@ -19,6 +19,7 @@ const (
 	reconcileMailboxes
 	reconcileNotifications
 	reconcileScheduler
+	reconcileServices
 )
 
 func (m *agentManager) requestReconcile(request reconcileRequest) {
@@ -87,7 +88,9 @@ func (m *agentManager) runReconcileLoop(ctx context.Context) {
 	nextMailbox := now
 	nextNotifications := now
 	nextSchedulerFallback := now
+	nextServicesFallback := now
 	var nextSchedulerDeadline time.Time
+	var nextServicesDeadline time.Time
 	var nextIdleDeadline time.Time
 	timer := time.NewTimer(0)
 	defer timer.Stop()
@@ -109,6 +112,9 @@ func (m *agentManager) runReconcileLoop(ctx context.Context) {
 		}
 		if !now.Before(nextSchedulerFallback) || (!nextSchedulerDeadline.IsZero() && !now.Before(nextSchedulerDeadline)) {
 			request |= reconcileScheduler
+		}
+		if !now.Before(nextServicesFallback) || (!nextServicesDeadline.IsZero() && !now.Before(nextServicesDeadline)) {
+			request |= reconcileServices
 		}
 		if !nextIdleDeadline.IsZero() && !now.Before(nextIdleDeadline) {
 			request |= reconcileAgentHub
@@ -167,6 +173,17 @@ func (m *agentManager) runReconcileLoop(ctx context.Context) {
 				nextSchedulerDeadline = time.Time{}
 			}
 		}
+		if request&reconcileServices != 0 {
+			if err := m.reconcileOwnedWorkspaceServices(ctx); err != nil {
+				log.Printf("reconcile workspace services: %v", err)
+			}
+			now = time.Now()
+			nextServicesFallback = now.Add(time.Second)
+			nextServicesDeadline = m.nextServicesReconcileDeadline(now)
+			if !nextServicesDeadline.After(now) {
+				nextServicesDeadline = time.Time{}
+			}
+		}
 
 		now = time.Now()
 		if !nextAgentHub.After(now) {
@@ -185,6 +202,7 @@ func (m *agentManager) runReconcileLoop(ctx context.Context) {
 		deadline := earliestReconcileDeadline(
 			nextAgentHub, nextColdAudit, nextMailbox, nextNotifications,
 			nextSchedulerFallback, nextSchedulerDeadline, nextIdleDeadline,
+			nextServicesFallback, nextServicesDeadline,
 		)
 		if deadline.IsZero() {
 			deadline = now.Add(durationOr(m.stablePollInterval, 10*time.Second))
@@ -392,6 +410,36 @@ func (m *agentManager) reconcileOwnedWorkspaceSchedulers(ctx context.Context) er
 		return errors.New(strings.Join(failures, "; "))
 	}
 	return nil
+}
+
+func (m *agentManager) reconcileOwnedWorkspaceServices(ctx context.Context) error {
+	if m == nil || m.server == nil {
+		return nil
+	}
+	return m.server.reconcileServices(ctx)
+}
+
+func (m *agentManager) nextServicesReconcileDeadline(now time.Time) time.Time {
+	if m == nil || m.server == nil {
+		return time.Time{}
+	}
+	m.server.serviceMu.Lock()
+	managers := make([]*ServiceManager, 0, len(m.server.services))
+	for _, manager := range m.server.services {
+		managers = append(managers, manager)
+	}
+	m.server.serviceMu.Unlock()
+	var earliest time.Time
+	for _, manager := range managers {
+		deadline := manager.NextDeadline(now)
+		if deadline.IsZero() {
+			continue
+		}
+		if earliest.IsZero() || deadline.Before(earliest) {
+			earliest = deadline
+		}
+	}
+	return earliest
 }
 
 // nextSchedulerReconcileDeadline derives an exact wake time from the durable

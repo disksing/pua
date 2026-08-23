@@ -12,6 +12,7 @@ import (
 	"github.com/disksing/pua/agenthub/internal/provider"
 	"github.com/disksing/pua/agenthub/internal/semantic"
 	"github.com/disksing/pua/agenthub/internal/session"
+	"github.com/disksing/pua/internal/security"
 )
 
 type Manager struct {
@@ -38,11 +39,35 @@ type active struct {
 	stopReason         string
 	finalized          bool
 	finalize           sync.Once
+	redactor           *security.Redactor
 	// replies holds custom text replies queued while the owning turn is still
 	// open. Providers cannot accept free text inside an approval response, so
 	// each reply dismisses its question immediately and is delivered as a
 	// regular user message once the turn closes.
 	replies []string
+}
+
+func (a *active) redactError(err error) error {
+	if err == nil || a == nil || a.redactor == nil {
+		return err
+	}
+	return errors.New(a.redactor.RedactString(err.Error()))
+}
+
+func (a *active) redactData(value any) any {
+	if a == nil || a.redactor == nil {
+		return value
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return value
+	}
+	data = a.redactor.Redact(data)
+	var result any
+	if json.Unmarshal(data, &result) != nil {
+		return string(data)
+	}
+	return result
 }
 
 func (a *active) turn() string {
@@ -155,7 +180,16 @@ func (m *Manager) SetConfig(cfg config.Config) error {
 }
 
 func (m *Manager) Start(id string) (session.Session, error) {
-	if _, err := m.ensure(id); err != nil {
+	return m.StartWithEnvironment(id, nil)
+}
+
+// StartWithEnvironment starts a Provider with an in-memory environment
+// overlay. The overlay is never passed to the Session store.
+func (m *Manager) StartWithEnvironment(id string, ephemeral map[string]string) (session.Session, error) {
+	if err := session.ValidateLaunchEnvironment(ephemeral); err != nil {
+		return session.Session{}, err
+	}
+	if _, err := m.ensureWithEphemeral(id, ephemeral); err != nil {
 		return session.Session{}, err
 	}
 	lock := m.inputLock(id)
@@ -285,7 +319,7 @@ func (m *Manager) deliverMessageLocked(id string, message session.DurableMessage
 		return false
 	}
 	if err := promptAdapter(run.adapter, message.Input); err != nil {
-		m.recordDelivery(id, message, session.MessageDeliveryPending, err)
+		m.recordDelivery(id, message, session.MessageDeliveryPending, run.redactError(err))
 		m.schedulePendingRetry(id)
 		return false
 	}
@@ -373,7 +407,7 @@ func (m *Manager) Interrupt(id string) error {
 	}
 	if err := run.adapter.Interrupt(); err != nil {
 		run.clearInterruptRequest()
-		return err
+		return run.redactError(err)
 	}
 	// Providers differ in whether Interrupt emits a terminal notification. If
 	// one did not, close the canonical Turn here; withEvent makes this idempotent
@@ -428,7 +462,7 @@ func (m *Manager) Stop(id string) error {
 		m.convergeActive(id, run, nil)
 	} else {
 		_, _ = m.store.Append(id, "provider.error", run.turn(), marshal(map[string]any{
-			"message": closeErr.Error(), "reason": "process_cleanup_error",
+			"message": run.redactError(closeErr).Error(), "reason": "process_cleanup_error",
 		}))
 	}
 	return closeErr
@@ -465,25 +499,25 @@ func (m *Manager) Approve(id, approvalID string, reply ApprovalReply) error {
 		// so a custom reply dismisses the question and is queued for delivery
 		// as a regular user message when the turn closes (see providerEvent).
 		if err := run.adapter.Approve(approvalID, provider.ApprovalResolution{Decision: "cancel"}); err != nil {
-			return err
+			return run.redactError(err)
 		}
 		run.mu.Lock()
 		run.replies = append(run.replies, reply.Text)
 		run.mu.Unlock()
-		_, err := m.store.Append(id, "approval.resolved", run.turn(), marshal(map[string]any{
+		_, err := m.store.Append(id, "approval.resolved", run.turn(), marshal(run.redactData(map[string]any{
 			"approvalId": approvalID, "decision": "text", "text": reply.Text,
-		}))
+		})))
 		return err
 	}
 	resolution := provider.ApprovalResolution{Decision: reply.Decision, OptionID: reply.OptionID}
 	if err := run.adapter.Approve(approvalID, resolution); err != nil {
-		return err
+		return run.redactError(err)
 	}
 	data := map[string]any{"approvalId": approvalID, "decision": reply.Decision}
 	if reply.OptionID != "" {
 		data["optionId"] = reply.OptionID
 	}
-	_, err := m.store.Append(id, "approval.resolved", run.turn(), marshal(data))
+	_, err := m.store.Append(id, "approval.resolved", run.turn(), marshal(run.redactData(data)))
 	return err
 }
 
@@ -500,6 +534,10 @@ func (m *Manager) Close() {
 }
 
 func (m *Manager) ensure(id string) (*active, error) {
+	return m.ensureWithEphemeral(id, nil)
+}
+
+func (m *Manager) ensureWithEphemeral(id string, ephemeral map[string]string) (*active, error) {
 	m.mu.Lock()
 	if run := m.running[id]; run != nil {
 		m.mu.Unlock()
@@ -536,10 +574,10 @@ func (m *Manager) ensure(id string) (*active, error) {
 		m.mu.Unlock()
 		return nil, err
 	}
-	run := &active{turnID: value.CurrentTurnID, ready: make(chan struct{})}
+	run := &active{turnID: value.CurrentTurnID, ready: make(chan struct{}), redactor: security.NewRedactor(environmentValues(ephemeral)...)}
 	adapter, err := m.factory(provider.Options{
 		ID: id, Cwd: value.Cwd, Title: value.Title, Agent: agent, Provider: providerConfig,
-		Environment: mergeEnvironment(agent.Environment, value.LaunchEnvironment),
+		Environment: mergeEnvironmentWithEphemeral(agent.Environment, value.LaunchEnvironment, ephemeral),
 		Hooks: provider.Hooks{
 			NativeID: func(nativeID string) {
 				run.withEvent(func(_ string) {
@@ -552,7 +590,8 @@ func (m *Manager) ensure(id string) (*active, error) {
 			Event: func(event provider.Event) { m.providerEvent(id, run, event) },
 			Approval: func(approvalID, method string, params json.RawMessage) {
 				run.withEvent(func(turnID string) {
-					_, _ = m.store.Append(id, "approval.requested", turnID, marshal(semantic.ApprovalRequestData(approvalID, method, params)))
+					data := semantic.ApprovalRequestData(approvalID, method, params)
+					_, _ = m.store.Append(id, "approval.requested", turnID, marshal(run.redactData(data)))
 				})
 			},
 			ProcessStart: func(info provider.ProcessInfo) error {
@@ -568,7 +607,7 @@ func (m *Manager) ensure(id string) (*active, error) {
 				if cleanupErr := run.adapter.Close(); cleanupErr != nil {
 					_, _ = m.store.Append(id, "session.state", "", marshal(session.StateEventData{State: session.StateStopping}))
 					_, _ = m.store.Append(id, "provider.error", run.turn(), marshal(map[string]any{
-						"message": cleanupErr.Error(), "reason": "process_cleanup_error",
+						"message": run.redactError(cleanupErr).Error(), "reason": "process_cleanup_error",
 					}))
 					return
 				}
@@ -577,6 +616,7 @@ func (m *Manager) ensure(id string) (*active, error) {
 		},
 	})
 	if err != nil {
+		err = run.redactError(err)
 		m.convergeStored(id, session.StopReasonStartupError, err)
 		m.mu.Unlock()
 		return nil, err
@@ -586,6 +626,7 @@ func (m *Manager) ensure(id string) (*active, error) {
 	m.mu.Unlock()
 
 	if err := adapter.Start(value.ProviderSessionID); err != nil {
+		err = run.redactError(err)
 		run.finishStart(err)
 		_ = adapter.Close()
 		m.convergeActive(id, run, err)
@@ -604,7 +645,7 @@ func (m *Manager) providerEvent(id string, run *active, event provider.Event) {
 	var replies []string
 	run.withEvent(func(turnID string) {
 		if event.Type != "" {
-			_, _ = m.store.Append(id, event.Type, turnID, marshal(event.Data))
+			_, _ = m.store.Append(id, event.Type, turnID, marshal(run.redactData(event.Data)))
 		}
 		if !event.TurnDone || turnID == "" {
 			return
@@ -620,6 +661,9 @@ func (m *Manager) providerEvent(id string, run *active, event provider.Event) {
 		} else if event.TurnFailed {
 			eventType = session.EventTurnFailed
 			terminal.Error = providerEventMessage(event.Data)
+			if run.redactor != nil {
+				terminal.Error = run.redactor.RedactString(terminal.Error)
+			}
 			approvalReason = session.StopReasonProviderError
 		}
 		// A canonical turn terminal is also the closure boundary for every
@@ -687,6 +731,7 @@ func providerEventMessage(data any) string {
 func (m *Manager) convergeActive(id string, run *active, processErr error) {
 	run.finalize.Do(func() {
 		run.beginFinalizing()
+		processErr = run.redactError(processErr)
 		reason, cause := run.outcome(processErr)
 		m.mu.Lock()
 		if m.running[id] == run {
@@ -821,6 +866,28 @@ func mergeEnvironment(agent, session map[string]string) map[string]string {
 		merged[key] = value
 	}
 	return merged
+}
+
+func mergeEnvironmentWithEphemeral(agent, session, ephemeral map[string]string) map[string]string {
+	merged := mergeEnvironment(agent, session)
+	if len(ephemeral) == 0 {
+		return merged
+	}
+	if merged == nil {
+		merged = make(map[string]string, len(ephemeral))
+	}
+	for key, value := range ephemeral {
+		merged[key] = value
+	}
+	return merged
+}
+
+func environmentValues(environment map[string]string) []string {
+	values := make([]string, 0, len(environment))
+	for _, value := range environment {
+		values = append(values, value)
+	}
+	return values
 }
 
 func cloneConfig(value config.Config) config.Config {

@@ -41,6 +41,10 @@ type DoctorBindingCatalog struct {
 type DoctorOptions struct {
 	BindingCatalog *DoctorBindingCatalog
 	BindingError   string
+	// ServiceError is populated by the service supervisor integration when a
+	// Workspace's versioned service graph cannot be loaded or validated. The
+	// app package keeps this as text so it does not depend on internal/serve.
+	ServiceError string
 }
 
 type DoctorIssue struct {
@@ -126,6 +130,9 @@ func CheckWorkspace(root string, options DoctorOptions) (DoctorReport, error) {
 	scanner.scanProjects()
 	scanner.scanScheduler()
 	scanner.scanBindings()
+	if strings.TrimSpace(options.ServiceError) != "" {
+		scanner.issue(DoctorSeverityError, "service_configuration_invalid", filepath.Join(".pua", "services"), "workspace", options.ServiceError, "Repair the service definition or remove the invalid service before restarting pua serve.")
+	}
 	scanner.finish()
 	return scanner.report, nil
 }

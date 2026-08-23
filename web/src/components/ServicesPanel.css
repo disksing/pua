@@ -1,0 +1,30 @@
+:where([data-component-owner="services-panel"]) {
+  padding: 18px;
+  display: grid;
+  gap: 14px;
+}
+:where([data-component-owner="services-panel"]) .services-heading,
+:where([data-component-owner="services-panel"]) .service-card header,
+:where([data-component-owner="services-panel"]) .service-log-view header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+:where([data-component-owner="services-panel"]) h2,
+:where([data-component-owner="services-panel"]) h3,
+:where([data-component-owner="services-panel"]) p { margin: 0; }
+:where([data-component-owner="services-panel"]) .services-heading p { color: var(--ink-muted, #68707a); margin-top: 4px; }
+:where([data-component-owner="services-panel"]) .services-list { display: grid; gap: 10px; }
+:where([data-component-owner="services-panel"]) .service-card,
+:where([data-component-owner="services-panel"]) .service-log-view { border: 1px solid var(--line, #d8dce0); border-radius: 10px; padding: 14px; background: var(--surface, #fff); }
+:where([data-component-owner="services-panel"]) .service-card.attention { border-color: var(--danger, #b94747); }
+:where([data-component-owner="services-panel"]) .service-state { color: var(--ink-muted, #68707a); font-size: .82rem; text-transform: uppercase; letter-spacing: .06em; }
+:where([data-component-owner="services-panel"]) .service-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+:where([data-component-owner="services-panel"]) dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; margin: 12px 0 0; }
+:where([data-component-owner="services-panel"]) dt { color: var(--ink-muted, #68707a); font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; }
+:where([data-component-owner="services-panel"]) dd { margin: 2px 0 0; font-size: .9rem; overflow-wrap: anywhere; }
+:where([data-component-owner="services-panel"]) .service-error { color: var(--danger, #b94747); margin-top: 10px; }
+:where([data-component-owner="services-panel"]) .service-secrets { color: var(--ink-muted, #68707a); margin-top: 10px; font-size: .85rem; }
+:where([data-component-owner="services-panel"]) .services-empty { display: flex; align-items: center; gap: 8px; color: var(--ink-muted, #68707a); padding: 28px 0; }
+:where([data-component-owner="services-panel"]) .service-log-view pre { max-height: 420px; overflow: auto; margin: 12px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font: .8rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }

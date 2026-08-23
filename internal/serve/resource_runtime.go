@@ -286,9 +286,33 @@ func (m *agentManager) createResourceGeneration(ctx context.Context, workspace s
 		"PUA_WORKSPACE_INSTANCE_ID": record.SourceInstanceID,
 		"PUA_RESOURCE_ID":           resourceKey,
 	}
+	var ephemeralEnvironment map[string]string
+	if m.server != nil {
+		boundVariables, boundSecrets, bindingErr := m.server.serviceEnvironment(workspace)
+		if bindingErr != nil {
+			rt.setRecoveryError(m, bindingErr)
+			return rt.snapshotGeneration(), bindingErr
+		}
+		for key, value := range boundVariables {
+			launchEnvironment[key] = value
+		}
+		if len(boundSecrets) > 0 {
+			status, statusErr := client.Status(ctx)
+			if statusErr != nil {
+				rt.setRecoveryError(m, statusErr)
+				return rt.snapshotGeneration(), statusErr
+			}
+			if !agentHubHasCapability(status, "session.ephemeral-environment") {
+				err := errors.New("AgentHub does not support ephemeral service secrets")
+				rt.setRecoveryError(m, err)
+				return rt.snapshotGeneration(), err
+			}
+			ephemeralEnvironment = boundSecrets
+		}
+	}
 	session, err := m.findOrCreateAgentHubSession(ctx, client, source, agentHubCreateSessionRequest{
 		Title: record.Title, Cwd: record.Cwd, AgentName: record.AgentHubAgentName,
-		Source: &source, IdempotencyKey: record.GenerationID, LaunchEnvironment: launchEnvironment,
+		Source: &source, IdempotencyKey: record.GenerationID, LaunchEnvironment: launchEnvironment, EphemeralEnvironment: ephemeralEnvironment,
 	})
 	if err != nil {
 		rt.setRecoveryError(m, err)

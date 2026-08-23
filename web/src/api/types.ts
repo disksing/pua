@@ -44,3 +44,39 @@ export interface WorkspaceTreeResponse {
   scheduler?: ResourceSummary;
   projects: ResourceSummary[];
 }
+
+export interface ServiceReadinessStatus {
+  configured: boolean;
+  ready: boolean;
+  lastCheck?: string;
+  lastError?: string;
+}
+
+export interface ServiceCleanupStatus {
+  configured: boolean;
+  attempts?: number;
+  lastRun?: string;
+  lastError?: string;
+  succeeded: boolean;
+}
+
+export interface ServiceExportMetadata {
+  variables?: Record<string, string>;
+  secrets?: Array<{ name: string; source?: string; updatedAt?: string }>;
+  updatedAt?: string;
+}
+
+export interface ServiceStatus {
+  id: string;
+  enabled: boolean;
+  state: string;
+  pid?: number;
+  failureCount?: number;
+  nextRetryAt?: string;
+  lastError?: string;
+  attentionRequired?: boolean;
+  dependencies?: string[];
+  readiness: ServiceReadinessStatus;
+  cleanup: ServiceCleanupStatus;
+  exports: ServiceExportMetadata;
+}

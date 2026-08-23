@@ -192,6 +192,8 @@ type server struct {
 	services         map[serviceWorkspaceKey]*ServiceManager
 	serviceRemovals  map[string]*serviceManagerRemoval
 	serviceContext   context.Context
+	serviceFactory   func(string, ServiceManagerOptions) (*ServiceManager, error)
+	serviceStarter   func(*ServiceManager, context.Context) error
 	uiStateMu        sync.Mutex
 }
 
@@ -1692,10 +1694,6 @@ func (s *server) addWorkspaceWithOptions(ctx context.Context, path string, creat
 		Name: workspaceName(tree.Root),
 		Path: tree.Root,
 	}
-	cfg, err := s.loadConfig()
-	if err != nil {
-		return serveWorkspace{}, err
-	}
 	puaWorkspace, err := app.OpenWorkspace(tree.Root)
 	if err != nil {
 		return serveWorkspace{}, err
@@ -1718,26 +1716,126 @@ func (s *server) addWorkspaceWithOptions(ctx context.Context, path string, creat
 	if _, err := puaWorkspace.EnsureResourceRuntime(); err != nil {
 		return serveWorkspace{}, err
 	}
-	replaced := false
-	for i := range cfg.Workspaces {
-		if cfg.Workspaces[i].ID == workspace.ID {
-			workspace.Icon = cfg.Workspaces[i].Icon
-			cfg.Workspaces[i] = workspace
-			replaced = true
-			break
+	// A concurrent add may have borrowed an ownership lock acquired by an add
+	// that subsequently failed. Re-check ownership at the commit boundary so
+	// this transaction never publishes a Workspace it no longer owns.
+	if s.locks != nil && !s.locks.owns(canonical) {
+		if _, err := s.locks.acquire(canonical); err != nil {
+			return serveWorkspace{}, err
 		}
+		locked = true
 	}
-	if !replaced {
-		cfg.Workspaces = append(cfg.Workspaces, workspace)
+	workspace, retainLock, err := s.commitWorkspaceAddition(workspace)
+	if retainLock {
+		// A failed manager rollback remains authoritative so its processes can
+		// still be recovered or stopped. Keep the Workspace ownership lock with
+		// that registered manager instead of exposing it to another server.
+		locked = false
 	}
-	cfg.ActiveID = workspace.ID
-	if err := s.saveConfig(cfg); err != nil {
+	if err != nil {
 		return serveWorkspace{}, err
 	}
 	if s.doctor != nil {
 		s.doctor.requestScan()
 	}
 	return workspace, nil
+}
+
+// commitWorkspaceAddition publishes a Workspace and its service supervisor as
+// one runtime transaction. Callers finish all Workspace initialization first;
+// this commit boundary then serializes against service removal and concurrent
+// additions, starts services with the server lifecycle (never the HTTP request
+// context), and leaves neither configuration nor a manager behind on failure.
+// The boolean result asks the caller to retain its Workspace lock only when a
+// failed process cleanup makes the registered manager the remaining safe owner.
+func (s *server) commitWorkspaceAddition(workspace serveWorkspace) (serveWorkspace, bool, error) {
+	s.serviceMu.Lock()
+	defer s.serviceMu.Unlock()
+
+	if s.serviceRemovals[workspace.ID] != nil {
+		return serveWorkspace{}, false, errWorkspaceServiceRemovalInProgress
+	}
+	cfg, err := s.loadConfig()
+	if err != nil {
+		return serveWorkspace{}, false, err
+	}
+	replaced := false
+	for index := range cfg.Workspaces {
+		if cfg.Workspaces[index].ID != workspace.ID {
+			continue
+		}
+		workspace.Icon = cfg.Workspaces[index].Icon
+		cfg.Workspaces[index] = workspace
+		replaced = true
+		break
+	}
+	if !replaced {
+		cfg.Workspaces = append(cfg.Workspaces, workspace)
+	}
+	cfg.ActiveID = workspace.ID
+
+	key, manager, err := s.registeredServiceManagerLocked(workspace)
+	if err != nil {
+		return serveWorkspace{}, false, fmt.Errorf("resolve Workspace service supervision: %w", err)
+	}
+	created := false
+	if manager == nil {
+		factory := s.serviceFactory
+		if factory == nil {
+			factory = NewServiceManager
+		}
+		manager, err = factory(key.root, ServiceManagerOptions{})
+		if err != nil {
+			return serveWorkspace{}, false, fmt.Errorf("initialize Workspace service supervision: %w", err)
+		}
+		if s.services == nil {
+			s.services = make(map[serviceWorkspaceKey]*ServiceManager)
+		}
+		s.services[key] = manager
+		created = true
+	}
+
+	startAttempted := false
+	if s.serviceContext != nil {
+		startAttempted = true
+		starter := s.serviceStarter
+		if starter == nil {
+			starter = func(manager *ServiceManager, ctx context.Context) error {
+				return manager.Start(ctx)
+			}
+		}
+		if startErr := starter(manager, s.serviceContext); startErr != nil {
+			rollbackErr := s.rollbackAddedServiceManagerLocked(key, manager, created, startAttempted)
+			return serveWorkspace{}, rollbackErr != nil, errors.Join(
+				fmt.Errorf("start Workspace service supervision: %w", startErr),
+				rollbackErr,
+			)
+		}
+	}
+	if err := s.saveConfig(cfg); err != nil {
+		rollbackErr := s.rollbackAddedServiceManagerLocked(key, manager, created, startAttempted)
+		return serveWorkspace{}, rollbackErr != nil, errors.Join(err, rollbackErr)
+	}
+	return workspace, false, nil
+}
+
+func (s *server) rollbackAddedServiceManagerLocked(key serviceWorkspaceKey, manager *ServiceManager, created, startAttempted bool) error {
+	if !created {
+		return nil
+	}
+	if startAttempted {
+		stopContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		stopErr := manager.Stop(stopContext)
+		cancel()
+		if stopErr != nil {
+			return fmt.Errorf("roll back Workspace service supervision: %w", stopErr)
+		}
+	}
+	if s.services[key] != manager {
+		return errors.New("roll back Workspace service supervision: manager ownership changed")
+	}
+	delete(s.services, key)
+	return nil
 }
 
 func (s *server) ensureConfiguredResourceRuntimes() error {

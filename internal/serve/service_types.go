@@ -45,14 +45,17 @@ var (
 // Commands are always executed as argument arrays; no field is interpreted by
 // a shell.
 type ServiceConfig struct {
-	SchemaVersion int                           `json:"schemaVersion"`
-	ID            string                        `json:"id"`
-	Enabled       bool                          `json:"enabled"`
-	Command       []string                      `json:"command"`
-	Args          []string                      `json:"args,omitempty"`
-	CWD           string                        `json:"cwd,omitempty"`
-	Environment   map[string]ServiceEnvironment `json:"environment,omitempty"`
-	DependsOn     []string                      `json:"dependsOn,omitempty"`
+	SchemaVersion int      `json:"schemaVersion"`
+	ID            string   `json:"id"`
+	Enabled       bool     `json:"enabled"`
+	Command       []string `json:"command"`
+	Args          []string `json:"args,omitempty"`
+	CWD           string   `json:"cwd,omitempty"`
+	// Environment overlays the supervisor's documented safe host environment.
+	// Resolved service entries override inherited basics; PUA_SERVICE_* control
+	// values remain authoritative.
+	Environment map[string]ServiceEnvironment `json:"environment,omitempty"`
+	DependsOn   []string                      `json:"dependsOn,omitempty"`
 	// Exports declares that the process atomically writes
 	// PUA_SERVICE_EXPORT_PATH. Every writer must set this regardless of Readiness
 	// so the complete initial hand-off is accepted before startup output is

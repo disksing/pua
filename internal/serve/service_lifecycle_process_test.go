@@ -90,6 +90,110 @@ func readPersistedServiceStatus(t *testing.T, root, id string) ServiceStatus {
 	return status
 }
 
+func TestServiceManagerChildEnvironmentIsolation(t *testing.T) {
+	const resolvedSecret = "undeclared-daemon-secret"
+	root := t.TempDir()
+	readinessPath := filepath.Join(root, "readiness-environment")
+	cleanupPath := filepath.Join(root, "cleanup-environment")
+	home := filepath.Join(root, "service-home")
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "/usr/bin:/bin")
+	t.Setenv("LANG", "C")
+	t.Setenv("PUA_SECRET_OTHER", resolvedSecret)
+	t.Setenv("PUA_RESOURCE_ID", "daemon-internal-resource")
+	t.Setenv("DAEMON_DATABASE_PASSWORD", "generic-daemon-credential")
+
+	probe := "printf 'pua=%s|internal=%s|generic=%s|mapped=%s|home=%s|lang=%s\\n' " +
+		`"$PUA_SECRET_OTHER" "$PUA_RESOURCE_ID" "$DAEMON_DATABASE_PASSWORD" "$CHOSEN_TOKEN" "$HOME" "$LANG"`
+	hookProbe := "printf 'pua=%s|internal=%s|generic=%s|mapped-length=%s|home=%s|lang=%s\\n' " +
+		`"$PUA_SECRET_OTHER" "$PUA_RESOURCE_ID" "$DAEMON_DATABASE_PASSWORD" "${#CHOSEN_TOKEN}" "$HOME" "$LANG"`
+	writeTestService(t, root, ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "environment",
+		Enabled:       true,
+		Command: []string{"/bin/sh", "-c",
+			probe + "; printf 'path=%s|export=%s\\n' \"$PATH\" \"$PUA_SERVICE_EXPORT_PATH\"; exec sleep 30"},
+		Environment: map[string]ServiceEnvironment{
+			"CHOSEN_TOKEN":            {Template: "${secret.OTHER}"},
+			"LANG":                    {Literal: "POSIX"},
+			"PUA_SERVICE_EXPORT_PATH": {Literal: "untrusted-export-path"},
+		},
+		Readiness: &ServiceReadinessConfig{
+			Command:  []string{"/bin/sh", "-c", hookProbe + " > " + shellQuote(readinessPath)},
+			Interval: 10 * time.Millisecond,
+			Timeout:  time.Second,
+		},
+		Cleanup: &ServiceCleanupConfig{
+			Command: []string{"/bin/sh", "-c", hookProbe + " > " + shellQuote(cleanupPath)},
+			Timeout: time.Second,
+		},
+	})
+
+	manager, err := NewServiceManager(root, ServiceManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopProcessTestManager(t, &manager)
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	waitForServiceState(t, manager, "environment", ServiceStateReady)
+	stdoutPath := filepath.Join(serviceRuntimePath(root, "environment"), "stdout.log")
+	wantExportPath := filepath.Join(serviceRuntimePath(root, "environment"), "export.json")
+	waitForTestPath(t, stdoutPath, "path=/usr/bin:/bin|export="+wantExportPath)
+
+	stdout, err := os.ReadFile(stdoutPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantProbe := "pua=|internal=|generic=|mapped=<redacted>|home=" + home + "|lang=POSIX"
+	if !strings.Contains(string(stdout), wantProbe) {
+		t.Fatalf("service environment output = %q, want %q", stdout, wantProbe)
+	}
+	forbiddenValues := []string{resolvedSecret, "daemon-internal-resource", "generic-daemon-credential"}
+	for _, forbidden := range forbiddenValues {
+		if strings.Contains(string(stdout), forbidden) {
+			t.Fatalf("service stdout persisted undeclared daemon credential %q", forbidden)
+		}
+	}
+	readiness, err := os.ReadFile(readinessPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantHookProbe := "pua=|internal=|generic=|mapped-length=" + strconv.Itoa(len(resolvedSecret)) + "|home=" + home + "|lang=POSIX"
+	if got := strings.TrimSpace(string(readiness)); got != wantHookProbe {
+		t.Fatalf("readiness environment = %q", got)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := manager.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+	manager = nil
+	cleanup, err := os.ReadFile(cleanupPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(cleanup)); got != wantHookProbe {
+		t.Fatalf("cleanup environment = %q", got)
+	}
+	for _, name := range []string{"state.json", "events.jsonl", "stdout.log", "stderr.log"} {
+		data, err := os.ReadFile(filepath.Join(serviceRuntimePath(root, "environment"), name))
+		if err != nil && os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, forbidden := range forbiddenValues {
+			if strings.Contains(string(data), forbidden) {
+				t.Fatalf("service runtime file %s persisted daemon credential %q", name, forbidden)
+			}
+		}
+	}
+}
+
 func TestServiceManagerBlocksDependentsUntilReadiness(t *testing.T) {
 	root := t.TempDir()
 	orderPath := filepath.Join(root, "start-order")

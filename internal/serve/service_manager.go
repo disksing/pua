@@ -1158,30 +1158,39 @@ func (m *ServiceManager) runCleanupLocked(ctx context.Context, rt *serviceRuntim
 }
 
 func (m *ServiceManager) resolveEnvironmentLocked(cfg ServiceConfig) ([]string, []string, map[string]ServiceSecretMetadata, ServiceExportFile, error) {
-	values := append([]string(nil), os.Environ()...)
-	byName := make(map[string]string, len(values))
-	for _, value := range values {
-		if key, val, ok := strings.Cut(value, "="); ok {
-			byName[key] = val
-		}
-	}
+	byName := inheritedServiceEnvironment()
 	secrets := []string{}
 	names := map[string]ServiceSecretMetadata{}
 	exports := ServiceExportFile{SchemaVersion: serviceExportSchema, Variables: map[string]string{}}
-	for name, entry := range cfg.Environment {
+	environmentNames := make([]string, 0, len(cfg.Environment))
+	for name := range cfg.Environment {
+		environmentNames = append(environmentNames, name)
+	}
+	sort.Strings(environmentNames)
+	for _, name := range environmentNames {
+		entry := cfg.Environment[name]
 		value, source, err := m.resolveEnvironmentValueLocked(entry)
 		if err != nil {
 			return nil, nil, nil, exports, fmt.Errorf("environment %s: %w", name, err)
 		}
+		if strings.ContainsRune(value, '\x00') {
+			return nil, nil, nil, exports, fmt.Errorf("environment %s contains NUL", name)
+		}
 		byName[name] = value
-		if entry.SecretName != "" {
+		secretName := entry.SecretName
+		if matches := secretTemplatePattern.FindStringSubmatch(entry.Template); secretName == "" && len(matches) == 2 && matches[0] == entry.Template {
+			secretName = matches[1]
+		}
+		if secretName != "" {
 			secrets = append(secrets, value)
-			names[entry.SecretName] = ServiceSecretMetadata{Name: entry.SecretName, Source: source, UpdatedAt: m.now().Format(time.RFC3339Nano)}
+			names[secretName] = ServiceSecretMetadata{Name: secretName, Source: source, UpdatedAt: m.now().Format(time.RFC3339Nano)}
 		} else if source == "service-secret" {
 			secrets = append(secrets, value)
 			names[name] = ServiceSecretMetadata{Name: name, Source: source, UpdatedAt: m.now().Format(time.RFC3339Nano)}
 		}
 	}
+	// Supervisor control values are authoritative even when a service
+	// definition happens to contain the same name.
 	byName["PUA_SERVICE_EXPORT_PATH"] = filepath.Join(serviceRuntimePath(m.root, cfg.ID), "export.json")
 	byName["PUA_SERVICE_INSTANCE_TOKEN"] = newServiceInstanceToken()
 	byName["PUA_SERVICE_COMMAND_DIGEST"] = serviceCommandDigest(cfg)
@@ -1192,11 +1201,43 @@ func (m *ServiceManager) resolveEnvironmentLocked(cfg ServiceConfig) ([]string, 
 	sort.Strings(keys)
 	// Rebuild from the map so overridden daemon values do not leave duplicate
 	// entries in the child environment.
-	values = values[:0]
+	values := make([]string, 0, len(keys))
 	for _, key := range keys {
 		values = append(values, key+"="+byName[key])
 	}
 	return values, secrets, names, exports, nil
+}
+
+// inheritedServiceEnvironment deliberately carries only process-execution,
+// locale, temporary-directory, and user-location basics into a service. In
+// particular, daemon credentials and all PUA_* values stay supervisor-private
+// unless the service explicitly declares a resolved environment entry.
+func inheritedServiceEnvironment() map[string]string {
+	values := make(map[string]string)
+	for _, entry := range os.Environ() {
+		name, value, ok := strings.Cut(entry, "=")
+		if !ok || !inheritedServiceEnvironmentName(name) {
+			continue
+		}
+		values[name] = value
+	}
+	return values
+}
+
+func inheritedServiceEnvironmentName(name string) bool {
+	switch name {
+	case "PATH",
+		"HOME", "USER", "LOGNAME", "SHELL", "XDG_RUNTIME_DIR",
+		"TMPDIR", "TMP", "TEMP",
+		"LANG", "LANGUAGE", "TZ", "__CF_USER_TEXT_ENCODING",
+		"LC_ALL", "LC_ADDRESS", "LC_COLLATE", "LC_CTYPE",
+		"LC_IDENTIFICATION", "LC_MEASUREMENT", "LC_MESSAGES",
+		"LC_MONETARY", "LC_NAME", "LC_NUMERIC", "LC_PAPER",
+		"LC_TELEPHONE", "LC_TIME":
+		return true
+	default:
+		return false
+	}
 }
 
 func (m *ServiceManager) resolveEnvironmentValueLocked(entry ServiceEnvironment) (string, string, error) {

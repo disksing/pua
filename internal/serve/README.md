@@ -148,6 +148,20 @@ service. Startup restores enabled definitions in dependency order; shutdown
 suppresses restart and performs graceful process-group termination followed by
 cleanup.
 
+Service processes do not inherit the complete `pua serve` environment. The
+supervisor carries only execution and user-location basics (`PATH`, `HOME`,
+`USER`, `LOGNAME`, `SHELL`, and `XDG_RUNTIME_DIR`), temporary-directory values
+(`TMPDIR`, `TMP`, and `TEMP`), and locale/timezone values (`LANG`, `LANGUAGE`,
+`TZ`, `LC_*` locale categories, and macOS `__CF_USER_TEXT_ENCODING`). Other
+daemon values, including every `PUA_SECRET_*`, credential variables, and
+internal `PUA_*` state, are absent by default. A service receives additional
+values only through its declared `environment` entries after templates and
+secret references are resolved. Declared entries override inherited basics;
+the supervisor's `PUA_SERVICE_EXPORT_PATH`, `PUA_SERVICE_INSTANCE_TOKEN`, and
+`PUA_SERVICE_COMMAND_DIGEST` remain authoritative. The same resolved,
+deterministically ordered environment is used for the service, its readiness
+command, and its cleanup command.
+
 Each service may provide readiness and cleanup commands, export variables and
 secrets through an atomically replaced `PUA_SERVICE_EXPORT_PATH`, and configure
 persisted exponential restart backoff. Every service that writes

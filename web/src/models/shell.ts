@@ -34,7 +34,6 @@ export interface ShellResourceItem {
   summary: ShellProjectSummary | null;
   children: ShellResourceItem[];
   projectId?: string;
-  favorite?: boolean;
   unreadCount: number;
 }
 
@@ -45,7 +44,6 @@ export interface ShellActivityItem {
   ref: string;
   selected: boolean;
   activeTurn: boolean;
-  favorite: boolean;
   unreadCount: number;
   turnNumber: number;
   agentName: string;
@@ -55,7 +53,6 @@ export interface ShellActivityItem {
 
 export interface ShellActivityLists {
   running: ShellActivityItem[];
-  favorites: ShellActivityItem[];
   unread: ShellActivityItem[];
   problems: ShellActivityItem[];
 }
@@ -122,6 +119,12 @@ export interface AppShellModel {
   version: string;
   activeWorkspaceId: string;
   workspaceName: string;
+  userGate: {
+    mode: "" | "create" | "select" | "loading";
+    users: Array<{ name: string; preference: string }>;
+    suggestedUserName: string;
+    missingUserName: string;
+  };
   workspaces: ShellWorkspaceItem[];
   scheduler?: ShellResourceItem | null;
   projects: ShellResourceItem[];
@@ -133,7 +136,9 @@ export interface AppShellModel {
   mobile: { sidebarOpen: boolean };
   layout: { preference: "auto" | "three" | "two" | "split"; effective: "three" | "two" | "split" | "single" };
   route: { path: string; revision: number; replace: boolean };
+  resolveResourceTitle: (resourceId: string) => string | null;
   onSwitchWorkspace: (id: string) => Promise<void>;
+  onResolveWorkspaceUser: (name: string, create: boolean) => Promise<void>;
   onAddWorkspace: () => void;
   onCreateProject: () => void;
   onOpenSettings: () => void;
@@ -147,7 +152,6 @@ export interface AppShellModel {
   onRenameFolder: (id: string, name: string) => Promise<void>;
   onDeleteFolder: (id: string) => Promise<void>;
   onToggleFolder: (id: string) => Promise<void>;
-  onToggleFavorite: (id: string, favorite: boolean) => Promise<void>;
   onOpenInboxMessage: (id: string) => Promise<void>;
   onReplyInboxMessage: (id: string, text: string) => Promise<void>;
   onDeleteInboxMessage: (id: string) => Promise<void>;

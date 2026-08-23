@@ -2,10 +2,13 @@ package serve
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
+	osuser "os/user"
 	"path/filepath"
+	"strings"
 
 	"github.com/disksing/pua/internal/app"
 	"github.com/disksing/pua/internal/workspacepath"
@@ -14,21 +17,33 @@ import (
 const workspaceUserHeader = "X-PUA-User"
 
 func (s *server) workspaceUserName(r *http.Request, workspacePath string) (string, error) {
-	name := r.Header.Get(workspaceUserHeader)
+	name := strings.TrimSpace(r.Header.Get(workspaceUserHeader))
 	if name == "" {
-		name = app.DefaultUserName
+		return "", &resourceAPIError{Code: "user_required", Message: "select a Workspace user before accessing personal data"}
 	}
 	if err := app.ValidateUserName(name); err != nil {
-		return "", err
+		return "", &resourceAPIError{Code: "invalid_request", Message: err.Error()}
 	}
 	workspace, err := app.OpenWorkspace(workspacePath)
 	if err != nil {
 		return "", err
 	}
 	if _, err := workspace.User(name); err != nil {
-		return "", err
+		return "", &resourceAPIError{Code: "user_not_found", Message: fmt.Sprintf("Workspace user not found: %s", name)}
 	}
 	return name, nil
+}
+
+func suggestedSystemUserName() string {
+	current, err := osuser.Current()
+	if err != nil {
+		return ""
+	}
+	name := strings.TrimSpace(current.Username)
+	if app.ValidateUserName(name) != nil {
+		return ""
+	}
+	return name
 }
 
 func (s *server) handleUsers(w http.ResponseWriter, r *http.Request, workspaceID string, parts []string) {
@@ -108,6 +123,10 @@ func (s *server) handleUsers(w http.ResponseWriter, r *http.Request, workspaceID
 		writeJSON(w, profile)
 	case http.MethodDelete:
 		if err := puaWorkspace.DeleteUser(name); err != nil {
+			if errors.Is(err, app.ErrLastUser) {
+				writeError(w, &resourceAPIError{Code: "last_user", Message: app.ErrLastUser.Error()}, http.StatusConflict)
+				return
+			}
 			writeError(w, err, http.StatusNotFound)
 			return
 		}
@@ -120,9 +139,6 @@ func (s *server) handleUsers(w http.ResponseWriter, r *http.Request, workspaceID
 func (s *server) ensureWorkspaceUsersAndMigrateUIState(workspacePath string) error {
 	workspace, err := app.OpenWorkspace(workspacePath)
 	if err != nil {
-		return err
-	}
-	if _, err := workspace.EnsureDefaultUser(); err != nil {
 		return err
 	}
 
@@ -178,6 +194,17 @@ func (s *server) ensureWorkspaceUsersAndMigrateUIState(workspacePath string) err
 	if err != nil {
 		return err
 	}
+	legacyTarget := ""
+	for _, user := range users {
+		if user.Name == app.LegacyDefaultUserName {
+			legacyTarget = user.Name
+			break
+		}
+	}
+	if legacyTarget == "" && len(users) == 1 {
+		legacyTarget = users[0].Name
+	}
+	legacyConsumed := legacyDefaultState == nil
 	for _, user := range users {
 		statePath := userUIStatePath(workspacePath, user.Name)
 		_, statErr := os.Stat(statePath)
@@ -186,8 +213,9 @@ func (s *server) ensureWorkspaceUsersAndMigrateUIState(workspacePath string) err
 			return statErr
 		}
 		var state uiState
-		if !stateExists && user.Name == app.DefaultUserName && legacyDefaultState != nil {
+		if !stateExists && user.Name == legacyTarget && legacyDefaultState != nil {
 			state = *legacyDefaultState
+			legacyConsumed = true
 		} else {
 			state, err = loadUIStateFile(statePath)
 			if err != nil {
@@ -201,8 +229,10 @@ func (s *server) ensureWorkspaceUsersAndMigrateUIState(workspacePath string) err
 			}
 		}
 	}
-	for _, legacy := range migratedPaths {
-		_ = os.Remove(legacy)
+	if legacyConsumed {
+		for _, legacy := range migratedPaths {
+			_ = os.Remove(legacy)
+		}
 	}
 	return nil
 }
@@ -223,6 +253,16 @@ func seedUnreadBaseline(state *uiState, turnNumbers map[string]int) {
 }
 
 func (s *server) ensureUserUIStateBaseline(workspacePath, userName string) error {
+	workspace, err := app.OpenWorkspace(workspacePath)
+	if err != nil {
+		return err
+	}
+	users, err := workspace.Users()
+	if err != nil {
+		return err
+	}
+	consumeLegacy := userName == app.LegacyDefaultUserName || len(users) == 1
+
 	s.uiStateMu.Lock()
 	defer s.uiStateMu.Unlock()
 	statePath := userUIStatePath(workspacePath, userName)
@@ -237,6 +277,25 @@ func (s *server) ensureUserUIStateBaseline(workspacePath, userName string) error
 	}
 	if stateExists && state.Version >= 2 {
 		return nil
+	}
+	legacyPaths := []string{uiStatePath(workspacePath), filepath.Join(workspacepath.ControlDir(workspacePath), "gui-state.json")}
+	migratedPaths := make([]string, 0, len(legacyPaths))
+	if !stateExists && consumeLegacy {
+		for _, legacy := range legacyPaths {
+			if _, statErr := os.Stat(legacy); os.IsNotExist(statErr) {
+				continue
+			} else if statErr != nil {
+				return statErr
+			}
+			legacyState, loadErr := loadUIStateFile(legacy)
+			if loadErr != nil {
+				return fmt.Errorf("migrate legacy UI state: %w", loadErr)
+			}
+			migratedPaths = append(migratedPaths, legacy)
+			if len(migratedPaths) == 1 {
+				state = legacyState
+			}
+		}
 	}
 	shared, err := loadResourceStateFile(resourceStatePath(workspacePath))
 	if err != nil {
@@ -253,13 +312,25 @@ func (s *server) ensureUserUIStateBaseline(workspacePath, userName string) error
 			sharedChanged = true
 		}
 	}
+	for resourceID, attention := range state.Attention {
+		if attention.TurnNumber > shared.TurnNumbers[resourceID] {
+			shared.TurnNumbers[resourceID] = attention.TurnNumber
+			sharedChanged = true
+		}
+	}
 	if sharedChanged {
 		if err := saveResourceStateFile(resourceStatePath(workspacePath), shared); err != nil {
 			return err
 		}
 	}
 	seedUnreadBaseline(&state, completedTurnBaseline(shared.TurnNumbers, records))
-	return saveUIStateFile(statePath, state)
+	if err := saveUIStateFile(statePath, state); err != nil {
+		return err
+	}
+	for _, legacy := range migratedPaths {
+		_ = os.Remove(legacy)
+	}
+	return nil
 }
 
 func userUIStatePath(workspacePath, userName string) string {

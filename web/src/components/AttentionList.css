@@ -185,46 +185,6 @@
   font-weight: 600;
 }
 
-:where([data-component-owner="attention-list"]) .activity-actions {
-  min-width: 18px;
-  display: flex;
-  align-items: center;
-  gap: 2px;
-}
-
-:where([data-component-owner="attention-list"]) .favorite-star {
-  width: 18px;
-  height: 18px;
-  display: grid;
-  place-items: center;
-  border-radius: 4px;
-  color: var(--sidebar-muted);
-  cursor: pointer;
-  opacity: 0;
-}
-
-:where([data-component-owner="attention-list"]) .activity-row:hover .favorite-star,
-:where([data-component-owner="attention-list"]) .activity-row:focus-within .favorite-star,
-:where([data-component-owner="attention-list"]) .favorite-star.favorite,
-:where([data-component-owner="attention-list"]) .favorite-star:focus-visible {
-  opacity: 1;
-}
-
-:where([data-component-owner="attention-list"]) .favorite-star:hover,
-:where([data-component-owner="attention-list"]) .favorite-star:focus-visible {
-  background: var(--sidebar-row);
-  color: var(--sidebar-text);
-}
-
-:where([data-component-owner="attention-list"]) .favorite-star svg {
-  width: 14px;
-  height: 14px;
-}
-
-:where([data-component-owner="attention-list"]) .favorite-star.favorite svg {
-  fill: currentColor;
-}
-
 :where([data-component-owner="attention-list"]) .empty-attention {
   grid-template-columns: 16px minmax(0, 1fr);
   cursor: default;
@@ -338,6 +298,44 @@
   color: var(--sidebar-text);
   font-size: calc(13px * var(--sidebar-font-scale, 1));
   line-height: 1.45;
+}
+
+/* Markdown-rendered message bodies keep the sidebar's compact sizing instead
+   of the global rich-content metrics, and markdown block structure replaces
+   pre-wrap whitespace handling. */
+:where([data-component-owner="attention-list"]) .inbox-text.markdown-rendered {
+  white-space: normal;
+  color: var(--sidebar-text);
+  font-size: calc(13px * var(--sidebar-font-scale, 1));
+  line-height: 1.45;
+}
+
+:where([data-component-owner="attention-list"]) .inbox-text.markdown-rendered h1,
+:where([data-component-owner="attention-list"]) .inbox-text.markdown-rendered h2,
+:where([data-component-owner="attention-list"]) .inbox-text.markdown-rendered h3,
+:where([data-component-owner="attention-list"]) .inbox-text.markdown-rendered h4 {
+  margin: 0.7em 0 0.3em;
+  color: var(--sidebar-text);
+  font-size: calc(14px * var(--sidebar-font-scale, 1));
+}
+
+:where([data-component-owner="attention-list"]) .inbox-text.markdown-rendered h2 {
+  padding-bottom: 0;
+  border-bottom: none;
+}
+
+:where([data-component-owner="attention-list"]) .inbox-text.markdown-rendered p,
+:where([data-component-owner="attention-list"]) .inbox-text.markdown-rendered ul,
+:where([data-component-owner="attention-list"]) .inbox-text.markdown-rendered ol,
+:where([data-component-owner="attention-list"]) .inbox-text.markdown-rendered blockquote,
+:where([data-component-owner="attention-list"]) .inbox-text.markdown-rendered pre,
+:where([data-component-owner="attention-list"]) .inbox-text.markdown-rendered table {
+  margin: 0 0 8px;
+}
+
+:where([data-component-owner="attention-list"]) .inbox-text.markdown-rendered pre {
+  white-space: pre-wrap;
+  font-size: calc(12px * var(--sidebar-font-scale, 1));
 }
 
 :where([data-component-owner="attention-list"]) .inbox-actions {

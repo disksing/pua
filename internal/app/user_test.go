@@ -1,6 +1,7 @@
 package app_test
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -18,8 +19,8 @@ func TestWorkspaceUsersLifecycleAndValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(users) != 1 || users[0].Name != app.DefaultUserName {
-		t.Fatalf("initialized users = %#v", users)
+	if len(users) != 0 {
+		t.Fatalf("initialized users = %#v, want none", users)
 	}
 
 	if _, err := workspace.RegisterUser("alice_2-test"); err != nil {
@@ -36,11 +37,19 @@ func TestWorkspaceUsersLifecycleAndValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gotNames := []string{users[0].Name, users[1].Name}
-	if !reflect.DeepEqual(gotNames, []string{"User", "alice_2-test"}) {
+	gotNames := []string{users[0].Name}
+	if !reflect.DeepEqual(gotNames, []string{"alice_2-test"}) {
 		t.Fatalf("user names = %v", gotNames)
 	}
 	if _, err := os.Stat(filepath.Join(workspace.Root(), ".pua", "users", "alice_2-test", "profile.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := workspace.DeleteUser("alice_2-test"); err != nil {
+		if !errors.Is(err, app.ErrLastUser) {
+			t.Fatal(err)
+		}
+	}
+	if _, err := workspace.RegisterUser("Bob"); err != nil {
 		t.Fatal(err)
 	}
 	if err := workspace.DeleteUser("alice_2-test"); err != nil {

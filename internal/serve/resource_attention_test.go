@@ -21,6 +21,9 @@ func attentionTestServer(t *testing.T) (*server, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := puaWorkspace.RegisterUser(app.LegacyDefaultUserName); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := puaWorkspace.CreateProject("Attention project", "attention"); err != nil {
 		t.Fatal(err)
 	}
@@ -35,11 +38,12 @@ func attentionRequest(t *testing.T, server *server, method, path, body string) *
 	t.Helper()
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(method, path, bytes.NewBufferString(body))
+	request.Header.Set(workspaceUserHeader, app.LegacyDefaultUserName)
 	server.handleWorkspace(recorder, request)
 	return recorder
 }
 
-func TestResourceFavoriteAndReadAPIAreIndependent(t *testing.T) {
+func TestResourceReadAPI(t *testing.T) {
 	server, workspace := attentionTestServer(t)
 	now := "2026-08-13T00:00:00Z"
 	record := generationRecord{
@@ -51,38 +55,21 @@ func TestResourceFavoriteAndReadAPIAreIndependent(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	recorder := attentionRequest(t, server, http.MethodPut, "/api/workspaces/workspace-one/resources/project1/favorite", `{"favorite":true}`)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("favorite returned %d: %s", recorder.Code, recorder.Body.String())
-	}
-	var state resourceUserStateSnapshot
-	if err := json.Unmarshal(recorder.Body.Bytes(), &state); err != nil {
-		t.Fatal(err)
-	}
-	if !state.Favorite || state.ReadTurnNumber != nil {
-		t.Fatalf("unexpected favorite state: %#v", state)
-	}
-
-	recorder = attentionRequest(t, server, http.MethodPut, "/api/workspaces/workspace-one/resources/project1/read", `{"throughTurnNumber":3}`)
+	recorder := attentionRequest(t, server, http.MethodPut, "/api/workspaces/workspace-one/resources/project1/read", `{"throughTurnNumber":3}`)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("read returned %d: %s", recorder.Code, recorder.Body.String())
 	}
+	var state resourceUserStateSnapshot
 	if err := json.Unmarshal(recorder.Body.Bytes(), &state); err != nil {
 		t.Fatal(err)
 	}
 	if state.ReadTurnNumber == nil || *state.ReadTurnNumber != 3 {
 		t.Fatalf("read did not record current Turn: %#v", state)
 	}
-	if !state.Favorite {
-		t.Fatalf("reading unexpectedly removed favorite: %#v", state)
-	}
 
-	tree, err := server.treeAt(context.Background(), workspace)
+	tree, err := server.treeAt(context.Background(), workspace, app.LegacyDefaultUserName)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if len(tree.Activity.Favorites) != 1 || tree.Activity.Favorites[0].ID != "project1" {
-		t.Fatalf("read favorite should remain in Favorites: %#v", tree.Activity.Favorites)
 	}
 	if len(tree.Activity.Unread) != 0 || tree.Projects[0].UnreadCount != 0 {
 		t.Fatalf("read resource remained unread: %#v", tree.Activity.Unread)
@@ -92,23 +79,12 @@ func TestResourceFavoriteAndReadAPIAreIndependent(t *testing.T) {
 	if err := rewriteTestGenerationRecords(workspace, []generationRecord{record}); err != nil {
 		t.Fatal(err)
 	}
-	tree, err = server.treeAt(context.Background(), workspace)
+	tree, err = server.treeAt(context.Background(), workspace, app.LegacyDefaultUserName)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(tree.Activity.Unread) != 1 || tree.Activity.Unread[0].ID != "project1" || tree.Projects[0].UnreadCount != 1 {
 		t.Fatalf("resource should become unread after next Turn: %#v", tree.Activity.Unread)
-	}
-
-	recorder = attentionRequest(t, server, http.MethodPut, "/api/workspaces/workspace-one/resources/project1/favorite", `{"favorite":false}`)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("unfavorite returned %d: %s", recorder.Code, recorder.Body.String())
-	}
-	if err := json.Unmarshal(recorder.Body.Bytes(), &state); err != nil {
-		t.Fatal(err)
-	}
-	if state.Favorite || state.ReadTurnNumber == nil || *state.ReadTurnNumber != 3 {
-		t.Fatalf("unfavorite changed the read cursor: %#v", state)
 	}
 }
 
@@ -141,7 +117,7 @@ func TestResourceReadAPIRejectsFutureTurnsAndNeverRegresses(t *testing.T) {
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("future read returned %d: %s", recorder.Code, recorder.Body.String())
 	}
-	state, err := server.resourceUserStateForResource(workspace, "project1")
+	state, err := server.resourceUserStateForResource(workspace, "project1", app.LegacyDefaultUserName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,10 +140,10 @@ func TestActiveTurnDoesNotCountAsUnreadAndCannotBeMarkedRead(t *testing.T) {
 	}
 	if _, err := server.mutateResourceUserStateAtPath(workspace, "project1", func(state *resourceUserState) {
 		state.ReadTurnNumber = intPointer(1)
-	}); err != nil {
+	}, app.LegacyDefaultUserName); err != nil {
 		t.Fatal(err)
 	}
-	tree, err := server.treeAt(context.Background(), workspace)
+	tree, err := server.treeAt(context.Background(), workspace, app.LegacyDefaultUserName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +164,7 @@ func TestActiveTurnDoesNotCountAsUnreadAndCannotBeMarkedRead(t *testing.T) {
 	if err := rewriteTestGenerationRecords(workspace, []generationRecord{record}); err != nil {
 		t.Fatal(err)
 	}
-	tree, err = server.treeAt(context.Background(), workspace)
+	tree, err = server.treeAt(context.Background(), workspace, app.LegacyDefaultUserName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +180,7 @@ func TestActiveTurnDoesNotCountAsUnreadAndCannotBeMarkedRead(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("ui-state update returned %d: %s", recorder.Code, recorder.Body.String())
 	}
-	state, err := server.loadUIState("workspace-one")
+	state, err := server.loadUIState("workspace-one", app.LegacyDefaultUserName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +206,7 @@ func TestSchedulerNeverCountsAsUnread(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	tree, err := server.treeAt(context.Background(), workspace)
+	tree, err := server.treeAt(context.Background(), workspace, app.LegacyDefaultUserName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,7 +234,7 @@ func TestActivityUsesLatestTurnAcrossRetiredGenerations(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	tree, err := server.treeAt(context.Background(), workspace)
+	tree, err := server.treeAt(context.Background(), workspace, app.LegacyDefaultUserName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,13 +295,6 @@ func TestResourceActivityListsAndSortsIndependentCategories(t *testing.T) {
 		}
 		resourceIDs = append(resourceIDs, task.ID)
 	}
-	for _, resourceID := range resourceIDs {
-		if _, err := server.mutateResourceUserStateAtPath(workspace, resourceID, func(state *resourceUserState) {
-			state.Favorite = true
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
 	records := []generationRecord{
 		{ID: "gen-running-newer", ResourceID: resourceIDs[0], Generation: 1, GenerationID: "gen-running-newer", AgentHubSessionID: "session-running-newer", Status: "running", CurrentTurnID: "turn-running-newer", TurnNumber: 1, TurnStartedAt: "2026-08-13T00:00:20Z", UpdatedAt: "2026-08-13T00:00:21Z"},
 		{ID: "gen-running-older", ResourceID: resourceIDs[1], Generation: 1, GenerationID: "gen-running-older", AgentHubSessionID: "session-running-older", Status: "running", CurrentTurnID: "turn-running-older", TurnNumber: 1, TurnStartedAt: "2026-08-13T00:00:10Z", UpdatedAt: "2026-08-13T00:00:59Z"},
@@ -336,17 +305,16 @@ func TestResourceActivityListsAndSortsIndependentCategories(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tree, err := server.treeAt(context.Background(), workspace)
+	tree, err := server.treeAt(context.Background(), workspace, app.LegacyDefaultUserName)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := make([]string, 0, len(tree.Activity.Favorites))
-	for _, item := range tree.Activity.Favorites {
-		got = append(got, item.ID)
+	unread := make([]string, 0, len(tree.Activity.Unread))
+	for _, item := range tree.Activity.Unread {
+		unread = append(unread, item.ID)
 	}
-	want := []string{resourceIDs[3], resourceIDs[2], resourceIDs[0], resourceIDs[1]}
-	if !slices.Equal(got, want) {
-		t.Fatalf("Favorites order = %v, want %v", got, want)
+	if wantUnread := []string{resourceIDs[3], resourceIDs[2]}; !slices.Equal(unread, wantUnread) {
+		t.Fatalf("Unread order = %v, want %v", unread, wantUnread)
 	}
 	running := []string{}
 	for _, item := range tree.Activity.Running {
@@ -385,7 +353,7 @@ func TestResourceActivityProblemsIncludeOnlyBlockedAndErrorTasks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tree, err := server.treeAt(context.Background(), workspace)
+	tree, err := server.treeAt(context.Background(), workspace, app.LegacyDefaultUserName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,73 +363,6 @@ func TestResourceActivityProblemsIncludeOnlyBlockedAndErrorTasks(t *testing.T) {
 	}
 	if len(got) != 2 || !slices.Contains(got, blocked.ID) || !slices.Contains(got, errorTask.ID) || slices.Contains(got, waiting.ID) {
 		t.Fatalf("Problems = %v, want blocked and error Tasks only", got)
-	}
-}
-
-func TestAcceptResourceMessageDoesNotFavoriteResource(t *testing.T) {
-	server, workspace := attentionTestServer(t)
-	manager := newAgentManager(server)
-	server.agents = manager
-	message, err := manager.acceptResourceMessage(context.Background(), serveWorkspace{ID: "workspace-one", Path: workspace}, "project1", resourceMessageRequest{Text: "hello", Role: "user"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if message.ResourceID != "project1" {
-		t.Fatalf("message resource id = %q", message.ResourceID)
-	}
-	state, err := server.resourceUserStateForResource(workspace, "project1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if state.Favorite {
-		t.Fatalf("message unexpectedly favorited resource: %#v", state)
-	}
-}
-
-func TestCreateProjectAndTaskDoNotFavoriteResources(t *testing.T) {
-	workspace := t.TempDir()
-	if _, err := app.Initialize(workspace, "en"); err != nil {
-		t.Fatal(err)
-	}
-	server := &server{config: filepath.Join(t.TempDir(), "serve.json")}
-	if err := server.saveConfig(config{Version: agentHubConfigVersion, Workspaces: []serveWorkspace{{ID: "workspace-one", Path: workspace}}, AgentHubEndpoint: "http://127.0.0.1:1"}); err != nil {
-		t.Fatal(err)
-	}
-
-	projectResponse := attentionRequest(t, server, http.MethodPost, "/api/workspaces/workspace-one/projects", `{"description":"Created project"}`)
-	if projectResponse.Code != http.StatusOK {
-		t.Fatalf("project creation returned %d: %s", projectResponse.Code, projectResponse.Body.String())
-	}
-	var project struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(projectResponse.Body.Bytes(), &project); err != nil {
-		t.Fatal(err)
-	}
-	state, err := server.resourceUserStateForResource(workspace, project.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if state.Favorite {
-		t.Fatalf("created project was unexpectedly favorited: %#v", state)
-	}
-
-	taskResponse := attentionRequest(t, server, http.MethodPost, "/api/workspaces/workspace-one/tasks", `{"project":"project1","title":"Created task"}`)
-	if taskResponse.Code != http.StatusOK {
-		t.Fatalf("task creation returned %d: %s", taskResponse.Code, taskResponse.Body.String())
-	}
-	var task struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(taskResponse.Body.Bytes(), &task); err != nil {
-		t.Fatal(err)
-	}
-	state, err = server.resourceUserStateForResource(workspace, task.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if state.Favorite {
-		t.Fatalf("created task was unexpectedly favorited: %#v", state)
 	}
 }
 

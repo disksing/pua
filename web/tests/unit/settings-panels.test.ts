@@ -25,7 +25,7 @@ function model(overrides: Partial<SettingsModel> = {}): SettingsModel {
       { id: "green", label: "Green", src: "/green.png" },
     ],
     workspaceIconSavingId: "",
-    userName: "User",
+    suggestedUserName: "ServerUser",
     appearance: { layout: "auto", fontScales: { sidebar: 1, details: 1, chat: 1 }, theme: "default", themeOptions: [{ id: "default", label: "Default", description: "The standard PUA appearance" }] },
     agentHub: {
       mode: "external",
@@ -51,7 +51,6 @@ function model(overrides: Partial<SettingsModel> = {}): SettingsModel {
     onRemoveWorkspace: vi.fn(async () => undefined),
     onWorkspaceIcon: vi.fn(async () => undefined),
     onSaveWorkspaceName: vi.fn(async () => undefined),
-    onSaveUser: vi.fn(async (name) => name.trim() || "User"),
     onLayoutPreference: vi.fn(),
     onFontScale: vi.fn(),
     onResetFontScales: vi.fn(),
@@ -190,51 +189,6 @@ describe("settings domain panels", () => {
     await tick();
     expect(failing.onSaveWorkspaceName).toHaveBeenCalledTimes(1);
     expect(failingTarget.querySelector(".settings-workspace-name-form")).toBeNull();
-  });
-
-  it("normalizes and persists browser-local user names while containing save failures", async () => {
-    const save = deferred<string>();
-    const onSaveUser = vi.fn()
-      .mockImplementationOnce(() => save.promise)
-      .mockRejectedValueOnce(new Error("user save failed"));
-    const current = model({ onSaveUser });
-    const draft = createSettingsDraft(current);
-    const target = document.body.appendChild(document.createElement("div"));
-    const component = mount(SettingsPanelHarness, { target, props: { panel: "user", model: current, initialDraft: draft } });
-    cleanups.push(() => unmount(component));
-    await tick();
-
-    input(target.querySelector<HTMLInputElement>("#settingsUserName")!, "  Alice  ");
-    const saveButton = target.querySelector<HTMLButtonElement>('[type="submit"]')!;
-    saveButton.click();
-    saveButton.click();
-    await tick();
-    expect(onSaveUser).toHaveBeenCalledTimes(1);
-    expect(saveButton.disabled).toBe(true);
-
-    save.resolve("Alice");
-    await vi.waitFor(() => expect(saveButton.disabled).toBe(false));
-    expect(target.querySelector<HTMLInputElement>("#settingsUserName")?.value).toBe("Alice");
-
-    saveButton.click();
-    await vi.waitFor(() => expect(current.onToast).toHaveBeenCalledWith("user save failed"));
-  });
-
-  it("keeps the visible user name synchronized after filtering invalid characters", async () => {
-    const onSaveUser = vi.fn(async () => "badname");
-    const current = model({ onSaveUser });
-    const draft = createSettingsDraft(current);
-    const target = document.body.appendChild(document.createElement("div"));
-    const component = mount(SettingsPanelHarness, { target, props: { panel: "user", model: current, initialDraft: draft } });
-    cleanups.push(() => unmount(component));
-    await tick();
-
-    const nameInput = target.querySelector<HTMLInputElement>("#settingsUserName")!;
-    input(nameInput, "bad name");
-    expect(nameInput.value).toBe("badname");
-    nameInput.form!.requestSubmit();
-    await vi.waitFor(() => expect(onSaveUser).toHaveBeenCalledWith("badname"));
-    expect(nameInput.value).toBe("badname");
   });
 
   it("routes appearance layout and font scale changes through the settings model", async () => {

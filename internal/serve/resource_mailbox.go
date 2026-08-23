@@ -63,6 +63,19 @@ type resourceMailbox struct {
 	Messages     []resourceMailboxMessage `json:"messages"`
 }
 
+// providerMessageContext freezes the PUA-owned prompt presentation chosen at
+// the delivery boundary. It is deliberately separate from puaMessagePayload:
+// AgentHub persists that payload opaquely for history, while this context is
+// only PUA's deterministic retry input.
+type providerMessageContext struct {
+	Language       string                 `json:"language"`
+	TurnID         string                 `json:"turnId,omitempty"`
+	OpenerRole     string                 `json:"openerRole"`
+	OpenerSender   *agentHubMessageSender `json:"openerSender,omitempty"`
+	OpenerResponse string                 `json:"openerResponse"`
+	OpenerUnknown  bool                   `json:"openerUnknown,omitempty"`
+}
+
 // resourceMailboxMessage is the durable PUA-side ownership record for one
 // accepted resource message. Delivery is complete when AgentHub has durably
 // accepted the stable message id and assumed its at-least-once responsibility;
@@ -93,6 +106,7 @@ type resourceMailboxMessage struct {
 	GenerationID              string                       `json:"generationId,omitempty"`
 	AgentHubSessionID         string                       `json:"agentHubSessionId,omitempty"`
 	TurnID                    string                       `json:"turnId,omitempty"`
+	ProviderContext           *providerMessageContext      `json:"providerContext,omitempty"`
 	TurnTerminalAt            string                       `json:"turnTerminalAt,omitempty"`
 	InterruptTurnID           string                       `json:"interruptTurnId,omitempty"`
 	InterruptAt               string                       `json:"interruptAt,omitempty"`
@@ -348,6 +362,14 @@ func cloneMailboxMessage(message resourceMailboxMessage) resourceMailboxMessage 
 	if message.Notification != nil {
 		notification := *message.Notification
 		cloned.Notification = &notification
+	}
+	if message.ProviderContext != nil {
+		context := *message.ProviderContext
+		if context.OpenerSender != nil {
+			sender := *context.OpenerSender
+			context.OpenerSender = &sender
+		}
+		cloned.ProviderContext = &context
 	}
 	return cloned
 }
@@ -1398,6 +1420,10 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 		}
 		if message.Status != resourceMessageDelivering && session.State != "ready" && message.ActualMode != resourceMessageModeSteer {
 			return nil
+		}
+		message, err = m.ensureProviderMessageContext(ctx, workspace, client, session, record.GenerationID, message)
+		if err != nil {
+			return err
 		}
 		deliveryPlan := lifecyclePlan
 		if err := m.prepareTaskWorkChain(workspace, message, rt); err != nil {

@@ -6,6 +6,7 @@ export interface AgentOption {
 
 export interface WorkspaceOption {
   id: string;
+  instanceId?: string;
   name: string;
   path: string;
   icon?: string;

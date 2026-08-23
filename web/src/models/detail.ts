@@ -112,6 +112,8 @@ export interface DetailPanelModel {
   onSaveDescription: (description: string) => Promise<void>;
   onSaveWorkspaceDefaults: (defaults: { project: ResourceAgentBindingModel; task: ResourceAgentBindingModel }) => Promise<void>;
   onSaveWorkspaceUserPreference: (name: string, preference: string) => Promise<void>;
+  onSwitchWorkspaceUser: (name: string) => Promise<void>;
+  onAddWorkspaceUser: (name: string) => Promise<void>;
   onDeleteWorkspaceUser: (name: string) => Promise<void>;
   onSaveGenerationPolicy: (policy: GenerationPolicyRecord) => Promise<void>;
   onSaveStallWatchdogPolicy: (policy: StallWatchdogPolicyRecord) => Promise<void>;

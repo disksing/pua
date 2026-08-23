@@ -6,6 +6,7 @@
   import AgentBindingSelector from "./AgentBindingSelector.svelte";
   import Icon from "./Icon.svelte";
   import type { DetailPanelModel } from "./models";
+  import { sanitizeUserNameInput, validateUserName } from "../controllers/user-settings-controller";
 
   let { model, onOpenTemplate }: { model: DetailPanelModel; onOpenTemplate?: (path: string) => void } = $props();
 
@@ -25,6 +26,7 @@
   let descDraft = $state("");
   let descInput = $state<HTMLInputElement | null>(null);
   let preferenceDrafts = $state<Record<string, string>>({});
+  let newUserName = $state("");
   $effect(() => {
     const wake = model.detail?.scheduler?.wakeIntervalMinutes;
     if (typeof wake === "number") interval = wake;
@@ -81,6 +83,21 @@
 
   function deleteUser(name: string): void {
     void run(`delete-user:${name}`, () => model.onDeleteWorkspaceUser(name));
+  }
+
+  function switchUser(name: string): void {
+    if (!name || name === model.currentUserName) return;
+    void run(`switch-user:${name}`, () => model.onSwitchWorkspaceUser(name));
+  }
+
+  function addUser(): void {
+    let name: string;
+    try { name = validateUserName(newUserName); }
+    catch (reason) { model.onToast(reason instanceof Error ? reason.message : String(reason)); return; }
+    void run("add-user", async () => {
+      await model.onAddWorkspaceUser(name);
+      newUserName = "";
+    });
   }
 
   function saveGenerationPolicy(): void {
@@ -254,6 +271,16 @@
         <span>Workspace-local users and the preferences Agents can query with the CLI.</span>
       </div>
       <div class="resource-settings-list">
+        <div class="resource-settings-row resource-settings-user-controls">
+          <label class="resource-settings-row-label" for="workspaceCurrentUser"><strong>Current user</strong><span>Controls personal read state, preferences, and inbox in this browser.</span></label>
+          <select id="workspaceCurrentUser" value={model.currentUserName} disabled={Boolean(pending)} onchange={(event) => switchUser((event.currentTarget as HTMLSelectElement).value)}>
+            {#each model.workspaceUsers as user (user.name)}<option value={user.name}>{user.name}</option>{/each}
+          </select>
+        </div>
+        <form class="resource-settings-row resource-settings-add-user" onsubmit={(event) => { event.preventDefault(); addUser(); }}>
+          <label class="resource-settings-row-label" for="workspaceNewUser"><strong>Add user</strong><span>Creates another identity in this Workspace without switching to it.</span></label>
+          <div><input id="workspaceNewUser" value={newUserName} placeholder="e.g. Alice" disabled={Boolean(pending)} oninput={(event) => newUserName = sanitizeUserNameInput((event.currentTarget as HTMLInputElement).value)} /><button type="submit" class="secondary-button" disabled={Boolean(pending) || !newUserName}><Icon name="plus" /><span>{pending === "add-user" ? "Adding..." : "Add"}</span></button></div>
+        </form>
         {#each model.workspaceUsers as user (user.name)}
           <div class="resource-settings-user-row">
             <div class="resource-settings-user-head">

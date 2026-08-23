@@ -17,6 +17,9 @@ func TestWorkspaceDefaultsAndProjectTaskDefaultHTTPAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := puaWorkspace.RegisterUser(app.LegacyDefaultUserName); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := puaWorkspace.EnsureResourceRuntime(); err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +37,9 @@ func TestWorkspaceDefaultsAndProjectTaskDefaultHTTPAPI(t *testing.T) {
 	}
 	request := func(method, path, body string) *httptest.ResponseRecorder {
 		recorder := httptest.NewRecorder()
-		s.handleWorkspace(recorder, httptest.NewRequest(method, path, strings.NewReader(body)))
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set(workspaceUserHeader, app.LegacyDefaultUserName)
+		s.handleWorkspace(recorder, req)
 		return recorder
 	}
 

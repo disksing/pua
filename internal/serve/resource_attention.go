@@ -15,33 +15,29 @@ import (
 )
 
 // resourceAttentionState is the version 1 persisted shape. It is read only
-// while migrating Follow/Dismiss state to the version 2 resource state model.
+// while migrating read cursors to the version 2 resource state model.
 type resourceAttentionState struct {
-	Followed       bool `json:"followed"`
 	ReadTurnNumber *int `json:"readTurnNumber,omitempty"`
 	DismissedTurn  *int `json:"dismissedTurn,omitempty"`
 	TurnNumber     int  `json:"turnNumber,omitempty"`
 }
 
 type resourceUserState struct {
-	Favorite       bool `json:"favorite,omitempty"`
 	ReadTurnNumber *int `json:"readTurnNumber,omitempty"`
 }
 
 type resourceUserStateSnapshot struct {
-	Favorite       bool `json:"favorite"`
 	ReadTurnNumber *int `json:"readTurnNumber,omitempty"`
 }
 
 type resourceActivityLists struct {
-	Running   []resourceSnapshot `json:"running"`
-	Favorites []resourceSnapshot `json:"favorites"`
-	Unread    []resourceSnapshot `json:"unread"`
-	Problems  []resourceSnapshot `json:"problems"`
+	Running  []resourceSnapshot `json:"running"`
+	Unread   []resourceSnapshot `json:"unread"`
+	Problems []resourceSnapshot `json:"problems"`
 }
 
 func resourceUserStateSnapshotForState(state resourceUserState) *resourceUserStateSnapshot {
-	return &resourceUserStateSnapshot{Favorite: state.Favorite, ReadTurnNumber: cloneIntPointer(state.ReadTurnNumber)}
+	return &resourceUserStateSnapshot{ReadTurnNumber: cloneIntPointer(state.ReadTurnNumber)}
 }
 
 type resourceState struct {
@@ -83,9 +79,9 @@ func loadUIStateFile(path string) (uiState, error) {
 			attention.ReadTurnNumber = cloneIntPointer(attention.DismissedTurn)
 		}
 		state.Attention[resourceID] = attention
-		if _, exists := state.ResourceStates[resourceID]; !exists && (attention.Followed || attention.ReadTurnNumber != nil) {
+		if _, exists := state.ResourceStates[resourceID]; !exists && attention.ReadTurnNumber != nil {
 			state.ResourceStates[resourceID] = resourceUserState{
-				Favorite: attention.Followed, ReadTurnNumber: cloneIntPointer(attention.ReadTurnNumber),
+				ReadTurnNumber: cloneIntPointer(attention.ReadTurnNumber),
 			}
 		}
 	}
@@ -100,7 +96,7 @@ func saveUIStateFile(path string, state uiState) error {
 		state.ResourceStates = map[string]resourceUserState{}
 	}
 	for resourceID, resourceState := range state.ResourceStates {
-		if !resourceState.Favorite && resourceState.ReadTurnNumber == nil {
+		if resourceState.ReadTurnNumber == nil {
 			delete(state.ResourceStates, resourceID)
 		}
 	}
@@ -175,13 +171,17 @@ func selectedUserName(userNames []string) string {
 	if len(userNames) > 0 && strings.TrimSpace(userNames[0]) != "" {
 		return userNames[0]
 	}
-	return app.DefaultUserName
+	return ""
 }
 
 func (s *server) loadResourceStatesAtPath(path string, userNames ...string) (map[string]resourceUserState, error) {
+	userName := selectedUserName(userNames)
+	if userName == "" {
+		return map[string]resourceUserState{}, nil
+	}
 	s.uiStateMu.Lock()
 	defer s.uiStateMu.Unlock()
-	state, err := loadUIStateFile(userUIStatePath(path, selectedUserName(userNames)))
+	state, err := loadUIStateFile(userUIStatePath(path, userName))
 	if err != nil {
 		return nil, err
 	}
@@ -189,9 +189,13 @@ func (s *server) loadResourceStatesAtPath(path string, userNames ...string) (map
 }
 
 func (s *server) mutateResourceUserStateAtPath(path, resourceID string, mutate func(*resourceUserState), userNames ...string) (resourceUserState, error) {
+	userName := selectedUserName(userNames)
+	if userName == "" {
+		return resourceUserState{}, &resourceAPIError{Code: "user_required", Message: "select a Workspace user before accessing personal data"}
+	}
 	s.uiStateMu.Lock()
 	defer s.uiStateMu.Unlock()
-	statePath := userUIStatePath(path, selectedUserName(userNames))
+	statePath := userUIStatePath(path, userName)
 	state, err := loadUIStateFile(statePath)
 	if err != nil {
 		return resourceUserState{}, err
@@ -202,7 +206,7 @@ func (s *server) mutateResourceUserStateAtPath(path, resourceID string, mutate f
 	resourceID = normalizedResourceID(resourceID)
 	resourceState := state.ResourceStates[resourceID]
 	mutate(&resourceState)
-	if !resourceState.Favorite && resourceState.ReadTurnNumber == nil {
+	if resourceState.ReadTurnNumber == nil {
 		delete(state.ResourceStates, resourceID)
 	} else {
 		state.ResourceStates[resourceID] = resourceState
@@ -214,7 +218,7 @@ func (s *server) mutateResourceUserStateAtPath(path, resourceID string, mutate f
 }
 
 // pruneUIStateForArchivedResources removes persisted UI state entries that
-// reference resources removed by an archive, so favorite stars, expansion state
+// reference resources removed by an archive, so read cursors, expansion state
 // and custom ordering cannot leak into a resource that later reuses the ID.
 func (s *server) pruneUIStateForArchivedResources(workspacePath string, resourceIDs []string) error {
 	if len(resourceIDs) == 0 {
@@ -404,56 +408,6 @@ func (s *server) allocateResourceTurnNumber(path, resourceID string) (int, error
 	return state.TurnNumbers[resourceID], nil
 }
 
-func (s *server) handleResourceFavorite(w http.ResponseWriter, r *http.Request, workspaceID, resourceID string) {
-	workspace, err := s.workspace(workspaceID)
-	if err != nil {
-		writeError(w, err, http.StatusNotFound)
-		return
-	}
-	resourceID = normalizedResourceID(resourceID)
-	userName, err := s.workspaceUserName(r, workspace.Path)
-	if err != nil {
-		writeError(w, err, http.StatusBadRequest)
-		return
-	}
-	if err := validateFavoriteResource(workspace.Path, resourceID); err != nil {
-		writeError(w, err, http.StatusBadRequest)
-		return
-	}
-	switch r.Method {
-	case http.MethodGet:
-		resourceState, err := s.resourceUserStateForResource(workspace.Path, resourceID, userName)
-		if err != nil {
-			writeError(w, err, http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, resourceUserStateSnapshotForState(resourceState))
-	case http.MethodPut:
-		var body struct {
-			Favorite *bool `json:"favorite"`
-		}
-		decoder := json.NewDecoder(r.Body)
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&body); err != nil || body.Favorite == nil {
-			if err == nil {
-				err = errors.New("favorite is required")
-			}
-			writeError(w, err, http.StatusBadRequest)
-			return
-		}
-		resourceState, err := s.mutateResourceUserStateAtPath(workspace.Path, resourceID, func(state *resourceUserState) {
-			state.Favorite = *body.Favorite
-		}, userName)
-		if err != nil {
-			writeError(w, err, http.StatusInternalServerError)
-			return
-		}
-		writeJSON(w, resourceUserStateSnapshotForState(resourceState))
-	default:
-		w.WriteHeader(http.StatusMethodNotAllowed)
-	}
-}
-
 func (s *server) handleResourceRead(w http.ResponseWriter, r *http.Request, workspaceID, resourceID string) {
 	if r.Method != http.MethodPut {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -547,14 +501,6 @@ func validateAttentionResource(path, resourceID string) error {
 		return fmt.Errorf("resource %s is archived", resourceID)
 	}
 	return nil
-}
-
-func validateFavoriteResource(path, resourceID string) error {
-	resourceID = normalizedResourceID(resourceID)
-	if resourceID == "workspace" || resourceID == app.SchedulerResourceID {
-		return fmt.Errorf("resource %s cannot be favorited", resourceID)
-	}
-	return validateAttentionResource(path, resourceID)
 }
 
 func latestTurnGenerationByResource(records []generationRecord) map[string]generationRecord {
@@ -739,8 +685,8 @@ func (s *server) enrichTreeResourceActivity(workspacePath string, tree *workspac
 		candidates = append(candidates, project.Children...)
 	}
 	tree.Activity = resourceActivityLists{
-		Running: make([]resourceSnapshot, 0), Favorites: make([]resourceSnapshot, 0),
-		Unread: make([]resourceSnapshot, 0), Problems: make([]resourceSnapshot, 0),
+		Running: make([]resourceSnapshot, 0),
+		Unread:  make([]resourceSnapshot, 0), Problems: make([]resourceSnapshot, 0),
 	}
 	for _, item := range candidates {
 		if item.Archived {
@@ -749,9 +695,6 @@ func (s *server) enrichTreeResourceActivity(workspacePath string, tree *workspac
 		item.Children = nil
 		if item.Runtime != nil && item.Runtime.ActiveTurn {
 			tree.Activity.Running = append(tree.Activity.Running, item)
-		}
-		if (item.Type == "project" || item.Type == "task") && item.UserState != nil && item.UserState.Favorite {
-			tree.Activity.Favorites = append(tree.Activity.Favorites, item)
 		}
 		if item.UnreadCount > 0 {
 			tree.Activity.Unread = append(tree.Activity.Unread, item)
@@ -766,7 +709,6 @@ func (s *server) enrichTreeResourceActivity(workspacePath string, tree *workspac
 		}
 		return ""
 	})
-	sortResourceActivity(tree.Activity.Favorites, func(item resourceSnapshot) string { return item.LatestTurnAt })
 	sortResourceActivity(tree.Activity.Unread, func(item resourceSnapshot) string { return item.LatestTurnAt })
 	sortResourceActivity(tree.Activity.Problems, func(item resourceSnapshot) string { return item.StateUpdatedAt })
 	return nil

@@ -80,6 +80,7 @@ type resourceMailboxReceipt struct {
 	GenerationID              string                       `json:"generationId,omitempty"`
 	AgentHubSessionID         string                       `json:"agentHubSessionId,omitempty"`
 	TurnID                    string                       `json:"turnId,omitempty"`
+	ProviderContext           *providerMessageContext      `json:"providerContext,omitempty"`
 	InterruptTurnID           string                       `json:"interruptTurnId,omitempty"`
 	InterruptAt               string                       `json:"interruptAt,omitempty"`
 	PromotedAt                string                       `json:"promotedAt,omitempty"`
@@ -428,6 +429,18 @@ func cloneMailboxCausation(causation *resourceMessageCausation) *resourceMessage
 	return &cloned
 }
 
+func cloneProviderMessageContext(context *providerMessageContext) *providerMessageContext {
+	if context == nil {
+		return nil
+	}
+	cloned := *context
+	if context.OpenerSender != nil {
+		sender := *context.OpenerSender
+		cloned.OpenerSender = &sender
+	}
+	return &cloned
+}
+
 func receiptFromMailboxMessage(message resourceMailboxMessage) resourceMailboxReceipt {
 	var sender *agentHubMessageSender
 	if message.Sender != nil {
@@ -443,7 +456,7 @@ func receiptFromMailboxMessage(message resourceMailboxMessage) resourceMailboxRe
 		DowngradeReason: message.DowngradeReason, Status: message.Status, AcceptedAt: message.AcceptedAt,
 		UpdatedAt: message.UpdatedAt, DeliveredAt: message.DeliveredAt, TerminalAt: message.TerminalAt,
 		TurnTerminalAt: message.TurnTerminalAt, GenerationID: message.GenerationID,
-		AgentHubSessionID: message.AgentHubSessionID, TurnID: message.TurnID, InterruptTurnID: message.InterruptTurnID,
+		AgentHubSessionID: message.AgentHubSessionID, TurnID: message.TurnID, ProviderContext: cloneProviderMessageContext(message.ProviderContext), InterruptTurnID: message.InterruptTurnID,
 		InterruptAt: message.InterruptAt, PromotedAt: message.PromotedAt, LastError: message.LastError,
 		LastErrorCode:          message.LastErrorCode,
 		subscribeResultPresent: message.subscribeResultPresent,
@@ -465,7 +478,7 @@ func mailboxMessageFromReceipt(receipt resourceMailboxReceipt) resourceMailboxMe
 		DowngradeReason: receipt.DowngradeReason, Status: receipt.Status, AcceptedAt: receipt.AcceptedAt,
 		UpdatedAt: receipt.UpdatedAt, DeliveredAt: receipt.DeliveredAt, TerminalAt: receipt.TerminalAt,
 		TurnTerminalAt: receipt.TurnTerminalAt, GenerationID: receipt.GenerationID,
-		AgentHubSessionID: receipt.AgentHubSessionID, TurnID: receipt.TurnID, InterruptTurnID: receipt.InterruptTurnID,
+		AgentHubSessionID: receipt.AgentHubSessionID, TurnID: receipt.TurnID, ProviderContext: cloneProviderMessageContext(receipt.ProviderContext), InterruptTurnID: receipt.InterruptTurnID,
 		InterruptAt: receipt.InterruptAt, PromotedAt: receipt.PromotedAt, LastError: receipt.LastError,
 		LastErrorCode: receipt.LastErrorCode, receipt: true,
 		subscribeResultPresent: receipt.subscribeResultPresent,

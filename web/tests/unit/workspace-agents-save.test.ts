@@ -55,19 +55,19 @@ describe("Workspace AGENTS save flow", () => {
       const url = new URL(String(input), window.location.origin);
       const method = init?.method || "GET";
       if (url.pathname === "/api/workspaces" && method === "GET") {
-        return json({ activeId: "ws-test", workspaces: [{ id: "ws-test", name: "Test workspace", path: "/tmp/ws-test" }], agents: [], agentProfiles: [] });
+        return json({ activeId: "ws-test", workspaces: [{ id: "ws-test", instanceId: "instance-test", name: "Test workspace", path: "/tmp/ws-test" }], agents: [], agentProfiles: [] });
       }
       if (url.pathname === "/api/settings/agenthub" && method === "GET") {
         return json({ connected: false, compatible: false, catalog: { providers: [], agents: [] }, config: { agentProfiles: [] } });
       }
       if (url.pathname === "/api/workspaces/ws-test/users") {
-        if (method === "POST") return json({ version: 1, name: "User", preference: "" });
         return json({ users: [{ version: 1, name: "User", preference: "" }] });
       }
+      if (url.pathname === "/api/workspaces/ws-test/users/User/messages" && method === "GET") return json({ messages: [] });
       if (url.pathname === "/api/workspaces/ws-test/ui-state" && method === "GET") return json({});
       if (url.pathname === "/api/workspaces/ws-test/ui-state" && method === "PUT") return json({});
       if (url.pathname === "/api/workspaces/ws-test/tree" && method === "GET") {
-		return json({ agentBinding: { kind: "profile", name: "default" }, projects: [], activity: { running: [], favorites: [], unread: [], problems: [] }, wiki: { exists: false } });
+		return json({ agentBinding: { kind: "profile", name: "default" }, projects: [], activity: { running: [], unread: [], problems: [] }, wiki: { exists: false } });
       }
       if (url.pathname === "/api/workspaces/ws-test/files" && url.searchParams.get("path") === "AGENTS.md") {
         if (method === "PUT") {

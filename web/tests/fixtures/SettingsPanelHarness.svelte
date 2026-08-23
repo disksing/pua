@@ -4,10 +4,9 @@
   import NotificationSettingsPanel from "../../src/components/NotificationSettingsPanel.svelte";
   import ProfilesSettingsPanel from "../../src/components/ProfilesSettingsPanel.svelte";
   import type { SettingsDraft, SettingsModel } from "../../src/components/models";
-  import UserSettingsPanel from "../../src/components/UserSettingsPanel.svelte";
   import WorkspaceSettingsPanel from "../../src/components/WorkspaceSettingsPanel.svelte";
 
-  type Panel = "workspace" | "user" | "appearance" | "agenthub" | "profiles" | "notifications";
+  type Panel = "workspace" | "appearance" | "agenthub" | "profiles" | "notifications";
 
   let { panel, model, initialDraft }: { panel: Panel; model: SettingsModel; initialDraft: SettingsDraft } = $props();
   // svelte-ignore state_referenced_locally
@@ -26,8 +25,6 @@
 
 {#if panel === "workspace"}
   <WorkspaceSettingsPanel workspaces={model.workspaces} activeWorkspaceId={model.activeWorkspaceId} workspaceIcons={model.workspaceIcons} bind:draft bind:pending onAddWorkspace={model.onAddWorkspace} onRemoveWorkspace={model.onRemoveWorkspace} onWorkspaceIcon={model.onWorkspaceIcon} onSaveWorkspaceName={model.onSaveWorkspaceName} onToast={model.onToast} />
-{:else if panel === "user"}
-  <UserSettingsPanel userName={draft.userName} onUserNameInput={(value) => draft.userName = value} bind:pending onSaveUser={model.onSaveUser} onToast={model.onToast} />
 {:else if panel === "appearance"}
   <AppearanceSettingsPanel appearance={model.appearance} onLayoutPreference={model.onLayoutPreference} onFontScale={model.onFontScale} onResetFontScales={model.onResetFontScales} onThemePreference={model.onThemePreference} />
 {:else if panel === "agenthub"}

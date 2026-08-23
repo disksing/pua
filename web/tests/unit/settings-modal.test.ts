@@ -22,7 +22,7 @@ afterEach(async () => {
     activeWorkspaceId: "workspace-a",
     workspaceIcons: [{ id: "", label: "PUA default", src: "/favicon.svg" }],
     workspaceIconSavingId: "",
-    userName: "User",
+    suggestedUserName: "ServerUser",
     appearance: { layout: "auto", fontScales: { sidebar: 1, details: 1, chat: 1 }, theme: "default", themeOptions: [{ id: "default", label: "Default", description: "The standard PUA appearance" }] },
     agentHub: {
       mode: "external",
@@ -45,7 +45,6 @@ afterEach(async () => {
     onRemoveWorkspace: vi.fn(async () => undefined),
     onWorkspaceIcon: vi.fn(async () => undefined),
     onSaveWorkspaceName: vi.fn(async () => undefined),
-    onSaveUser: vi.fn(async (name) => name.trim() || "User"),
     onLayoutPreference: vi.fn(),
     onFontScale: vi.fn(),
     onResetFontScales: vi.fn(),
@@ -80,54 +79,6 @@ describe("SettingsModal coordination", () => {
     expect(body.querySelector("h2")?.textContent).toBe("Workspaces");
   });
 
-  it("preserves a user draft while settings data refreshes and saves it", async () => {
-    const initial = model({ initialTab: "user", userName: "" });
-    const channel = createModelChannel(initial);
-    const target = document.body.appendChild(document.createElement("div"));
-    const component = mount(SettingsModal, { target, props: { channel } });
-    cleanups.push(() => unmount(component));
-    await tick();
-
-    const name = target.querySelector<HTMLInputElement>("#settingsUserName")!;
-    input(name, "Probe");
-    await tick();
-    expect(name.value).toBe("Probe");
-    channel.publish({ ...initial, dataVersion: 1, userName: "Remote User" });
-    await tick();
-    expect(name.value).toBe("Probe");
-    channel.publish({ ...initial, dataVersion: 2, userName: "" });
-    await tick();
-
-    expect(target.querySelector("[data-component-owner=\"user-settings-panel\"]")).toBeTruthy();
-    expect(name.value).toBe("Probe");
-    name.form!.requestSubmit();
-    await vi.waitFor(() => expect(initial.onSaveUser).toHaveBeenCalledWith("Probe"));
-    expect(name.value).toBe("Probe");
-  });
-
-  it("shows the default User value after saving an emptied user name", async () => {
-    const initial = model({ initialTab: "user" });
-    const channel = createModelChannel(initial);
-    const save = vi.fn(async () => {
-      channel.publish({ ...initial, dataVersion: 2, userName: "User" });
-      return "User";
-    });
-    initial.onSaveUser = save;
-    const target = document.body.appendChild(document.createElement("div"));
-    const component = mount(SettingsModal, { target, props: { channel } });
-    cleanups.push(() => unmount(component));
-    await tick();
-
-    const name = target.querySelector<HTMLInputElement>("#settingsUserName")!;
-    input(name, "");
-    await tick();
-    expect(name.required).toBe(false);
-    name.form!.requestSubmit();
-
-    await vi.waitFor(() => expect(save).toHaveBeenCalledWith(""));
-    await vi.waitFor(() => expect(name.value).toBe("User"));
-  });
-
   it("composes all domain panels and preserves a dirty focused draft across data refreshes", async () => {
     const initial = model();
     const channel = createModelChannel(initial);
@@ -138,7 +89,7 @@ describe("SettingsModal coordination", () => {
     await tick();
 
     const tabs = [...target.querySelectorAll<HTMLButtonElement>(".settings-tab")];
-    expect(tabs.map((tab) => tab.textContent?.trim())).toEqual(["Workspace", "User", "Appearance", "Agents", "Profiles", "Notifications"]);
+    expect(tabs.map((tab) => tab.textContent?.trim())).toEqual(["Workspace", "Appearance", "Agents", "Profiles", "Notifications"]);
     tabs.find((tab) => tab.textContent?.includes("Agents"))!.click();
     await tick();
 
@@ -151,7 +102,6 @@ describe("SettingsModal coordination", () => {
     channel.publish({
       ...initial,
       dataVersion: 2,
-      userName: "Refreshed User",
       agentHub: { ...initial.agentHub, configuredEndpoint: "http://127.0.0.1:9999" },
     });
     await tick();
@@ -219,7 +169,7 @@ describe("SettingsModal coordination", () => {
     cleanups.push(() => unmount(component));
     await tick();
 
-    target.querySelector<HTMLButtonElement>('.settings-tab:nth-of-type(4)')!.click();
+    [...target.querySelectorAll<HTMLButtonElement>(".settings-tab")].find((tab) => tab.textContent?.includes("Agents"))!.click();
     await tick();
     input(target.querySelector<HTMLInputElement>("#settingsAgentHubEndpoint")!, "http://dirty");
     await tick();

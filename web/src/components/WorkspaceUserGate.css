@@ -1,0 +1,72 @@
+:where([data-component-owner="app-shell"]) .workspace-user-gate {
+  grid-column: 1 / -1;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  overflow: auto;
+  padding: clamp(20px, 6vw, 72px);
+  background: var(--bg);
+  color: var(--text);
+}
+
+:where([data-component-owner="app-shell"]) .workspace-user-card {
+  width: min(100%, 560px);
+  display: grid;
+  gap: 22px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: var(--shadow-lg, 0 18px 48px color-mix(in srgb, var(--ink) 12%, transparent));
+  padding: clamp(22px, 5vw, 38px);
+}
+
+:where([data-component-owner="app-shell"]) .workspace-user-icon {
+  width: 46px;
+  height: 46px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--accent-deep);
+}
+
+:where([data-component-owner="app-shell"]) .workspace-user-icon svg { width: 23px; height: 23px; }
+:where([data-component-owner="app-shell"]) .workspace-user-copy { display: grid; gap: 8px; }
+:where([data-component-owner="app-shell"]) .workspace-user-copy p,
+:where([data-component-owner="app-shell"]) .workspace-user-copy h1 { margin: 0; }
+:where([data-component-owner="app-shell"]) .workspace-user-copy h1 { color: var(--ink); font-size: clamp(22px, 4vw, 30px); line-height: 1.15; }
+:where([data-component-owner="app-shell"]) .workspace-user-copy > p:not(.workspace-user-eyebrow):not(.workspace-user-warning) { color: var(--muted-strong); line-height: 1.55; }
+:where([data-component-owner="app-shell"]) .workspace-user-eyebrow { color: var(--accent-deep); font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+:where([data-component-owner="app-shell"]) .workspace-user-warning { border: 1px solid var(--amber); border-radius: 7px; background: var(--amber-soft); color: var(--amber-deep); padding: 9px 11px; font-size: 12px; }
+:where([data-component-owner="app-shell"]) .workspace-user-create { display: grid; gap: 8px; }
+:where([data-component-owner="app-shell"]) .workspace-user-create label { color: var(--muted-strong); font-size: 12px; font-weight: 800; }
+:where([data-component-owner="app-shell"]) .workspace-user-input-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+:where([data-component-owner="app-shell"]) .workspace-user-input-row input { min-width: 0; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--bg); color: var(--text); padding: 10px 12px; font: inherit; }
+:where([data-component-owner="app-shell"]) .workspace-user-input-row button { display: inline-flex; align-items: center; gap: 7px; border-radius: 7px; background: var(--accent); color: var(--panel); padding: 10px 14px; font-weight: 800; }
+:where([data-component-owner="app-shell"]) .workspace-user-input-row button svg { width: 15px; height: 15px; }
+:where([data-component-owner="app-shell"]) .workspace-user-create small,
+:where([data-component-owner="app-shell"]) .workspace-user-footnote { margin: 0; color: var(--muted); font-size: 11px; }
+:where([data-component-owner="app-shell"]) .workspace-user-options { display: grid; gap: 8px; }
+:where([data-component-owner="app-shell"]) .workspace-user-options > button { width: 100%; min-width: 0; display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; align-items: center; gap: 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--text); padding: 10px; text-align: left; }
+:where([data-component-owner="app-shell"]) .workspace-user-options > button:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-soft); }
+:where([data-component-owner="app-shell"]) .workspace-user-options > button > span:nth-child(2) { min-width: 0; display: grid; gap: 2px; }
+:where([data-component-owner="app-shell"]) .workspace-user-options strong,
+:where([data-component-owner="app-shell"]) .workspace-user-options small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+:where([data-component-owner="app-shell"]) .workspace-user-options small { color: var(--muted); }
+:where([data-component-owner="app-shell"]) .workspace-user-avatar { width: 38px; height: 38px; display: grid; place-items: center; border-radius: 8px; background: var(--accent); color: var(--panel); font-weight: 800; }
+:where([data-component-owner="app-shell"]) .workspace-user-add { border-top: 1px solid var(--line); padding-top: 18px; }
+:where([data-component-owner="app-shell"]) .workspace-user-add-toggle,
+:where([data-component-owner="app-shell"]) .workspace-user-cancel { width: fit-content; border: 0; background: transparent; color: var(--accent-deep); padding: 0; font: inherit; font-weight: 800; }
+:where([data-component-owner="app-shell"]) .workspace-user-add-toggle { display: inline-flex; align-items: center; gap: 7px; }
+:where([data-component-owner="app-shell"]) .workspace-user-add-toggle svg { width: 15px; height: 15px; }
+:where([data-component-owner="app-shell"]) .workspace-user-add-toggle:hover:not(:disabled),
+:where([data-component-owner="app-shell"]) .workspace-user-cancel:hover:not(:disabled) { color: var(--accent); }
+:where([data-component-owner="app-shell"]) .workspace-user-error { margin: 0; color: var(--red-deep, var(--accent-deep)); font-size: 12px; }
+
+@media (max-width: 560px) {
+  :where([data-component-owner="app-shell"]) .workspace-user-gate { padding: 14px; place-items: start stretch; }
+  :where([data-component-owner="app-shell"]) .workspace-user-card { border-radius: 9px; padding: 20px; }
+  :where([data-component-owner="app-shell"]) .workspace-user-input-row { grid-template-columns: 1fr; }
+  :where([data-component-owner="app-shell"]) .workspace-user-input-row button { justify-content: center; min-height: 44px; }
+}

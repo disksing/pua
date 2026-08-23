@@ -7,7 +7,7 @@ export function createSettingsDraft(model: SettingsModel): SettingsDraft {
     workspacePath: "",
     createWorkspace: false,
     workspaceLanguage: "en",
-    userName: model.userName,
+    initialUserName: model.suggestedUserName,
     endpoint: model.agentHub.configuredEndpoint || "http://127.0.0.1:4646/agenthub",
     profiles: model.profiles.map((profile) => ({ ...profile })),
     agentProviders: (model.agentHub.agentConfig?.providers || model.agentHub.providers.map((provider) => ({

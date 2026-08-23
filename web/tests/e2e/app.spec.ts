@@ -69,7 +69,7 @@ type MockActivityResource = {
   path: string;
   archived: boolean;
   state?: string;
-  userState?: { favorite: boolean; readTurnNumber?: number };
+  userState?: { readTurnNumber?: number };
   latestTurnNumber?: number;
   unreadCount?: number;
   runtime?: { activeTurn?: boolean; [key: string]: unknown };
@@ -175,7 +175,7 @@ async function json(route: Route, body: unknown, status = 200) {
 async function installMockApi(page: Page, lastResourceId = "project1.task1", withWaitingMessage = false, initialTurnRunning = false, startWithoutRuntime = false, extraAgents: string[] = [], initialIdleStatus: "idle" | "idle-suspended" = "idle", settingsRefreshDelayMs = 0, conversationFixture: ConversationFixture = "default"): Promise<Harness> {
   const harness: Harness = { inputBodies: [], taskBodies: [], previewBodies: [], settingsBodies: [], uploadNames: [], streamRequests: [], treeRequests: 0, agentsBodies: [], uiStateBodies: [], steeredMessageIds: [], schedulerBodies: [], bindingBodies: [], resourceStateBodies: [], markdownBodies: [], finishTurn: () => undefined };
   let waitingMessages = withWaitingMessage ? [{ messageId: "msg-waiting", resourceId: "project1.task1", text: "Review the mailbox change now", status: "waiting", acceptedAt: now, requestedMode: "enqueue", actualMode: "enqueue" }] : [];
-  const resourceStates: Record<string, { favorite: boolean; readTurnNumber?: number }> = {};
+  const resourceStates: Record<string, { readTurnNumber?: number }> = {};
   let runtimeExists = !startWithoutRuntime;
   let turnRunning = initialTurnRunning;
   let turnNumber = initialTurnRunning ? 1 : 0;
@@ -185,7 +185,6 @@ async function installMockApi(page: Page, lastResourceId = "project1.task1", wit
     turnRunning = false;
     completedTurnNumber = turnNumber;
   };
-  if (startWithoutRuntime) resourceStates["project1.task1"] = { favorite: true };
   let createdProject: MockProject | null = null;
   let createdTask: MockTask | null = null;
   let scheduleSequence = 0;
@@ -298,7 +297,6 @@ async function installMockApi(page: Page, lastResourceId = "project1.task1", wit
       const activityCandidates: MockActivityResource[] = [projectSnapshot, ...projectSnapshot.children].map((item) => ({ ...item, children: undefined }));
       const activity = {
         running: activityCandidates.filter((item) => item.runtime?.activeTurn),
-        favorites: activityCandidates.filter((item) => item.userState?.favorite),
         unread: activityCandidates.filter((item) => Number(item.unreadCount || 0) > 0),
         problems: activityCandidates.filter((item) => item.type === "task" && (item.state === "blocked" || item.state === "error")),
       };
@@ -318,22 +316,10 @@ async function installMockApi(page: Page, lastResourceId = "project1.task1", wit
     if (readMatch && method === "PUT") {
       const resourceId = decodeURIComponent(readMatch[1]);
       const body = request.postDataJSON() as { throughTurnNumber?: number };
-      const current = resourceStates[resourceId] || { favorite: false };
+      const current = resourceStates[resourceId] || {};
       resourceStates[resourceId] = { ...current, readTurnNumber: Math.max(Number(current.readTurnNumber || 0), Number(body.throughTurnNumber || 0)) };
       harness.resourceStateBodies.push({ method, path, body });
       return json(route, resourceStates[resourceId]);
-    }
-    const favoriteMatch = path.match(/^\/api\/workspaces\/ws-test\/resources\/(.+)\/favorite$/);
-    if (favoriteMatch) {
-      const resourceId = decodeURIComponent(favoriteMatch[1]);
-      if (method === "PUT") {
-        const body = request.postDataJSON() as { favorite?: boolean };
-        const current = resourceStates[resourceId] || { favorite: false };
-        resourceStates[resourceId] = { ...current, favorite: Boolean(body.favorite) };
-        harness.resourceStateBodies.push({ method, path, body });
-        return json(route, resourceStates[resourceId]);
-      }
-      if (method === "GET") return json(route, resourceStates[resourceId] || { favorite: false });
     }
     if (path === "/api/workspaces/ws-test/scheduler" && method === "GET") {
       return json(route, schedulerConfig);
@@ -1074,22 +1060,14 @@ test("navigates to a newly created project", async ({ page }) => {
   await expect(page.locator("#toast")).toContainText("Project created");
 });
 
-test("favorites a resource and always shows all Activity tab counts", async ({ page }) => {
-  const harness = await installMockApi(page, "project1");
+test("always shows all Activity tab counts and supports resizing the panel", async ({ page }) => {
+  await installMockApi(page, "project1");
   await page.goto("/w/ws-test/r/project1");
 
-  const projectRow = page.locator("#projectTree > .tree-item").first();
-  await projectRow.hover();
-  await projectRow.locator('[aria-label="Add Migration project to favorites"]').click();
   await expect(page.getByRole("tab", { name: "Running 0", exact: true })).toBeVisible();
-  await expect(page.getByRole("tab", { name: "Favs 1", exact: true })).toBeVisible();
   await expect(page.getByRole("tab", { name: "Unread 0", exact: true })).toBeVisible();
   await expect(page.getByRole("tab", { name: "Issues 0", exact: true })).toBeVisible();
-  await page.getByRole("tab", { name: "Favs 1", exact: true }).click();
-  const activityRow = page.locator('[data-component-owner="attention-list"] button.activity-row');
-  await expect(activityRow).toHaveCount(1);
-  await expect(activityRow).toContainText("Migration project");
-  await expect(activityRow).toContainText("#1 · No turns · Favorite");
+  await expect(page.getByRole("tab", { name: "Inbox 0", exact: true })).toBeVisible();
 
   const activityPanel = page.locator('[data-component-owner="attention-list"]');
   const initialHeight = await activityPanel.evaluate((element) => element.getBoundingClientRect().height);
@@ -1102,31 +1080,20 @@ test("favorites a resource and always shows all Activity tab counts", async ({ p
   await page.mouse.up();
   await expect.poll(() => activityPanel.evaluate((element) => element.getBoundingClientRect().height)).toBeGreaterThan(initialHeight + 40);
   await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("pua.web.paneSizes") || "{}").sidebarAttentionHeight)).toBeGreaterThan(initialHeight + 40);
-
-  await activityRow.hover();
-  await activityRow.locator('[aria-label="Remove Migration project from favorites"]').click();
-  await expect(activityRow).toHaveCount(0);
-  await expect(page.getByRole("tab", { name: "Favs 0", exact: true })).toBeVisible();
-  expect(harness.resourceStateBodies.map((entry) => entry.path)).toEqual([
-    "/api/workspaces/ws-test/resources/project1/favorite",
-    "/api/workspaces/ws-test/resources/project1/favorite",
-  ]);
 });
 
-test("uses Task workflow state in the tree while keeping the favorite presentation independent", async ({ page }) => {
-  await installMockApi(page, "project1.task1");
+test("uses Task workflow state in the tree and the Activity running list", async ({ page }) => {
+  await installMockApi(page, "project1.task1", false, true);
   await page.goto("/w/ws-test/r/project1.task1");
 
   const taskRow = page.locator("#projectTree .task-item", { hasText: "Infrastructure task" });
-  await expect(taskRow.locator('[data-lucide="circle"]')).toHaveCount(1);
+  await expect(taskRow.locator('[data-lucide="loader-circle"]')).toHaveCount(1);
   await expect(taskRow.locator('[data-lucide="file-text"]')).toHaveCount(0);
   await expect(taskRow.locator('[data-lucide="message-square"]')).toHaveCount(0);
-  await taskRow.hover();
-  await taskRow.locator('[aria-label="Add Infrastructure task to favorites"]').click();
-  await page.getByRole("tab", { name: "Favs 1", exact: true }).click();
 
+  await page.getByRole("tab", { name: "Running 1", exact: true }).click();
   const activityRow = page.locator('[data-component-owner="attention-list"] button.activity-row', { hasText: "Infrastructure task" });
-  await expect(activityRow).toContainText("Favorite");
+  await expect(activityRow).toContainText("Resource working");
   await expect(activityRow.locator('.activity-status [data-lucide="file-text"]')).toHaveCount(1);
   await expect(activityRow.locator('.activity-status [data-lucide="message-square"]')).toHaveCount(0);
 });
@@ -1139,23 +1106,12 @@ test("keeps Task workflow state independent from a sleeping Session", async ({ p
   await expect(taskRow.locator('[data-lucide="circle"]')).toHaveCount(1);
   await expect(taskRow.locator('[data-lucide="file-text"]')).toHaveCount(0);
   await expect(taskRow.locator('[data-lucide="pause-circle"]')).toHaveCount(0);
-  await taskRow.hover();
-  await taskRow.locator('[aria-label="Add Infrastructure task to favorites"]').click();
-  await page.getByRole("tab", { name: "Favs 1", exact: true }).click();
-
-  const activityRow = page.locator('[data-component-owner="attention-list"] button.activity-row', { hasText: "Infrastructure task" });
-  await expect(activityRow).toContainText("Favorite");
-  await expect(activityRow.locator('.activity-status [data-lucide="file-text"]')).toHaveCount(1);
-  await expect(activityRow.locator('.activity-status [data-lucide="pause-circle"]')).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: "Running 0", exact: true })).toBeVisible();
 });
 
 test("highlights the selected Activity resource instead of every active turn", async ({ page }) => {
   await installMockApi(page, "project1", false, true);
   await page.goto("/w/ws-test/r/project1");
-
-  const projectRow = page.locator("#projectTree > .tree-item").first();
-  await projectRow.hover();
-  await projectRow.locator('[aria-label="Add Migration project to favorites"]').click();
 
   const runningActivity = page.locator('[data-component-owner="attention-list"] button.activity-row', { hasText: "Infrastructure task" });
   await expect(runningActivity).not.toHaveClass(/\bselected\b/);
@@ -1163,45 +1119,35 @@ test("highlights the selected Activity resource instead of every active turn", a
   await expect(runningActivity).toHaveAttribute("data-active-turn", "true");
   await expect(runningActivity).toContainText("Resource working");
 
-  await page.getByRole("tab", { name: "Favs 1", exact: true }).click();
-  const selectedActivity = page.locator('[data-component-owner="attention-list"] button.activity-row', { hasText: "Migration project" });
-  await expect(selectedActivity).toHaveClass(/\bselected\b/);
-  await expect(selectedActivity).toHaveAttribute("aria-current", "page");
-  await expect(selectedActivity).not.toHaveAttribute("data-active-turn");
+  await page.goto("/w/ws-test/r/project1.task1");
+  await expect(runningActivity).toHaveClass(/\bselected\b/);
+  await expect(runningActivity).toHaveAttribute("aria-current", "page");
+  await expect(runningActivity).toHaveAttribute("data-active-turn", "true");
 });
 
 test("keeps a newly created task Activity row aligned when its first turn starts", async ({ page }) => {
   const harness = await installMockApi(page, "project1.task1", false, false, true);
   await page.goto("/w/ws-test/r/project1.task1");
 
-  await page.getByRole("tab", { name: "Favs 1", exact: true }).click();
   const activityRow = page.locator('[data-component-owner="attention-list"] button.activity-row', { hasText: "Infrastructure task" });
-  await expect(activityRow).toHaveCount(1);
-  await expect(activityRow.locator(":scope > .activity-status")).toHaveCount(1);
-  await expect(activityRow.locator(":scope > .activity-title")).toHaveCount(1);
-  await expect(activityRow.locator(":scope > .activity-actions")).toHaveCount(1);
-  await expect(activityRow.locator('.activity-status [data-lucide="file-text"]')).toHaveCount(1);
+  await expect(activityRow).toHaveCount(0);
 
-  const before = await activityRow.evaluate((row) => ({
-    titleTop: row.querySelector(".activity-title")!.getBoundingClientRect().top,
-    actionsTop: row.querySelector(".activity-actions")!.getBoundingClientRect().top,
-  }));
   const input = page.locator("#chatInput");
   await input.fill("Start the first turn");
   await input.press("Enter");
   await expect.poll(() => harness.inputBodies.length).toBe(1);
+  await expect(activityRow).toHaveCount(1);
   await expect(activityRow).toHaveAttribute("data-active-turn", "true", { timeout: 8_000 });
-  await expect(activityRow.locator('.activity-status-runtime-slot [data-lucide="loader-circle"]')).toBeVisible();
-  await expect(activityRow.locator('.activity-status-fallback-slot [data-lucide="file-text"]')).toBeHidden();
+  await expect(activityRow.locator(".activity-status-runtime-slot [data-lucide=\"loader-circle\"]")).toBeVisible();
+  await expect(activityRow.locator(".activity-status-fallback-slot [data-lucide=\"file-text\"]")).toBeHidden();
 
-  const after = await activityRow.evaluate((row) => ({
+  const layout = await activityRow.evaluate((row) => ({
     directChildren: row.children.length,
+    statusTop: row.querySelector(".activity-status")!.getBoundingClientRect().top,
     titleTop: row.querySelector(".activity-title")!.getBoundingClientRect().top,
-    actionsTop: row.querySelector(".activity-actions")!.getBoundingClientRect().top,
   }));
-  expect(after.directChildren).toBe(3);
-  expect(Math.abs(after.titleTop - after.actionsTop)).toBeLessThan(2);
-  expect(Math.abs(after.titleTop - before.titleTop)).toBeLessThan(2);
+  expect(layout.directChildren).toBe(2);
+  expect(Math.abs(layout.titleTop - layout.statusTop)).toBeLessThan(2);
 });
 
 test("does not count a running Turn as unread, then clears it after completion when clicked again", async ({ page }) => {
@@ -1577,6 +1523,39 @@ test("pages resource history, sends input, receives SSE, and preserves active re
   expect(after.selection).not.toBe("");
   expect(harness.treeRequests).toBeGreaterThan(1);
   expect(harness.streamRequests).toContain("project1.task1");
+});
+
+test("multiline send restores single-line Enter and explicitly resumes timeline follow", async ({ page }) => {
+  const harness = await installMockApi(page);
+  await page.goto("/w/ws-test/r/project1.task1");
+
+  const timeline = page.locator("#chatTimeline");
+  await expect(timeline).toContainText("gen-1 baseline message 1");
+  await timeline.evaluate((log) => {
+    log.scrollTop = 0;
+    const bubble = log.querySelector(".agent-message-bubble");
+    if (!bubble) throw new Error("message bubble is unavailable");
+    const range = document.createRange();
+    range.selectNodeContents(bubble);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  });
+  await expect.poll(() => timeline.evaluate((log) => log.scrollHeight - log.scrollTop - log.clientHeight)).toBeGreaterThan(32);
+
+  const input = page.locator("#chatInput");
+  await input.fill("first line\nsecond line");
+  await input.press("Control+Enter");
+  await expect.poll(() => harness.inputBodies.length).toBe(1);
+  expect(harness.inputBodies[0]).toMatchObject({ text: "first line\nsecond line" });
+  await expect(input).toHaveValue("");
+  await expect.poll(() => timeline.evaluate((log) => log.scrollHeight - log.scrollTop - log.clientHeight)).toBeLessThanOrEqual(1);
+  await expect.poll(() => page.evaluate(() => window.getSelection()?.toString() || "")).toBe("");
+
+  await input.fill("next single-line message");
+  await input.press("Enter");
+  await expect.poll(() => harness.inputBodies.length).toBe(2);
+  expect(harness.inputBodies[1]).toMatchObject({ text: "next single-line message" });
 });
 
 test("shows waiting messages above the composer and inserts one through steer", async ({ page }) => {
@@ -2154,7 +2133,8 @@ test("keeps 440px Projects resource rows at a 44px touch size without changing t
     expect(box!.height).toBeGreaterThanOrEqual(44);
     expect(box!.x).toBeGreaterThanOrEqual(0);
     expect(box!.x + box!.width).toBeLessThanOrEqual(440);
-    await expect(row.locator('[role="checkbox"]')).toHaveAttribute("aria-checked", "false");
+    // The favorite star is gone; rows keep plain button semantics only.
+    await expect(row.locator('[role="checkbox"]')).toHaveCount(0);
   }
 
   const taskBox = await taskRows.first().boundingBox();

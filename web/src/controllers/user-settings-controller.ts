@@ -1,7 +1,8 @@
 import type { ResourceScope } from "../runtime/resource-scope";
 
-const USER_SETTINGS_KEY = "pua.web.user.v1";
-const USER_SETTINGS_VERSION = 1;
+const USER_SELECTIONS_KEY = "pua.web.users.v2";
+const LEGACY_USER_SETTINGS_KEY = "pua.web.user.v1";
+const USER_SELECTIONS_VERSION = 2;
 export const USER_NAME_MAX_LENGTH = 80;
 const USER_NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
 
@@ -17,66 +18,75 @@ export function validateUserName(value: unknown): string {
 	return name;
 }
 
-export function normalizeUserNameForSave(value: unknown): string {
-	const name = String(value || "");
-	return name ? validateUserName(name) : "User";
+interface StoredSelections {
+	version: number;
+	selections: Record<string, string>;
 }
 
-export function normalizeUserName(value: unknown): string {
-	const trimmed = String(value || "").trim();
-	if (!trimmed) return "User";
+function decodeSelections(raw: string | null): Record<string, string> {
+	if (!raw) return {};
 	try {
-		return validateUserName(trimmed);
-	} catch (_) {
-		return "User";
+		const stored = JSON.parse(raw) as Partial<StoredSelections> | null;
+		if (!stored || stored.version !== USER_SELECTIONS_VERSION || !stored.selections || typeof stored.selections !== "object") return {};
+		return Object.fromEntries(Object.entries(stored.selections).filter(([instanceId, name]) => {
+			if (!instanceId) return false;
+			try { validateUserName(name); return true; } catch { return false; }
+		}));
+	} catch {
+		return {};
 	}
 }
 
-export function decodeStoredUserName(raw: string | null): string {
-	if (!raw) return "User";
+export function decodeLegacyUserName(raw: string | null): string {
+	if (!raw) return "";
 	try {
 		const stored = JSON.parse(raw) as { version?: unknown; name?: unknown } | null;
-		if (!stored || stored.version !== USER_SETTINGS_VERSION) return "User";
-		return normalizeUserName(stored.name);
-	} catch (_) {
-		return "User";
+		if (!stored || stored.version !== 1) return "";
+		return validateUserName(stored.name);
+	} catch {
+		return "";
 	}
 }
 
 export function createUserSettingsController(scope: ResourceScope, onChange: () => void) {
-	let name = read();
+	let selections = read();
 
-	function read(): string {
-		try {
-			return decodeStoredUserName(window.localStorage.getItem(USER_SETTINGS_KEY));
-		} catch (_) {
-			return "User";
-		}
+	function read(): Record<string, string> {
+		try { return decodeSelections(window.localStorage.getItem(USER_SELECTIONS_KEY)); }
+		catch { return {}; }
 	}
 
-	function save(value: unknown): string {
-		const normalized = normalizeUserNameForSave(value);
+	function persist(next: Record<string, string>): void {
 		try {
-			window.localStorage.setItem(USER_SETTINGS_KEY, JSON.stringify({
-				version: USER_SETTINGS_VERSION,
-				name: normalized
-			}));
-		} catch (_) {
-			throw new Error("User name could not be saved in this browser.");
-		}
-		name = normalized;
-		return name;
+			window.localStorage.setItem(USER_SELECTIONS_KEY, JSON.stringify({ version: USER_SELECTIONS_VERSION, selections: next }));
+		} catch { /* Keep the selection for this page when browser storage is unavailable. */ }
+		selections = next;
 	}
 
 	scope.listen(window, "storage", (event) => {
-		if (event.key !== USER_SETTINGS_KEY) return;
-		name = decodeStoredUserName(event.newValue);
+		if (event.key !== USER_SELECTIONS_KEY) return;
+		selections = decodeSelections(event.newValue);
 		onChange();
 	});
 
 	return {
-		current: () => name,
+		selected: (instanceId: string) => selections[instanceId] || "",
+		legacyCandidate: () => {
+			try { return decodeLegacyUserName(window.localStorage.getItem(LEGACY_USER_SETTINGS_KEY)); }
+			catch { return ""; }
+		},
+		save: (instanceId: string, value: unknown) => {
+			if (!instanceId) throw new Error("Workspace identity is unavailable.");
+			const name = validateUserName(value);
+			persist({ ...selections, [instanceId]: name });
+			return name;
+		},
+		clear: (instanceId: string) => {
+			if (!instanceId || !selections[instanceId]) return;
+			const next = { ...selections };
+			delete next[instanceId];
+			persist(next);
+		},
 		validate: validateUserName,
-		save
 	};
 }

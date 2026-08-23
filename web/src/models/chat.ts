@@ -293,6 +293,7 @@ export interface AgentPanelHeaderModel {
   workspaceId: string;
   resourceId: string;
   status: ResourceMessageStatus | null;
+  /** True while a user-initiated message submission is in flight. */
   submitting: boolean;
   agentName: string;
   /** "Provider · model" summary of the resolved agent, may be empty. */
@@ -307,6 +308,7 @@ export interface EventTimelineModel {
   workspaceId: string;
   resourceId: string;
   status: ResourceMessageStatus | null;
+  submitting: boolean;
   agentName: string;
   resolveResourceTitle: (resourceId: string) => string | null;
   onNavigate: (resourceId: string) => void;

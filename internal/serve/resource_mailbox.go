@@ -1088,6 +1088,11 @@ func (m *agentManager) promoteWaitingMessageLocked(ctx context.Context, workspac
 	if message.Status != resourceMessageQueued {
 		return resourceMailboxMessage{}, &resourceAPIError{Code: "message_not_waiting", Message: fmt.Sprintf("message %s is not waiting", messageID)}
 	}
+	if message.ModeFrozen {
+		return resourceMailboxMessage{}, &resourceAPIError{
+			Code: "message_mode_frozen", Message: fmt.Sprintf("message %s has a frozen delivery mode and cannot be promoted", messageID),
+		}
+	}
 	_, archived, _, resourceErr := resourceExistsAndArchived(workspace.Path, message.ResourceID)
 	if resourceErr != nil {
 		return resourceMailboxMessage{}, &resourceAPIError{Code: "resource_not_found", Message: resourceErr.Error()}
@@ -1435,6 +1440,12 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 					})
 				}
 			case resourceMessageModeEnqueue:
+				// An ordinary enqueue stays promotable while it waits behind an
+				// active Turn. Freeze it only at the inactive boundary where this
+				// pass can deliver it as the next Turn opener.
+				if active {
+					break
+				}
 				message, err = updateMailboxMessage(workspace.Path, message.ID, func(current *resourceMailboxMessage) {
 					current.ActualMode = resourceMessageModeEnqueue
 					current.ModeFrozen = true
@@ -1615,7 +1626,7 @@ func resourceErrorStatus(err error) int {
 		return http.StatusNotFound
 	case "message_receipt_expired":
 		return http.StatusGone
-	case "resource_archived", "message_not_waiting", "steer_unavailable", "generation_unavailable", "generation_changed", "active_turn":
+	case "resource_archived", "message_not_waiting", "message_mode_frozen", "steer_unavailable", "generation_unavailable", "generation_changed", "active_turn":
 		return http.StatusConflict
 	case "workspace_not_owned":
 		return http.StatusConflict

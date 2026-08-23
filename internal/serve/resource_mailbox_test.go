@@ -973,6 +973,129 @@ func TestResourceServerAPIListsAndSteersWaitingMessageInPlace(t *testing.T) {
 	}
 }
 
+func TestResourceServerAPIRejectsFrozenOccurrencePromotion(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	fake.enforceMessageIDs = true
+	hub := httptest.NewServer(fake)
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+
+	_ = acceptTestResourceMessage(t, manager, workspace, "project1.task1", "start", resourceMessageModeSteer, nil)
+	record, found, err := currentResourceGeneration(workspace.Path, "project1.task1")
+	if err != nil || !found {
+		t.Fatalf("generation missing: found=%v err=%v", found, err)
+	}
+	fake.mu.Lock()
+	session := fake.sessions[record.AgentHubSessionID]
+	session.State = "running"
+	session.CurrentTurnID = "turn-active"
+	session.InputCapabilities.Steer = true
+	fake.sessions[session.ID] = session
+	fake.mu.Unlock()
+
+	ordinary := acceptTestResourceMessage(t, manager, workspace, "project1.task1", "ordinary waiting", resourceMessageModeEnqueue, nil)
+	frozen, err := acceptGeneratedMailboxMessage(workspace.Path, resourceMailboxMessage{
+		ID: "msg-frozen-occurrence", ResourceID: "project1.task1", Text: "run the one-time occurrence",
+		RequestedMode: resourceMessageModeEnqueue, ActualMode: resourceMessageModeEnqueue, ModeFrozen: true,
+		Type: resourceMessageTypeScheduleOccurrence, SenderWorkspaceInstanceID: "workspace-instance",
+		Causation: &resourceMessageCausation{
+			Type: resourceMessageTypeScheduleOccurrence, SourceWorkspaceInstanceID: "workspace-instance",
+			SourceResourceID: app.SchedulerResourceID, ScheduleID: "schedule-once", ScheduleRevision: 1,
+			OccurrenceID: "occurrence-once", ScheduledFor: "2026-08-01T00:00:00Z",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ordinary.Status != resourceMessageQueued || ordinary.ModeFrozen || frozen.Status != resourceMessageQueued ||
+		!frozen.ModeFrozen || frozen.ActualMode != resourceMessageModeEnqueue || frozen.Sequence <= ordinary.Sequence {
+		t.Fatalf("waiting setup mismatch: ordinary=%#v frozen=%#v", ordinary, frozen)
+	}
+
+	manager.waitBackground()
+	restarted := newAgentManager(manager.server)
+	manager.server.agents = restarted
+	beforeMailbox, err := loadHotResourceMailbox(workspace.Path, "project1.task1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake.mu.Lock()
+	beforeInputs := len(fake.messageIDs)
+	beforeSession := fake.sessions[record.AgentHubSessionID]
+	beforeSessionReads := fake.getSessionCalls
+	fake.mu.Unlock()
+
+	rejected := httptest.NewRecorder()
+	restarted.server.handleWorkspace(rejected, httptest.NewRequest(http.MethodPost,
+		"/api/workspaces/"+workspace.ID+"/messages/"+frozen.ID+"/steer", nil))
+	var rejection map[string]any
+	if err := json.Unmarshal(rejected.Body.Bytes(), &rejection); err != nil {
+		t.Fatal(err)
+	}
+	if rejected.Code != http.StatusConflict || rejection["code"] != "message_mode_frozen" {
+		t.Fatalf("frozen promotion response = %d %#v", rejected.Code, rejection)
+	}
+	afterMailbox, err := loadHotResourceMailbox(workspace.Path, "project1.task1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(afterMailbox, beforeMailbox) {
+		t.Fatalf("rejected promotion mutated mailbox:\nbefore=%#v\nafter=%#v", beforeMailbox, afterMailbox)
+	}
+	fake.mu.Lock()
+	afterInputs := len(fake.messageIDs)
+	afterSession := fake.sessions[record.AgentHubSessionID]
+	afterSessionReads := fake.getSessionCalls
+	fake.mu.Unlock()
+	if afterInputs != beforeInputs || afterSessionReads != beforeSessionReads || !reflect.DeepEqual(afterSession, beforeSession) {
+		t.Fatalf("rejected promotion contacted the active Turn: inputs=%d/%d reads=%d/%d session=%#v/%#v",
+			afterInputs, beforeInputs, afterSessionReads, beforeSessionReads, afterSession, beforeSession)
+	}
+
+	promoted := httptest.NewRecorder()
+	restarted.server.handleWorkspace(promoted, httptest.NewRequest(http.MethodPost,
+		"/api/workspaces/"+workspace.ID+"/messages/"+ordinary.ID+"/steer", nil))
+	if promoted.Code != http.StatusOK {
+		t.Fatalf("ordinary promotion failed: %d %s", promoted.Code, promoted.Body.String())
+	}
+	var ordinaryResponse resourceMessageResponse
+	if err := json.Unmarshal(promoted.Body.Bytes(), &ordinaryResponse); err != nil {
+		t.Fatal(err)
+	}
+	if ordinaryResponse.MessageID != ordinary.ID || ordinaryResponse.ActualMode != resourceMessageModeSteer ||
+		ordinaryResponse.Status != resourceMessageDelivered || ordinaryResponse.PromotedAt == "" {
+		t.Fatalf("ordinary promotion response mismatch: %#v", ordinaryResponse)
+	}
+	stillFrozen, found, err := mailboxMessageByID(workspace.Path, frozen.ID)
+	if err != nil || !found || stillFrozen.Status != resourceMessageQueued || !stillFrozen.ModeFrozen ||
+		stillFrozen.ActualMode != resourceMessageModeEnqueue || stillFrozen.Sequence != frozen.Sequence || stillFrozen.PromotedAt != "" {
+		t.Fatalf("ordinary promotion changed frozen occurrence: found=%v err=%v message=%#v", found, err, stillFrozen)
+	}
+
+	fake.mu.Lock()
+	session = fake.sessions[record.AgentHubSessionID]
+	session.State = "ready"
+	session.CurrentTurnID = ""
+	fake.sessions[session.ID] = session
+	fake.mu.Unlock()
+	if err := restarted.withResourceController(context.Background(), workspace, "project1.task1", func() error {
+		return restarted.reconcileResourceMailboxLocked(context.Background(), workspace, "project1.task1")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	delivered, found, err := mailboxMessageByID(workspace.Path, frozen.ID)
+	if err != nil || !found || delivered.Status != resourceMessageDelivered || !delivered.ModeFrozen ||
+		delivered.ActualMode != resourceMessageModeEnqueue || delivered.Sequence != frozen.Sequence || delivered.PromotedAt != "" {
+		t.Fatalf("ready-boundary occurrence delivery mismatch: found=%v err=%v message=%#v", found, err, delivered)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.messageIDs) != beforeInputs+2 || fake.messageIDs[len(fake.messageIDs)-1] != frozen.ID ||
+		fake.messageSteers[len(fake.messageSteers)-1] {
+		t.Fatalf("delivery modes after promotions = ids=%#v steers=%#v", fake.messageIDs, fake.messageSteers)
+	}
+}
+
 func TestResourceServerAPISteerUnavailableLeavesWaitingMessageUnchanged(t *testing.T) {
 	fake := newRuntimeFakeAgentHub()
 	hub := httptest.NewServer(fake)

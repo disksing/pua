@@ -57,10 +57,8 @@ func (r EnvironmentSecretResolver) ResolveSecret(name string) (string, string, e
 }
 
 type ServiceManagerOptions struct {
-	Resolver         ServiceSecretResolver
-	Now              func() time.Time
-	Logger           func(format string, args ...any)
-	ReadinessContext time.Duration
+	Resolver ServiceSecretResolver
+	Now      func() time.Time
 }
 
 var errServiceBindingsPathEscape = errors.New("service bindings path escapes the workspace control directory")
@@ -97,7 +95,6 @@ type ServiceManager struct {
 	runtimes map[string]*serviceRuntime
 	resolver ServiceSecretResolver
 	now      func() time.Time
-	logger   func(string, ...any)
 	ctx      context.Context
 	stopping bool
 	started  bool
@@ -113,12 +110,9 @@ func NewServiceManager(root string, options ServiceManagerOptions) (*ServiceMana
 	if strings.TrimSpace(root) == "" {
 		return nil, errors.New("workspace root is required")
 	}
-	m := &ServiceManager{root: filepath.Clean(root), configs: map[string]ServiceConfig{}, runtimes: map[string]*serviceRuntime{}, resolver: options.Resolver, now: options.Now, logger: options.Logger}
+	m := &ServiceManager{root: filepath.Clean(root), configs: map[string]ServiceConfig{}, runtimes: map[string]*serviceRuntime{}, resolver: options.Resolver, now: options.Now}
 	if m.now == nil {
 		m.now = time.Now
-	}
-	if m.logger == nil {
-		m.logger = func(format string, args ...any) {}
 	}
 	if err := m.loadLocked(); err != nil {
 		return nil, err

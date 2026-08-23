@@ -30,7 +30,7 @@ func (s *server) initializeServiceManagers() error {
 		if canonical, evalErr := filepath.EvalSymlinks(root); evalErr == nil {
 			root = canonical
 		}
-		manager, err := NewServiceManager(root, ServiceManagerOptions{Logger: log.Printf})
+		manager, err := NewServiceManager(root, ServiceManagerOptions{})
 		if err != nil {
 			return err
 		}
@@ -58,7 +58,7 @@ func (s *server) serviceManagerForWorkspace(id string) (*ServiceManager, serveWo
 	}
 	manager := s.services[root]
 	if manager == nil {
-		manager, err = NewServiceManager(root, ServiceManagerOptions{Logger: log.Printf})
+		manager, err = NewServiceManager(root, ServiceManagerOptions{})
 		if err != nil {
 			return nil, workspace, err
 		}

@@ -330,11 +330,8 @@ type CreateInput struct {
 	IdempotencyKey    string
 	Source            *Source
 	LaunchEnvironment map[string]string
-	// EphemeralEnvironment is supplied only for the in-memory Provider
-	// process. It is deliberately not part of Session or any event payload.
-	EphemeralEnvironment map[string]string
-	Provider             string
-	InputCapabilities    InputCapabilities
+	Provider          string
+	InputCapabilities InputCapabilities
 }
 
 // TurnSummary is a rebuildable index entry over the durable event log. Every

@@ -678,6 +678,7 @@ func TestPUAGateSourceEnvironmentResumeCapabilitiesAndErrors(t *testing.T) {
 
 func TestPUAGateEphemeralEnvironmentIsOneShotAndSecret(t *testing.T) {
 	gate := newGate(t)
+	const ephemeralKey = "FAKE_EPHEMERAL_SECRET"
 	const createSecret = "pua-create-ephemeral-7bcf27d2"
 	const resumeSecret = "pua-resume-ephemeral-fd352e91"
 
@@ -704,23 +705,25 @@ func TestPUAGateEphemeralEnvironmentIsOneShotAndSecret(t *testing.T) {
 			"FAKE_REPORT_EPHEMERAL": "1",
 		},
 		"ephemeralEnvironment": map[string]string{
-			"FAKE_EPHEMERAL_SECRET": createSecret,
+			ephemeralKey: createSecret,
 		},
 	})
 	if code != http.StatusCreated {
 		t.Fatalf("create: status=%d body=%v", code, createBody)
 	}
-	requireSecretsAbsent(t, "create response", mustJSONBytes(t, createBody), createSecret)
+	requireSecretsAbsent(t, "create response", mustJSONBytes(t, createBody), ephemeralKey, createSecret)
 	value := decodeSession(t, createBody)
 	if text := gate.promptAndWait(value.ID, "observe create overlay"); !strings.Contains(text, "ephemeral=<redacted>") {
 		t.Fatalf("create process did not receive a redacted ephemeral value: %q", text)
 	}
-	gate.requireSessionSecretsAbsent(value.ID, createSecret)
+	// The create overlay reaches the Provider above, but the session store's
+	// projection, event facts, snapshots, and API views must remain secret-free.
+	gate.requireSessionSecretsAbsent(value.ID, ephemeralKey, createSecret)
 
 	root, cwd := gate.root, gate.cwd
 	gate.stop()
 	restarted := startGate(t, root, cwd)
-	restarted.requireSessionSecretsAbsent(value.ID, createSecret)
+	restarted.requireSessionSecretsAbsent(value.ID, ephemeralKey, createSecret)
 
 	code, resumeBody := restarted.request(http.MethodPost, "/v1/sessions/"+value.ID+"/resume", map[string]any{})
 	if code != http.StatusOK {
@@ -737,13 +740,13 @@ func TestPUAGateEphemeralEnvironmentIsOneShotAndSecret(t *testing.T) {
 	restarted.waitSession(value.ID, func(current sessionValue) bool { return current.State == "stopped" })
 	code, resumeBody = restarted.request(http.MethodPost, "/v1/sessions/"+value.ID+"/resume", map[string]any{
 		"ephemeralEnvironment": map[string]string{
-			"FAKE_EPHEMERAL_SECRET": resumeSecret,
+			ephemeralKey: resumeSecret,
 		},
 	})
 	if code != http.StatusOK {
 		t.Fatalf("resume with overlay: status=%d body=%v", code, resumeBody)
 	}
-	requireSecretsAbsent(t, "resume response", mustJSONBytes(t, resumeBody), createSecret, resumeSecret)
+	requireSecretsAbsent(t, "resume response", mustJSONBytes(t, resumeBody), ephemeralKey, createSecret, resumeSecret)
 	if text := restarted.promptAndWait(value.ID, "observe resume overlay"); !strings.Contains(text, "ephemeral=<redacted>") {
 		t.Fatalf("resumed process did not receive a redacted ephemeral value: %q", text)
 	}
@@ -760,7 +763,9 @@ func TestPUAGateEphemeralEnvironmentIsOneShotAndSecret(t *testing.T) {
 	if text := restarted.promptAndWait(value.ID, "observe missing resume overlay"); !strings.Contains(text, "ephemeral=missing") || strings.Contains(text, "<redacted>") {
 		t.Fatalf("resume overlay was reused by a later process: %q", text)
 	}
-	restarted.requireSessionSecretsAbsent(value.ID, createSecret, resumeSecret)
+	// The resume overlay is equally one-shot: it reaches only this Provider
+	// process and never becomes part of a durable session fact.
+	restarted.requireSessionSecretsAbsent(value.ID, ephemeralKey, createSecret, resumeSecret)
 }
 
 func mustJSONBytes(t *testing.T, value any) []byte {

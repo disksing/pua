@@ -92,7 +92,14 @@ func (n *NativeScheduler) Snapshot(now time.Time) (app.SchedulerSnapshot, error)
 		runtime := store.Scheduler.Schedules[schedule.ID]
 		effective := schedule.State
 		projection := app.ScheduleSnapshot{Schedule: schedule, EffectiveState: effective}
-		if runtime.Revision == schedule.Revision && runtime.EffectiveState != "" {
+		projectRuntime := runtime.Revision == schedule.Revision && runtime.EffectiveState != ""
+		if !projectRuntime {
+			projectRuntime, err = schedulerRuntimeCanProjectForward(runtime, schedule)
+			if err != nil {
+				return app.SchedulerSnapshot{}, err
+			}
+		}
+		if projectRuntime {
 			effective = runtime.EffectiveState
 			projection.EffectiveState = effective
 			projection.NextRunAt = runtime.NextRunAt
@@ -113,6 +120,38 @@ func (n *NativeScheduler) Snapshot(now time.Time) (app.SchedulerSnapshot, error)
 		result.NextWakeAt = earliest.Format(time.RFC3339Nano)
 	}
 	return result, nil
+}
+
+func schedulerRuntimeCanProjectForward(runtime schedulerScheduleRuntime, schedule app.Schedule) (bool, error) {
+	if runtime.Revision == 0 || runtime.Revision >= schedule.Revision || runtime.EffectiveState == "" || runtime.TriggerDigest == "" {
+		return false, nil
+	}
+	triggerDigest, err := schedulerTriggerDigest(schedule.Trigger)
+	if err != nil {
+		return false, err
+	}
+	if triggerDigest == "" || runtime.TriggerDigest != triggerDigest || !schedulerRuntimeTargetsSchedule(runtime, schedule.Target) {
+		return false, nil
+	}
+	switch schedule.State {
+	case app.ScheduleStateActive:
+		switch runtime.EffectiveState {
+		case app.ScheduleStateActive:
+			return true, nil
+		case schedulerOutcomeAttention:
+			return runtime.Prepared != nil, nil
+		case app.ScheduleStateCompleted:
+			return runtimeCompletesSameOneTimeOccurrence(runtime, schedule), nil
+		}
+	case app.ScheduleStatePaused:
+		if runtime.EffectiveState == app.ScheduleStatePaused {
+			return true, nil
+		}
+		return runtimeCompletesSameOneTimeOccurrence(runtime, schedule), nil
+	case app.ScheduleStateCompleted:
+		return runtime.EffectiveState == app.ScheduleStateCompleted, nil
+	}
+	return false, nil
 }
 
 func (n *NativeScheduler) Change(ctx context.Context, change NativeSchedulerChange) (app.Schedule, error) {

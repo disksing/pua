@@ -1556,6 +1556,297 @@ func TestNativeSchedulerMetadataEditPreservesPreparedRetry(t *testing.T) {
 	assertSingleDurableOccurrence(t, workspace.Path, prepared, 1)
 }
 
+func TestNativeSchedulerSnapshotProjectsMetadataRevisionLag(t *testing.T) {
+	t.Run("completed one-time", func(t *testing.T) {
+		manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+		puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		at := time.Date(2099, time.January, 2, 3, 4, 5, 0, time.UTC)
+		created, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+			Description: "Run once", Condition: "at the configured time", Target: "workspace",
+			Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: at.Format(time.RFC3339Nano)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		native := newNativeScheduler(manager, workspace)
+		runtime := schedulerScheduleRuntime{
+			Revision: created.Revision, TriggerDigest: mustSchedulerTriggerDigest(t, created.Trigger), Target: created.Target,
+			EffectiveState: app.ScheduleStateCompleted, LastOccurrenceAt: at.Format(time.RFC3339Nano),
+			LastOutcome: schedulerOutcomeAccepted, LastError: "preserved completion detail",
+		}
+		if err := native.storeSchedulerRuntime(created.ID, runtime); err != nil {
+			t.Fatal(err)
+		}
+		description := "Run once with clearer wording"
+		trigger := *created.Trigger
+		updated, err := native.Change(context.Background(), NativeSchedulerChange{
+			Operation: app.ScheduleChangeUpdate, ID: created.ID, ExpectedRevision: created.Revision,
+			Description: &description, Trigger: &trigger,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		snapshot, err := native.Snapshot(at.Add(time.Minute))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := snapshot.Schedules[0]
+		if got.Revision != updated.Revision || got.Description != description || got.EffectiveState != app.ScheduleStateCompleted ||
+			got.LastOccurrenceAt != runtime.LastOccurrenceAt || got.LastOutcome != runtime.LastOutcome || got.LastError != runtime.LastError ||
+			got.NextRunAt != "" || snapshot.NextWakeAt != "" {
+			t.Fatalf("completed metadata-lag snapshot = %#v", snapshot)
+		}
+	})
+
+	t.Run("attention", func(t *testing.T) {
+		manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+		puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		anchor := time.Date(2099, time.February, 3, 4, 5, 6, 0, time.UTC)
+		created, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+			Description: "Inspect target", Condition: "every five minutes", Target: "project1.task1",
+			Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerInterval, EverySeconds: 300, AnchorAt: anchor.Format(time.RFC3339Nano)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		native := newNativeScheduler(manager, workspace)
+		prepared := schedulerPreparedOccurrence{ScheduleID: created.ID, ScheduleRevision: created.Revision, Target: created.Target}
+		runtime := schedulerScheduleRuntime{
+			Revision: created.Revision, TriggerDigest: mustSchedulerTriggerDigest(t, created.Trigger),
+			EffectiveState: schedulerOutcomeAttention, LastOutcome: schedulerOutcomeAttention,
+			LastError: "target resource is archived", AttentionTarget: created.Target, Prepared: &prepared,
+		}
+		if err := native.storeSchedulerRuntime(created.ID, runtime); err != nil {
+			t.Fatal(err)
+		}
+		condition := "every five minutes after review"
+		trigger := *created.Trigger
+		if _, err := native.Change(context.Background(), NativeSchedulerChange{
+			Operation: app.ScheduleChangeUpdate, ID: created.ID, ExpectedRevision: created.Revision,
+			Condition: &condition, Trigger: &trigger,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		snapshot, err := native.Snapshot(anchor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := snapshot.Schedules[0]
+		if got.EffectiveState != schedulerOutcomeAttention || got.LastOutcome != schedulerOutcomeAttention ||
+			got.LastError != runtime.LastError || got.NextRunAt != "" || snapshot.NextWakeAt != "" {
+			t.Fatalf("attention metadata-lag snapshot = %#v", snapshot)
+		}
+	})
+
+	for _, test := range []struct {
+		name       string
+		retryDelay time.Duration
+	}{
+		{name: "prepared deadline"},
+		{name: "retry deadline", retryDelay: 45 * time.Second},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+			puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			anchor := time.Date(2099, time.March, 4, 5, 6, 7, 0, time.UTC)
+			created, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+				Description: "Retry work", Condition: "every minute", Target: "workspace",
+				Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerInterval, EverySeconds: 60, AnchorAt: anchor.Format(time.RFC3339Nano)},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := anchor.Add(10 * time.Minute)
+			prepared := schedulerPreparedOccurrence{ScheduleID: created.ID, ScheduleRevision: created.Revision, Target: created.Target}
+			runtime := schedulerScheduleRuntime{
+				Revision: created.Revision, TriggerDigest: mustSchedulerTriggerDigest(t, created.Trigger), Target: created.Target,
+				EffectiveState: app.ScheduleStateActive, NextRunAt: anchor.Add(11 * time.Minute).Format(time.RFC3339Nano),
+				LastOccurrenceAt: anchor.Add(9 * time.Minute).Format(time.RFC3339Nano), LastOutcome: schedulerOutcomeBusy,
+				LastError: "preserved retry detail", Prepared: &prepared,
+			}
+			wantWake := now
+			if test.retryDelay != 0 {
+				wantWake = now.Add(test.retryDelay)
+				runtime.RetryAt = wantWake.Format(time.RFC3339Nano)
+				runtime.RetryCount = 2
+			}
+			native := newNativeScheduler(manager, workspace)
+			if err := native.storeSchedulerRuntime(created.ID, runtime); err != nil {
+				t.Fatal(err)
+			}
+			guard := "only after metadata review"
+			trigger := *created.Trigger
+			if _, err := native.Change(context.Background(), NativeSchedulerChange{
+				Operation: app.ScheduleChangeUpdate, ID: created.ID, ExpectedRevision: created.Revision,
+				Guard: &guard, Trigger: &trigger,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := native.Snapshot(now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := snapshot.Schedules[0]
+			if got.EffectiveState != app.ScheduleStateActive || got.NextRunAt != runtime.NextRunAt ||
+				got.LastOccurrenceAt != runtime.LastOccurrenceAt || got.LastOutcome != runtime.LastOutcome || got.LastError != runtime.LastError ||
+				snapshot.NextWakeAt != wantWake.Format(time.RFC3339Nano) {
+				t.Fatalf("%s metadata-lag snapshot = %#v", test.name, snapshot)
+			}
+		})
+	}
+}
+
+func TestNativeSchedulerSnapshotRejectsUnsafeRevisionLag(t *testing.T) {
+	t.Run("target edit", func(t *testing.T) {
+		manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+		puaWorkspace, _ := app.OpenWorkspace(workspace.Path)
+		at := time.Date(2099, time.April, 5, 6, 7, 8, 0, time.UTC)
+		created, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+			Description: "Run on Task", Condition: "once", Target: "project1.task1",
+			Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: at.Format(time.RFC3339Nano)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		prepared := schedulerPreparedOccurrence{ScheduleID: created.ID, ScheduleRevision: created.Revision, Target: created.Target}
+		runtime := schedulerScheduleRuntime{
+			Revision: created.Revision, TriggerDigest: mustSchedulerTriggerDigest(t, created.Trigger), Target: created.Target,
+			EffectiveState: schedulerOutcomeAttention, LastOutcome: schedulerOutcomeAttention, LastError: "old target unavailable",
+			AttentionTarget: created.Target, Prepared: &prepared,
+		}
+		native := newNativeScheduler(manager, workspace)
+		if err := native.storeSchedulerRuntime(created.ID, runtime); err != nil {
+			t.Fatal(err)
+		}
+		target := "workspace"
+		trigger := *created.Trigger
+		if _, err := native.Change(context.Background(), NativeSchedulerChange{
+			Operation: app.ScheduleChangeUpdate, ID: created.ID, ExpectedRevision: created.Revision,
+			Target: &target, Trigger: &trigger,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		assertPortableSchedulerSnapshot(t, native, at, app.ScheduleStateActive)
+	})
+
+	t.Run("trigger edit", func(t *testing.T) {
+		manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+		puaWorkspace, _ := app.OpenWorkspace(workspace.Path)
+		at := time.Date(2099, time.May, 6, 7, 8, 9, 0, time.UTC)
+		created, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+			Description: "Run once", Condition: "once", Target: "workspace",
+			Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: at.Format(time.RFC3339Nano)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		runtime := schedulerScheduleRuntime{
+			Revision: created.Revision, TriggerDigest: mustSchedulerTriggerDigest(t, created.Trigger), Target: created.Target,
+			EffectiveState: app.ScheduleStateCompleted, LastOccurrenceAt: at.Format(time.RFC3339Nano), LastOutcome: schedulerOutcomeAccepted,
+		}
+		native := newNativeScheduler(manager, workspace)
+		if err := native.storeSchedulerRuntime(created.ID, runtime); err != nil {
+			t.Fatal(err)
+		}
+		trigger := app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: at.Add(time.Hour).Format(time.RFC3339Nano)}
+		if _, err := native.Change(context.Background(), NativeSchedulerChange{
+			Operation: app.ScheduleChangeUpdate, ID: created.ID, ExpectedRevision: created.Revision, Trigger: &trigger,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		assertPortableSchedulerSnapshot(t, native, at, app.ScheduleStateActive)
+	})
+
+	for _, test := range []struct {
+		name      string
+		configure func(*testing.T, app.Schedule) schedulerScheduleRuntime
+		wantState string
+	}{
+		{
+			name: "runtime newer",
+			configure: func(t *testing.T, schedule app.Schedule) schedulerScheduleRuntime {
+				return schedulerScheduleRuntime{
+					Revision: schedule.Revision + 2, TriggerDigest: mustSchedulerTriggerDigest(t, schedule.Trigger), Target: schedule.Target,
+					EffectiveState: app.ScheduleStateCompleted, LastOccurrenceAt: schedule.Trigger.At, LastOutcome: schedulerOutcomeAccepted,
+				}
+			},
+			wantState: app.ScheduleStateActive,
+		},
+		{
+			name: "unknown target",
+			configure: func(t *testing.T, schedule app.Schedule) schedulerScheduleRuntime {
+				return schedulerScheduleRuntime{
+					Revision: schedule.Revision, TriggerDigest: mustSchedulerTriggerDigest(t, schedule.Trigger),
+					EffectiveState: app.ScheduleStateCompleted, LastOccurrenceAt: schedule.Trigger.At, LastOutcome: schedulerOutcomeAccepted,
+				}
+			},
+			wantState: app.ScheduleStateActive,
+		},
+		{
+			name: "corrupt completion",
+			configure: func(t *testing.T, schedule app.Schedule) schedulerScheduleRuntime {
+				return schedulerScheduleRuntime{
+					Revision: schedule.Revision, TriggerDigest: mustSchedulerTriggerDigest(t, schedule.Trigger), Target: schedule.Target,
+					EffectiveState: app.ScheduleStateCompleted, LastOccurrenceAt: generationTime(schedule.Trigger.At).Add(time.Minute).Format(time.RFC3339Nano),
+					LastOutcome: schedulerOutcomeAccepted,
+				}
+			},
+			wantState: app.ScheduleStateActive,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+			puaWorkspace, _ := app.OpenWorkspace(workspace.Path)
+			at := time.Date(2099, time.June, 7, 8, 9, 10, 0, time.UTC)
+			created, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+				Description: "Run once", Condition: "once", Target: "workspace",
+				Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: at.Format(time.RFC3339Nano)},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			native := newNativeScheduler(manager, workspace)
+			if err := native.storeSchedulerRuntime(created.ID, test.configure(t, created)); err != nil {
+				t.Fatal(err)
+			}
+			description := "Run once after metadata review"
+			trigger := *created.Trigger
+			if _, err := native.Change(context.Background(), NativeSchedulerChange{
+				Operation: app.ScheduleChangeUpdate, ID: created.ID, ExpectedRevision: created.Revision,
+				Description: &description, Trigger: &trigger,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			assertPortableSchedulerSnapshot(t, native, at, test.wantState)
+		})
+	}
+}
+
+func assertPortableSchedulerSnapshot(t *testing.T, native *NativeScheduler, now time.Time, wantState string) {
+	t.Helper()
+	snapshot, err := native.Snapshot(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Schedules) != 1 {
+		t.Fatalf("portable snapshot schedule count = %d, want 1", len(snapshot.Schedules))
+	}
+	got := snapshot.Schedules[0]
+	if got.EffectiveState != wantState || got.NextRunAt != "" || got.LastOccurrenceAt != "" ||
+		got.LastOutcome != "" || got.LastError != "" || snapshot.NextWakeAt != "" {
+		t.Fatalf("unsafe revision lag exposed runtime = %#v", snapshot)
+	}
+}
+
 func TestNativeSchedulerMetadataEditReplaysAcceptedPreparedOneTime(t *testing.T) {
 	fake := newRuntimeFakeAgentHub()
 	hub := httptest.NewServer(fake)

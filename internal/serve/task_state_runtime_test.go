@@ -693,6 +693,74 @@ func TestWaitingTaskWithTargetScheduleNeedsNoReminder(t *testing.T) {
 	}
 }
 
+func TestWaitingTaskCompletedScheduleRevisionLagGetsReminder(t *testing.T) {
+	manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2099, time.July, 8, 9, 10, 11, 0, time.UTC)
+	created, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Resume Task once", Condition: "at the configured time", Target: "project1.task1",
+		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: at.Format(time.RFC3339Nano)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := puaWorkspace.SetTaskState(created.Target, app.TaskStateWaiting, "waiting for the one-time check"); err != nil {
+		t.Fatal(err)
+	}
+	native := newNativeScheduler(manager, workspace)
+	runtime := schedulerScheduleRuntime{
+		Revision: created.Revision, TriggerDigest: mustSchedulerTriggerDigest(t, created.Trigger), Target: created.Target,
+		EffectiveState: app.ScheduleStateCompleted, LastOccurrenceAt: at.Format(time.RFC3339Nano), LastOutcome: schedulerOutcomeAccepted,
+	}
+	if err := native.storeSchedulerRuntime(created.ID, runtime); err != nil {
+		t.Fatal(err)
+	}
+	description := "Resume Task once with clearer wording"
+	trigger := *created.Trigger
+	if _, err := native.Change(context.Background(), NativeSchedulerChange{
+		Operation: app.ScheduleChangeUpdate, ID: created.ID, ExpectedRevision: created.Revision,
+		Description: &description, Trigger: &trigger,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	manager.now = func() time.Time { return at.Add(time.Minute) }
+	snapshot, err := native.Snapshot(manager.now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if taskHasTargetSchedule(snapshot, created.Target) {
+		t.Fatalf("completed revision-lag schedule still satisfies waiting Task requirement: %#v", snapshot)
+	}
+
+	now := manager.now().Format(time.RFC3339Nano)
+	record := generationRecord{
+		ID: "task-waiting-completed-schedule-gen", WorkspaceID: workspace.ID, ResourceID: created.Target,
+		Generation: 1, GenerationID: "gen-task-waiting-completed-schedule", Status: "stopped", ReplacementPending: true,
+		Title: "Task waiting after completed schedule", CreatedAt: now, UpdatedAt: now,
+		CompletionMarker: "session:2", CompletionTurnID: "turn-2", TaskStateChainID: "message-chain",
+	}
+	if err := saveGenerationRecord(workspace.Path, record); err != nil {
+		t.Fatal(err)
+	}
+	rt := newAgentHubRuntime(manager, workspace, record, nil)
+	manager.registerRuntime(rt)
+	if err := manager.handleTaskTurnCompletionLocked(context.Background(), rt); err != nil {
+		t.Fatal(err)
+	}
+	mailbox, err := loadHotResourceMailbox(workspace.Path, record.ResourceID)
+	if err != nil || len(mailbox.Messages) != 1 || mailbox.Messages[0].Type != resourceMessageTypeTaskContinuation ||
+		mailbox.Messages[0].Causation == nil || mailbox.Messages[0].Causation.Reason != "task_waiting_without_schedule" {
+		t.Fatalf("waiting Task revision-lag reminder = %#v, err=%v", mailbox, err)
+	}
+	updated := rt.snapshotGeneration()
+	if updated.TaskStateContinuationCount != 1 || updated.TaskStateCompletionMarker != record.CompletionMarker {
+		t.Fatalf("waiting Task revision-lag reminder checkpoint = %#v", updated)
+	}
+}
+
 func TestTaskTargetScheduleUsesRuntimeEffectiveState(t *testing.T) {
 	schedule := app.ScheduleSnapshot{
 		Schedule:       app.Schedule{Target: "project1.task1", State: app.ScheduleStateActive, Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: "2026-08-23T09:00:00Z"}},

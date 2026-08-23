@@ -1242,6 +1242,151 @@ func TestNativeSchedulerHonorsPersistedDeliveryBackoff(t *testing.T) {
 	}
 }
 
+func TestNativeSchedulerMetadataEditPreservesPreparedRetry(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	failCatalog := true
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if failCatalog && r.Method == http.MethodGet && r.URL.Path == "/v1/agents" {
+			failCatalog = false
+			w.WriteHeader(http.StatusServiceUnavailable)
+			writeRuntimeFakeJSON(w, map[string]any{"error": map[string]any{
+				"code": "runtime_unavailable", "message": "synthetic catalog outage", "retryable": true,
+			}})
+			return
+		}
+		fake.ServeHTTP(w, r)
+	}))
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	anchor := time.Now().UTC().Add(time.Minute).Truncate(time.Second)
+	created, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Retry immutable work", Condition: "every minute", Guard: "only when ready", Target: "workspace",
+		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerInterval, EverySeconds: 60, AnchorAt: anchor.Format(time.RFC3339Nano)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := anchor.Add(time.Second)
+	native := newNativeScheduler(manager, workspace)
+	if _, err := native.Reconcile(context.Background(), now); err != nil {
+		t.Fatal(err)
+	}
+	before, err := native.schedulerRuntime(created.ID)
+	if err != nil || before.Prepared == nil || before.RetryAt == "" || before.RetryCount != 1 {
+		t.Fatalf("transient prepared retry = %#v, %v", before, err)
+	}
+	if before.Target != created.Target {
+		t.Fatalf("initial runtime target = %q, want %q", before.Target, created.Target)
+	}
+	prepared := *before.Prepared
+	if prepared.ScheduleRevision != created.Revision || prepared.Causation == nil || prepared.Causation.ScheduleRevision != created.Revision {
+		t.Fatalf("prepared retry causation = %#v", prepared)
+	}
+	// Model a checkpoint written before runtime target identity was added. A
+	// frozen prepared target is sufficient to establish sameness safely.
+	before.Target = ""
+	if err := native.storeSchedulerRuntime(created.ID, before); err != nil {
+		t.Fatal(err)
+	}
+
+	description := "Retry immutable work with clearer wording"
+	condition := "every minute after metadata review"
+	guard := "only when reviewed and ready"
+	trigger := *created.Trigger
+	updated, err := puaWorkspace.UpdateSchedule(app.UpdateScheduleInput{
+		ID: created.ID, ExpectedRevision: created.Revision,
+		Description: &description, Condition: &condition, Guard: &guard, Trigger: &trigger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := native.Reconcile(context.Background(), now); err != nil {
+		t.Fatal(err)
+	}
+	after, err := native.schedulerRuntime(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := before
+	want.Revision = updated.Revision
+	want.TriggerDigest = mustSchedulerTriggerDigest(t, updated.Trigger)
+	want.Target = updated.Target
+	if !reflect.DeepEqual(after, want) {
+		t.Fatalf("metadata edit runtime = %#v, want %#v", after, want)
+	}
+	assertPreparedOccurrenceEqual(t, after.Prepared, prepared)
+
+	retryAt := generationTime(before.RetryAt)
+	if _, err := native.Reconcile(context.Background(), retryAt); err != nil {
+		t.Fatal(err)
+	}
+	assertDeliveredPreparedOccurrence(t, scheduleOccurrenceMessages(t, workspace.Path, created.Target), prepared)
+	if _, err := native.Reconcile(context.Background(), retryAt.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDurableOccurrence(t, workspace.Path, prepared, 1)
+}
+
+func TestNativeSchedulerMetadataEditReplaysAcceptedPreparedOneTime(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	hub := httptest.NewServer(fake)
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().UTC().Add(time.Minute).Truncate(time.Second)
+	created, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Accept exactly once", Condition: "once", Target: "workspace",
+		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: at.Format(time.RFC3339Nano)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := at.Add(time.Second)
+	native := newNativeScheduler(manager, workspace)
+	runtime, err := initialScheduleRuntime(created, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := native.prepareOccurrence(created, at, at, time.Time{}, 1, false, time.Time{}, schedulerOccurrenceReasonTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.Prepared = &prepared
+	if err := native.storeSchedulerRuntime(created.ID, runtime); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := acceptGeneratedMailboxMessage(workspace.Path, preparedOccurrenceMessage(prepared)); err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDurableOccurrence(t, workspace.Path, prepared, 1)
+
+	description := "Accept exactly once with clearer wording"
+	trigger := *created.Trigger
+	updated, err := puaWorkspace.UpdateSchedule(app.UpdateScheduleInput{
+		ID: created.ID, ExpectedRevision: created.Revision, Description: &description, Trigger: &trigger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := native.Reconcile(context.Background(), now); err != nil {
+		t.Fatal(err)
+	}
+	assertSingleDurableOccurrence(t, workspace.Path, prepared, 1)
+	after, err := native.schedulerRuntime(created.ID)
+	if err != nil || after.Revision != updated.Revision || after.Prepared != nil || after.EffectiveState != app.ScheduleStateCompleted || after.LastOutcome != schedulerOutcomeAccepted || after.LastOccurrenceAt != prepared.ScheduledFor {
+		t.Fatalf("accepted prepared replay checkpoint = %#v, %v", after, err)
+	}
+	messages := scheduleOccurrenceMessages(t, workspace.Path, created.Target)
+	assertDeliveredPreparedOccurrence(t, messages, prepared)
+}
+
 func TestNativeSchedulerBindingAttentionRecoversPreparedOccurrence(t *testing.T) {
 	fake := newRuntimeFakeAgentHub()
 	hub := httptest.NewServer(fake)
@@ -2439,7 +2584,16 @@ func TestNativeSchedulerTargetEditReplacesPreparedOccurrence(t *testing.T) {
 	if err != nil || runtime.Prepared == nil {
 		t.Fatalf("archived target did not preserve prepared occurrence: %#v, %v", runtime, err)
 	}
+	if runtime.Target != created.Target || runtime.AttentionTarget != created.Target {
+		t.Fatalf("attention runtime target identity = %#v", runtime)
+	}
 	prepared := *runtime.Prepared
+	// Model a legacy attention checkpoint. Its consistent prepared and
+	// attention identities can establish sameness, but cannot hide a retarget.
+	runtime.Target = ""
+	if err := native.storeSchedulerRuntime(created.ID, runtime); err != nil {
+		t.Fatal(err)
+	}
 	description := "Still archived"
 	updated, err := puaWorkspace.UpdateSchedule(app.UpdateScheduleInput{ID: created.ID, ExpectedRevision: created.Revision, Description: &description})
 	if err != nil {
@@ -2453,7 +2607,7 @@ func TestNativeSchedulerTargetEditReplacesPreparedOccurrence(t *testing.T) {
 		t.Fatalf("unrelated edit cleared target attention: %#v, %v", snapshot, err)
 	}
 	runtime, err = native.schedulerRuntime(created.ID)
-	if err != nil || runtime.Revision != updated.Revision {
+	if err != nil || runtime.Revision != updated.Revision || runtime.Target != updated.Target {
 		t.Fatalf("unrelated edit runtime = %#v, %v", runtime, err)
 	}
 	assertPreparedOccurrenceEqual(t, runtime.Prepared, prepared)

@@ -253,6 +253,7 @@ func (n *NativeScheduler) Change(ctx context.Context, change NativeSchedulerChan
 			if runtimeErr != nil {
 				return app.Schedule{}, runtimeErr
 			}
+			runtime.Target = resumed.Target
 			runtimeErr = n.storeSchedulerRuntime(change.ID, runtime)
 		}
 		if runtimeErr == nil && runtime.EffectiveState == schedulerOutcomeAttention {
@@ -331,6 +332,11 @@ func (n *NativeScheduler) reconcileSchedule(ctx context.Context, schedule app.Sc
 	if err != nil {
 		return err
 	}
+	if runtime.Target == "" && schedulerRuntimeTargetsSchedule(runtime, schedule.Target) {
+		// Backfill legacy checkpoints only when their frozen delivery identity
+		// establishes the portable target without ambiguity.
+		runtime.Target = schedule.Target
+	}
 	triggerDigest, err := schedulerTriggerDigest(schedule.Trigger)
 	if err != nil {
 		return err
@@ -339,18 +345,22 @@ func (n *NativeScheduler) reconcileSchedule(ctx context.Context, schedule app.Sc
 	triggerChanged := runtime.TriggerDigest != triggerDigest
 	if revisionChanged || triggerChanged {
 		sameKnownTrigger := runtime.TriggerDigest != "" && !triggerChanged
-		if revisionChanged && sameKnownTrigger && runtime.EffectiveState == app.ScheduleStatePaused && schedule.State == app.ScheduleStateActive {
+		sameDefinition := revisionChanged && sameKnownTrigger && schedulerRuntimeTargetsSchedule(runtime, schedule.Target)
+		resumingPaused := sameDefinition && runtime.EffectiveState == app.ScheduleStatePaused && schedule.State == app.ScheduleStateActive
+		enteringPaused := sameDefinition && runtime.EffectiveState != app.ScheduleStatePaused && schedule.State == app.ScheduleStatePaused
+		if resumingPaused {
 			resumeBoundary, err := time.Parse(time.RFC3339Nano, schedule.UpdatedAt)
 			if err != nil {
 				return err
 			}
 			completeExpiredOneTimeWhilePaused(&runtime, schedule.Trigger, resumeBoundary)
 		}
-		if runtimeCompletesSameOneTimeOccurrence(runtime, schedule) && (sameKnownTrigger || runtime.TriggerDigest == "") {
+		if sameDefinition && !enteringPaused && (!resumingPaused || runtimeCompletesSameOneTimeOccurrence(runtime, schedule)) {
+			// Definition-only revisions promote the portable identity while the
+			// prepared payload and every delivery/cursor field remain frozen.
 			runtime.Revision = schedule.Revision
 			runtime.TriggerDigest = triggerDigest
-		} else if revisionChanged && sameKnownTrigger && runtime.EffectiveState == schedulerOutcomeAttention && runtime.AttentionTarget == schedule.Target && schedule.State == app.ScheduleStateActive {
-			runtime.Revision = schedule.Revision
+			runtime.Target = schedule.Target
 		} else {
 			runtime, err = initialScheduleRuntime(schedule, now)
 			if err != nil {
@@ -407,6 +417,24 @@ func (n *NativeScheduler) reconcileSchedule(ctx context.Context, schedule app.Sc
 	return n.deliverPrepared(ctx, schedule, runtime, now)
 }
 
+func schedulerRuntimeTargetsSchedule(runtime schedulerScheduleRuntime, target string) bool {
+	knownTarget := runtime.Target
+	preparedTarget := ""
+	if runtime.Prepared != nil {
+		preparedTarget = runtime.Prepared.Target
+	}
+	for _, candidate := range []string{preparedTarget, runtime.AttentionTarget} {
+		if candidate == "" {
+			continue
+		}
+		if knownTarget != "" && knownTarget != candidate {
+			return false
+		}
+		knownTarget = candidate
+	}
+	return knownTarget != "" && knownTarget == target
+}
+
 func runtimeCompletesSameOneTimeOccurrence(runtime schedulerScheduleRuntime, schedule app.Schedule) bool {
 	if runtime.EffectiveState != app.ScheduleStateCompleted || schedule.Trigger == nil || schedule.Trigger.Type != app.ScheduleTriggerAt || runtime.LastOccurrenceAt == "" {
 		return false
@@ -433,7 +461,7 @@ func initialScheduleRuntime(schedule app.Schedule, now time.Time) (schedulerSche
 	if err != nil {
 		return schedulerScheduleRuntime{}, err
 	}
-	runtime := schedulerScheduleRuntime{Revision: schedule.Revision, TriggerDigest: triggerDigest, EffectiveState: schedule.State}
+	runtime := schedulerScheduleRuntime{Revision: schedule.Revision, TriggerDigest: triggerDigest, Target: schedule.Target, EffectiveState: schedule.State}
 	if schedule.Trigger == nil {
 		return runtime, nil
 	}

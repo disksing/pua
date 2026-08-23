@@ -656,6 +656,11 @@ Commands:
     PUA resource environment takes precedence over cwd; provenance is not
     authentication or instruction priority.
 
+    The message text is sent verbatim. For multi-line text use real newlines
+    (for example $'line1\nline2'), or pass - to read the message from
+    standard input, for example:
+      pua message send --to=project1.task2 - <<'EOF'
+
     When --to is a registered user name, durably append the message to that
     user's inbox for display in the Web GUI. The user reads it in the Inbox
     panel and may reply; the reply arrives as an ordinary role=user resource

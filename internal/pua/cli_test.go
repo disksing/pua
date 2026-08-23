@@ -350,6 +350,78 @@ func TestMessageSendToUserTarget(t *testing.T) {
 	})
 }
 
+func TestMessageSendStdinAndEscapeWarning(t *testing.T) {
+	t.Setenv(puaWorkspaceRootEnvironment, "")
+	t.Setenv(puaWorkspaceInstanceEnvironment, "")
+	t.Setenv(puaResourceIDEnvironment, "")
+	withTempCwd(t, func(root string) {
+		run(t, "init")
+		run(t, "project", "create", "Mailbox project")
+		if err := os.Chdir(filepath.Join(root, "project1")); err != nil {
+			t.Fatal(err)
+		}
+		run(t, "task", "create", "Mailbox task")
+		if err := os.Chdir(filepath.Join(root, "project1", "task1")); err != nil {
+			t.Fatal(err)
+		}
+		var requestBody map[string]any
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/resources/project1.task1/messages") {
+				if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+					t.Error(err)
+				}
+				_, _ = io.WriteString(w, `{"messageId":"msg-test","resourceId":"project1.task1","requestedMode":"steer","actualMode":"steer","status":"delivered"}`)
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		defer server.Close()
+		lock := map[string]any{"pid": os.Getpid(), "address": server.URL, "workspacePath": root}
+		data, err := json.Marshal(lock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, ".pua", "serve.lock"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		// A "-" message argument reads the body from stdin, preserving real
+		// newlines.
+		_, stderr, err := runWithStdin(t, "line1\nline2\n\n- item\n", "message", "send", "--to=project1.task1", "-")
+		if err != nil {
+			t.Fatalf("stdin send failed: %v", err)
+		}
+		if requestBody["text"] != "line1\nline2\n\n- item" {
+			t.Fatalf("stdin message text = %#v", requestBody["text"])
+		}
+		if strings.Contains(stderr, "warning") {
+			t.Fatalf("stdin message triggered an escape warning: %q", stderr)
+		}
+
+		// A literal \n sequence without any real newline hints at shell
+		// quoting that kept the escape verbatim; the send still succeeds.
+		_, stderr, err = runWithStdin(t, "", "message", "send", "--to=project1.task1", `failed:\n1. first\n2. second`)
+		if err != nil {
+			t.Fatalf("literal-escape send failed: %v", err)
+		}
+		if requestBody["text"] != `failed:\n1. first\n2. second` {
+			t.Fatalf("literal-escape message text = %#v", requestBody["text"])
+		}
+		if !strings.Contains(stderr, "literal \\n sequences") {
+			t.Fatalf("missing literal-escape warning, stderr = %q", stderr)
+		}
+
+		// Plain single-line text stays silent.
+		_, stderr, err = runWithStdin(t, "", "message", "send", "--to=project1.task1", "hello")
+		if err != nil {
+			t.Fatalf("plain send failed: %v", err)
+		}
+		if strings.Contains(stderr, "warning") {
+			t.Fatalf("plain message triggered an escape warning: %q", stderr)
+		}
+	})
+}
+
 func TestRemovedStartAndServeSubcommands(t *testing.T) {
 	if _, err := runErr(t, "start"); err == nil || !strings.Contains(err.Error(), `unknown command "start"`) {
 		t.Fatalf("expected pua start to be unknown, got %v", err)
@@ -2092,6 +2164,60 @@ func run(t *testing.T, args ...string) string {
 
 func runErr(t *testing.T, args ...string) (string, error) {
 	return captureRun(t, Run, args...)
+}
+
+// runWithStdin feeds stdin to the CLI and captures both stdout and stderr.
+func runWithStdin(t *testing.T, stdin string, args ...string) (string, string, error) {
+	t.Helper()
+	stdinReader, stdinWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStdin := os.Stdin
+	os.Stdin = stdinReader
+	if _, err := io.WriteString(stdinWriter, stdin); err != nil {
+		t.Fatal(err)
+	}
+	if err := stdinWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		os.Stdin = oldStdin
+		_ = stdinReader.Close()
+	}()
+
+	var stdoutBuf, stderrBuf bytes.Buffer
+	oldStdout, oldStderr := os.Stdout, os.Stderr
+	stdoutReader, stdoutWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stderrReader, stderrWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout, os.Stderr = stdoutWriter, stderrWriter
+	runErr := Run(args)
+	if err := stdoutWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := stderrWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout, os.Stderr = oldStdout, oldStderr
+	if _, err := io.Copy(&stdoutBuf, stdoutReader); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(&stderrBuf, stderrReader); err != nil {
+		t.Fatal(err)
+	}
+	if err := stdoutReader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := stderrReader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return stdoutBuf.String(), stderrBuf.String(), runErr
 }
 
 func captureRun(t *testing.T, fn func([]string) error, args ...string) (string, error) {

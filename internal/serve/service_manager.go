@@ -162,10 +162,8 @@ func (m *ServiceManager) loadLocked() error {
 		if err != nil {
 			return fmt.Errorf("read service %s: %w", id, err)
 		}
-		decoder := json.NewDecoder(bytes.NewReader(data))
-		decoder.DisallowUnknownFields()
 		var cfg ServiceConfig
-		if err := decoder.Decode(&cfg); err != nil {
+		if err := decodeStrictServiceJSON(bytes.NewReader(data), &cfg); err != nil {
 			return fmt.Errorf("decode service %s: %w", id, err)
 		}
 		if cfg.ID == "" {
@@ -224,9 +222,7 @@ func (m *ServiceManager) loadBindingsLocked() (ServiceBindings, error) {
 	if err != nil {
 		return ServiceBindings{}, fmt.Errorf("read service bindings: %w", err)
 	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&bindings); err != nil {
+	if err := decodeStrictServiceJSON(bytes.NewReader(data), &bindings); err != nil {
 		return ServiceBindings{}, fmt.Errorf("decode service bindings: %w", err)
 	}
 	if err := m.validateBindingsLocked(bindings); err != nil {
@@ -768,15 +764,20 @@ func (m *ServiceManager) readExportHandoffWithGateLocked(rt *serviceRuntime, han
 		return ServiceExportFile{}, m.rejectExportLocked(rt, cause, nil, fromLog)
 	}
 	var export ServiceExportFile
-	decoder := json.NewDecoder(bytes.NewReader(handoff.data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&export); err != nil {
-		cause := scrubRejectedExport(handoff.file, serviceExportSchema, fmt.Errorf("decode export: %w", err))
+	if err := decodeStrictServiceJSON(bytes.NewReader(handoff.data), &export); err != nil {
+		cause := scrubRejectedExport(handoff.file, serviceExportSchema, errors.New("decode export: invalid JSON hand-off"))
 		return ServiceExportFile{}, m.rejectExportLocked(rt, cause, nil, fromLog)
+	}
+	candidateSecrets := make([]string, 0, len(export.Secrets))
+	for _, value := range export.Secrets {
+		candidateSecrets = append(candidateSecrets, value)
+		if rt.redactor != nil {
+			rt.redactor.Register(value)
+		}
 	}
 	if export.SchemaVersion != serviceExportSchema {
 		cause := scrubRejectedExport(handoff.file, serviceExportSchema, fmt.Errorf("unsupported export schema version %d", export.SchemaVersion))
-		return ServiceExportFile{}, m.rejectExportLocked(rt, cause, nil, fromLog)
+		return ServiceExportFile{}, m.rejectExportLocked(rt, cause, candidateSecrets, fromLog)
 	}
 	if export.Variables == nil {
 		export.Variables = map[string]string{}
@@ -784,25 +785,20 @@ func (m *ServiceManager) readExportHandoffWithGateLocked(rt *serviceRuntime, han
 	if rt.secretNames == nil {
 		rt.secretNames = map[string]ServiceSecretMetadata{}
 	}
-	candidateSecrets := make([]string, 0, len(export.Secrets))
 	for name, value := range export.Secrets {
-		candidateSecrets = append(candidateSecrets, value)
-		if rt.redactor != nil {
-			rt.redactor.Register(value)
-		}
 		if !validSecretName(name) || strings.ContainsRune(value, '\x00') {
-			cause := scrubRejectedExport(handoff.file, export.SchemaVersion, fmt.Errorf("invalid exported secret %q", name))
+			cause := scrubRejectedExport(handoff.file, export.SchemaVersion, errors.New("invalid exported secret name or value"))
 			return ServiceExportFile{}, m.rejectExportLocked(rt, cause, candidateSecrets, fromLog)
 		}
 	}
 	candidateRedactor := security.NewRedactor(candidateSecrets...)
 	for name, value := range export.Variables {
 		if !environmentNamePattern.MatchString(name) || strings.ContainsRune(value, '\x00') {
-			cause := scrubRejectedExport(handoff.file, export.SchemaVersion, fmt.Errorf("invalid exported variable %q", name))
+			cause := scrubRejectedExport(handoff.file, export.SchemaVersion, errors.New("invalid exported variable name or value"))
 			return ServiceExportFile{}, m.rejectExportLocked(rt, cause, candidateSecrets, fromLog)
 		}
 		if candidateRedactor.ContainsSecret([]byte(value)) || rt.redactor != nil && rt.redactor.ContainsSecret([]byte(value)) {
-			cause := scrubRejectedExport(handoff.file, export.SchemaVersion, fmt.Errorf("exported variable %q contains a secret; place it under secrets", name))
+			cause := scrubRejectedExport(handoff.file, export.SchemaVersion, errors.New("exported variable contains a secret; place it under secrets"))
 			return ServiceExportFile{}, m.rejectExportLocked(rt, cause, candidateSecrets, fromLog)
 		}
 	}
@@ -842,13 +838,6 @@ func (m *ServiceManager) readExportHandoffWithGateLocked(rt *serviceRuntime, han
 }
 
 func (m *ServiceManager) rejectExportLocked(rt *serviceRuntime, cause error, secretValues []string, fromLog bool) error {
-	if !rt.exportAccepted && !fromLog {
-		return cause
-	}
-	message := cause.Error()
-	if rt.exportViolation == "" {
-		rt.exportViolation = message
-	}
 	if fromLog {
 		for _, value := range secretValues {
 			if !containsString(rt.rejectedExportSecrets, value) {
@@ -861,6 +850,13 @@ func (m *ServiceManager) rejectExportLocked(rt *serviceRuntime, cause error, sec
 				rt.secretValues = append(rt.secretValues, value)
 			}
 		}
+	}
+	if !rt.exportAccepted && !fromLog {
+		return cause
+	}
+	message := cause.Error()
+	if rt.exportViolation == "" {
+		rt.exportViolation = message
 	}
 	return errors.New(rt.exportViolation)
 }
@@ -1913,9 +1909,7 @@ func LoadServiceConfig(path string) (ServiceConfig, error) {
 		return ServiceConfig{}, err
 	}
 	var cfg ServiceConfig
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&cfg); err != nil {
+	if err := decodeStrictServiceJSON(bytes.NewReader(data), &cfg); err != nil {
 		return ServiceConfig{}, err
 	}
 	if cfg.ID == "" {

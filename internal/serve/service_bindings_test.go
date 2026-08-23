@@ -40,6 +40,16 @@ func TestServiceManagerBindingReadsShareStrictValidation(t *testing.T) {
 			data:      `{"schemaVersion":1,"secrets":{"TOKEN":"domain-validation-secret"}}`,
 			sensitive: "domain-validation-secret",
 		},
+		{
+			name:      "concatenated objects",
+			data:      `{"schemaVersion":1}{"schemaVersion":1,"variables":{"PUBLIC":"concatenated-binding-secret"}}`,
+			sensitive: "concatenated-binding-secret",
+		},
+		{
+			name:      "trailing garbage",
+			data:      `{"schemaVersion":1} trailing-binding-secret`,
+			sensitive: "trailing-binding-secret",
+		},
 	}
 
 	for _, test := range tests {
@@ -128,7 +138,8 @@ func TestServiceManagerBindingReadsShareValidData(t *testing.T) {
 		"schemaVersion": 1,
 		"variables": {"PUBLIC_VALUE": "plain"},
 		"secrets": {"API_TOKEN": "${secret.api-token}"}
-	}`)
+	}
+	`)
 	manager, err := NewServiceManager(root, ServiceManagerOptions{
 		Resolver: EnvironmentSecretResolver{Values: map[string]string{"api-token": "resolved-secret"}},
 	})
@@ -352,6 +363,11 @@ func TestHandleServiceBindingsPreservesWireBehavior(t *testing.T) {
 	server.handleServiceBindings(recorder, httptest.NewRequest(http.MethodPut, request.URL.String(), strings.NewReader(`{"variables":{},"unknown":true}`)), "workspace-one")
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("unknown PUT field returned %d: %s", recorder.Code, recorder.Body.String())
+	}
+	recorder = httptest.NewRecorder()
+	server.handleServiceBindings(recorder, httptest.NewRequest(http.MethodPut, request.URL.String(), strings.NewReader(`{"variables":{}}{"variables":{"PUBLIC_VALUE":"hidden"}}`)), "workspace-one")
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("concatenated PUT objects returned %d: %s", recorder.Code, recorder.Body.String())
 	}
 	recorder = httptest.NewRecorder()
 	server.handleServiceBindings(recorder, httptest.NewRequest(http.MethodPost, request.URL.String(), nil), "workspace-one")

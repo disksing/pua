@@ -1,7 +1,6 @@
 package serve
 
 import (
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -27,9 +26,7 @@ func (s *server) handleWorkspaceServices(w http.ResponseWriter, r *http.Request,
 			var body struct {
 				Services []ServiceConfig `json:"services"`
 			}
-			decoder := json.NewDecoder(r.Body)
-			decoder.DisallowUnknownFields()
-			if err := decoder.Decode(&body); err != nil {
+			if err := decodeStrictServiceJSON(r.Body, &body); err != nil {
 				writeError(w, err, http.StatusBadRequest)
 				return
 			}
@@ -61,9 +58,7 @@ func (s *server) handleWorkspaceServices(w http.ResponseWriter, r *http.Request,
 			writeJSON(w, status)
 		case http.MethodPut:
 			var cfg ServiceConfig
-			decoder := json.NewDecoder(r.Body)
-			decoder.DisallowUnknownFields()
-			if err := decoder.Decode(&cfg); err != nil {
+			if err := decodeStrictServiceJSON(r.Body, &cfg); err != nil {
 				writeError(w, err, http.StatusBadRequest)
 				return
 			}
@@ -200,9 +195,7 @@ func (s *server) handleServiceBindings(w http.ResponseWriter, r *http.Request, w
 		writeJSON(w, bindings)
 	case http.MethodPut:
 		var bindings ServiceBindings
-		decoder := json.NewDecoder(r.Body)
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&bindings); err != nil {
+		if err := decodeStrictServiceJSON(r.Body, &bindings); err != nil {
 			writeError(w, err, http.StatusBadRequest)
 			return
 		}

@@ -113,6 +113,50 @@ func TestServiceConfigExportsDeclarationWire(t *testing.T) {
 	}
 }
 
+func TestServiceDefinitionJSONRequiresOneValue(t *testing.T) {
+	valid := `{"schemaVersion":1,"id":"worker","enabled":false,"command":["service"]}`
+	for _, test := range []struct {
+		name string
+		data string
+		want string
+	}{
+		{name: "concatenated objects", data: valid + `{"schemaVersion":1}`, want: "multiple JSON values"},
+		{name: "trailing garbage", data: valid + ` trailing-definition-data`, want: "invalid trailing JSON data"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := serviceConfigPath(root, "worker")
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(test.data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadServiceConfig(path); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("LoadServiceConfig error = %v, want %q", err, test.want)
+			}
+			if _, err := NewServiceManager(root, ServiceManagerOptions{}); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("NewServiceManager error = %v, want %q", err, test.want)
+			}
+		})
+	}
+
+	root := t.TempDir()
+	path := serviceConfigPath(root, "worker")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(valid+" \n\t"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadServiceConfig(path); err != nil {
+		t.Fatalf("LoadServiceConfig rejected trailing whitespace: %v", err)
+	}
+	if _, err := NewServiceManager(root, ServiceManagerOptions{}); err != nil {
+		t.Fatalf("NewServiceManager rejected trailing whitespace: %v", err)
+	}
+}
+
 func TestValidateServiceGraphRejectsCyclesAndSecretArguments(t *testing.T) {
 	root := t.TempDir()
 	configs := map[string]ServiceConfig{
@@ -495,6 +539,213 @@ func TestServiceManagerDeclaredExporterRequiresValidInitialHandoff(t *testing.T)
 				t.Fatal("missing or malformed initial hand-off was not reported")
 			}
 		})
+	}
+}
+
+func TestServiceManagerRejectedExportJSONIsScrubbedAndOpaque(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		data   string
+		secret string
+	}{
+		{
+			name:   "concatenated objects",
+			data:   `{"schemaVersion":1}{"schemaVersion":1,"secrets":{"TOKEN":"concatenated-export-secret"}}`,
+			secret: "concatenated-export-secret",
+		},
+		{
+			name:   "trailing garbage",
+			data:   `{"schemaVersion":1} trailing-export-secret`,
+			secret: "trailing-export-secret",
+		},
+		{
+			name:   "unknown field",
+			data:   `{"schemaVersion":1,"unknown":"unknown-export-secret"}`,
+			secret: "unknown-export-secret",
+		},
+		{
+			name:   "malformed object",
+			data:   `{"schemaVersion":1,"secrets":{"TOKEN":"malformed-export-secret"}`,
+			secret: "malformed-export-secret",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(serviceRuntimePath(root, "exporter"), "export.json")
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(test.data), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			manager := &ServiceManager{root: root, now: time.Now}
+			runtime := &serviceRuntime{
+				config:   ServiceConfig{SchemaVersion: serviceSchemaVersion, ID: "exporter", Exports: true},
+				redactor: security.NewRedactor(),
+			}
+			if _, err := manager.readExportsLocked(runtime); err == nil {
+				t.Fatal("rejected export was accepted")
+			} else if strings.Contains(err.Error(), test.secret) || !strings.Contains(err.Error(), "invalid JSON hand-off") {
+				t.Fatalf("rejected export error disclosed input or lost protocol context: %v", err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(data, []byte(test.secret)) || !json.Valid(data) {
+				t.Fatalf("rejected export was not safely scrubbed: %s", data)
+			}
+			if info, err := os.Stat(path); err != nil {
+				t.Fatal(err)
+			} else if info.Mode().Perm() != 0o600 {
+				t.Fatalf("scrubbed export mode = %o, want 600", info.Mode().Perm())
+			}
+		})
+	}
+}
+
+func TestServiceManagerRejectedExportScrubsOpenedDescriptorBeforeReplacement(t *testing.T) {
+	const (
+		openedSecret      = "opened-rejected-secret"
+		replacementSecret = "replacement-accepted-secret"
+	)
+	root := t.TempDir()
+	path := filepath.Join(serviceRuntimePath(root, "exporter"), "export.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"schemaVersion":1}{"secrets":{"TOKEN":"`+openedSecret+`"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	handoff, err := openServiceExportHandoff(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := ServiceExportFile{
+		SchemaVersion: serviceExportSchema,
+		Variables:     map[string]string{"PUBLIC": "visible"},
+		Secrets:       map[string]string{"TOKEN": replacementSecret},
+	}
+	if err := writeServiceJSON(path, replacement, 0o644); err != nil {
+		_ = handoff.file.Close()
+		t.Fatal(err)
+	}
+	manager := &ServiceManager{root: root, now: time.Now}
+	runtime := &serviceRuntime{
+		config:        ServiceConfig{SchemaVersion: serviceSchemaVersion, ID: "exporter", Exports: true},
+		secretNames:   map[string]ServiceSecretMetadata{},
+		exportSecrets: map[string]string{},
+		redactor:      security.NewRedactor(),
+	}
+	if _, err := manager.readExportHandoffWithGateLocked(runtime, handoff, false); err == nil {
+		_ = handoff.file.Close()
+		t.Fatal("opened rejected hand-off was accepted")
+	}
+	if _, err := handoff.file.Seek(0, io.SeekStart); err != nil {
+		_ = handoff.file.Close()
+		t.Fatal(err)
+	}
+	openedData, err := io.ReadAll(handoff.file)
+	if closeErr := handoff.file.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(openedData, []byte(openedSecret)) || !json.Valid(openedData) {
+		t.Fatalf("opened rejected inode was not scrubbed: %s", openedData)
+	}
+	pathnameData, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(pathnameData, []byte(replacementSecret)) || bytes.Contains(pathnameData, []byte(openedSecret)) {
+		t.Fatalf("pathname replacement was overwritten: %s", pathnameData)
+	}
+	accepted, err := manager.readExportsLocked(runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accepted.Variables["PUBLIC"] != "visible" || accepted.Secrets["TOKEN"] != replacementSecret {
+		t.Fatalf("replacement export = %#v", accepted)
+	}
+	pathnameData, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(pathnameData, []byte(replacementSecret)) {
+		t.Fatalf("accepted replacement retained its secret: %s", pathnameData)
+	}
+}
+
+func TestServiceManagerTrailingWhitespaceExportRemainsVisible(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(serviceRuntimePath(root, "exporter"), "export.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"schemaVersion":1,"variables":{"PUBLIC":"visible"}}`+" \n\t"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manager := &ServiceManager{root: root, now: time.Now}
+	runtime := &serviceRuntime{config: ServiceConfig{ID: "exporter", Exports: true}, redactor: security.NewRedactor()}
+	export, err := manager.readExportsLocked(runtime)
+	if err != nil {
+		t.Fatalf("trailing whitespace export was rejected: %v", err)
+	}
+	if export.Variables["PUBLIC"] != "visible" {
+		t.Fatalf("visible export variables = %#v", export.Variables)
+	}
+}
+
+func TestServiceManagerRejectedExportDoesNotReachDurableOutputs(t *testing.T) {
+	const secret = "strict-tail-secret-marker"
+	root := t.TempDir()
+	writeTestService(t, root, ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "exporter",
+		Enabled:       true,
+		Exports:       true,
+		Command: []string{"/bin/sh", "-c", `
+			printf '%s' '{"schemaVersion":1}{"schemaVersion":1,"secrets":{"TOKEN":"strict-tail-secret-marker"}}' > "$PUA_SERVICE_EXPORT_PATH"
+			printf '%s\n' 'strict-tail-secret-marker'
+			exec sleep 30
+		`},
+		Restart: ServiceRestartConfig{InitialDelay: time.Second, Multiplier: 2, MaxDelay: time.Second},
+	})
+	manager, err := NewServiceManager(root, ServiceManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopProcessTestManager(t, &manager)
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	status, err := manager.Show("exporter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != ServiceStateBackoff && status.State != ServiceStateAttentionRequired {
+		t.Fatalf("state = %q, want rejected export failure", status.State)
+	}
+	projection, err := json.Marshal(status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(projection, []byte(secret)) {
+		t.Fatalf("public status disclosed rejected export bytes: %s", projection)
+	}
+	for _, name := range []string{"export.json", "stdout.log", "stderr.log", "state.json", "events.jsonl"} {
+		data, err := os.ReadFile(filepath.Join(serviceRuntimePath(root, "exporter"), name))
+		if err != nil && os.IsNotExist(err) && (name == "stdout.log" || name == "stderr.log") {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(data, []byte(secret)) {
+			t.Fatalf("rejected export bytes reached %s: %s", name, data)
+		}
 	}
 }
 
@@ -967,6 +1218,7 @@ func TestServiceManagerRetainsExportSecretsAcrossReadinessPolls(t *testing.T) {
 }
 
 func TestServiceManagerRejectsNewExportSecretInVariable(t *testing.T) {
+	const secret = "new-export-secret"
 	root := t.TempDir()
 	cfg := ServiceConfig{SchemaVersion: serviceSchemaVersion, ID: "exporter", Exports: true, Command: []string{"service"}}
 	m := &ServiceManager{root: root, now: time.Now}
@@ -977,13 +1229,23 @@ func TestServiceManagerRejectsNewExportSecretInVariable(t *testing.T) {
 	}
 	export := ServiceExportFile{
 		SchemaVersion: serviceExportSchema,
-		Variables:     map[string]string{"PUBLIC_TOKEN": "new-export-secret"},
-		Secrets:       map[string]string{"TOKEN": "new-export-secret"},
+		Variables:     map[string]string{"PUBLIC_TOKEN": secret},
+		Secrets:       map[string]string{"TOKEN": secret},
 	}
 	if err := writeServiceJSON(path, export, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := m.readExportsLocked(rt); err == nil || !strings.Contains(err.Error(), "contains a secret") {
 		t.Fatalf("read export error = %v, want secret variable rejection", err)
+	}
+	if !containsString(rt.secretValues, secret) || !rt.redactor.ContainsSecret([]byte(secret)) {
+		t.Fatal("rejected export secret was not retained for later redaction")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(data, []byte(secret)) {
+		t.Fatalf("rejected validation retained its secret: %s", data)
 	}
 }

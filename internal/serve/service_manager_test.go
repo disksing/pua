@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,6 +25,44 @@ func writeTestService(t *testing.T, root string, cfg ServiceConfig) {
 	}
 	if err := os.WriteFile(serviceConfigPath(root, cfg.ID), data, 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
+}
+
+func waitForTestFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		} else if !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", filepath.Base(path))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func waitForTestPath(t *testing.T, path, content string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		data, err := os.ReadFile(path)
+		if err == nil && strings.Contains(string(data), content) {
+			return
+		}
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %q in %s", content, filepath.Base(path))
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -423,6 +462,138 @@ func TestServiceManagerBuffersDeclaredExportLogsWithoutReadiness(t *testing.T) {
 	}
 	if err := m.Stop(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestServiceManagerRejectsSecretRotationBeforePersistingLaterLogs(t *testing.T) {
+	root := t.TempDir()
+	runtimeDir := serviceRuntimePath(root, "exporter")
+	triggerPath := filepath.Join(root, "rotate")
+	donePath := filepath.Join(root, "rotated")
+	cfg := ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "exporter",
+		Enabled:       true,
+		Exports:       true,
+		Command: []string{"/bin/sh", "-c", fmt.Sprintf(`
+			tmp="$PUA_SERVICE_EXPORT_PATH.tmp"
+			printf '%%s' '{"schemaVersion":1,"variables":{"PUBLIC":"initial"},"secrets":{"TOKEN":"initial-secret"}}' > "$tmp"
+			mv "$tmp" "$PUA_SERVICE_EXPORT_PATH"
+			while [ ! -f %s ]; do sleep 0.01; done
+			printf '%%s' '{"schemaVersion":1,"variables":{"PUBLIC":"updated"}}' > "$tmp"
+			mv "$tmp" "$PUA_SERVICE_EXPORT_PATH"
+			printf 'ordinary-output\n'
+			while [ ! -f %s ]; do sleep 0.01; done
+			printf '%%s' '{"schemaVersion":1,"variables":{"PUBLIC":"rejected"},"secrets":{"TOKEN":"rotated-secret"}}' > "$tmp"
+			mv "$tmp" "$PUA_SERVICE_EXPORT_PATH"
+			printf 'rotated-secret\n'
+			printf 'rotated-secret\n' >&2
+			: > %s
+			sleep 2
+		`, shellQuote(filepath.Join(root, "update-variable")), shellQuote(triggerPath), shellQuote(donePath))},
+		Restart: ServiceRestartConfig{InitialDelay: time.Second, Multiplier: 2, MaxDelay: time.Second},
+	}
+	writeTestService(t, root, cfg)
+	m, err := NewServiceManager(root, ServiceManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "update-variable"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitForTestPath(t, filepath.Join(runtimeDir, "stdout.log"), "ordinary-output")
+	if err := m.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	exports, err := m.Exports("exporter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := exports.Variables["PUBLIC"]; got != "updated" {
+		t.Fatalf("public variable update = %q, want updated", got)
+	}
+	if err := os.WriteFile(triggerPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitForTestFile(t, donePath)
+	if err := m.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	status, err := m.Show("exporter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != ServiceStateBackoff && status.State != ServiceStateAttentionRequired {
+		t.Fatalf("state = %q, want rejected export to stop service", status.State)
+	}
+	if !strings.Contains(status.LastError, "immutable") {
+		t.Fatalf("last error = %q, want immutable export contract", status.LastError)
+	}
+	projection, err := json.Marshal(status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(projection), "rotated-secret") {
+		t.Fatalf("rotated secret appeared in API projection: %s", projection)
+	}
+	exports, err = m.Exports("exporter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	exportProjection, err := json.Marshal(exports)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(exportProjection), "rotated-secret") {
+		t.Fatalf("rotated secret appeared in export projection: %s", exportProjection)
+	}
+	for _, name := range []string{"stdout.log", "stderr.log", "state.json", "events.jsonl", "export.json"} {
+		data, err := os.ReadFile(filepath.Join(runtimeDir, name))
+		if err != nil && os.IsNotExist(err) && name == "stderr.log" {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "rotated-secret") {
+			t.Fatalf("rotated secret appeared in %s: %s", name, data)
+		}
+	}
+}
+
+func TestServiceManagerDiscardsTimedOutStartupLogsWithoutExport(t *testing.T) {
+	root := t.TempDir()
+	cfg := ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "exporter",
+		Enabled:       true,
+		Exports:       true,
+		Command:       []string{"/bin/sh", "-c", "printf 'unknown-startup-secret'; sleep 2"},
+		Readiness:     &ServiceReadinessConfig{Command: []string{"/bin/sh", "-c", "exit 0"}, Interval: time.Second, Timeout: 100 * time.Millisecond},
+		Restart:       ServiceRestartConfig{InitialDelay: time.Second, Multiplier: 2, MaxDelay: time.Second},
+	}
+	writeTestService(t, root, cfg)
+	m, err := NewServiceManager(root, ServiceManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"stdout.log", "stderr.log"} {
+		data, err := os.ReadFile(filepath.Join(serviceRuntimePath(root, "exporter"), name))
+		if err != nil && os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(data) != 0 {
+			t.Fatalf("timed-out startup buffer reached %s: %q", name, data)
+		}
 	}
 }
 

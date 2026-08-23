@@ -69,21 +69,23 @@ type serviceProcessExit struct {
 }
 
 type serviceRuntime struct {
-	config        ServiceConfig
-	status        ServiceStatus
-	process       *exec.Cmd
-	exit          <-chan serviceProcessExit
-	started       time.Time
-	stableSince   time.Time
-	environment   []string
-	secretValues  []string
-	secretNames   map[string]ServiceSecretMetadata
-	exportSecrets map[string]string
-	redactor      *security.Redactor
-	exports       ServiceExportFile
-	logStreams    []*security.Stream
-	logWriters    []*serviceLogWriter
-	logSinks      []*serviceLogSink
+	config                ServiceConfig
+	status                ServiceStatus
+	process               *exec.Cmd
+	exit                  <-chan serviceProcessExit
+	started               time.Time
+	stableSince           time.Time
+	environment           []string
+	secretValues          []string
+	secretNames           map[string]ServiceSecretMetadata
+	exportSecrets         map[string]string
+	exportMu              sync.Mutex
+	exportAccepted        bool
+	exportViolation       string
+	rejectedExportSecrets []string
+	redactor              *security.Redactor
+	exports               ServiceExportFile
+	logWriters            []*serviceLogWriter
 }
 
 // ServiceManager owns all mutable service state for one Workspace. It is the
@@ -474,11 +476,13 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 	stdoutSink := newServiceLogSink(filepath.Join(serviceRuntimePath(m.root, cfg.ID), "stdout.log"), cfg.LogRotation)
 	stderrSink := newServiceLogSink(filepath.Join(serviceRuntimePath(m.root, cfg.ID), "stderr.log"), cfg.LogRotation)
 	gatedLogs := requiresInitialExport(cfg)
-	stdoutWriter := newServiceLogWriter(stdoutSink, redactor, gatedLogs)
-	stderrWriter := newServiceLogWriter(stderrSink, redactor, gatedLogs)
-	stdout := redactor.NewStream(stdoutWriter)
-	stderr := redactor.NewStream(stderrWriter)
-	cmd.Stdout, cmd.Stderr = stdout, stderr
+	var exportGuard func() error
+	if gatedLogs {
+		exportGuard = func() error { return m.guardServiceLogExport(rt) }
+	}
+	stdoutWriter := newServiceLogWriter(stdoutSink, redactor, gatedLogs, exportGuard)
+	stderrWriter := newServiceLogWriter(stderrSink, redactor, gatedLogs, exportGuard)
+	cmd.Stdout, cmd.Stderr = stdoutWriter, stderrWriter
 	// Keep the resolved environment in the runtime before Start so a failed
 	// exec can still run cleanup with the same environment and redact any
 	// resolver-provided secret from its diagnostics.
@@ -486,11 +490,14 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 	rt.secretValues = secrets
 	rt.secretNames = names
 	rt.exportSecrets = map[string]string{}
+	rt.exportAccepted = false
+	rt.exportViolation = ""
+	rt.rejectedExportSecrets = nil
 	rt.redactor = redactor
 	rt.exports = exports
 	if err := cmd.Start(); err != nil {
-		_ = stdout.Close()
-		_ = stderr.Close()
+		_ = stdoutWriter.Close()
+		_ = stderrWriter.Close()
 		return m.failStartLocked(ctx, rt, err)
 	}
 	processStartID := ""
@@ -499,8 +506,8 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 		if identityErr != nil || processIdentity.processGroup != cmd.Process.Pid || processIdentity.startID == "" {
 			_ = terminateProcessGroup(cmd.Process.Pid, true)
 			_ = cmd.Wait()
-			_ = stdout.Close()
-			_ = stderr.Close()
+			_ = stdoutWriter.Close()
+			_ = stderrWriter.Close()
 			if identityErr == nil {
 				identityErr = errProcessIdentityUnavailable
 			}
@@ -526,11 +533,8 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 	rt.secretValues = secrets
 	rt.secretNames = names
 	rt.exportSecrets = map[string]string{}
-	rt.redactor = redactor
 	rt.exports = exports
-	rt.logStreams = []*security.Stream{stdout, stderr}
 	rt.logWriters = []*serviceLogWriter{stdoutWriter, stderrWriter}
-	rt.logSinks = []*serviceLogSink{stdoutSink, stderrSink}
 	rt.status.State = ServiceStateStarting
 	rt.status.PID = cmd.Process.Pid
 	rt.status.ProcessGroup = cmd.Process.Pid
@@ -579,6 +583,9 @@ func (m *ServiceManager) observeReadyLocked(ctx context.Context, rt *serviceRunt
 	if rt.process == nil {
 		return nil
 	}
+	if err := m.exportProtocolErrorLocked(rt); err != nil {
+		return m.readinessFailedLocked(ctx, rt, err)
+	}
 	now := m.now()
 	if rt.stableSince.IsZero() {
 		rt.stableSince = now
@@ -596,7 +603,9 @@ func (m *ServiceManager) observeReadyLocked(ctx context.Context, rt *serviceRunt
 			return m.readinessFailedLocked(ctx, rt, err)
 		}
 		rt.exports = exports
-		m.releaseStartupLogsLocked(rt)
+		if err := m.releaseStartupLogsLocked(rt); err != nil {
+			return m.readinessFailedLocked(ctx, rt, err)
+		}
 		rt.status.State = ServiceStateReady
 		rt.status.Readiness.Ready = true
 		rt.status.Exports = publicExports(rt.exports, rt.secretNames)
@@ -618,7 +627,9 @@ func (m *ServiceManager) observeReadyLocked(ctx context.Context, rt *serviceRunt
 	if err := m.runReadinessLocked(ctx, rt); err != nil {
 		return m.readinessFailedLocked(ctx, rt, err)
 	}
-	m.releaseStartupLogsLocked(rt)
+	if err := m.releaseStartupLogsLocked(rt); err != nil {
+		return m.readinessFailedLocked(ctx, rt, err)
+	}
 	rt.status.State = ServiceStateReady
 	rt.status.Readiness.Ready = true
 	rt.status.Readiness.LastCheck = now.Format(time.RFC3339Nano)
@@ -672,31 +683,67 @@ func (m *ServiceManager) waitForInitialExportLocked(ctx context.Context, rt *ser
 }
 
 func (m *ServiceManager) readExportsLocked(rt *serviceRuntime) (ServiceExportFile, error) {
+	rt.exportMu.Lock()
+	defer rt.exportMu.Unlock()
+	m.promoteRejectedExportSecretsLocked(rt)
+	if rt.exportViolation != "" {
+		return ServiceExportFile{}, errors.New(rt.exportViolation)
+	}
+	return m.readExportsWithGateLocked(rt, false)
+}
+
+// guardServiceLogExport runs in the os/exec pipe copier before raw service
+// bytes enter the streaming redactor. Atomic export replacements are therefore
+// observed in process order before output written after the replacement can be
+// persisted. It never takes the manager mutex because shutdown closes writers
+// while holding that mutex.
+func (m *ServiceManager) guardServiceLogExport(rt *serviceRuntime) error {
+	rt.exportMu.Lock()
+	defer rt.exportMu.Unlock()
+	if !rt.exportAccepted {
+		return nil
+	}
+	if rt.exportViolation != "" {
+		return errors.New(rt.exportViolation)
+	}
+	_, err := m.readExportsWithGateLocked(rt, true)
+	return err
+}
+
+func (m *ServiceManager) readExportsWithGateLocked(rt *serviceRuntime, fromLog bool) (ServiceExportFile, error) {
 	path := filepath.Join(serviceRuntimePath(m.root, rt.config.ID), "export.json")
 	if !pathWithinResolved(filepath.Join(m.root, ".pua"), path) {
-		return ServiceExportFile{}, errors.New("service export path escapes the workspace control directory")
+		return ServiceExportFile{}, m.rejectExportLocked(rt, errors.New("service export path escapes the workspace control directory"), nil, fromLog)
 	}
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		if requiresInitialExport(rt.config) {
-			return ServiceExportFile{}, errors.New("service has not written its initial export")
+			message := "service has not written its initial export"
+			if rt.exportAccepted {
+				message = "service removed its accepted export hand-off"
+			}
+			return ServiceExportFile{}, m.rejectExportLocked(rt, errors.New(message), nil, fromLog)
 		}
 		return ServiceExportFile{SchemaVersion: serviceExportSchema, Variables: map[string]string{}}, nil
 	}
 	if err != nil {
-		return ServiceExportFile{}, err
+		return ServiceExportFile{}, m.rejectExportLocked(rt, err, nil, fromLog)
 	}
 	if len(data) > 1<<20 {
-		return ServiceExportFile{}, errors.New("service export exceeds 1 MiB")
+		cause := errors.New("service export exceeds 1 MiB")
+		cause = scrubRejectedExport(path, serviceExportSchema, cause)
+		return ServiceExportFile{}, m.rejectExportLocked(rt, cause, nil, fromLog)
 	}
 	var export ServiceExportFile
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&export); err != nil {
-		return ServiceExportFile{}, fmt.Errorf("decode export: %w", err)
+		cause := scrubRejectedExport(path, serviceExportSchema, fmt.Errorf("decode export: %w", err))
+		return ServiceExportFile{}, m.rejectExportLocked(rt, cause, nil, fromLog)
 	}
 	if export.SchemaVersion != serviceExportSchema {
-		return ServiceExportFile{}, fmt.Errorf("unsupported export schema version %d", export.SchemaVersion)
+		cause := scrubRejectedExport(path, serviceExportSchema, fmt.Errorf("unsupported export schema version %d", export.SchemaVersion))
+		return ServiceExportFile{}, m.rejectExportLocked(rt, cause, nil, fromLog)
 	}
 	if export.Variables == nil {
 		export.Variables = map[string]string{}
@@ -704,31 +751,43 @@ func (m *ServiceManager) readExportsLocked(rt *serviceRuntime) (ServiceExportFil
 	if rt.secretNames == nil {
 		rt.secretNames = map[string]ServiceSecretMetadata{}
 	}
-	knownSecrets := append([]string(nil), rt.secretValues...)
+	candidateSecrets := make([]string, 0, len(export.Secrets))
 	for name, value := range export.Secrets {
-		if !validSecretName(name) || strings.ContainsRune(value, '\x00') {
-			return ServiceExportFile{}, fmt.Errorf("invalid exported secret %q", name)
+		candidateSecrets = append(candidateSecrets, value)
+		if rt.redactor != nil {
+			rt.redactor.Register(value)
 		}
-		knownSecrets = append(knownSecrets, value)
+		if !validSecretName(name) || strings.ContainsRune(value, '\x00') {
+			cause := scrubRejectedExport(path, export.SchemaVersion, fmt.Errorf("invalid exported secret %q", name))
+			return ServiceExportFile{}, m.rejectExportLocked(rt, cause, candidateSecrets, fromLog)
+		}
 	}
-	exportRedactor := security.NewRedactor(knownSecrets...)
+	candidateRedactor := security.NewRedactor(candidateSecrets...)
 	for name, value := range export.Variables {
 		if !environmentNamePattern.MatchString(name) || strings.ContainsRune(value, '\x00') {
-			return ServiceExportFile{}, fmt.Errorf("invalid exported variable %q", name)
+			cause := scrubRejectedExport(path, export.SchemaVersion, fmt.Errorf("invalid exported variable %q", name))
+			return ServiceExportFile{}, m.rejectExportLocked(rt, cause, candidateSecrets, fromLog)
 		}
-		if exportRedactor.ContainsSecret([]byte(value)) {
-			return ServiceExportFile{}, fmt.Errorf("exported variable %q contains a secret; place it under secrets", name)
+		if candidateRedactor.ContainsSecret([]byte(value)) || rt.redactor != nil && rt.redactor.ContainsSecret([]byte(value)) {
+			cause := scrubRejectedExport(path, export.SchemaVersion, fmt.Errorf("exported variable %q contains a secret; place it under secrets", name))
+			return ServiceExportFile{}, m.rejectExportLocked(rt, cause, candidateSecrets, fromLog)
 		}
 	}
+	if rt.exportAccepted && export.Secrets != nil && !equalStringMap(export.Secrets, rt.exportSecrets) {
+		sanitized := ServiceExportFile{SchemaVersion: export.SchemaVersion, Variables: cloneStringMap(export.Variables)}
+		if err := writeSanitizedExport(path, sanitized); err != nil {
+			return ServiceExportFile{}, m.rejectExportLocked(rt, fmt.Errorf("scrub rejected exported secrets: %w", err), candidateSecrets, fromLog)
+		}
+		return ServiceExportFile{}, m.rejectExportLocked(rt, errors.New("service exported secrets are immutable after the initial hand-off"), candidateSecrets, fromLog)
+	}
 	if len(export.Secrets) > 0 {
-		rt.exportSecrets = cloneStringMap(export.Secrets)
-		for name, value := range export.Secrets {
-			rt.secretNames[name] = ServiceSecretMetadata{Name: name, Source: "service-export", UpdatedAt: m.now().Format(time.RFC3339Nano)}
-			if !containsString(rt.secretValues, value) {
-				rt.secretValues = append(rt.secretValues, value)
-			}
-			if rt.redactor != nil {
-				rt.redactor.Register(value)
+		if !rt.exportAccepted {
+			rt.exportSecrets = cloneStringMap(export.Secrets)
+			for name, value := range export.Secrets {
+				rt.secretNames[name] = ServiceSecretMetadata{Name: name, Source: "service-export", UpdatedAt: m.now().Format(time.RFC3339Nano)}
+				if !containsString(rt.secretValues, value) {
+					rt.secretValues = append(rt.secretValues, value)
+				}
 			}
 		}
 		// The export file is an IPC hand-off, not durable secret storage. Keep
@@ -736,7 +795,7 @@ func (m *ServiceManager) readExportsLocked(rt *serviceRuntime) (ServiceExportFil
 		// with a secret-free representation as soon as its secret values have
 		// been registered in memory. A failure to scrub is fail-closed.
 		sanitized := ServiceExportFile{SchemaVersion: export.SchemaVersion, Variables: cloneStringMap(export.Variables)}
-		if err := writeServiceJSON(path, sanitized, 0o600); err != nil {
+		if err := writeSanitizedExport(path, sanitized); err != nil {
 			return ServiceExportFile{}, fmt.Errorf("scrub exported secrets: %w", err)
 		}
 	} else {
@@ -745,7 +804,80 @@ func (m *ServiceManager) readExportsLocked(rt *serviceRuntime) (ServiceExportFil
 		// later service bindings cannot erase the only usable copy.
 		export.Secrets = cloneStringMap(rt.exportSecrets)
 	}
+	rt.exportAccepted = true
 	return export, nil
+}
+
+func (m *ServiceManager) rejectExportLocked(rt *serviceRuntime, cause error, secretValues []string, fromLog bool) error {
+	if !rt.exportAccepted && !fromLog {
+		return cause
+	}
+	message := cause.Error()
+	if rt.exportViolation == "" {
+		rt.exportViolation = message
+	}
+	if fromLog {
+		for _, value := range secretValues {
+			if !containsString(rt.rejectedExportSecrets, value) {
+				rt.rejectedExportSecrets = append(rt.rejectedExportSecrets, value)
+			}
+		}
+	} else {
+		for _, value := range secretValues {
+			if !containsString(rt.secretValues, value) {
+				rt.secretValues = append(rt.secretValues, value)
+			}
+		}
+	}
+	return errors.New(rt.exportViolation)
+}
+
+func (m *ServiceManager) promoteRejectedExportSecretsLocked(rt *serviceRuntime) {
+	for _, value := range rt.rejectedExportSecrets {
+		if !containsString(rt.secretValues, value) {
+			rt.secretValues = append(rt.secretValues, value)
+		}
+	}
+	rt.rejectedExportSecrets = nil
+}
+
+func (m *ServiceManager) exportProtocolErrorLocked(rt *serviceRuntime) error {
+	rt.exportMu.Lock()
+	defer rt.exportMu.Unlock()
+	m.promoteRejectedExportSecretsLocked(rt)
+	if rt.exportViolation == "" {
+		return nil
+	}
+	return errors.New(rt.exportViolation)
+}
+
+func scrubRejectedExport(path string, schemaVersion int, cause error) error {
+	if err := writeSanitizedExport(path, ServiceExportFile{SchemaVersion: schemaVersion, Variables: map[string]string{}}); err != nil {
+		return fmt.Errorf("%v; scrub rejected export: %w", cause, err)
+	}
+	return cause
+}
+
+func writeSanitizedExport(path string, export ServiceExportFile) error {
+	if err := writeServiceJSON(path, export, 0o600); err != nil {
+		if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
+			return fmt.Errorf("write sanitized export: %v; remove rejected export: %w", err, removeErr)
+		}
+		return err
+	}
+	return nil
+}
+
+func equalStringMap(left, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, value := range left {
+		if other, ok := right[key]; !ok || other != value {
+			return false
+		}
+	}
+	return true
 }
 
 func requiresInitialExport(cfg ServiceConfig) bool {
@@ -822,17 +954,22 @@ func (m *ServiceManager) handleProcessExitLocked(ctx context.Context, rt *servic
 	if rt.process == nil {
 		return
 	}
+	var exportErr error
 	if requiresInitialExport(rt.config) {
-		_, _ = m.readExportsLocked(rt)
+		_, exportErr = m.readExportsLocked(rt)
 	}
-	for _, stream := range rt.logStreams {
-		_ = stream.Close()
+	for _, writer := range rt.logWriters {
+		_ = writer.Close()
+	}
+	if protocolErr := m.exportProtocolErrorLocked(rt); protocolErr != nil {
+		exportErr = protocolErr
+	}
+	if exit.err == nil && exportErr != nil {
+		exit.err = exportErr
 	}
 	rt.process = nil
 	rt.exit = nil
-	rt.logStreams = nil
 	rt.logWriters = nil
-	rt.logSinks = nil
 	rt.status.PID, rt.status.ProcessGroup = 0, 0
 	rt.status.ExitedAt = m.now().Format(time.RFC3339Nano)
 	rt.status.ExitCode = exit.code
@@ -894,14 +1031,16 @@ func (m *ServiceManager) stopProcessLocked(ctx context.Context, rt *serviceRunti
 		default:
 		}
 	}
-	for _, stream := range rt.logStreams {
-		_ = stream.Close()
+	if requiresInitialExport(rt.config) {
+		_, _ = m.readExportsLocked(rt)
 	}
+	for _, writer := range rt.logWriters {
+		_ = writer.Close()
+	}
+	_ = m.exportProtocolErrorLocked(rt)
 	rt.process = nil
 	rt.exit = nil
-	rt.logStreams = nil
 	rt.logWriters = nil
-	rt.logSinks = nil
 	rt.status.PID, rt.status.ProcessGroup = 0, 0
 	if err := m.runCleanupLocked(ctx, rt); err != nil {
 		rt.status.LastError = security.NewRedactor(rt.secretValues...).RedactString(err.Error())
@@ -1129,15 +1268,21 @@ func (m *ServiceManager) persistStatusLocked(rt *serviceRuntime) {
 	}
 }
 
-func (m *ServiceManager) releaseStartupLogsLocked(rt *serviceRuntime) {
+func (m *ServiceManager) releaseStartupLogsLocked(rt *serviceRuntime) error {
+	var first error
 	for _, writer := range rt.logWriters {
-		if err := writer.Release(rt.redactor); err != nil {
+		if err := writer.Release(); err != nil && first == nil {
+			first = err
 			message := security.NewRedactor(rt.secretValues...).RedactString(err.Error())
 			rt.status.LastError = message
 			rt.status.AttentionRequired = true
 			_ = m.appendEventLocked(rt, map[string]any{"type": "log_flush_failed", "error": message, "time": m.now().Format(time.RFC3339Nano)})
 		}
 	}
+	if protocolErr := m.exportProtocolErrorLocked(rt); protocolErr != nil {
+		return protocolErr
+	}
+	return first
 }
 
 func (m *ServiceManager) appendEventLocked(rt *serviceRuntime, event map[string]any) error {

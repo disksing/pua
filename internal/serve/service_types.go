@@ -54,7 +54,9 @@ type ServiceConfig struct {
 	Environment   map[string]ServiceEnvironment `json:"environment,omitempty"`
 	DependsOn     []string                      `json:"dependsOn,omitempty"`
 	// Exports declares that the process atomically writes its complete initial
-	// export hand-off before startup output may be persisted.
+	// export hand-off before startup output may be persisted. Variables may be
+	// replaced later, but exported secret names and values are immutable for the
+	// lifetime of the process.
 	Exports     bool                     `json:"exports,omitempty"`
 	Readiness   *ServiceReadinessConfig  `json:"readiness,omitempty"`
 	Cleanup     *ServiceCleanupConfig    `json:"cleanup,omitempty"`

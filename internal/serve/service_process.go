@@ -28,15 +28,17 @@ type serviceLogSink struct {
 // service. This prevents a service that prints an exported secret before its
 // first export from leaking that value into the durable log.
 type serviceLogWriter struct {
-	mu       sync.Mutex
-	sink     *serviceLogSink
-	redactor *security.Redactor
-	gated    bool
-	buffer   []byte
+	mu          sync.Mutex
+	sink        *serviceLogSink
+	stream      *security.Stream
+	beforeWrite func() error
+	gated       bool
+	blocked     error
+	buffer      []byte
 }
 
-func newServiceLogWriter(sink *serviceLogSink, redactor *security.Redactor, gated bool) *serviceLogWriter {
-	return &serviceLogWriter{sink: sink, redactor: redactor, gated: gated}
+func newServiceLogWriter(sink *serviceLogSink, redactor *security.Redactor, gated bool, beforeWrite func() error) *serviceLogWriter {
+	return &serviceLogWriter{sink: sink, stream: redactor.NewStream(sink), beforeWrite: beforeWrite, gated: gated}
 }
 
 func (w *serviceLogWriter) Write(data []byte) (int, error) {
@@ -57,40 +59,46 @@ func (w *serviceLogWriter) Write(data []byte) (int, error) {
 		// safer than allowing an unregistered secret into a durable sink.
 		return len(data), nil
 	}
-	return w.writeUnlocked(data)
-}
-
-func (w *serviceLogWriter) writeUnlocked(data []byte) (int, error) {
-	if w.sink == nil || len(data) == 0 {
-		return len(data), nil
+	if w.blocked != nil {
+		return 0, w.blocked
 	}
-	if w.redactor != nil {
-		data = w.redactor.Redact(data)
+	if w.beforeWrite != nil {
+		if err := w.beforeWrite(); err != nil {
+			w.blocked = err
+			return 0, err
+		}
 	}
-	return w.sink.Write(data)
+	return w.stream.Write(data)
 }
 
 // Release publishes the bounded startup buffer after the caller has loaded and
-// registered the service's initial export secrets.
-func (w *serviceLogWriter) Release(redactor *security.Redactor) error {
+// registered the service's initial export secrets. The export guard runs while
+// holding the writer lock so an atomic replacement that raced with the initial
+// hand-off is observed before any later bytes can reach the streaming redactor.
+func (w *serviceLogWriter) Release() error {
 	if w == nil {
 		return nil
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if !w.gated {
-		return nil
+		return w.blocked
+	}
+	if w.beforeWrite != nil {
+		if err := w.beforeWrite(); err != nil {
+			w.buffer = nil
+			w.gated = false
+			w.blocked = err
+			return err
+		}
 	}
 	w.gated = false
-	if redactor != nil {
-		w.redactor = redactor
-	}
 	buffer := w.buffer
 	w.buffer = nil
 	if len(buffer) == 0 {
 		return nil
 	}
-	_, err := w.writeUnlocked(buffer)
+	_, err := w.stream.Write(buffer)
 	return err
 }
 
@@ -101,13 +109,29 @@ func (w *serviceLogWriter) Close() error {
 	w.mu.Lock()
 	// If the startup handshake never succeeded, discard all gated output rather
 	// than flushing bytes whose secrets were not discoverable from an export.
-	w.buffer = nil
-	w.gated = false
-	w.mu.Unlock()
-	if w.sink != nil {
-		return w.sink.Close()
+	if w.gated || w.blocked != nil {
+		w.buffer = nil
+		w.gated = false
+		err := w.sink.Close()
+		w.mu.Unlock()
+		return err
 	}
-	return nil
+	if w.beforeWrite != nil {
+		if err := w.beforeWrite(); err != nil {
+			// Do not flush the stream's retained suffix when the current export is
+			// invalid. Its secret contents cannot be proven safe to persist.
+			w.blocked = err
+			closeErr := w.sink.Close()
+			w.mu.Unlock()
+			if closeErr != nil {
+				return closeErr
+			}
+			return err
+		}
+	}
+	err := w.stream.Close()
+	w.mu.Unlock()
+	return err
 }
 
 func newServiceLogSink(path string, rotation ServiceLogRotationConfig) *serviceLogSink {

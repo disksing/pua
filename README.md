@@ -74,7 +74,8 @@ with persisted exponential backoff after unexpected exits. Runtime state,
 redacted logs, and validated exports live below `.pua/runtime/services/`.
 Services that export without a readiness command declare `"exports": true` so
 the supervisor can register their complete initial secret hand-off before it
-persists startup output.
+persists startup output. Later atomic hand-offs may update public variables;
+secret names and values are immutable until the service restarts.
 
 Use `pua service list`, `show`, `apply`, `start`, `stop`, `restart`, `logs`,
 `exports`, and `validate` to inspect and control them. Secret references are

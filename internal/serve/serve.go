@@ -188,6 +188,7 @@ type server struct {
 	locks            *workspaceLockManager
 	serviceMu        sync.Mutex
 	services         map[serviceWorkspaceKey]*ServiceManager
+	serviceRemovals  map[string]*serviceManagerRemoval
 	serviceContext   context.Context
 	uiStateMu        sync.Mutex
 }
@@ -545,7 +546,12 @@ func (s *server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.removeWorkspace(id); err != nil {
-			writeError(w, err, http.StatusNotFound)
+			status := http.StatusNotFound
+			if errors.Is(err, errWorkspaceRemovalServicesActive) ||
+				errors.Is(err, errWorkspaceRemovalLifecycleUnavailable) {
+				status = http.StatusConflict
+			}
+			writeError(w, err, status)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -1810,7 +1816,7 @@ func (s *server) removeWorkspace(id string) error {
 	if err != nil {
 		return err
 	}
-	next := cfg.Workspaces[:0]
+	next := make([]serveWorkspace, 0, len(cfg.Workspaces))
 	removed := false
 	var removedWorkspace serveWorkspace
 	for _, workspace := range cfg.Workspaces {
@@ -1824,34 +1830,49 @@ func (s *server) removeWorkspace(id string) error {
 	if !removed {
 		return fmt.Errorf("workspace not found: %s", id)
 	}
-	cfg.Workspaces = next
-	if cfg.ActiveID == id {
-		cfg.ActiveID = ""
-		if len(cfg.Workspaces) > 0 {
-			cfg.ActiveID = cfg.Workspaces[0].ID
+	nextConfig := cfg
+	nextConfig.Workspaces = next
+	if nextConfig.ActiveID == id {
+		nextConfig.ActiveID = ""
+		if len(nextConfig.Workspaces) > 0 {
+			nextConfig.ActiveID = nextConfig.Workspaces[0].ID
 		}
 	}
-	if err := s.saveConfig(cfg); err != nil {
+	removal, owner, err := s.beginServiceManagerRemoval(removedWorkspace)
+	if err != nil {
+		return errWorkspaceRemovalLifecycleUnavailable
+	}
+	if !owner {
+		return waitForServiceManagerRemoval(removal)
+	}
+	if removal.manager != nil {
+		stopContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		stopErr := removal.manager.Stop(stopContext)
+		cancel()
+		if stopErr != nil {
+			s.finishServiceManagerRemoval(removal, errWorkspaceRemovalServicesActive)
+			return errWorkspaceRemovalServicesActive
+		}
+	}
+	if err := s.saveConfig(nextConfig); err != nil {
+		s.finishServiceManagerRemoval(removal, err)
 		return err
 	}
-	s.serviceMu.Lock()
-	manager, managerErr := s.removeServiceManagerLocked(removedWorkspace)
-	s.serviceMu.Unlock()
-	if managerErr != nil {
-		log.Printf("remove workspace service manager: %v", managerErr)
-	}
-	if manager != nil {
-		stopContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		if stopErr := manager.Stop(stopContext); stopErr != nil {
-			log.Printf("stop workspace services after removal: %v", stopErr)
+	if err := s.detachServiceManagerRemoval(removal); err != nil {
+		// The in-flight marker prevents ordinary registry mutation, so this is
+		// a defensive rollback for an unexpected ownership inconsistency.
+		if rollbackErr := s.saveConfig(cfg); rollbackErr != nil {
+			log.Printf("restore Workspace configuration after service registry conflict")
 		}
-		cancel()
+		s.finishServiceManagerRemoval(removal, errWorkspaceRemovalLifecycleUnavailable)
+		return errWorkspaceRemovalLifecycleUnavailable
 	}
 	// The Workspace is no longer managed once it leaves the persisted config;
 	// release the serve lock only after its service process groups are stopped.
 	if s.locks != nil {
 		s.locks.release(removedWorkspace.Path)
 	}
+	s.finishServiceManagerRemoval(removal, nil)
 	if s.doctor != nil {
 		s.doctor.requestScan()
 	}

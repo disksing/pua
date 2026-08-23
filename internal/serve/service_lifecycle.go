@@ -2,12 +2,27 @@ package serve
 
 import (
 	"context"
+	"errors"
 	"log"
+)
+
+var (
+	errWorkspaceRemovalServicesActive       = errors.New("workspace could not be removed because services remain active; resolve attention-required service state and retry")
+	errWorkspaceRemovalLifecycleUnavailable = errors.New("workspace could not be removed because service lifecycle ownership is unavailable; retry after the current operation completes")
+	errWorkspaceServiceRemovalInProgress    = errors.New("workspace service removal is in progress")
 )
 
 type serviceWorkspaceKey struct {
 	workspaceID string
 	root        string
+}
+
+type serviceManagerRemoval struct {
+	workspaceID string
+	key         serviceWorkspaceKey
+	manager     *ServiceManager
+	done        chan struct{}
+	result      error
 }
 
 func newServiceWorkspaceKey(workspace serveWorkspace) (serviceWorkspaceKey, error) {
@@ -48,6 +63,9 @@ func (s *server) registeredServiceManagerForResolutionLocked(workspace serveWork
 }
 
 func (s *server) ensureServiceManagerLocked(workspace serveWorkspace) (*ServiceManager, bool, error) {
+	if s.serviceRemovals[workspace.ID] != nil {
+		return nil, false, errWorkspaceServiceRemovalInProgress
+	}
 	key, manager, err := s.registeredServiceManagerLocked(workspace)
 	if err != nil || manager != nil {
 		return manager, false, err
@@ -61,6 +79,72 @@ func (s *server) ensureServiceManagerLocked(workspace serveWorkspace) (*ServiceM
 	}
 	s.services[key] = manager
 	return manager, true, nil
+}
+
+// beginServiceManagerRemoval claims lifecycle ownership for one Workspace.
+// Concurrent callers share the same completion instead of stopping, detaching,
+// or releasing the authoritative manager more than once.
+func (s *server) beginServiceManagerRemoval(workspace serveWorkspace) (*serviceManagerRemoval, bool, error) {
+	s.serviceMu.Lock()
+	defer s.serviceMu.Unlock()
+	if removal := s.serviceRemovals[workspace.ID]; removal != nil {
+		return removal, false, nil
+	}
+	key, manager, err := s.registeredServiceManagerLocked(workspace)
+	if err != nil {
+		return nil, false, err
+	}
+	if s.serviceRemovals == nil {
+		s.serviceRemovals = make(map[string]*serviceManagerRemoval)
+	}
+	removal := &serviceManagerRemoval{
+		workspaceID: workspace.ID,
+		key:         key,
+		manager:     manager,
+		done:        make(chan struct{}),
+	}
+	s.serviceRemovals[workspace.ID] = removal
+	return removal, true, nil
+}
+
+func waitForServiceManagerRemoval(removal *serviceManagerRemoval) error {
+	if removal == nil {
+		return errWorkspaceRemovalLifecycleUnavailable
+	}
+	<-removal.done
+	return removal.result
+}
+
+// detachServiceManagerRemoval removes only the exact manager claimed by the
+// removal transaction. The manager remains registered throughout Stop, so a
+// failed or partial shutdown continues to be authoritative and lookup-able.
+func (s *server) detachServiceManagerRemoval(removal *serviceManagerRemoval) error {
+	s.serviceMu.Lock()
+	defer s.serviceMu.Unlock()
+	if removal == nil || s.serviceRemovals[removal.workspaceID] != removal {
+		return errWorkspaceRemovalLifecycleUnavailable
+	}
+	if removal.manager == nil {
+		return nil
+	}
+	if s.services[removal.key] != removal.manager {
+		return errWorkspaceRemovalLifecycleUnavailable
+	}
+	delete(s.services, removal.key)
+	return nil
+}
+
+func (s *server) finishServiceManagerRemoval(removal *serviceManagerRemoval, result error) {
+	if removal == nil {
+		return
+	}
+	s.serviceMu.Lock()
+	if s.serviceRemovals[removal.workspaceID] == removal {
+		removal.result = result
+		delete(s.serviceRemovals, removal.workspaceID)
+		close(removal.done)
+	}
+	s.serviceMu.Unlock()
 }
 
 func (s *server) removeServiceManagerLocked(workspace serveWorkspace) (*ServiceManager, error) {
@@ -79,7 +163,10 @@ func (s *server) removeServiceManagerForResolutionLocked(workspace serveWorkspac
 
 func (s *server) serviceManagersLocked() []*ServiceManager {
 	managers := make([]*ServiceManager, 0, len(s.services))
-	for _, manager := range s.services {
+	for key, manager := range s.services {
+		if removal := s.serviceRemovals[key.workspaceID]; removal != nil && removal.manager == manager {
+			continue
+		}
 		managers = append(managers, manager)
 	}
 	return managers
@@ -110,6 +197,9 @@ func (s *server) serviceManagerForWorkspace(id string) (*ServiceManager, serveWo
 	}
 	s.serviceMu.Lock()
 	defer s.serviceMu.Unlock()
+	if s.serviceRemovals[workspace.ID] != nil {
+		return nil, workspace, errWorkspaceServiceRemovalInProgress
+	}
 	manager, created, err := s.ensureServiceManagerLocked(workspace)
 	if err != nil {
 		return nil, workspace, err

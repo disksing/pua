@@ -1,13 +1,10 @@
 package serve
 
 import (
-	"bytes"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -223,52 +220,6 @@ func (s *serviceLogSink) Close() error {
 	return closeErr
 }
 
-// processIdentityMatches is deliberately fail-closed. On Linux, /proc gives
-// us both the instance token and command line; if either cannot be read we do
-// not signal the PID and let the supervisor start a fresh process. This avoids
-// taking ownership of an unrelated process after PID reuse.
-func processIdentityMatches(pid int, token, digest string) bool {
-	if pid <= 0 || token == "" || digest == "" {
-		return false
-	}
-	base := filepath.Join("/proc", strconv.Itoa(pid))
-	envData, err := os.ReadFile(filepath.Join(base, "environ"))
-	if err != nil {
-		return false
-	}
-	if !bytes.Contains(envData, []byte("PUA_SERVICE_INSTANCE_TOKEN="+token+"\x00")) {
-		return false
-	}
-	if !bytes.Contains(envData, []byte("PUA_SERVICE_COMMAND_DIGEST="+digest+"\x00")) {
-		return false
-	}
-	cmdline, err := os.ReadFile(filepath.Join(base, "cmdline"))
-	if err != nil {
-		return false
-	}
-	command := strings.ReplaceAll(string(cmdline), "\x00", " ")
-	// The command digest is exported into the child environment at launch and
-	// checked above. Requiring a non-empty command line and a matching process
-	// group leader closes the remaining PID-reuse window on procfs systems.
-	if strings.TrimSpace(command) == "" {
-		return false
-	}
-	stat, err := os.ReadFile(filepath.Join(base, "stat"))
-	if err != nil {
-		return false
-	}
-	closeParen := bytes.LastIndex(stat, []byte(")"))
-	if closeParen < 0 || closeParen+2 >= len(stat) {
-		return false
-	}
-	fields := strings.Fields(string(stat[closeParen+2:]))
-	if len(fields) < 5 {
-		return false
-	}
-	pgrp, err := strconv.Atoi(fields[2])
-	return err == nil && pgrp == pid
-}
-
 func reapOrphanProcessGroup(pgid int) {
 	if pgid <= 0 {
 		return
@@ -297,16 +248,6 @@ func terminateProcessGroup(pgid int, force bool) error {
 		return err
 	}
 	return nil
-}
-
-// readProcessCommand is kept small and side-effect free for diagnostics and
-// tests that need to verify PID-reuse protection.
-func readProcessCommand(pid int) string {
-	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(strings.ReplaceAll(string(data), "\x00", " "))
 }
 
 var _ io.Writer = (*serviceLogSink)(nil)

@@ -378,6 +378,7 @@ type ServiceStatus struct {
 	Exports           ServiceExports         `json:"exports"`
 	CommandDigest     string                 `json:"commandDigest,omitempty"`
 	InstanceToken     string                 `json:"instanceToken,omitempty"`
+	ProcessStartID    string                 `json:"processStartId,omitempty"`
 	UpdatedAt         string                 `json:"updatedAt,omitempty"`
 	ManualStop        bool                   `json:"manualStop,omitempty"`
 }

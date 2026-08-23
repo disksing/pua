@@ -497,6 +497,21 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 		_ = stderr.Close()
 		return m.failStartLocked(ctx, rt, err)
 	}
+	processStartID := ""
+	if serviceProcessIdentityRequired() {
+		processIdentity, identityErr := readServiceProcessIdentity(cmd.Process.Pid)
+		if identityErr != nil || processIdentity.processGroup != cmd.Process.Pid || processIdentity.startID == "" {
+			_ = terminateProcessGroup(cmd.Process.Pid, true)
+			_ = cmd.Wait()
+			_ = stdout.Close()
+			_ = stderr.Close()
+			if identityErr == nil {
+				identityErr = errProcessIdentityUnavailable
+			}
+			return m.failStartLocked(ctx, rt, fmt.Errorf("record service process identity: %w", identityErr))
+		}
+		processStartID = processIdentity.startID
+	}
 	exit := make(chan serviceProcessExit, 1)
 	go func() {
 		err := cmd.Wait()
@@ -531,6 +546,7 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 	rt.status.NextRetryAt = ""
 	rt.status.CommandDigest = serviceCommandDigest(cfg)
 	rt.status.InstanceToken = valueFromEnvironment(env, "PUA_SERVICE_INSTANCE_TOKEN")
+	rt.status.ProcessStartID = processStartID
 	rt.status.Readiness = ServiceReadinessStatus{Configured: cfg.Readiness != nil}
 	rt.status.Cleanup = ServiceCleanupStatus{Configured: cfg.Cleanup != nil}
 	rt.status.Exports = publicExports(exports, names)
@@ -1083,7 +1099,7 @@ func (m *ServiceManager) recoverOrphanLocked(rt *serviceRuntime) {
 	if rt.status.PID <= 0 || (rt.status.State != ServiceStateRunning && rt.status.State != ServiceStateStarting && rt.status.State != ServiceStateReady) {
 		return
 	}
-	if rt.status.ProcessGroup > 0 && processIdentityMatches(rt.status.PID, rt.status.InstanceToken, rt.status.CommandDigest) {
+	if rt.status.ProcessGroup > 0 && processIdentityMatches(rt.status.PID, rt.status.ProcessGroup, rt.status.ProcessStartID, rt.status.InstanceToken, rt.status.CommandDigest) {
 		reapOrphanProcessGroup(rt.status.ProcessGroup)
 	}
 	rt.status.PID, rt.status.ProcessGroup = 0, 0

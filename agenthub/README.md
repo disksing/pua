@@ -189,10 +189,22 @@ The map is deliberately persisted in the Session's `events.jsonl` and rebuildabl
 
 When the daemon advertises `session.ephemeral-environment`, create and resume
 requests may include an `ephemeralEnvironment` string map. It is merged last
-for that Provider process only and discarded when the process exits. The map
-is never written to Session events, `session.json`, API responses, or history.
-Clients that require this behavior must fail closed when the capability is
-absent; they must not fall back to `launchEnvironment`.
+for that Provider process only and discarded when the process exits. The first
+non-empty overlay used to start a Provider sets the durable, non-secret
+`ephemeralEnvironmentRequired: true` Session marker, which Session responses
+return. That marker survives stop, archive, event replay, and daemon restart,
+but the overlay's names and values are never written to Session events,
+`session.json`, API responses, or history.
+
+Once the marker is set, every future Provider start requires a fresh non-empty
+overlay. Implicit delivery retries and Provider restarts remain stopped because
+they cannot supply one. While the Session is stopped, Resume with an empty body,
+`{}`, or an explicitly empty `ephemeralEnvironment` map returns `409
+runtime_operation_failed` without starting a Provider. Resume remains
+idempotent while a Provider is already running: it does not start or alter that
+process, so no fresh overlay is required or consumed. Clients that require this
+behavior must fail closed when the capability is absent; they must never put the
+ephemeral values in `launchEnvironment` as a fallback.
 
 ### Agent environment variables
 

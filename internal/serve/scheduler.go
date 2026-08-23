@@ -33,10 +33,14 @@ type NativeScheduler struct {
 }
 
 type NativeSchedulerChange struct {
-	Operation string
-	ID        string
-	Create    app.CreateScheduleInput
-	Update    app.UpdateScheduleInput
+	Operation        app.ScheduleChangeOperation
+	ID               string
+	ExpectedRevision uint64
+	Description      *string
+	Condition        *string
+	Guard            *string
+	Target           *string
+	Trigger          *app.ScheduleTrigger
 }
 
 func newNativeScheduler(manager *agentManager, workspace serveWorkspace) *NativeScheduler {
@@ -98,22 +102,54 @@ func (n *NativeScheduler) Change(ctx context.Context, change NativeSchedulerChan
 	if err := ctx.Err(); err != nil {
 		return app.Schedule{}, err
 	}
+	if err := change.Operation.Validate(); err != nil {
+		return app.Schedule{}, err
+	}
 	workspace, err := app.OpenWorkspace(n.workspace.Path)
 	if err != nil {
 		return app.Schedule{}, err
 	}
 	switch change.Operation {
-	case "create":
-		if change.Create.Trigger == nil {
-			return app.Schedule{}, errors.New("native schedule create requires a trigger")
+	case app.ScheduleChangeCreate:
+		if change.Description == nil || change.Condition == nil || change.Target == nil || change.Trigger == nil {
+			return app.Schedule{}, errors.New("create requires description, condition, target, and trigger")
 		}
-		return workspace.AddSchedule(change.Create)
-	case "update":
-		change.Update.ID = change.ID
-		return workspace.UpdateSchedule(change.Update)
-	case "pause":
+		guard := ""
+		if change.Guard != nil {
+			guard = *change.Guard
+		}
+		return workspace.AddSchedule(app.CreateScheduleInput{
+			Description: *change.Description,
+			Condition:   *change.Condition,
+			Guard:       guard,
+			Target:      *change.Target,
+			Trigger:     change.Trigger,
+		})
+	case app.ScheduleChangeUpdate:
+		if change.ID == "" || change.ExpectedRevision == 0 {
+			return app.Schedule{}, errors.New("update requires id and expectedRevision")
+		}
+		if change.Description == nil && change.Condition == nil && change.Guard == nil && change.Target == nil && change.Trigger == nil {
+			return app.Schedule{}, errors.New("update requires at least one changed field")
+		}
+		return workspace.UpdateSchedule(app.UpdateScheduleInput{
+			ID:               change.ID,
+			ExpectedRevision: change.ExpectedRevision,
+			Description:      change.Description,
+			Condition:        change.Condition,
+			Guard:            change.Guard,
+			Target:           change.Target,
+			Trigger:          change.Trigger,
+		})
+	case app.ScheduleChangePause:
+		if change.ID == "" {
+			return app.Schedule{}, errors.New("pause requires id")
+		}
 		return workspace.PauseSchedule(change.ID)
-	case "resume":
+	case app.ScheduleChangeResume:
+		if change.ID == "" {
+			return app.Schedule{}, errors.New("resume requires id")
+		}
 		config, err := workspace.Scheduler()
 		if err != nil {
 			return app.Schedule{}, err
@@ -145,11 +181,13 @@ func (n *NativeScheduler) Change(ctx context.Context, change NativeSchedulerChan
 			})
 		}
 		return resumed, runtimeErr
-	case "remove":
+	case app.ScheduleChangeRemove:
+		if change.ID == "" {
+			return app.Schedule{}, errors.New("remove requires id")
+		}
 		return workspace.RemoveSchedule(change.ID)
-	default:
-		return app.Schedule{}, fmt.Errorf("unsupported Scheduler change %q", change.Operation)
 	}
+	return app.Schedule{}, fmt.Errorf("Scheduler change %q was not dispatched", change.Operation)
 }
 
 // Reconcile recovers any frozen occurrence, prepares due work, advances

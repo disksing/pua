@@ -102,6 +102,16 @@ func TestScheduleTriggerValidationAndRevisionCAS(t *testing.T) {
 	}
 }
 
+func TestScheduleChangeOperationRejectsUnknownValues(t *testing.T) {
+	operation, err := app.ParseScheduleChangeOperation(" pause ")
+	if err != nil || operation != app.ScheduleChangePause {
+		t.Fatalf("parsed operation = %q, %v", operation, err)
+	}
+	if _, err := app.ParseScheduleChangeOperation("restart"); err == nil || err.Error() != `unsupported Scheduler change "restart"` {
+		t.Fatalf("invalid operation error = %v", err)
+	}
+}
+
 func TestCronDowntimeCoalescingIsBounded(t *testing.T) {
 	trigger := app.ScheduleTrigger{Type: app.ScheduleTriggerCron, Cron: "0 * * * * *", TimeZone: "UTC"}
 	first := time.Date(2026, 1, 1, 0, 1, 0, 0, time.UTC)

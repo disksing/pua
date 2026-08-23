@@ -40,6 +40,10 @@ func TestSchedulerHTTPAPIRoutesNaturalLanguageAndNativeChanges(t *testing.T) {
 	}
 
 	at := time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)
+	invalid := request(http.MethodPost, "/api/workspaces/workspace-scheduler/scheduler/changes", `{"operation":"restart"}`)
+	if invalid.Code != http.StatusBadRequest || !strings.Contains(invalid.Body.String(), `unsupported Scheduler change \"restart\"`) {
+		t.Fatalf("invalid native change = %d %s", invalid.Code, invalid.Body.String())
+	}
 	createdResponse := request(http.MethodPost, "/api/workspaces/workspace-scheduler/scheduler/changes", `{"operation":"create","description":"Review","condition":"tomorrow at 09:00 UTC","target":"workspace","trigger":{"type":"at","at":"`+at+`"}}`)
 	if createdResponse.Code != http.StatusOK {
 		t.Fatalf("native create = %d %s", createdResponse.Code, createdResponse.Body.String())
@@ -47,6 +51,14 @@ func TestSchedulerHTTPAPIRoutesNaturalLanguageAndNativeChanges(t *testing.T) {
 	var created app.Schedule
 	if err := json.Unmarshal(createdResponse.Body.Bytes(), &created); err != nil || created.Revision != 1 || created.Trigger == nil {
 		t.Fatalf("created schedule = %#v, %v", created, err)
+	}
+	naturalUpdate := request(http.MethodPut, "/api/workspaces/workspace-scheduler/scheduler/"+created.ID, `{"description":"Review later","condition":"next week","target":"workspace"}`)
+	if naturalUpdate.Code != http.StatusAccepted {
+		t.Fatalf("natural-language update = %d %s", naturalUpdate.Code, naturalUpdate.Body.String())
+	}
+	mailbox, err = loadResourceMailboxForResource(root, app.SchedulerResourceID)
+	if err != nil || len(mailbox.Messages) != 2 || !strings.Contains(mailbox.Messages[1].Text, "Please update a native schedule for "+created.ID) {
+		t.Fatalf("Scheduler update compilation mailbox = %#v, %v", mailbox.Messages, err)
 	}
 	conflict := request(http.MethodPost, "/api/workspaces/workspace-scheduler/scheduler/changes", `{"operation":"update","id":"`+created.ID+`","expectedRevision":9,"description":"Changed"}`)
 	if conflict.Code != http.StatusConflict || !strings.Contains(conflict.Body.String(), "schedule_revision_conflict") {
@@ -59,6 +71,10 @@ func TestSchedulerHTTPAPIRoutesNaturalLanguageAndNativeChanges(t *testing.T) {
 	read := request(http.MethodGet, "/api/workspaces/workspace-scheduler/scheduler", "")
 	if read.Code != http.StatusOK || !strings.Contains(read.Body.String(), `"effectiveState": "paused"`) || strings.Contains(read.Body.String(), "wakeIntervalMinutes") {
 		t.Fatalf("snapshot = %d %s", read.Code, read.Body.String())
+	}
+	resumed := request(http.MethodPost, "/api/workspaces/workspace-scheduler/scheduler/"+created.ID+"/resume", "")
+	if resumed.Code != http.StatusOK || !strings.Contains(resumed.Body.String(), `"state": "active"`) {
+		t.Fatalf("resume = %d %s", resumed.Code, resumed.Body.String())
 	}
 	removed := request(http.MethodDelete, "/api/workspaces/workspace-scheduler/scheduler/"+created.ID, "")
 	if removed.Code != http.StatusOK {
@@ -520,7 +536,7 @@ func TestNativeSchedulerPauseResumeSkipsPausedOccurrences(t *testing.T) {
 	if messages := scheduleOccurrenceMessages(t, workspace.Path, "workspace"); len(messages) != 0 {
 		t.Fatalf("paused occurrences were delivered: %#v", messages)
 	}
-	if _, err := newNativeScheduler(manager, workspace).Change(context.Background(), NativeSchedulerChange{Operation: "resume", ID: repeating.ID}); err != nil {
+	if _, err := newNativeScheduler(manager, workspace).Change(context.Background(), NativeSchedulerChange{Operation: app.ScheduleChangeResume, ID: repeating.ID}); err != nil {
 		t.Fatal(err)
 	}
 	current = time.Now().UTC()
@@ -556,7 +572,7 @@ func TestNativeSchedulerResumeSkipsExpiredOneTimeWithoutReconcile(t *testing.T) 
 	// resume request arrives after its one-time occurrence has elapsed.
 	manager.now = func() time.Time { return at.Add(time.Minute) }
 	native := newNativeScheduler(manager, workspace)
-	resumed, err := native.Change(context.Background(), NativeSchedulerChange{Operation: "resume", ID: created.ID})
+	resumed, err := native.Change(context.Background(), NativeSchedulerChange{Operation: app.ScheduleChangeResume, ID: created.ID})
 	if err != nil {
 		t.Fatal(err)
 	}

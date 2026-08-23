@@ -84,15 +84,15 @@ func TestSchedulerCommandsUseOwningServerForNativeSchedules(t *testing.T) {
 				var schedule app.Schedule
 				var changeErr error
 				switch body.Operation {
-				case "create":
+				case app.ScheduleChangeCreate:
 					schedule, changeErr = workspace.AddSchedule(app.CreateScheduleInput{Description: *body.Description, Condition: *body.Condition, Target: *body.Target, Trigger: body.Trigger})
-				case "update":
+				case app.ScheduleChangeUpdate:
 					schedule, changeErr = workspace.UpdateSchedule(app.UpdateScheduleInput{ID: body.ID, ExpectedRevision: body.ExpectedRevision, Description: body.Description, Condition: body.Condition, Guard: body.Guard, Target: body.Target, Trigger: body.Trigger})
-				case "pause":
+				case app.ScheduleChangePause:
 					schedule, changeErr = workspace.PauseSchedule(body.ID)
-				case "resume":
+				case app.ScheduleChangeResume:
 					schedule, changeErr = workspace.ResumeSchedule(body.ID)
-				case "remove":
+				case app.ScheduleChangeRemove:
 					schedule, changeErr = workspace.RemoveSchedule(body.ID)
 				}
 				if changeErr != nil {
@@ -178,6 +178,16 @@ func TestSchedulerCommandsUseOwningServerForNativeSchedules(t *testing.T) {
 		jsonList := run(t, "scheduler", "list", "--json")
 		if strings.Contains(jsonList, "wakeIntervalMinutes") || !strings.Contains(jsonList, created.ID) {
 			t.Fatalf("JSON schedule list = %s", jsonList)
+		}
+		pausedOutput := run(t, "scheduler", "pause", "--id="+created.ID)
+		var paused app.Schedule
+		if err := json.Unmarshal([]byte(pausedOutput), &paused); err != nil || paused.State != app.ScheduleStatePaused || paused.Revision != 4 {
+			t.Fatalf("paused schedule = %#v, %v", paused, err)
+		}
+		resumedOutput := run(t, "scheduler", "resume", "--id="+created.ID)
+		var resumed app.Schedule
+		if err := json.Unmarshal([]byte(resumedOutput), &resumed); err != nil || resumed.State != app.ScheduleStateActive || resumed.Revision != 5 {
+			t.Fatalf("resumed schedule = %#v, %v", resumed, err)
 		}
 		removed := run(t, "scheduler", "remove", "--id="+created.ID)
 		if !strings.Contains(removed, created.ID) || strings.TrimSpace(run(t, "scheduler", "list")) != "" {

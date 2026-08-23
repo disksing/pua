@@ -49,7 +49,7 @@ func (s *server) handleScheduler(w http.ResponseWriter, r *http.Request, workspa
 			}
 			writeJSON(w, snapshot)
 		case http.MethodPost:
-			s.handleNaturalLanguageScheduleRequest(w, r, workspace, "create", "")
+			s.handleNaturalLanguageScheduleRequest(w, r, workspace, app.ScheduleChangeCreate, "")
 		default:
 			w.WriteHeader(http.StatusMethodNotAllowed)
 		}
@@ -92,8 +92,8 @@ func (s *server) handleScheduler(w http.ResponseWriter, r *http.Request, workspa
 		return
 	}
 	if len(parts) == 2 {
-		operation := parts[1]
-		if r.Method != http.MethodPost || (operation != "pause" && operation != "resume") {
+		operation, err := app.ParseScheduleChangeOperation(parts[1])
+		if r.Method != http.MethodPost || err != nil || (operation != app.ScheduleChangePause && operation != app.ScheduleChangeResume) {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
@@ -102,9 +102,9 @@ func (s *server) handleScheduler(w http.ResponseWriter, r *http.Request, workspa
 	}
 	switch r.Method {
 	case http.MethodPut:
-		s.handleNaturalLanguageScheduleRequest(w, r, workspace, "update", id)
+		s.handleNaturalLanguageScheduleRequest(w, r, workspace, app.ScheduleChangeUpdate, id)
 	case http.MethodDelete:
-		s.applyDirectScheduleChange(w, r, workspace, NativeSchedulerChange{Operation: "remove", ID: id})
+		s.applyDirectScheduleChange(w, r, workspace, NativeSchedulerChange{Operation: app.ScheduleChangeRemove, ID: id})
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)
 	}
@@ -131,34 +131,20 @@ func ensureJSONRequestEOF(decoder *json.Decoder) error {
 }
 
 func schedulerNativeChange(body schedulerChangeRequest) (NativeSchedulerChange, error) {
-	operation := strings.TrimSpace(body.Operation)
-	change := NativeSchedulerChange{Operation: operation, ID: strings.TrimSpace(body.ID)}
-	switch operation {
-	case "create":
-		if body.Description == nil || body.Condition == nil || body.Target == nil || body.Trigger == nil {
-			return change, errors.New("create requires description, condition, target, and trigger")
-		}
-		guard := ""
-		if body.Guard != nil {
-			guard = *body.Guard
-		}
-		change.Create = app.CreateScheduleInput{Description: *body.Description, Condition: *body.Condition, Guard: guard, Target: *body.Target, Trigger: body.Trigger}
-	case "update":
-		if change.ID == "" || body.ExpectedRevision == 0 {
-			return change, errors.New("update requires id and expectedRevision")
-		}
-		if body.Description == nil && body.Condition == nil && body.Guard == nil && body.Target == nil && body.Trigger == nil {
-			return change, errors.New("update requires at least one changed field")
-		}
-		change.Update = app.UpdateScheduleInput{ID: change.ID, ExpectedRevision: body.ExpectedRevision, Description: body.Description, Condition: body.Condition, Guard: body.Guard, Target: body.Target, Trigger: body.Trigger}
-	case "pause", "resume", "remove":
-		if change.ID == "" {
-			return change, errors.New(operation + " requires id")
-		}
-	default:
-		return change, fmt.Errorf("unsupported Scheduler change %q", operation)
+	operation, err := app.ParseScheduleChangeOperation(body.Operation)
+	if err != nil {
+		return NativeSchedulerChange{}, err
 	}
-	return change, nil
+	return NativeSchedulerChange{
+		Operation:        operation,
+		ID:               strings.TrimSpace(body.ID),
+		ExpectedRevision: body.ExpectedRevision,
+		Description:      body.Description,
+		Condition:        body.Condition,
+		Guard:            body.Guard,
+		Target:           body.Target,
+		Trigger:          body.Trigger,
+	}, nil
 }
 
 func (s *server) applyDirectScheduleChange(w http.ResponseWriter, r *http.Request, workspace serveWorkspace, change NativeSchedulerChange) {
@@ -186,7 +172,7 @@ func writeSchedulerChangeError(w http.ResponseWriter, err error) {
 	writeError(w, err, http.StatusBadRequest)
 }
 
-func (s *server) handleNaturalLanguageScheduleRequest(w http.ResponseWriter, r *http.Request, workspace serveWorkspace, operation, id string) {
+func (s *server) handleNaturalLanguageScheduleRequest(w http.ResponseWriter, r *http.Request, workspace serveWorkspace, operation app.ScheduleChangeOperation, id string) {
 	var body struct {
 		Description string `json:"description"`
 		Condition   string `json:"condition"`

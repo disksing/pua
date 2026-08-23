@@ -42,6 +42,44 @@ const (
 	ScheduleTriggerCron     = "cron"
 )
 
+// ScheduleChangeOperation identifies one mutation supported by the native
+// Scheduler. Transport adapters parse their external operation names into this
+// type before handing a change to the Scheduler owner.
+type ScheduleChangeOperation string
+
+const (
+	ScheduleChangeCreate ScheduleChangeOperation = "create"
+	ScheduleChangeUpdate ScheduleChangeOperation = "update"
+	ScheduleChangePause  ScheduleChangeOperation = "pause"
+	ScheduleChangeResume ScheduleChangeOperation = "resume"
+	ScheduleChangeRemove ScheduleChangeOperation = "remove"
+)
+
+var scheduleChangeOperations = map[ScheduleChangeOperation]struct{}{
+	ScheduleChangeCreate: {},
+	ScheduleChangeUpdate: {},
+	ScheduleChangePause:  {},
+	ScheduleChangeResume: {},
+	ScheduleChangeRemove: {},
+}
+
+// ParseScheduleChangeOperation validates an external Scheduler mutation name.
+func ParseScheduleChangeOperation(value string) (ScheduleChangeOperation, error) {
+	operation := ScheduleChangeOperation(strings.TrimSpace(value))
+	if err := operation.Validate(); err != nil {
+		return "", err
+	}
+	return operation, nil
+}
+
+// Validate rejects operations outside the native Scheduler mutation domain.
+func (operation ScheduleChangeOperation) Validate() error {
+	if _, ok := scheduleChangeOperations[operation]; !ok {
+		return fmt.Errorf("unsupported Scheduler change %q", operation)
+	}
+	return nil
+}
+
 // SchedulerConfig is the portable, Workspace-owned Scheduler definition. It
 // deliberately excludes execution cursors and delivery results, which belong
 // to the Server runtime checkpoint.

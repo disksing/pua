@@ -63,13 +63,20 @@ export function createSchedulerMutationController(dependencies: SchedulerMutatio
 	async function save(identity: SchedulerMutationContext, input: SchedulerSaveInput): Promise<SchedulerMutationLease | null> {
 		if (!input.description.trim() || !input.condition.trim() || validateTarget(identity, input.target)) return null;
 		const scheduleId = input.scheduleId || "";
+		if (scheduleId && (!Number.isSafeInteger(input.expectedRevision) || (input.expectedRevision || 0) <= 0)) return null;
+		const body = {
+			description: input.description,
+			condition: input.condition,
+			target: input.target,
+			...(scheduleId ? { expectedRevision: input.expectedRevision } : {}),
+		};
 		return mutate(
 			identity,
 			"save",
 			`/api/workspaces/${encodeURIComponent(identity.workspaceId)}/scheduler${scheduleId ? `/${encodeURIComponent(scheduleId)}` : ""}`,
 			{
 				method: scheduleId ? "PUT" : "POST",
-				body: JSON.stringify({ description: input.description, condition: input.condition, target: input.target }),
+				body: JSON.stringify(body),
 			}
 		);
 	}

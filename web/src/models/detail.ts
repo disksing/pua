@@ -80,12 +80,16 @@ export interface WorkspaceAgentsModel extends Partial<FilePreviewModel> {
   error?: string;
 }
 
-export interface SchedulerSaveInput {
-  scheduleId?: string;
+interface SchedulerSaveFields {
   description: string;
   condition: string;
   target: string;
 }
+
+export type SchedulerSaveInput = SchedulerSaveFields & (
+  | { scheduleId?: undefined; expectedRevision?: undefined }
+  | { scheduleId: string; expectedRevision: number }
+);
 
 export interface SchedulerMutationCallbacks {
   validateTarget: (target: string) => string;

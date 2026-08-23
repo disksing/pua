@@ -1308,6 +1308,7 @@ test("manages natural-language schedules from the fixed Scheduler resource", asy
     target: "project1.task1",
   });
   expect(harness.schedulerBodies[1].body).toEqual({
+    expectedRevision: 1,
     description: "Notify after release verification",
     condition: "When the release branch is green after 09:00 Shanghai time",
     target: "project1.task1",

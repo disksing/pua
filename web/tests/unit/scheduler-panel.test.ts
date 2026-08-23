@@ -147,7 +147,6 @@ describe("SchedulerPanel", () => {
     addButton.click();
     await vi.waitFor(() => expect(save).toHaveBeenCalledOnce());
     expect(save).toHaveBeenCalledWith({
-      scheduleId: undefined,
       description: "Review the release",
       condition: "when the release is ready",
       target: "project1.task1",
@@ -202,6 +201,7 @@ describe("SchedulerPanel", () => {
     const otherSchedule = {
       ...schedule,
       id: "schedule-fedcba9876543210fedcba98",
+      revision: 7,
       description: "Publish target",
       condition: "daily",
       target: "workspace",
@@ -215,6 +215,10 @@ describe("SchedulerPanel", () => {
     await tick();
     editorFields(target).save.click();
     await vi.waitFor(() => expect(save).toHaveBeenCalledOnce());
+    expect(save).toHaveBeenLastCalledWith(expect.objectContaining({
+      scheduleId: schedule.id,
+      expectedRevision: 1,
+    }));
     editButtons[1].click();
     await tick();
 
@@ -225,6 +229,39 @@ describe("SchedulerPanel", () => {
     expect(editorFields(target).condition.value).toBe("daily");
     expect(editorFields(target).target.value).toBe("workspace");
     expect(target.querySelector(".schedule-list article.editing code")?.textContent).toContain(otherSchedule.id);
+
+    editorFields(target).save.click();
+    await vi.waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+    expect(save).toHaveBeenLastCalledWith(expect.objectContaining({
+      scheduleId: otherSchedule.id,
+      expectedRevision: 7,
+    }));
+  });
+
+  it("submits the revision displayed when a stale concurrent edit began", async () => {
+    const save = vi.fn(async () => true);
+    const concurrentlyUpdated = { ...schedule };
+    const { target } = mountPanel({ ...config, schedules: [concurrentlyUpdated] }, schedulerActions({ save }));
+    await tick();
+
+    const editButton = Array.from(target.querySelectorAll<HTMLButtonElement>(".schedule-list button"))
+      .find((button) => button.textContent?.trim() === "Edit")!;
+    expect(target.querySelector(".schedule-list article code")?.textContent).toContain("r1");
+    editButton.click();
+    await tick();
+
+    concurrentlyUpdated.revision = 2;
+    inputValue(editorFields(target).description, "Review without overwriting the concurrent change");
+    editorFields(target).save.click();
+
+    await vi.waitFor(() => expect(save).toHaveBeenCalledOnce());
+    expect(save).toHaveBeenCalledWith({
+      scheduleId: schedule.id,
+      expectedRevision: 1,
+      description: "Review without overwriting the concurrent change",
+      condition: schedule.condition,
+      target: schedule.target,
+    });
   });
 
   it("preserves a new draft started after cancelling a pending edit", async () => {

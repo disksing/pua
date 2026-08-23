@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { ApiError } from "../../src/api/client";
+import type { SchedulerSaveInput } from "../../src/models/detail";
 import {
 	createSchedulerMutationController,
 	type SchedulerMutationContext,
@@ -48,14 +49,21 @@ describe("SchedulerMutationController", () => {
 		expect(operations.validateTarget("scheduler")).toBe("The Scheduler resource cannot be a schedule target.");
 		await expect(operations.save({ ...input, target: "scheduler" })).resolves.toBeNull();
 		expect(request).not.toHaveBeenCalled();
+		await expect(operations.save({ ...input, scheduleId: "schedule/one" } as SchedulerSaveInput)).resolves.toBeNull();
+		await expect(operations.save({ ...input, scheduleId: "schedule/one", expectedRevision: 0 })).resolves.toBeNull();
+		expect(request).not.toHaveBeenCalled();
 		await release(operations.save(input));
-		await release(operations.save({ ...input, scheduleId: "schedule/one" }));
+		await release(operations.save({ ...input, scheduleId: "schedule/one", expectedRevision: 7 }));
 		await release(operations.setPaused("schedule/one", false));
 		await release(operations.remove("schedule/one"));
 
 		expect(request.mock.calls.map(([path, init]) => ({ path, method: init?.method, body: init?.body }))).toEqual([
 			{ path: "/api/workspaces/workspace%20current/scheduler", method: "POST", body: JSON.stringify(input) },
-			{ path: "/api/workspaces/workspace%20current/scheduler/schedule%2Fone", method: "PUT", body: JSON.stringify(input) },
+			{
+				path: "/api/workspaces/workspace%20current/scheduler/schedule%2Fone",
+				method: "PUT",
+				body: JSON.stringify({ ...input, expectedRevision: 7 }),
+			},
 			{ path: "/api/workspaces/workspace%20current/scheduler/schedule%2Fone/resume", method: "POST", body: undefined },
 			{ path: "/api/workspaces/workspace%20current/scheduler/schedule%2Fone", method: "DELETE", body: undefined },
 		]);
@@ -116,6 +124,32 @@ describe("SchedulerMutationController", () => {
 			status: 404,
 			code: "schedule_not_found",
 			message: "schedule not found: schedule-missing",
+		});
+	});
+
+	it("propagates a current schedule_revision_conflict from a natural-language update", async () => {
+		const context: SchedulerMutationContext = { workspaceId: "alpha", navigationVersion: 1, selectedId: "scheduler" };
+		const failure = new ApiError(409, "schedule revision conflict", {
+			error: "schedule revision conflict",
+			code: "schedule_revision_conflict",
+		});
+		const controller = createSchedulerMutationController({
+			context: () => context,
+			isCurrentWorkspace: (workspaceId, navigationVersion) => workspaceId === context.workspaceId && navigationVersion === context.navigationVersion,
+			resolveResourceTitle: () => "Resource",
+			request: vi.fn(async () => { throw failure; }) as SchedulerMutationDependencies["request"],
+		});
+
+		await expect(controller.operations().save({
+			scheduleId: "schedule-stale",
+			expectedRevision: 4,
+			description: "Review release",
+			condition: "when green",
+			target: "workspace",
+		})).rejects.toMatchObject({
+			status: 409,
+			code: "schedule_revision_conflict",
+			message: "schedule revision conflict",
 		});
 	});
 

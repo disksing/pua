@@ -2,7 +2,7 @@
   import "./SchedulerPanel.css";
 
   import { confirmDialog } from "../controllers/confirm-dialog-controller";
-  import type { SchedulerMutationCallbacks } from "../models/detail";
+  import type { SchedulerMutationCallbacks, SchedulerSaveInput } from "../models/detail";
   import type { ScheduleRecord, SchedulerConfigRecord } from "../models/workspace";
   import Icon from "./Icon.svelte";
 
@@ -11,6 +11,7 @@
     actions: SchedulerMutationCallbacks;
   } = $props();
   let editingId = $state("");
+  let editingRevision = $state<number | undefined>();
   let description = $state("");
   let condition = $state("");
   let target = $state("workspace");
@@ -22,6 +23,7 @@
   function edit(schedule: ScheduleRecord): void {
     formGeneration += 1;
     editingId = schedule.id;
+    editingRevision = schedule.revision;
     description = schedule.description;
     condition = schedule.condition;
     target = schedule.target;
@@ -30,6 +32,7 @@
   function clearForm(): void {
     formGeneration += 1;
     editingId = "";
+    editingRevision = undefined;
     description = "";
     condition = "";
     target = "workspace";
@@ -56,9 +59,17 @@
   async function saveSchedule(): Promise<void> {
     if (saving || !description.trim() || !condition.trim() || targetError) return;
     const submittedGeneration = formGeneration;
+    const fields = {
+      description,
+      condition,
+      target,
+    };
+    const submission: SchedulerSaveInput = editingId
+      ? { ...fields, scheduleId: editingId, expectedRevision: editingRevision! }
+      : fields;
     saving = true;
     try {
-      const completed = await actions.save({ scheduleId: editingId || undefined, description, condition, target });
+      const completed = await actions.save(submission);
       if (completed && formGeneration === submittedGeneration) clearForm();
     } finally {
       saving = false;

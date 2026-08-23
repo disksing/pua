@@ -194,9 +194,10 @@ func writeSchedulerTargetError(w http.ResponseWriter) {
 
 func (s *server) handleNaturalLanguageScheduleRequest(w http.ResponseWriter, r *http.Request, workspace serveWorkspace, operation app.ScheduleChangeOperation, id string) {
 	var body struct {
-		Description string `json:"description"`
-		Condition   string `json:"condition"`
-		Target      string `json:"target"`
+		ExpectedRevision *uint64 `json:"expectedRevision,omitempty"`
+		Description      string  `json:"description"`
+		Condition        string  `json:"condition"`
+		Target           string  `json:"target"`
 	}
 	if err := decodeSchedulerBody(r, &body); err != nil {
 		writeError(w, err, http.StatusBadRequest)
@@ -206,6 +207,18 @@ func (s *server) handleNaturalLanguageScheduleRequest(w http.ResponseWriter, r *
 	if description == "" || condition == "" || target == "" {
 		writeError(w, errors.New("description, condition, and target are required"), http.StatusBadRequest)
 		return
+	}
+	if operation == app.ScheduleChangeCreate && body.ExpectedRevision != nil {
+		writeError(w, errors.New("expectedRevision is only valid for schedule updates"), http.StatusBadRequest)
+		return
+	}
+	if operation == app.ScheduleChangeUpdate && (body.ExpectedRevision == nil || *body.ExpectedRevision == 0) {
+		writeError(w, errors.New("expectedRevision is required for schedule updates"), http.StatusBadRequest)
+		return
+	}
+	expectedRevision := uint64(0)
+	if body.ExpectedRevision != nil {
+		expectedRevision = *body.ExpectedRevision
 	}
 	if err := app.ValidateScheduleTarget(target); err != nil {
 		writeSchedulerTargetError(w)
@@ -222,12 +235,14 @@ func (s *server) handleNaturalLanguageScheduleRequest(w http.ResponseWriter, r *
 		return
 	}
 	text := strings.TrimSuffix(localize.MustRender(language, "scheduler-compilation.md", map[string]any{
-		"Operation":   string(operation),
-		"HasID":       id != "",
-		"ID":          id,
-		"Description": description,
-		"Condition":   condition,
-		"Target":      target,
+		"Operation":           string(operation),
+		"HasID":               id != "",
+		"ID":                  id,
+		"HasExpectedRevision": operation == app.ScheduleChangeUpdate,
+		"ExpectedRevision":    expectedRevision,
+		"Description":         description,
+		"Condition":           condition,
+		"Target":              target,
 	}), "\n")
 	role, sender := agentHubMessageProvenance(userName)
 	var message resourceMailboxMessage

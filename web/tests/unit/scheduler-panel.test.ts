@@ -62,6 +62,21 @@ function inputValue(element: HTMLInputElement | HTMLTextAreaElement, value: stri
   element.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+function editorFields(target: HTMLElement) {
+  return {
+    description: target.querySelector<HTMLInputElement>("input[placeholder^='What should']")!,
+    condition: target.querySelector<HTMLTextAreaElement>("textarea")!,
+    target: target.querySelector<HTMLInputElement>("input[placeholder^='workspace']")!,
+    save: target.querySelector<HTMLButtonElement>(".schedule-editor > button")!,
+  };
+}
+
 afterEach(async () => {
   while (mounted.length) await unmount(mounted.pop()!);
   document.body.replaceChildren();
@@ -137,6 +152,106 @@ describe("SchedulerPanel", () => {
       condition: "when the release is ready",
       target: "project1.task1",
     });
+  });
+
+  it("clears only the unchanged form after a successful save", async () => {
+    const completion = deferred<boolean>();
+    const save = vi.fn(() => completion.promise);
+    const { target } = mountPanel(config, schedulerActions({ save }));
+    await tick();
+    const fields = editorFields(target);
+
+    inputValue(fields.description, "Review the release");
+    inputValue(fields.condition, "when the release is ready");
+    await tick();
+    fields.save.click();
+    await vi.waitFor(() => expect(save).toHaveBeenCalledOnce());
+
+    completion.resolve(true);
+    await vi.waitFor(() => expect(fields.description.value).toBe(""));
+    expect(fields.condition.value).toBe("");
+    expect(fields.target.value).toBe("workspace");
+  });
+
+  it.each([
+    { completed: true, label: "success" },
+    { completed: false, label: "failure" },
+  ])("preserves field edits that overlap a late save $label", async ({ completed }) => {
+    const completion = deferred<boolean>();
+    const save = vi.fn(() => completion.promise);
+    const { target } = mountPanel(config, schedulerActions({ save }));
+    await tick();
+    const fields = editorFields(target);
+
+    inputValue(fields.description, "Review the release");
+    inputValue(fields.condition, "when the release is ready");
+    await tick();
+    fields.save.click();
+    await vi.waitFor(() => expect(save).toHaveBeenCalledOnce());
+    inputValue(fields.description, "Review the newer draft");
+
+    completion.resolve(completed);
+    await vi.waitFor(() => expect(fields.save.classList.contains("busy")).toBe(false));
+    expect(fields.description.value).toBe("Review the newer draft");
+    expect(fields.condition.value).toBe("when the release is ready");
+  });
+
+  it("preserves another schedule selected while a save is pending", async () => {
+    const completion = deferred<boolean>();
+    const save = vi.fn(() => completion.promise);
+    const otherSchedule = {
+      ...schedule,
+      id: "schedule-fedcba9876543210fedcba98",
+      description: "Publish target",
+      condition: "daily",
+      target: "workspace",
+    };
+    const { target } = mountPanel({ ...config, schedules: [schedule, otherSchedule] }, schedulerActions({ save }));
+    await tick();
+    const editButtons = Array.from(target.querySelectorAll<HTMLButtonElement>(".schedule-list button"))
+      .filter((button) => button.textContent?.trim() === "Edit");
+
+    editButtons[0].click();
+    await tick();
+    editorFields(target).save.click();
+    await vi.waitFor(() => expect(save).toHaveBeenCalledOnce());
+    editButtons[1].click();
+    await tick();
+
+    completion.resolve(true);
+    await vi.waitFor(() => expect(editorFields(target).save.classList.contains("busy")).toBe(false));
+    expect(target.querySelector(".schedule-editor-heading strong")?.textContent).toBe("Edit schedule");
+    expect(editorFields(target).description.value).toBe("Publish target");
+    expect(editorFields(target).condition.value).toBe("daily");
+    expect(editorFields(target).target.value).toBe("workspace");
+    expect(target.querySelector(".schedule-list article.editing code")?.textContent).toContain(otherSchedule.id);
+  });
+
+  it("preserves a new draft started after cancelling a pending edit", async () => {
+    const completion = deferred<boolean>();
+    const save = vi.fn(() => completion.promise);
+    const { target } = mountPanel({ ...config, schedules: [schedule] }, schedulerActions({ save }));
+    await tick();
+    const editButton = Array.from(target.querySelectorAll<HTMLButtonElement>(".schedule-list button"))
+      .find((button) => button.textContent?.trim() === "Edit")!;
+
+    editButton.click();
+    await tick();
+    editorFields(target).save.click();
+    await vi.waitFor(() => expect(save).toHaveBeenCalledOnce());
+    const cancel = Array.from(target.querySelectorAll<HTMLButtonElement>(".schedule-editor-heading button"))
+      .find((button) => button.textContent?.trim() === "Cancel edit")!;
+    cancel.click();
+    await tick();
+    inputValue(editorFields(target).description, "Create a new draft");
+    inputValue(editorFields(target).condition, "next week");
+
+    completion.resolve(true);
+    await vi.waitFor(() => expect(editorFields(target).save.classList.contains("busy")).toBe(false));
+    expect(target.querySelector(".schedule-editor-heading strong")?.textContent).toBe("Add schedule");
+    expect(editorFields(target).description.value).toBe("Create a new draft");
+    expect(editorFields(target).condition.value).toBe("next week");
+    expect(target.querySelector(".schedule-list article.editing")).toBeNull();
   });
 
   it("offers direct recovery for a schedule requiring attention", async () => {

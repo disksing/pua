@@ -14,11 +14,13 @@
   let description = $state("");
   let condition = $state("");
   let target = $state("workspace");
+  let formGeneration = $state(0);
   let saving = $state(false);
   let pendingScheduleIds = $state(new Set<string>());
   const targetError = $derived(actions.validateTarget(target));
 
   function edit(schedule: ScheduleRecord): void {
+    formGeneration += 1;
     editingId = schedule.id;
     description = schedule.description;
     condition = schedule.condition;
@@ -26,10 +28,15 @@
   }
 
   function clearForm(): void {
+    formGeneration += 1;
     editingId = "";
     description = "";
     condition = "";
     target = "workspace";
+  }
+
+  function markFormChanged(): void {
+    formGeneration += 1;
   }
 
   function setSchedulePending(scheduleId: string, pending: boolean): void {
@@ -48,10 +55,11 @@
 
   async function saveSchedule(): Promise<void> {
     if (saving || !description.trim() || !condition.trim() || targetError) return;
+    const submittedGeneration = formGeneration;
     saving = true;
     try {
       const completed = await actions.save({ scheduleId: editingId || undefined, description, condition, target });
-      if (completed) clearForm();
+      if (completed && formGeneration === submittedGeneration) clearForm();
     } finally {
       saving = false;
     }
@@ -82,9 +90,9 @@
 
 <div class="schedule-editor" data-component-owner="scheduler-panel">
   <div class="schedule-editor-heading"><div><strong>{editingId ? "Edit schedule" : "Add schedule"}</strong><span>The Scheduler Agent compiles this natural-language request into a native trigger and asks when timing or timezone is ambiguous.</span></div>{#if editingId}<button type="button" class="secondary-button" onclick={clearForm}>Cancel edit</button>{/if}</div>
-  <label><span>Description</span><input bind:value={description} placeholder="What should the Scheduler understand?" /></label>
-  <label><span>Condition</span><textarea bind:value={condition} rows="3" placeholder="For example: when the release branch is green after 09:00 Shanghai time"></textarea></label>
-  <label><span>Target resource ID</span><input bind:value={target} placeholder="workspace, project1, or project1.task1" aria-invalid={Boolean(targetError)} aria-describedby={targetError ? "schedule-target-error" : undefined} />{#if targetError}<small id="schedule-target-error" class="schedule-field-error" role="alert">{targetError}</small>{/if}</label>
+  <label><span>Description</span><input bind:value={description} oninput={markFormChanged} placeholder="What should the Scheduler understand?" /></label>
+  <label><span>Condition</span><textarea bind:value={condition} oninput={markFormChanged} rows="3" placeholder="For example: when the release branch is green after 09:00 Shanghai time"></textarea></label>
+  <label><span>Target resource ID</span><input bind:value={target} oninput={markFormChanged} placeholder="workspace, project1, or project1.task1" aria-invalid={Boolean(targetError)} aria-describedby={targetError ? "schedule-target-error" : undefined} />{#if targetError}<small id="schedule-target-error" class="schedule-field-error" role="alert">{targetError}</small>{/if}</label>
   <button type="button" class="primary-button" class:busy={saving} class:editing={Boolean(editingId)} disabled={saving || !description.trim() || !condition.trim() || Boolean(targetError)} onclick={saveSchedule}><span class="schedule-icon schedule-icon-busy"><Icon name="loader-circle" /></span><span class="schedule-icon schedule-icon-editing"><Icon name="save" /></span><span class="schedule-icon schedule-icon-add"><Icon name="plus" /></span><span>{editingId ? "Update schedule" : "Add schedule"}</span></button>
 </div>
 

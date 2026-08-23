@@ -319,7 +319,6 @@ func (m *ServiceManager) Stop(ctx context.Context) error {
 				first = cleanupErr
 			}
 		}
-		rt.status.ManualStop = false
 		if rt.config.Enabled {
 			if cleanupErr != nil {
 				rt.status.AttentionRequired = true

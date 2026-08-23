@@ -635,6 +635,22 @@ func TestServiceManagerManualStartStopAndRestart(t *testing.T) {
 	if launches := waitForLaunches(t, launchPath, 1); len(launches) != 1 {
 		t.Fatalf("manual stop allowed automatic restart: %#v", launches)
 	}
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelShutdown()
+	if err := manager.Stop(shutdownCtx); err != nil {
+		t.Fatal(err)
+	}
+	shutdownStatus := readPersistedServiceStatus(t, root, "worker")
+	if shutdownStatus.State != ServiceStateStopped || !shutdownStatus.ManualStop || shutdownStatus.FailureCount != 0 || shutdownStatus.AttentionRequired || shutdownStatus.NextRetryAt != "" {
+		t.Fatalf("graceful shutdown changed manual-stop intent: %#v", shutdownStatus)
+	}
+	shutdownEvents, err := os.ReadFile(filepath.Join(serviceRuntimePath(root, "worker"), "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(shutdownEvents), `"type":"exited"`) || strings.Contains(string(shutdownEvents), `"type":"start_failed"`) {
+		t.Fatalf("manual stop or graceful shutdown entered restart policy: %s", shutdownEvents)
+	}
 
 	restarted, err := NewServiceManager(root, ServiceManagerOptions{})
 	if err != nil {
@@ -683,7 +699,7 @@ func TestServiceManagerManualStartStopAndRestart(t *testing.T) {
 	}
 }
 
-func TestServiceManagerShutdownSuppressesRestart(t *testing.T) {
+func TestServiceManagerShutdownSuppressesRestartAndRestoresRunningService(t *testing.T) {
 	root := t.TempDir()
 	launchPath := filepath.Join(root, "shutdown-launches")
 	now := time.Date(2026, time.August, 24, 3, 0, 0, 0, time.UTC)
@@ -751,5 +767,34 @@ func TestServiceManagerShutdownSuppressesRestart(t *testing.T) {
 	}
 	if !strings.Contains(string(events), `"type":"started"`) {
 		t.Fatalf("shutdown test did not observe a persisted start event: %s", events)
+	}
+
+	restarted, err := NewServiceManager(root, ServiceManagerOptions{Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager = restarted
+	if err := restarted.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := restarted.Show("worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.State != ServiceStateReady || restored.ManualStop || restored.PID <= 0 || restored.FailureCount != 0 || restored.AttentionRequired || restored.NextRetryAt != "" {
+		t.Fatalf("reconstructed running service status = %#v", restored)
+	}
+	if launches := waitForLaunches(t, launchPath, 2); len(launches) != 2 || launches[0] == launches[1] {
+		t.Fatalf("reconstruction did not restore the running service: %#v", launches)
+	}
+	restoredEvents, err := os.ReadFile(filepath.Join(serviceRuntimePath(root, "worker"), "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(restoredEvents), `"type":"exited"`) || strings.Contains(string(restoredEvents), `"type":"start_failed"`) {
+		t.Fatalf("shutdown or reconstruction entered restart policy: %s", restoredEvents)
+	}
+	if strings.Count(string(restoredEvents), `"type":"started"`) != 2 {
+		t.Fatalf("reconstruction start events = %s, want two clean starts", restoredEvents)
 	}
 }

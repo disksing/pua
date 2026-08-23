@@ -5,7 +5,6 @@ package security
 import (
 	"bytes"
 	"io"
-	"strings"
 	"sync"
 	"unicode/utf16"
 	"unicode/utf8"
@@ -47,21 +46,6 @@ func (r *Redactor) Register(value string) {
 		}
 	}
 	r.secrets = append(r.secrets, append([]byte(nil), b...))
-}
-
-// Secrets returns only lengths of the registered values. It is useful for
-// diagnostics and tests without creating another API that can expose them.
-func (r *Redactor) SecretLengths() []int {
-	if r == nil {
-		return nil
-	}
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	result := make([]int, len(r.secrets))
-	for i, secret := range r.secrets {
-		result[i] = len(secret)
-	}
-	return result
 }
 
 // Redact replaces every registered secret in data and returns a new byte
@@ -431,23 +415,4 @@ func hexValue(value byte) (byte, bool) {
 	default:
 		return 0, false
 	}
-}
-
-// NormalizeSecretValues removes duplicate/empty values and trims only the
-// surrounding collection, never the secret itself. It is exported for callers
-// that construct a redactor from a secret map.
-func NormalizeSecretValues(values []string) []string {
-	seen := make(map[string]struct{}, len(values))
-	result := make([]string, 0, len(values))
-	for _, value := range values {
-		if strings.TrimSpace(value) == "" {
-			continue
-		}
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		result = append(result, value)
-	}
-	return result
 }

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -39,8 +40,11 @@ const (
 	SchedulerResourceID         = "scheduler"
 	schedulerDir                = "scheduler"
 	schedulerJSONFile           = "scheduler.json"
+	schedulerV1JSONFile         = "scheduler.v1.json"
 	schedulerMarkdownFile       = "scheduler.md"
 	schedulerSchemaVersion      = 2
+	minimumSchedulerV1WakeMins  = 1
+	maximumSchedulerV1WakeMins  = 7 * 24 * 60
 	minimumScheduleEverySeconds = 60
 	maximumScheduleEverySeconds = int64(^uint64(0)>>1) / int64(time.Second)
 	maximumScheduleTextLength   = 64 * 1024
@@ -378,6 +382,10 @@ type scheduleV1 struct {
 // Definitions remain byte-for-byte equivalent at the semantic fields and are
 // explicitly inert until a Scheduler Agent compiles a native trigger.
 func migrateSchedulerJSONLocked(root string) error {
+	return migrateSchedulerJSONLockedWithWriter(root, writeSchedulerJSON)
+}
+
+func migrateSchedulerJSONLockedWithWriter(root string, writeV2 func(string, SchedulerConfig) error) error {
 	path := schedulerJSONPath(root)
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
@@ -407,6 +415,9 @@ func migrateSchedulerJSONLocked(root string) error {
 	if err := ensureJSONEOF(decoder); err != nil {
 		return fmt.Errorf("read Scheduler configuration: %w", err)
 	}
+	if legacy.WakeIntervalMinutes < minimumSchedulerV1WakeMins || legacy.WakeIntervalMinutes > maximumSchedulerV1WakeMins {
+		return fmt.Errorf("Scheduler wake interval must be between %d and %d minutes", minimumSchedulerV1WakeMins, maximumSchedulerV1WakeMins)
+	}
 	config := SchedulerConfig{SchemaVersion: schedulerSchemaVersion, AgentBinding: legacy.AgentBinding, Schedules: make([]Schedule, 0, len(legacy.Schedules))}
 	for _, old := range legacy.Schedules {
 		config.Schedules = append(config.Schedules, Schedule{
@@ -419,7 +430,32 @@ func migrateSchedulerJSONLocked(root string) error {
 	if err := validateSchedulerConfig(config); err != nil {
 		return err
 	}
-	return writeSchedulerJSON(path, config)
+	if err := preserveSchedulerV1RollbackEvidence(path, data); err != nil {
+		return err
+	}
+	return writeV2(path, config)
+}
+
+func preserveSchedulerV1RollbackEvidence(path string, data []byte) error {
+	evidencePath := filepath.Join(filepath.Dir(path), schedulerV1JSONFile)
+	info, err := os.Lstat(evidencePath)
+	switch {
+	case err == nil:
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return fmt.Errorf("Scheduler v1 rollback evidence must be a regular file: %s", evidencePath)
+		}
+		existing, err := os.ReadFile(evidencePath)
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(existing, data) {
+			return fmt.Errorf("Scheduler v1 rollback evidence conflicts with the current v1 definition: %s", evidencePath)
+		}
+		return nil
+	case !os.IsNotExist(err):
+		return err
+	}
+	return writeSchedulerBytesAtomically(evidencePath, ".scheduler-v1-*.tmp", data)
 }
 
 func ensureJSONEOF(decoder *json.Decoder) error {
@@ -727,8 +763,12 @@ func writeSchedulerJSON(path string, config SchedulerConfig) error {
 		return err
 	}
 	data = append(data, '\n')
+	return writeSchedulerBytesAtomically(path, ".scheduler-*.tmp", data)
+}
+
+func writeSchedulerBytesAtomically(path, tempPattern string, data []byte) error {
 	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".scheduler-*.tmp")
+	tmp, err := os.CreateTemp(dir, tempPattern)
 	if err != nil {
 		return err
 	}

@@ -24,6 +24,26 @@ func writeTestService(t *testing.T, root string, cfg ServiceConfig) {
 	}
 }
 
+func TestServiceManagerStateWireValues(t *testing.T) {
+	states := []ServiceState{
+		ServiceStateDisabled,
+		ServiceStateStopped,
+		ServiceStateBlocked,
+		ServiceStateStarting,
+		ServiceStateRunning,
+		ServiceStateReady,
+		ServiceStateBackoff,
+		ServiceStateAttentionRequired,
+	}
+	data, err := json.Marshal(states)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(data), `["disabled","stopped","blocked","starting","running","ready","backoff","attention_required"]`; got != want {
+		t.Fatalf("service state wire values = %s, want %s", got, want)
+	}
+}
+
 func TestValidateServiceGraphRejectsCyclesAndSecretArguments(t *testing.T) {
 	root := t.TempDir()
 	configs := map[string]ServiceConfig{
@@ -58,7 +78,7 @@ func TestServiceManagerStartsProcessAndPersistsRedactedLogs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.State != "backoff" && status.State != "attention_required" {
+	if status.State != ServiceStateBackoff && status.State != ServiceStateAttentionRequired {
 		t.Fatalf("state = %q, want backoff", status.State)
 	}
 	data, err := os.ReadFile(filepath.Join(serviceRuntimePath(root, "worker"), "stdout.log"))
@@ -95,7 +115,7 @@ func TestServiceManagerRequiresInitialExportBeforeReadiness(t *testing.T) {
 	if status.Readiness.Ready {
 		t.Fatal("service became ready without an initial export")
 	}
-	if status.State != "backoff" && status.State != "attention_required" {
+	if status.State != ServiceStateBackoff && status.State != ServiceStateAttentionRequired {
 		t.Fatalf("state = %q, want backoff", status.State)
 	}
 }

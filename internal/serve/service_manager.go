@@ -258,9 +258,9 @@ func (m *ServiceManager) loadStatusLocked(rt *serviceRuntime) error {
 }
 
 func initialServiceStatus(cfg ServiceConfig) ServiceStatus {
-	state := "disabled"
+	state := ServiceStateDisabled
 	if cfg.Enabled {
-		state = "stopped"
+		state = ServiceStateStopped
 	}
 	return ServiceStatus{SchemaVersion: serviceSchemaVersion, ID: cfg.ID, Enabled: cfg.Enabled, State: state, Dependencies: append([]string(nil), cfg.DependsOn...), Readiness: ServiceReadinessStatus{Configured: cfg.Readiness != nil}, Cleanup: ServiceCleanupStatus{Configured: cfg.Cleanup != nil}, Exports: ServiceExports{Variables: map[string]string{}}}
 }
@@ -313,12 +313,12 @@ func (m *ServiceManager) Stop(ctx context.Context) error {
 		if rt.config.Enabled {
 			if cleanupErr != nil {
 				rt.status.AttentionRequired = true
-				rt.status.State = "attention_required"
-			} else if rt.status.State != "backoff" && rt.status.State != "attention_required" {
-				rt.status.State = "stopped"
+				rt.status.State = ServiceStateAttentionRequired
+			} else if rt.status.State != ServiceStateBackoff && rt.status.State != ServiceStateAttentionRequired {
+				rt.status.State = ServiceStateStopped
 			}
 		} else {
-			rt.status.State = "disabled"
+			rt.status.State = ServiceStateDisabled
 		}
 		rt.status.PID, rt.status.ProcessGroup = 0, 0
 		m.persistStatusLocked(rt)
@@ -371,11 +371,11 @@ func (m *ServiceManager) reconcileOneLocked(ctx context.Context, rt *serviceRunt
 		if rt.process != nil {
 			if err := m.stopProcessLocked(ctx, rt, true); err != nil {
 				status.AttentionRequired = true
-				status.State = "attention_required"
+				status.State = ServiceStateAttentionRequired
 			}
 		}
 		if !status.AttentionRequired {
-			status.State = "disabled"
+			status.State = ServiceStateDisabled
 		}
 		status.ManualStop = false
 		status.PID, status.ProcessGroup = 0, 0
@@ -383,7 +383,7 @@ func (m *ServiceManager) reconcileOneLocked(ctx context.Context, rt *serviceRunt
 		return nil
 	}
 	if status.ManualStop && rt.process == nil {
-		status.State = "stopped"
+		status.State = ServiceStateStopped
 		m.persistStatusLocked(rt)
 		return nil
 	}
@@ -401,15 +401,15 @@ func (m *ServiceManager) reconcileOneLocked(ctx context.Context, rt *serviceRunt
 		if rt.process != nil {
 			if err := m.stopProcessLocked(ctx, rt, false); err != nil {
 				status.AttentionRequired = true
-				status.State = "attention_required"
+				status.State = ServiceStateAttentionRequired
 				m.persistStatusLocked(rt)
 				return nil
 			}
 		}
 		if status.AttentionRequired {
-			status.State = "attention_required"
+			status.State = ServiceStateAttentionRequired
 		} else {
-			status.State = "blocked"
+			status.State = ServiceStateBlocked
 		}
 		status.Readiness.Ready = false
 		m.persistStatusLocked(rt)
@@ -417,7 +417,7 @@ func (m *ServiceManager) reconcileOneLocked(ctx context.Context, rt *serviceRunt
 	}
 	now := m.now()
 	if rt.process == nil {
-		if status.State == "backoff" || status.State == "attention_required" {
+		if status.State == ServiceStateBackoff || status.State == ServiceStateAttentionRequired {
 			if next, err := time.Parse(time.RFC3339Nano, status.NextRetryAt); err == nil && now.Before(next) {
 				return nil
 			}
@@ -430,7 +430,7 @@ func (m *ServiceManager) reconcileOneLocked(ctx context.Context, rt *serviceRunt
 func (m *ServiceManager) dependenciesReadyLocked(cfg ServiceConfig) bool {
 	for _, dep := range cfg.DependsOn {
 		rt := m.runtimes[dep]
-		if rt == nil || rt.status.State != "ready" {
+		if rt == nil || rt.status.State != ServiceStateReady {
 			return false
 		}
 	}
@@ -511,7 +511,7 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 	rt.logStreams = []*security.Stream{stdout, stderr}
 	rt.logWriters = []*serviceLogWriter{stdoutWriter, stderrWriter}
 	rt.logSinks = []*serviceLogSink{stdoutSink, stderrSink}
-	rt.status.State = "starting"
+	rt.status.State = ServiceStateStarting
 	rt.status.PID = cmd.Process.Pid
 	rt.status.ProcessGroup = cmd.Process.Pid
 	rt.status.StartedAt = rt.started.Format(time.RFC3339Nano)
@@ -536,9 +536,9 @@ func (m *ServiceManager) failStartLocked(ctx context.Context, rt *serviceRuntime
 	rt.status.FailureCount++
 	rt.status.LastError = message
 	rt.status.AttentionRequired = rt.status.FailureCount >= 5
-	rt.status.State = "backoff"
+	rt.status.State = ServiceStateBackoff
 	if rt.status.AttentionRequired {
-		rt.status.State = "attention_required"
+		rt.status.State = ServiceStateAttentionRequired
 	}
 	delay := restartDelay(rt.config.Restart, rt.status.FailureCount)
 	rt.status.NextRetryAt = m.now().Add(delay).Format(time.RFC3339Nano)
@@ -547,7 +547,7 @@ func (m *ServiceManager) failStartLocked(ctx context.Context, rt *serviceRuntime
 	if cleanupErr := m.runCleanupLocked(ctx, rt); cleanupErr != nil {
 		cleanupMessage := security.NewRedactor(rt.secretValues...).RedactString(cleanupErr.Error())
 		rt.status.AttentionRequired = true
-		rt.status.State = "attention_required"
+		rt.status.State = ServiceStateAttentionRequired
 		rt.status.LastError = message + "; " + cleanupMessage
 	}
 	m.persistStatusLocked(rt)
@@ -572,7 +572,7 @@ func (m *ServiceManager) observeReadyLocked(ctx context.Context, rt *serviceRunt
 			return m.readinessFailedLocked(ctx, rt, err)
 		}
 		rt.exports = exports
-		rt.status.State = "ready"
+		rt.status.State = ServiceStateReady
 		rt.status.Readiness.Ready = true
 		rt.status.Exports = publicExports(rt.exports, rt.secretNames)
 		m.persistStatusLocked(rt)
@@ -594,7 +594,7 @@ func (m *ServiceManager) observeReadyLocked(ctx context.Context, rt *serviceRunt
 		return m.readinessFailedLocked(ctx, rt, err)
 	}
 	m.releaseStartupLogsLocked(rt)
-	rt.status.State = "ready"
+	rt.status.State = ServiceStateReady
 	rt.status.Readiness.Ready = true
 	rt.status.Readiness.LastCheck = now.Format(time.RFC3339Nano)
 	rt.status.Readiness.LastError = ""
@@ -760,14 +760,14 @@ func (m *ServiceManager) readinessFailedLocked(ctx context.Context, rt *serviceR
 	cleanupErr := m.stopProcessLocked(ctx, rt, false)
 	rt.status.FailureCount++
 	rt.status.AttentionRequired = rt.status.FailureCount >= 5
-	rt.status.State = "backoff"
+	rt.status.State = ServiceStateBackoff
 	if rt.status.AttentionRequired {
-		rt.status.State = "attention_required"
+		rt.status.State = ServiceStateAttentionRequired
 	}
 	rt.status.NextRetryAt = m.now().Add(restartDelay(rt.config.Restart, rt.status.FailureCount)).Format(time.RFC3339Nano)
 	if cleanupErr != nil {
 		rt.status.AttentionRequired = true
-		rt.status.State = "attention_required"
+		rt.status.State = ServiceStateAttentionRequired
 		cleanupMessage := security.NewRedactor(rt.secretValues...).RedactString(cleanupErr.Error())
 		rt.status.LastError = message + "; " + cleanupMessage
 	}
@@ -797,7 +797,7 @@ func (m *ServiceManager) handleProcessExitLocked(ctx context.Context, rt *servic
 		rt.status.ExitError = security.NewRedactor(rt.secretValues...).RedactString(exit.err.Error())
 	}
 	if rt.status.ManualStop || m.stopping || !rt.config.Enabled {
-		rt.status.State = "stopped"
+		rt.status.State = ServiceStateStopped
 		m.persistStatusLocked(rt)
 		return
 	}
@@ -807,9 +807,9 @@ func (m *ServiceManager) handleProcessExitLocked(ctx context.Context, rt *servic
 	}
 	rt.status.FailureCount++
 	rt.status.AttentionRequired = rt.status.FailureCount >= 5
-	rt.status.State = "backoff"
+	rt.status.State = ServiceStateBackoff
 	if rt.status.AttentionRequired {
-		rt.status.State = "attention_required"
+		rt.status.State = ServiceStateAttentionRequired
 	}
 	rt.status.LastError = rt.status.ExitError
 	rt.status.NextRetryAt = m.now().Add(restartDelay(rt.config.Restart, rt.status.FailureCount)).Format(time.RFC3339Nano)
@@ -818,7 +818,7 @@ func (m *ServiceManager) handleProcessExitLocked(ctx context.Context, rt *servic
 	cleanupErr := m.runCleanupLocked(ctx, rt)
 	if cleanupErr != nil {
 		rt.status.AttentionRequired = true
-		rt.status.State = "attention_required"
+		rt.status.State = ServiceStateAttentionRequired
 		rt.status.LastError = security.NewRedactor(rt.secretValues...).RedactString(cleanupErr.Error())
 	}
 	m.persistStatusLocked(rt)
@@ -863,7 +863,7 @@ func (m *ServiceManager) stopProcessLocked(ctx context.Context, rt *serviceRunti
 	if err := m.runCleanupLocked(ctx, rt); err != nil {
 		rt.status.LastError = security.NewRedactor(rt.secretValues...).RedactString(err.Error())
 		rt.status.Cleanup.LastError = rt.status.LastError
-		rt.status.State = "attention_required"
+		rt.status.State = ServiceStateAttentionRequired
 		rt.status.AttentionRequired = true
 		m.persistStatusLocked(rt)
 		return err
@@ -1005,7 +1005,7 @@ func (m *ServiceManager) resolveEnvironmentValueLocked(entry ServiceEnvironment)
 func (m *ServiceManager) resolveTemplateLocked(template string) (string, string, error) {
 	if match := serviceTemplatePattern.FindStringSubmatch(template); len(match) == 3 && match[0] == template {
 		rt := m.runtimes[match[1]]
-		if rt == nil || rt.status.State != "ready" {
+		if rt == nil || rt.status.State != ServiceStateReady {
 			return "", "", fmt.Errorf("service %q is not ready", match[1])
 		}
 		if value, ok := rt.exports.Variables[match[2]]; ok {
@@ -1024,7 +1024,7 @@ func (m *ServiceManager) resolveTemplateLocked(template string) (string, string,
 			return ""
 		}
 		rt := m.runtimes[match[1]]
-		if rt == nil || rt.status.State != "ready" {
+		if rt == nil || rt.status.State != ServiceStateReady {
 			missing = fmt.Errorf("service %q is not ready", match[1])
 			return ""
 		}
@@ -1045,14 +1045,14 @@ func (m *ServiceManager) resolveTemplateLocked(template string) (string, string,
 }
 
 func (m *ServiceManager) recoverOrphanLocked(rt *serviceRuntime) {
-	if rt.status.PID <= 0 || (rt.status.State != "running" && rt.status.State != "starting" && rt.status.State != "ready") {
+	if rt.status.PID <= 0 || (rt.status.State != ServiceStateRunning && rt.status.State != ServiceStateStarting && rt.status.State != ServiceStateReady) {
 		return
 	}
 	if rt.status.ProcessGroup > 0 && processIdentityMatches(rt.status.PID, rt.status.InstanceToken, rt.status.CommandDigest) {
 		reapOrphanProcessGroup(rt.status.ProcessGroup)
 	}
 	rt.status.PID, rt.status.ProcessGroup = 0, 0
-	rt.status.State = "stopped"
+	rt.status.State = ServiceStateStopped
 	rt.status.ManualStop = false
 	m.persistStatusLocked(rt)
 }
@@ -1328,11 +1328,11 @@ func (m *ServiceManager) Apply(cfg ServiceConfig) error {
 		rt.status.Cleanup.Configured = cfg.Cleanup != nil
 		if rt.process == nil {
 			if cfg.Enabled {
-				if rt.status.State == "disabled" {
-					rt.status.State = "stopped"
+				if rt.status.State == ServiceStateDisabled {
+					rt.status.State = ServiceStateStopped
 				}
 			} else {
-				rt.status.State = "disabled"
+				rt.status.State = ServiceStateDisabled
 			}
 		}
 		m.persistStatusLocked(rt)
@@ -1388,7 +1388,7 @@ func (m *ServiceManager) Enable(id string) error {
 	rt.status.AttentionRequired = false
 	rt.status.LastError = ""
 	rt.status.NextRetryAt = ""
-	rt.status.State = "stopped"
+	rt.status.State = ServiceStateStopped
 	return writeServiceJSON(serviceConfigPath(m.root, id), cfg, 0o600)
 }
 func (m *ServiceManager) Disable(ctx context.Context, id string) error {
@@ -1409,9 +1409,9 @@ func (m *ServiceManager) Disable(ctx context.Context, id string) error {
 	rt.status.ManualStop = false
 	if cleanupErr != nil {
 		rt.status.AttentionRequired = true
-		rt.status.State = "attention_required"
+		rt.status.State = ServiceStateAttentionRequired
 	} else {
-		rt.status.State = "disabled"
+		rt.status.State = ServiceStateDisabled
 	}
 	m.persistStatusLocked(rt)
 	return writeServiceJSON(serviceConfigPath(m.root, id), cfg, 0o600)
@@ -1429,7 +1429,7 @@ func (m *ServiceManager) StartService(ctx context.Context, id string) error {
 	rt.status.LastError = ""
 	rt.status.ExitError = ""
 	rt.status.NextRetryAt = ""
-	rt.status.State = "stopped"
+	rt.status.State = ServiceStateStopped
 	if !m.started {
 		m.started = true
 		m.stopping = false
@@ -1450,7 +1450,7 @@ func (m *ServiceManager) StopService(ctx context.Context, id string) error {
 			return err
 		}
 	}
-	rt.status.State = "stopped"
+	rt.status.State = ServiceStateStopped
 	m.persistStatusLocked(rt)
 	return nil
 }

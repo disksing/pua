@@ -66,10 +66,20 @@ export interface ServiceExportMetadata {
   updatedAt?: string;
 }
 
+export type ServiceState =
+  | "disabled"
+  | "stopped"
+  | "blocked"
+  | "starting"
+  | "running"
+  | "ready"
+  | "backoff"
+  | "attention_required";
+
 export interface ServiceStatus {
   id: string;
   enabled: boolean;
-  state: string;
+  state: ServiceState;
   pid?: number;
   failureCount?: number;
   nextRetryAt?: string;

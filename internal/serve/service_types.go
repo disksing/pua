@@ -339,11 +339,26 @@ type ServiceCleanupStatus struct {
 	Succeeded  bool   `json:"succeeded"`
 }
 
+// ServiceState is the persisted and API-visible lifecycle state of a Workspace
+// service.
+type ServiceState string
+
+const (
+	ServiceStateDisabled          ServiceState = "disabled"
+	ServiceStateStopped           ServiceState = "stopped"
+	ServiceStateBlocked           ServiceState = "blocked"
+	ServiceStateStarting          ServiceState = "starting"
+	ServiceStateRunning           ServiceState = "running"
+	ServiceStateReady             ServiceState = "ready"
+	ServiceStateBackoff           ServiceState = "backoff"
+	ServiceStateAttentionRequired ServiceState = "attention_required"
+)
+
 type ServiceStatus struct {
 	SchemaVersion     int                    `json:"schemaVersion"`
 	ID                string                 `json:"id"`
 	Enabled           bool                   `json:"enabled"`
-	State             string                 `json:"state"`
+	State             ServiceState           `json:"state"`
 	PID               int                    `json:"pid,omitempty"`
 	ProcessGroup      int                    `json:"processGroup,omitempty"`
 	StartedAt         string                 `json:"startedAt,omitempty"`

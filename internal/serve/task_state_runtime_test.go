@@ -2,6 +2,7 @@ package serve
 
 import (
 	"context"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -158,6 +159,139 @@ func TestScheduledTaskOccurrenceIsOneShot(t *testing.T) {
 				t.Fatalf("scheduled completion enqueued continuation: mailbox=%#v err=%v", mailbox, err)
 			}
 		})
+	}
+}
+
+func TestScheduledTaskOccurrenceSteerPreservesOneShotChain(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	hub := httptest.NewServer(fake)
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const waitingNote = "waiting for the scheduled check"
+	if _, err := puaWorkspace.SetTaskState("project1.task1", app.TaskStateWaiting, waitingNote); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Format(time.RFC3339Nano)
+	record := generationRecord{
+		ID: "scheduled-steer-gen", WorkspaceID: workspace.ID, ResourceID: "project1.task1",
+		Generation: 1, GenerationID: "gen-scheduled-steer", AgentHubSessionID: "ses-scheduled-steer",
+		AgentHubAgentName: "fake-agent", SourceExternalID: workspace.ID + "/scheduled-steer",
+		Status: "idle", CompletionMarker: "session-before-schedule:2",
+		TaskStateCompletionMarker: "session-before-schedule:1", TaskStateContinuationCount: 2,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	seedPollerGeneration(t, fake, workspace, record, agentHubSession{
+		ID: record.AgentHubSessionID, State: "ready", UpdatedAt: now,
+	})
+	opener, err := acceptGeneratedMailboxMessage(workspace.Path, resourceMailboxMessage{
+		ID: "schedule-occurrence-steer", ResourceID: record.ResourceID, Text: "Run the scheduled check",
+		RequestedMode: resourceMessageModeEnqueue, ActualMode: resourceMessageModeEnqueue,
+		Type: resourceMessageTypeScheduleOccurrence,
+		Causation: &resourceMessageCausation{
+			Type: resourceMessageTypeScheduleOccurrence, SourceResourceID: app.SchedulerResourceID,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.withResourceController(context.Background(), workspace, record.ResourceID, func() error {
+		return manager.reconcileResourceMailboxLocked(context.Background(), workspace, record.ResourceID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rt := manager.runtimeByID(record.ID)
+	if rt == nil {
+		t.Fatal("scheduled occurrence did not attach its runtime")
+	}
+	afterOpener := rt.snapshotGeneration()
+	if afterOpener.TaskStateChainID != opener.ID || afterOpener.TaskStateContinuationCount != 0 ||
+		afterOpener.TaskStateCompletionMarker != afterOpener.CompletionMarker {
+		t.Fatalf("scheduled opener did not establish its one-shot chain: %#v", afterOpener)
+	}
+	detail, err := puaWorkspace.Resource(record.ResourceID)
+	if err != nil || detail.State != app.TaskStateWaiting || detail.StateNote != waitingNote {
+		t.Fatalf("scheduled opener changed Task workflow state: detail=%#v err=%v", detail, err)
+	}
+
+	const turnID = "turn-scheduled-steer"
+	fake.mu.Lock()
+	session := fake.sessions[record.AgentHubSessionID]
+	session.State = "running"
+	session.CurrentTurnID = turnID
+	session.InputCapabilities.Steer = true
+	fake.sessions[session.ID] = session
+	fake.mu.Unlock()
+	steer, err := manager.acceptResourceMessage(context.Background(), workspace, record.ResourceID, resourceMessageRequest{
+		Text: "Browser follow-up for the current Turn", Role: "user", Mode: resourceMessageModeSteer,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if steer.Status != resourceMessageDelivered || steer.ActualMode != resourceMessageModeSteer || steer.TurnID != turnID {
+		t.Fatalf("browser message was not delivered into the scheduled Turn: %#v", steer)
+	}
+	afterSteer := rt.snapshotGeneration()
+	detailAfterSteer, detailErr := puaWorkspace.Resource(record.ResourceID)
+
+	const completionMarker = "session-scheduled-steer:8"
+	if _, err := rt.mutateGeneration(func(current *generationRecord) {
+		current.Status = "stopped"
+		current.CurrentTurnID = ""
+		current.LastTurnID = turnID
+		current.CompletionMarker = completionMarker
+		current.CompletionTurnID = turnID
+		current.ReplacementPending = true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.handleTaskTurnCompletionLocked(context.Background(), rt); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.handleTaskTurnCompletionLocked(context.Background(), rt); err != nil {
+		t.Fatal(err)
+	}
+	afterCompletion := rt.snapshotGeneration()
+	mailbox, mailboxErr := loadHotResourceMailbox(workspace.Path, record.ResourceID)
+	if afterSteer.TaskStateChainID != afterOpener.TaskStateChainID ||
+		afterSteer.TaskStateContinuationCount != afterOpener.TaskStateContinuationCount ||
+		afterSteer.TaskStateCompletionMarker != afterOpener.TaskStateCompletionMarker ||
+		detailErr != nil || detailAfterSteer.State != app.TaskStateWaiting || detailAfterSteer.StateNote != waitingNote ||
+		afterCompletion.TaskStateCompletionMarker != completionMarker ||
+		afterCompletion.TaskStateContinuationCount != afterOpener.TaskStateContinuationCount ||
+		mailboxErr != nil || len(mailbox.Messages) != 0 {
+		t.Fatalf("active steer changed scheduled one-shot handling: opener=%#v steer=%#v detail=%#v detailErr=%v completion=%#v mailbox=%#v mailboxErr=%v",
+			afterOpener, afterSteer, detailAfterSteer, detailErr, afterCompletion, mailbox, mailboxErr)
+	}
+
+	if _, err := rt.mutateGeneration(func(current *generationRecord) {
+		current.Status = "idle"
+		current.ReplacementPending = false
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fake.mu.Lock()
+	session = fake.sessions[record.AgentHubSessionID]
+	session.State = "ready"
+	session.CurrentTurnID = ""
+	fake.sessions[session.ID] = session
+	fake.mu.Unlock()
+	ordinary, err := manager.acceptResourceMessage(context.Background(), workspace, record.ResourceID, resourceMessageRequest{
+		Text: "Start the next ordinary Turn", Role: "user", Mode: resourceMessageModeEnqueue,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterOrdinary := rt.snapshotGeneration()
+	detail, err = puaWorkspace.Resource(record.ResourceID)
+	if ordinary.Status != resourceMessageDelivered || ordinary.ActualMode != resourceMessageModeEnqueue ||
+		afterOrdinary.TaskStateChainID != ordinary.ID || afterOrdinary.TaskStateContinuationCount != 0 ||
+		detail.State != app.TaskStateInProgress || err != nil {
+		t.Fatalf("genuine next-Turn opener did not start a fresh chain: message=%#v generation=%#v detail=%#v err=%v",
+			ordinary, afterOrdinary, detail, err)
 	}
 }
 

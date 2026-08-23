@@ -97,10 +97,12 @@ func (m *agentManager) recordTaskStartFailure(workspace serveWorkspace, message 
 	return true, nil
 }
 
-// prepareTaskWorkChain runs at the durable delivery boundary. Ordinary input
-// starts a fresh budget; a generated continuation keeps the current budget.
+// prepareTaskWorkChain runs at the durable delivery boundary. Input that opens
+// a Turn starts a fresh budget; an actual steer and a generated continuation
+// keep the current Turn's budget and Task workflow state.
 func (m *agentManager) prepareTaskWorkChain(workspace serveWorkspace, message resourceMailboxMessage, rt *agentRuntime) error {
-	if !strings.Contains(normalizedResourceID(message.ResourceID), ".task") || message.Status != resourceMessageQueued {
+	if !strings.Contains(normalizedResourceID(message.ResourceID), ".task") ||
+		message.Status != resourceMessageQueued || message.ActualMode == resourceMessageModeSteer {
 		return nil
 	}
 	detail, task, err := taskDetail(workspace.Path, message.ResourceID)

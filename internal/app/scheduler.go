@@ -23,6 +23,10 @@ var scheduleIDPattern = regexp.MustCompile(`^schedule-[0-9a-f]{24}$`)
 // trigger required by the v2 Scheduler contract.
 var ErrScheduleTriggerRequired = errors.New("schedule trigger is required")
 
+// ErrScheduleTriggerAtNotFuture identifies a one-time trigger that is not
+// strictly later than the mutation that would make it active.
+var ErrScheduleTriggerAtNotFuture = errors.New("schedule trigger.at must be strictly in the future")
+
 const (
 	SchedulerResourceID         = "scheduler"
 	schedulerDir                = "scheduler"
@@ -546,6 +550,20 @@ func ValidateScheduleTrigger(trigger ScheduleTrigger) error {
 	return nil
 }
 
+func validateScheduleTriggerForMutation(trigger ScheduleTrigger, now time.Time) error {
+	if err := ValidateScheduleTrigger(trigger); err != nil {
+		return err
+	}
+	if trigger.Type != ScheduleTriggerAt {
+		return nil
+	}
+	at, _ := time.Parse(time.RFC3339Nano, trigger.At)
+	if !at.After(now) {
+		return ErrScheduleTriggerAtNotFuture
+	}
+	return nil
+}
+
 func scheduleCronParser() cron.Parser {
 	return cron.NewParser(cron.Second | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 }
@@ -733,11 +751,15 @@ func (w *Workspace) AddSchedule(input CreateScheduleInput) (Schedule, error) {
 		if len(guard) > maximumScheduleTextLength || strings.ContainsRune(guard, '\x00') {
 			return errors.New("schedule guard is invalid")
 		}
+		mutationTime := time.Now()
+		if err := validateScheduleTriggerForMutation(trigger, mutationTime); err != nil {
+			return err
+		}
 		id, err := newScheduleID()
 		if err != nil {
 			return err
 		}
-		now := time.Now().Format(time.RFC3339Nano)
+		now := mutationTime.Format(time.RFC3339Nano)
 		created = Schedule{ID: id, Revision: 1, Description: description, Condition: condition, Guard: guard, Target: target, State: ScheduleStateActive, Trigger: &trigger, CreatedAt: now, UpdatedAt: now}
 		config.Schedules = append(config.Schedules, created)
 		return writeSchedulerJSON(schedulerJSONPath(w.root), config)
@@ -794,10 +816,11 @@ func (w *Workspace) UpdateSchedule(input UpdateScheduleInput) (Schedule, error) 
 				return errors.New("schedule guard is invalid")
 			}
 		}
+		mutationTime := time.Now()
 		trigger := updated.Trigger
 		if input.Trigger != nil {
 			copy := *input.Trigger
-			if err := ValidateScheduleTrigger(copy); err != nil {
+			if err := validateScheduleTriggerForMutation(copy, mutationTime); err != nil {
 				return err
 			}
 			trigger = &copy
@@ -808,7 +831,7 @@ func (w *Workspace) UpdateSchedule(input UpdateScheduleInput) (Schedule, error) 
 			updated.State = ScheduleStateActive
 		}
 		updated.Revision++
-		updated.UpdatedAt = time.Now().Format(time.RFC3339Nano)
+		updated.UpdatedAt = mutationTime.Format(time.RFC3339Nano)
 		if err := validateSchedule(updated); err != nil {
 			return err
 		}

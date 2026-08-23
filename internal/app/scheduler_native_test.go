@@ -77,7 +77,7 @@ func TestSchedulerV1MigrationPreservesDefinitionsForCompilation(t *testing.T) {
 	if string(raw) == "" || string(raw) == string(legacyData) {
 		t.Fatal("migration did not atomically replace the v1 definition")
 	}
-	trigger := app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: "2030-08-30T12:00:00Z"}
+	trigger := app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: "9999-08-30T12:00:00Z"}
 	compiled, err := workspace.UpdateSchedule(app.UpdateScheduleInput{ID: schedule.ID, ExpectedRevision: schedule.Revision, Trigger: &trigger})
 	if err != nil {
 		t.Fatal(err)
@@ -119,6 +119,109 @@ func TestAddScheduleRequiresTriggerWithoutMutation(t *testing.T) {
 	}
 }
 
+func TestScheduleAtMutationRequiresFutureInstant(t *testing.T) {
+	workspace, err := app.Initialize(t.TempDir(), "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(workspace.Root(), "scheduler", "scheduler.json")
+	beforeCreate, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pastTrigger := app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: "2000-01-01T00:00:00Z"}
+	if _, err := workspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Too late", Condition: "in the past", Target: "workspace", Trigger: &pastTrigger,
+	}); !errors.Is(err, app.ErrScheduleTriggerAtNotFuture) {
+		t.Fatalf("past one-time create error = %v", err)
+	}
+	afterCreate, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(afterCreate) != string(beforeCreate) {
+		t.Fatalf("failed create mutated scheduler.json:\nbefore=%s\nafter=%s", beforeCreate, afterCreate)
+	}
+
+	futureTrigger := app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: "9999-12-31T23:59:58Z"}
+	created, err := workspace.AddSchedule(app.CreateScheduleInput{
+		Description: "In time", Condition: "in the future", Target: "workspace", Trigger: &futureTrigger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeUpdate, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	description := "Must stay unchanged"
+	if _, err := workspace.UpdateSchedule(app.UpdateScheduleInput{
+		ID: created.ID, ExpectedRevision: created.Revision, Description: &description, Trigger: &pastTrigger,
+	}); !errors.Is(err, app.ErrScheduleTriggerAtNotFuture) {
+		t.Fatalf("past one-time update error = %v", err)
+	}
+	afterUpdate, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(afterUpdate) != string(beforeUpdate) {
+		t.Fatalf("failed update mutated scheduler.json:\nbefore=%s\nafter=%s", beforeUpdate, afterUpdate)
+	}
+	config, err := workspace.Scheduler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(config.Schedules) != 1 || config.Schedules[0].Revision != created.Revision || config.Schedules[0].Description != created.Description || *config.Schedules[0].Trigger != futureTrigger {
+		t.Fatalf("failed update changed schedule = %#v", config.Schedules)
+	}
+
+	futureUpdate := app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: "9999-12-31T23:59:59Z"}
+	updated, err := workspace.UpdateSchedule(app.UpdateScheduleInput{
+		ID: created.ID, ExpectedRevision: created.Revision, Trigger: &futureUpdate,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Revision != created.Revision+1 || updated.Trigger == nil || *updated.Trigger != futureUpdate {
+		t.Fatalf("valid future update = %#v", updated)
+	}
+}
+
+func TestSchedulerLoadsCompletedPastAtTrigger(t *testing.T) {
+	workspace, err := app.Initialize(t.TempDir(), "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	futureTrigger := app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: "9999-12-31T23:59:59Z"}
+	created, err := workspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Already done", Condition: "once", Target: "workspace", Trigger: &futureTrigger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := workspace.Scheduler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.Schedules[0].State = app.ScheduleStateCompleted
+	config.Schedules[0].Trigger.At = "2000-01-01T00:00:00Z"
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(filepath.Join(workspace.Root(), "scheduler", "scheduler.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := workspace.Scheduler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Schedules) != 1 || loaded.Schedules[0].ID != created.ID || loaded.Schedules[0].State != app.ScheduleStateCompleted || loaded.Schedules[0].Trigger.At != "2000-01-01T00:00:00Z" {
+		t.Fatalf("loaded completed schedule = %#v", loaded.Schedules)
+	}
+}
+
 func TestScheduleTriggerValidationAndRevisionCAS(t *testing.T) {
 	workspace, err := app.Initialize(t.TempDir(), "en")
 	if err != nil {
@@ -141,12 +244,12 @@ func TestScheduleTriggerValidationAndRevisionCAS(t *testing.T) {
 	}
 	created, err := workspace.AddSchedule(app.CreateScheduleInput{
 		Description: "Run", Condition: "at noon UTC", Target: "workspace",
-		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: "2026-08-30T12:00:00Z"},
+		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: "9999-08-30T12:00:00Z"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created.Revision != 1 || created.State != app.ScheduleStateActive || created.Trigger == nil || created.Trigger.At != "2026-08-30T12:00:00Z" {
+	if created.Revision != 1 || created.State != app.ScheduleStateActive || created.Trigger == nil || created.Trigger.At != "9999-08-30T12:00:00Z" {
 		t.Fatalf("valid create = %#v", created)
 	}
 	description := "Changed"

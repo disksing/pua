@@ -74,6 +74,15 @@ func earliestReconcileDeadline(deadlines ...time.Time) time.Time {
 	return earliest
 }
 
+func finishColdAuditRequests(request reconcileRequest, schedulerDeadline, now time.Time) (reconcileRequest, time.Time) {
+	request &^= reconcileAgentHub | reconcileMailboxes | reconcileNotifications
+	if !schedulerDeadline.IsZero() && !schedulerDeadline.After(now) {
+		request |= reconcileScheduler
+		schedulerDeadline = time.Time{}
+	}
+	return request, schedulerDeadline
+}
+
 // runReconcileLoop keeps latency-sensitive AgentHub projection separate from
 // cold filesystem audits and recovery-only mailbox/notification passes. All
 // requests are coalesced here; per-resource mutation remains serialized by the
@@ -122,10 +131,7 @@ func (m *agentManager) runReconcileLoop(ctx context.Context) {
 			nextNotifications = now.Add(durationOr(m.notificationInterval, 30*time.Second))
 			nextSchedulerFallback = now.Add(durationOr(m.schedulerFallback, 30*time.Second))
 			nextSchedulerDeadline = m.nextSchedulerReconcileDeadline(now)
-			if !nextSchedulerDeadline.After(now) {
-				nextSchedulerDeadline = time.Time{}
-			}
-			request &^= reconcileAgentHub | reconcileMailboxes | reconcileNotifications | reconcileScheduler
+			request, nextSchedulerDeadline = finishColdAuditRequests(request, nextSchedulerDeadline, now)
 		}
 		if request&reconcileAgentHub != 0 {
 			if err := m.pollFastAgentHubSessions(ctx); err != nil {

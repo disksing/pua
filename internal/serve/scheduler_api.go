@@ -163,6 +163,10 @@ func writeSchedulerChangeError(w http.ResponseWriter, err error) {
 		writeError(w, &resourceAPIError{Code: "schedule_revision_exhausted", Message: err.Error()}, http.StatusConflict)
 		return
 	}
+	if errors.Is(err, app.ErrScheduleOccurrenceOutOfRange) {
+		writeError(w, &resourceAPIError{Code: "schedule_occurrence_out_of_range", Message: err.Error()}, http.StatusBadRequest)
+		return
+	}
 	if errors.Is(err, app.ErrScheduleTargetScheduler) {
 		writeSchedulerTargetError(w)
 		return

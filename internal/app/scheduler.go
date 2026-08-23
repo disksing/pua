@@ -627,6 +627,9 @@ func validateScheduleTriggerForMutation(trigger ScheduleTrigger, now time.Time) 
 	if err := ValidateScheduleTrigger(trigger); err != nil {
 		return err
 	}
+	if err := validateScheduleIntervalPersistence(trigger); err != nil {
+		return err
+	}
 	return validateScheduleTriggerAtFuture(trigger, now)
 }
 
@@ -634,10 +637,28 @@ func validateScheduleTriggerForUpdate(trigger ScheduleTrigger, persisted *Schedu
 	if err := ValidateScheduleTrigger(trigger); err != nil {
 		return err
 	}
+	if err := validateScheduleIntervalPersistence(trigger); err != nil {
+		return err
+	}
 	if persisted != nil && trigger == *persisted {
 		return nil
 	}
 	return validateScheduleTriggerAtFuture(trigger, now)
+}
+
+// validateScheduleIntervalPersistence is intentionally a mutation-only
+// contract. Portable definitions written by older releases must remain
+// readable so the runtime can terminate them deterministically, while new
+// definitions must have at least one persistable successor to be recurring.
+func validateScheduleIntervalPersistence(trigger ScheduleTrigger) error {
+	if trigger.Type != ScheduleTriggerInterval {
+		return nil
+	}
+	anchor, _ := time.Parse(time.RFC3339Nano, trigger.AnchorAt)
+	if _, err := intervalOccurrenceAt(anchor, 1, trigger.EverySeconds); err != nil {
+		return fmt.Errorf("interval trigger must have a successor inside the RFC3339Nano persistence range: %w", err)
+	}
+	return nil
 }
 
 func validateScheduleTriggerAtFuture(trigger ScheduleTrigger, now time.Time) error {
@@ -756,6 +777,11 @@ func intervalOccurrenceBounds(first, boundary time.Time, everySeconds int64) (la
 	}
 	next, err = intervalOccurrenceAt(first, lastOrdinal+1, everySeconds)
 	if err != nil {
+		if errors.Is(err, ErrScheduleOccurrenceOutOfRange) {
+			// The representable time domain is finite. Preserve the final valid
+			// occurrence and use an empty successor as its terminal cursor.
+			return last, time.Time{}, lastOrdinal + 1, nil
+		}
 		return time.Time{}, time.Time{}, 0, err
 	}
 	return last, next, lastOrdinal + 1, nil

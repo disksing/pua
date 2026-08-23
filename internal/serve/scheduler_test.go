@@ -110,6 +110,41 @@ func rewriteSchedulerTestOneTimeDeadline(t *testing.T, workspace *app.Workspace,
 	}
 }
 
+func rewriteSchedulerTestIntervalBoundary(t *testing.T, workspace *app.Workspace, id string, anchor, updatedAt time.Time) {
+	t.Helper()
+	config, err := workspace.Scheduler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for index := range config.Schedules {
+		schedule := &config.Schedules[index]
+		if schedule.ID != id {
+			continue
+		}
+		if schedule.Trigger == nil || schedule.Trigger.Type != app.ScheduleTriggerInterval {
+			t.Fatalf("schedule %q is not an interval: %#v", id, schedule)
+		}
+		schedule.Trigger.AnchorAt = anchor.Format(time.RFC3339Nano)
+		if !updatedAt.IsZero() {
+			schedule.UpdatedAt = updatedAt.Format(time.RFC3339Nano)
+		}
+		found = true
+		break
+	}
+	if !found {
+		t.Fatalf("schedule %q not found in %#v", id, config.Schedules)
+	}
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(filepath.Join(workspace.Root(), "scheduler", "scheduler.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSchedulerHTTPAPIRoutesNaturalLanguageAndNativeChanges(t *testing.T) {
 	root := t.TempDir()
 	puaWorkspace, err := app.Initialize(root, "en")
@@ -159,6 +194,10 @@ func TestSchedulerHTTPAPIRoutesNaturalLanguageAndNativeChanges(t *testing.T) {
 	selfTargetCreate := request(http.MethodPost, "/api/workspaces/workspace-scheduler/scheduler/changes", `{"operation":"create","description":"Review","condition":"tomorrow at 09:00 UTC","target":"scheduler","trigger":{"type":"at","at":"`+at+`"}}`)
 	if selfTargetCreate.Code != http.StatusBadRequest || !strings.Contains(selfTargetCreate.Body.String(), `"code":"schedule_target_invalid"`) || !strings.Contains(selfTargetCreate.Body.String(), app.ErrScheduleTargetScheduler.Error()) {
 		t.Fatalf("native self-target create = %d %s", selfTargetCreate.Code, selfTargetCreate.Body.String())
+	}
+	unsafeIntervalCreate := request(http.MethodPost, "/api/workspaces/workspace-scheduler/scheduler/changes", `{"operation":"create","description":"Review","condition":"every minute","target":"workspace","trigger":{"type":"interval","everySeconds":60,"anchorAt":"9999-12-31T23:59:59Z"}}`)
+	if unsafeIntervalCreate.Code != http.StatusBadRequest || !strings.Contains(unsafeIntervalCreate.Body.String(), `"code":"schedule_occurrence_out_of_range"`) {
+		t.Fatalf("unpersistable interval create = %d %s", unsafeIntervalCreate.Code, unsafeIntervalCreate.Body.String())
 	}
 	createdResponse := request(http.MethodPost, "/api/workspaces/workspace-scheduler/scheduler/changes", `{"operation":"create","description":"Review","condition":"tomorrow at 09:00 UTC","target":"workspace","trigger":{"type":"at","at":"`+at+`"}}`)
 	if createdResponse.Code != http.StatusOK {
@@ -2212,6 +2251,112 @@ func TestNativeSchedulerBindingAttentionRecoversPreparedOccurrence(t *testing.T)
 	}
 	if messages := scheduleOccurrenceMessages(t, workspace.Path, schedule.Target); len(messages) != 1 || messages[0].ID != prepared.MessageID {
 		t.Fatalf("recovery duplicated occurrence: %#v", messages)
+	}
+}
+
+func TestNativeSchedulerLegacyIntervalCompletesAtPersistenceBoundary(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	hub := httptest.NewServer(fake)
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest := time.Date(9999, time.December, 31, 23, 59, 59, 999999999, time.UTC)
+	schedule, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Deliver the final valid occurrence", Condition: "every minute", Target: "workspace",
+		Trigger: &app.ScheduleTrigger{
+			Type: app.ScheduleTriggerInterval, EverySeconds: 60,
+			AnchorAt: latest.Add(-time.Minute).Format(time.RFC3339Nano),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Model a definition accepted by an older release, before interval
+	// mutations required a persistable successor.
+	rewriteSchedulerTestIntervalBoundary(t, puaWorkspace, schedule.ID, latest, time.Time{})
+	native := newNativeScheduler(manager, workspace)
+	deadline, err := native.Reconcile(context.Background(), latest)
+	if err != nil || !deadline.IsZero() {
+		t.Fatalf("terminal reconcile deadline = %s, %v", deadline, err)
+	}
+	messages := scheduleOccurrenceMessages(t, workspace.Path, schedule.Target)
+	if len(messages) != 1 || messages[0].Causation == nil || messages[0].Causation.ScheduledFor != latest.Format(time.RFC3339Nano) {
+		t.Fatalf("terminal occurrence messages = %#v", messages)
+	}
+	runtime, err := native.schedulerRuntime(schedule.ID)
+	if err != nil || runtime.EffectiveState != app.ScheduleStateCompleted || runtime.Prepared != nil || runtime.NextRunAt != "" || runtime.RetryAt != "" || runtime.LastOccurrenceAt != latest.Format(time.RFC3339Nano) || runtime.LastOutcome != schedulerOutcomeAccepted {
+		t.Fatalf("terminal interval runtime = %#v, %v", runtime, err)
+	}
+	if _, err := native.Reconcile(context.Background(), latest.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if messages = scheduleOccurrenceMessages(t, workspace.Path, schedule.Target); len(messages) != 1 {
+		t.Fatalf("terminal interval replayed occurrence: %#v", messages)
+	}
+
+	exhausted, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Recover after the final valid occurrence", Condition: "every minute", Target: "workspace",
+		Trigger: &app.ScheduleTrigger{
+			Type: app.ScheduleTriggerInterval, EverySeconds: 60,
+			AnchorAt: latest.Add(-time.Minute).Format(time.RFC3339Nano),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rewriteSchedulerTestIntervalBoundary(t, puaWorkspace, exhausted.ID, latest, latest)
+	if deadline, err = native.Reconcile(context.Background(), latest); err != nil || !deadline.IsZero() {
+		t.Fatalf("exhausted recovery deadline = %s, %v", deadline, err)
+	}
+	exhaustedRuntime, err := native.schedulerRuntime(exhausted.ID)
+	if err != nil || exhaustedRuntime.EffectiveState != app.ScheduleStateCompleted || exhaustedRuntime.LastOutcome != schedulerOutcomeRangeExhausted || exhaustedRuntime.NextRunAt != "" || exhaustedRuntime.RetryAt != "" || !strings.Contains(exhaustedRuntime.LastError, app.ErrScheduleOccurrenceOutOfRange.Error()) {
+		t.Fatalf("exhausted interval runtime = %#v, %v", exhaustedRuntime, err)
+	}
+	if messages = scheduleOccurrenceMessages(t, workspace.Path, schedule.Target); len(messages) != 1 {
+		t.Fatalf("already exhausted interval delivered work: %#v", messages)
+	}
+}
+
+func TestNativeSchedulerIntervalRangeFailureDoesNotRetry(t *testing.T) {
+	manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest := time.Date(9999, time.December, 31, 23, 59, 59, 0, time.UTC)
+	schedule, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Stop outside the persistence range", Condition: "every minute", Target: "workspace",
+		Trigger: &app.ScheduleTrigger{
+			Type: app.ScheduleTriggerInterval, EverySeconds: 60,
+			AnchorAt: latest.Add(-time.Minute).Format(time.RFC3339Nano),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rewriteSchedulerTestIntervalBoundary(t, puaWorkspace, schedule.ID, latest, time.Time{})
+	beyondPersistence := time.Date(10000, time.January, 1, 0, 0, 0, 0, time.UTC)
+	native := newNativeScheduler(manager, workspace)
+	deadline, err := native.Reconcile(context.Background(), beyondPersistence)
+	if err != nil || !deadline.IsZero() {
+		t.Fatalf("range failure deadline = %s, %v", deadline, err)
+	}
+	runtime, err := native.schedulerRuntime(schedule.ID)
+	if err != nil || runtime.EffectiveState != schedulerOutcomeAttention || runtime.LastOutcome != schedulerOutcomeAttention || runtime.NextRunAt != "" || runtime.RetryAt != "" || runtime.RetryCount != 0 || !strings.Contains(runtime.LastError, app.ErrScheduleOccurrenceOutOfRange.Error()) {
+		t.Fatalf("non-retryable range failure = %#v, %v", runtime, err)
+	}
+	if _, err := native.Reconcile(context.Background(), beyondPersistence.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	after, err := native.schedulerRuntime(schedule.ID)
+	if err != nil || !reflect.DeepEqual(after, runtime) {
+		t.Fatalf("range failure changed on audit: before=%#v after=%#v err=%v", runtime, after, err)
+	}
+	if messages := scheduleOccurrenceMessages(t, workspace.Path, schedule.Target); len(messages) != 0 {
+		t.Fatalf("range failure delivered work: %#v", messages)
 	}
 }
 

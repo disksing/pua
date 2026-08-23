@@ -343,6 +343,44 @@ func TestScheduleTriggerValidationAndRevisionCAS(t *testing.T) {
 	}
 }
 
+func TestScheduleIntervalMutationRequiresPersistableSuccessor(t *testing.T) {
+	workspace, err := app.Initialize(t.TempDir(), "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest := time.Date(9999, time.December, 31, 23, 59, 59, 999999999, time.UTC)
+	unsafe := app.ScheduleTrigger{
+		Type: app.ScheduleTriggerInterval, EverySeconds: 60,
+		AnchorAt: latest.Format(time.RFC3339Nano),
+	}
+	if err := app.ValidateScheduleTrigger(unsafe); err != nil {
+		t.Fatalf("legacy interval is not structurally readable: %v", err)
+	}
+	if _, err := workspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Never persist an invalid cursor", Condition: "every minute", Target: "workspace", Trigger: &unsafe,
+	}); !errors.Is(err, app.ErrScheduleOccurrenceOutOfRange) {
+		t.Fatalf("unsafe create error = %v", err)
+	}
+
+	safe := unsafe
+	safe.AnchorAt = latest.Add(-time.Minute).Format(time.RFC3339Nano)
+	created, err := workspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Reach the persistence boundary", Condition: "every minute", Target: "workspace", Trigger: &safe,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspace.UpdateSchedule(app.UpdateScheduleInput{
+		ID: created.ID, ExpectedRevision: created.Revision, Trigger: &unsafe,
+	}); !errors.Is(err, app.ErrScheduleOccurrenceOutOfRange) {
+		t.Fatalf("unsafe update error = %v", err)
+	}
+	stored, err := workspace.Scheduler()
+	if err != nil || len(stored.Schedules) != 1 || stored.Schedules[0].Revision != created.Revision || *stored.Schedules[0].Trigger != safe {
+		t.Fatalf("rejected mutation changed definitions: %#v, %v", stored.Schedules, err)
+	}
+}
+
 func schedulerRevisionFixture(t *testing.T, state string, revision uint64) (*app.Workspace, app.Schedule, string, []byte) {
 	t.Helper()
 	workspace, err := app.Initialize(t.TempDir(), "en")
@@ -710,8 +748,8 @@ func TestIntervalOccurrenceRejectsRFC3339NanoOverflow(t *testing.T) {
 	if next, err = app.NextScheduleOccurrence(latestTrigger, latest.Add(-time.Nanosecond)); err != nil || !next.Equal(latest) {
 		t.Fatalf("latest anchor next = %s, %v", next, err)
 	}
-	if next, err = app.NextScheduleOccurrence(latestTrigger, latest); !errors.Is(err, app.ErrScheduleOccurrenceOutOfRange) || !next.IsZero() {
-		t.Fatalf("overflowing next = %s, %v", next, err)
+	if next, err = app.NextScheduleOccurrence(latestTrigger, latest); err != nil || !next.IsZero() {
+		t.Fatalf("terminal next = %s, %v", next, err)
 	}
 
 	last, next, count, truncated, err := app.CoalescedScheduleOccurrence(trigger, anchor, anchor)
@@ -719,8 +757,8 @@ func TestIntervalOccurrenceRejectsRFC3339NanoOverflow(t *testing.T) {
 		t.Fatalf("latest coalescing = last %s next %s count %d truncated %v err %v", last, next, count, truncated, err)
 	}
 	last, next, count, truncated, err = app.CoalescedScheduleOccurrence(latestTrigger, latest, latest)
-	if !errors.Is(err, app.ErrScheduleOccurrenceOutOfRange) || !last.IsZero() || !next.IsZero() || count != 0 || truncated {
-		t.Fatalf("overflowing coalescing = last %s next %s count %d truncated %v err %v", last, next, count, truncated, err)
+	if err != nil || !last.Equal(latest) || !next.IsZero() || count != 1 || truncated {
+		t.Fatalf("terminal coalescing = last %s next %s count %d truncated %v err %v", last, next, count, truncated, err)
 	}
 }
 

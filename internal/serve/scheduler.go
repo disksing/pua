@@ -21,6 +21,7 @@ const (
 	schedulerOutcomeBusy               = "skipped_target_busy"
 	schedulerOutcomePaused             = "skipped_while_paused"
 	schedulerOutcomeAttention          = "attention_required"
+	schedulerOutcomeRangeExhausted     = "completed_persistence_range_exhausted"
 )
 
 var (
@@ -403,6 +404,9 @@ func (n *NativeScheduler) reconcileSchedule(ctx context.Context, schedule app.Sc
 		} else {
 			runtime, err = initialScheduleRuntime(schedule, now)
 			if err != nil {
+				if errors.Is(err, app.ErrScheduleOccurrenceOutOfRange) {
+					return n.recordScheduleError(schedule.ID, runtime, now, err)
+				}
 				return err
 			}
 		}
@@ -525,6 +529,10 @@ func initialScheduleRuntime(schedule app.Schedule, now time.Time) (schedulerSche
 	}
 	if !next.IsZero() {
 		runtime.NextRunAt = next.Format(time.RFC3339Nano)
+	} else if schedule.Trigger.Type == app.ScheduleTriggerInterval {
+		runtime.EffectiveState = app.ScheduleStateCompleted
+		runtime.LastOutcome = schedulerOutcomeRangeExhausted
+		runtime.LastError = app.ErrScheduleOccurrenceOutOfRange.Error()
 	}
 	return runtime, nil
 }
@@ -773,6 +781,18 @@ func (n *NativeScheduler) targetBusy(resourceID string) (bool, error) {
 }
 
 func (n *NativeScheduler) recordScheduleError(id string, runtime schedulerScheduleRuntime, now time.Time, cause error) error {
+	if errors.Is(cause, app.ErrScheduleOccurrenceOutOfRange) {
+		runtime.EffectiveState = schedulerOutcomeAttention
+		runtime.NextRunAt = ""
+		runtime.RetryAt = ""
+		runtime.RetryCount = 0
+		runtime.LastOutcome = schedulerOutcomeAttention
+		runtime.LastError = cause.Error()
+		if err := n.storeSchedulerRuntime(id, runtime); err != nil {
+			return errors.Join(cause, err)
+		}
+		return nil
+	}
 	runtime.RetryCount++
 	delay := 5 * time.Second
 	for index := 1; index < runtime.RetryCount && delay < 30*time.Minute; index++ {

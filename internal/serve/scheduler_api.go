@@ -1,6 +1,7 @@
 package serve
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -182,15 +183,39 @@ func (s *server) handleNaturalLanguageScheduleRequest(w http.ResponseWriter, r *
 		writeError(w, errors.New("description, condition, and target are required"), http.StatusBadRequest)
 		return
 	}
+	userName, err := s.workspaceUserName(r, workspace.Path)
+	if err != nil {
+		writeError(w, err, http.StatusBadRequest)
+		return
+	}
 	text := fmt.Sprintf("Please %s a native schedule", operation)
 	if id != "" {
 		text += " for " + id
 	}
 	text += fmt.Sprintf(".\n\nDescription: %s\nCondition: %s\nTarget: %s\n\nCompile this request into a structured trigger with the Scheduler CLI. If the timing, recurrence, or IANA timezone is ambiguous, ask me in this Turn and do not modify the existing definition.", strings.TrimSpace(body.Description), strings.TrimSpace(body.Condition), strings.TrimSpace(body.Target))
-	message, err := s.agents.acceptResourceMessage(r.Context(), workspace, app.SchedulerResourceID, resourceMessageRequest{Text: text, Mode: resourceMessageModeEnqueue, Role: "user"})
-	if err != nil {
-		writeError(w, err, resourceErrorStatus(err))
+	role, sender := agentHubMessageProvenance(userName)
+	var message resourceMailboxMessage
+	acceptErr := s.agents.withResourceController(r.Context(), workspace, app.SchedulerResourceID, func() error {
+		var err error
+		message, err = s.agents.acceptResourceMessageDurable(r.Context(), workspace, app.SchedulerResourceID, resourceMessageRequest{
+			Text: text, Mode: resourceMessageModeEnqueue, Role: role, Sender: sender,
+		})
+		return err
+	})
+	if acceptErr != nil {
+		writeError(w, acceptErr, resourceErrorStatus(acceptErr))
 		return
+	}
+	s.markResourceReadOnUserMessage(workspace.Path, app.SchedulerResourceID, userName)
+	if wakeErr := s.agents.enqueueResourceController(workspace, app.SchedulerResourceID, func() error {
+		if err := s.agents.reconcileResourceMailboxLocked(context.Background(), workspace, app.SchedulerResourceID); err != nil {
+			recordMailboxFailure(workspace.Path, message.ID, err)
+		}
+		s.agents.requestReconcile(reconcileNotifications)
+		return nil
+	}); wakeErr != nil {
+		recordMailboxFailure(workspace.Path, message.ID, wakeErr)
+		s.agents.requestReconcile(reconcileNotifications)
 	}
 	response := mailboxMessageResponse(message)
 	response.Reference = fmt.Sprintf("/api/workspaces/%s/messages/%s", workspace.ID, message.ID)

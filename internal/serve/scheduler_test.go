@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -109,7 +110,11 @@ func rewriteSchedulerTestOneTimeDeadline(t *testing.T, workspace *app.Workspace,
 
 func TestSchedulerHTTPAPIRoutesNaturalLanguageAndNativeChanges(t *testing.T) {
 	root := t.TempDir()
-	if _, err := app.Initialize(root, "en"); err != nil {
+	puaWorkspace, err := app.Initialize(root, "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := puaWorkspace.RegisterUser("Ada"); err != nil {
 		t.Fatal(err)
 	}
 	workspace := serveWorkspace{ID: "workspace-scheduler", Name: "Scheduler", Path: root}
@@ -118,9 +123,12 @@ func TestSchedulerHTTPAPIRoutesNaturalLanguageAndNativeChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.agents = newAgentManager(s)
+	t.Cleanup(s.agents.waitBackground)
 	request := func(method, path, body string) *httptest.ResponseRecorder {
 		recorder := httptest.NewRecorder()
-		s.handleWorkspace(recorder, httptest.NewRequest(method, path, strings.NewReader(body)))
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		request.Header.Set(workspaceUserHeader, "Ada")
+		s.handleWorkspace(recorder, request)
 		return recorder
 	}
 
@@ -129,7 +137,7 @@ func TestSchedulerHTTPAPIRoutesNaturalLanguageAndNativeChanges(t *testing.T) {
 		t.Fatalf("natural-language request = %d %s", natural.Code, natural.Body.String())
 	}
 	mailbox, err := loadResourceMailboxForResource(root, app.SchedulerResourceID)
-	if err != nil || len(mailbox.Messages) != 1 || mailbox.Messages[0].Role != "user" || !strings.Contains(mailbox.Messages[0].Text, "IANA timezone") {
+	if err != nil || len(mailbox.Messages) != 1 || mailbox.Messages[0].Role != "user" || mailbox.Messages[0].Sender == nil || mailbox.Messages[0].Sender.Name != "Ada" || !strings.Contains(mailbox.Messages[0].Text, "IANA timezone") {
 		t.Fatalf("Scheduler compilation mailbox = %#v, %v", mailbox.Messages, err)
 	}
 
@@ -151,7 +159,7 @@ func TestSchedulerHTTPAPIRoutesNaturalLanguageAndNativeChanges(t *testing.T) {
 		t.Fatalf("natural-language update = %d %s", naturalUpdate.Code, naturalUpdate.Body.String())
 	}
 	mailbox, err = loadResourceMailboxForResource(root, app.SchedulerResourceID)
-	if err != nil || len(mailbox.Messages) != 2 || !strings.Contains(mailbox.Messages[1].Text, "Please update a native schedule for "+created.ID) {
+	if err != nil || len(mailbox.Messages) != 2 || mailbox.Messages[1].Sender == nil || mailbox.Messages[1].Sender.Name != "Ada" || !strings.Contains(mailbox.Messages[1].Text, "Please update a native schedule for "+created.ID) {
 		t.Fatalf("Scheduler update compilation mailbox = %#v, %v", mailbox.Messages, err)
 	}
 	conflict := request(http.MethodPost, "/api/workspaces/workspace-scheduler/scheduler/changes", `{"operation":"update","id":"`+created.ID+`","expectedRevision":9,"description":"Changed","trigger":{"type":"at","at":"`+at+`"}}`)
@@ -173,6 +181,154 @@ func TestSchedulerHTTPAPIRoutesNaturalLanguageAndNativeChanges(t *testing.T) {
 	removed := request(http.MethodDelete, "/api/workspaces/workspace-scheduler/scheduler/"+created.ID, "")
 	if removed.Code != http.StatusOK {
 		t.Fatalf("remove = %d %s", removed.Code, removed.Body.String())
+	}
+}
+
+func TestSchedulerNaturalLanguageAPIRequiresSelectedUserBeforeAcceptance(t *testing.T) {
+	root := t.TempDir()
+	puaWorkspace, err := app.Initialize(root, "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := puaWorkspace.RegisterUser("Ada"); err != nil {
+		t.Fatal(err)
+	}
+	workspace := serveWorkspace{ID: "workspace-scheduler-user", Name: "Scheduler User", Path: root}
+	s := &server{config: filepath.Join(t.TempDir(), "serve.json")}
+	if err := s.saveConfig(config{Version: agentHubConfigVersion, Workspaces: []serveWorkspace{workspace}}); err != nil {
+		t.Fatal(err)
+	}
+	s.agents = newAgentManager(s)
+	t.Cleanup(s.agents.waitBackground)
+
+	tests := []struct {
+		name, user, code string
+	}{
+		{name: "missing", code: "user_required"},
+		{name: "invalid", user: "bad/name", code: "invalid_request"},
+		{name: "unknown", user: "Grace", code: "user_not_found"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/api/workspaces/"+workspace.ID+"/scheduler", strings.NewReader(`{"description":"Review","condition":"tomorrow morning","target":"workspace"}`))
+			if test.user != "" {
+				request.Header.Set(workspaceUserHeader, test.user)
+			}
+			recorder := httptest.NewRecorder()
+			s.handleWorkspace(recorder, request)
+			if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), `"code":"`+test.code+`"`) {
+				t.Fatalf("response = %d %s", recorder.Code, recorder.Body.String())
+			}
+			mailbox, err := loadResourceMailboxForResource(root, app.SchedulerResourceID)
+			if err != nil || len(mailbox.Messages) != 0 {
+				t.Fatalf("rejected request mutated the Scheduler mailbox: %#v, %v", mailbox.Messages, err)
+			}
+		})
+	}
+}
+
+func TestSchedulerNaturalLanguageAPIReturnsBeforeAgentHubReconciliation(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	reconciliationStarted := make(chan struct{})
+	releaseReconciliation := make(chan struct{})
+	var releaseOnce sync.Once
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/agents" {
+			select {
+			case <-reconciliationStarted:
+			default:
+				close(reconciliationStarted)
+			}
+			<-releaseReconciliation
+		}
+		fake.ServeHTTP(w, r)
+	}))
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+	defer releaseOnce.Do(func() { close(releaseReconciliation) })
+	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := puaWorkspace.RegisterUser("Ada"); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/api/workspaces/"+workspace.ID+"/scheduler", strings.NewReader(`{"description":"Review","condition":"tomorrow morning","target":"workspace"}`))
+	request.Header.Set(workspaceUserHeader, "Ada")
+	recorder := httptest.NewRecorder()
+	responseDone := make(chan struct{})
+	go func() {
+		manager.server.handleWorkspace(recorder, request)
+		close(responseDone)
+	}()
+	select {
+	case <-responseDone:
+	case <-time.After(time.Second):
+		t.Fatal("Scheduler acceptance waited for AgentHub reconciliation")
+	}
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("acceptance = %d %s", recorder.Code, recorder.Body.String())
+	}
+	var response resourceMessageResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	wantReference := "/api/workspaces/" + workspace.ID + "/messages/" + response.MessageID
+	if response.MessageID == "" || response.ResourceID != app.SchedulerResourceID || response.Status != "waiting" || response.Reference != wantReference || response.GenerationID != "" || response.AgentHubSessionID != "" || response.TurnID != "" || response.LastError != "" || response.LastErrorCode != "" {
+		t.Fatalf("response was not the initial durable acceptance: %#v", response)
+	}
+	message, found, err := mailboxMessageByID(workspace.Path, response.MessageID)
+	if err != nil || !found || message.Status != resourceMessageQueued || message.Sender == nil || message.Sender.Name != "Ada" {
+		t.Fatalf("durable acceptance = found %v, message %#v, error %v", found, message, err)
+	}
+	select {
+	case <-reconciliationStarted:
+	case <-time.After(time.Second):
+		t.Fatal("queued reconciliation did not reach AgentHub")
+	}
+	releaseOnce.Do(func() { close(releaseReconciliation) })
+}
+
+func TestSchedulerNaturalLanguageAPIRetainsAcceptanceAfterBackgroundFailure(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	hub := httptest.NewServer(fake)
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := puaWorkspace.RegisterUser("Ada"); err != nil {
+		t.Fatal(err)
+	}
+	fake.mu.Lock()
+	fake.failNextMessage = true
+	fake.mu.Unlock()
+
+	request := httptest.NewRequest(http.MethodPut, "/api/workspaces/"+workspace.ID+"/scheduler/schedule-222222222222222222222222", strings.NewReader(`{"description":"Review later","condition":"next week","target":"workspace"}`))
+	request.Header.Set(workspaceUserHeader, "Ada")
+	recorder := httptest.NewRecorder()
+	manager.server.handleWorkspace(recorder, request)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("background failure changed acceptance to %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response resourceMessageResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	wantReference := "/api/workspaces/" + workspace.ID + "/messages/" + response.MessageID
+	if response.Status != "waiting" || response.Reference != wantReference || response.GenerationID != "" || response.AgentHubSessionID != "" || response.LastError != "" || response.LastErrorCode != "" {
+		t.Fatalf("acceptance exposed background state: %#v", response)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := manager.withResourceController(ctx, workspace, app.SchedulerResourceID, func() error { return nil }); err != nil {
+		t.Fatalf("wait for queued reconciliation: %v", err)
+	}
+	message, found, err := mailboxMessageByID(workspace.Path, response.MessageID)
+	if err != nil || !found || message.Status != resourceMessageDelivering || message.LastError == "" || message.LastErrorCode == "" {
+		t.Fatalf("background failure was not recorded: found %v, message %#v, error %v", found, message, err)
 	}
 }
 

@@ -102,6 +102,15 @@ afterEach(async () => {
 });
 
 describe("SchedulerPanel", () => {
+  it("declares its owner boundary on each visual root", () => {
+    const target = mountPanel();
+
+    expect(Array.from(target.children).map((root) => root.getAttribute("data-component-owner"))).toEqual([
+      "scheduler-panel",
+      "scheduler-panel",
+    ]);
+  });
+
   it("rejects a late pause acknowledgement after the Workspace changes", async () => {
     const pending = new Map<string, (response: Response) => void>();
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => new Promise<Response>((resolve) => pending.set(String(input), resolve))));

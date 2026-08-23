@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -145,7 +146,10 @@ func TestNativeSchedulerCoalescesDowntimeAndUsesStableOccurrence(t *testing.T) {
 }
 
 func TestNativeSchedulerSkipsBusyRepeatingTargetButQueuesOneTime(t *testing.T) {
-	manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+	fake := newRuntimeFakeAgentHub()
+	hub := httptest.NewServer(fake)
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
 	puaWorkspace, _ := app.OpenWorkspace(workspace.Path)
 	anchor := time.Now().UTC().Add(time.Minute).Truncate(time.Second)
 	if _, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
@@ -165,9 +169,9 @@ func TestNativeSchedulerSkipsBusyRepeatingTargetButQueuesOneTime(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager.now = func() time.Time { return at.Add(time.Second) }
-	// Delivery may fail against the intentionally unavailable fake endpoint,
-	// but the durable boundary still distinguishes skip from one-time queueing.
-	_ = manager.reconcileSchedulerLocked(context.Background(), workspace)
+	if err := manager.reconcileSchedulerLocked(context.Background(), workspace); err != nil {
+		t.Fatal(err)
+	}
 	snapshot, err := newNativeScheduler(manager, workspace).Snapshot(manager.now())
 	if err != nil || len(snapshot.Schedules) != 2 {
 		t.Fatalf("snapshot = %#v, %v", snapshot, err)
@@ -181,6 +185,9 @@ func TestNativeSchedulerSkipsBusyRepeatingTargetButQueuesOneTime(t *testing.T) {
 }
 
 func TestNativeSchedulerCrashWindowReplayMatrix(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	hub := httptest.NewServer(fake)
+	defer hub.Close()
 	type crashWindow int
 	const (
 		crashBeforePrepared crashWindow = iota
@@ -206,7 +213,7 @@ func TestNativeSchedulerCrashWindowReplayMatrix(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+			manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
 			puaWorkspace, err := app.OpenWorkspace(workspace.Path)
 			if err != nil {
 				t.Fatal(err)
@@ -355,7 +362,10 @@ func assertSingleDurableOccurrence(t *testing.T, workspacePath string, prepared 
 }
 
 func TestNativeSchedulerHonorsPersistedDeliveryBackoff(t *testing.T) {
-	manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+	fake := newRuntimeFakeAgentHub()
+	hub := httptest.NewServer(fake)
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
 	puaWorkspace, _ := app.OpenWorkspace(workspace.Path)
 	anchor := time.Now().UTC().Add(time.Minute).Truncate(time.Second)
 	schedule, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
@@ -397,8 +407,148 @@ func TestNativeSchedulerHonorsPersistedDeliveryBackoff(t *testing.T) {
 	}
 }
 
+func TestNativeSchedulerBindingAttentionRecoversPreparedOccurrence(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	hub := httptest.NewServer(fake)
+	defer hub.Close()
+	manager, workspace, configPath := newRuntimeTestManager(t, hub.URL)
+	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rewriteSchedulerTestProfiles(t, configPath, nil)
+	at := time.Now().UTC().Add(time.Minute).Truncate(time.Second)
+	schedule, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Recover binding", Condition: "once", Target: "project1.task1",
+		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: at.Format(time.RFC3339Nano)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := at.Add(time.Second)
+	native := newNativeScheduler(manager, workspace)
+	deadline, err := native.Reconcile(context.Background(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !deadline.IsZero() {
+		t.Fatalf("binding attention deadline = %s, want none", deadline)
+	}
+	runtime, err := native.schedulerRuntime(schedule.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.EffectiveState != schedulerOutcomeAttention || runtime.Prepared == nil || runtime.NextRunAt != "" || runtime.RetryAt != "" || runtime.LastOccurrenceAt != "" {
+		t.Fatalf("binding attention advanced the occurrence: %#v", runtime)
+	}
+	prepared := *runtime.Prepared
+	if messages := scheduleOccurrenceMessages(t, workspace.Path, schedule.Target); len(messages) != 0 {
+		t.Fatalf("binding attention accepted mailbox work: %#v", messages)
+	}
+
+	rewriteSchedulerTestProfiles(t, configPath, []agentHubProfileRoute{{Key: "default", AgentName: "fake-agent"}})
+	if _, err := native.Reconcile(context.Background(), now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	messages := scheduleOccurrenceMessages(t, workspace.Path, schedule.Target)
+	if len(messages) != 1 || messages[0].ID != prepared.MessageID || messages[0].Causation == nil || messages[0].Causation.OccurrenceID != prepared.OccurrenceID {
+		t.Fatalf("recovered occurrence changed identity: %#v, want %s/%s", messages, prepared.MessageID, prepared.OccurrenceID)
+	}
+	runtime, err = native.schedulerRuntime(schedule.ID)
+	if err != nil || runtime.Prepared != nil || runtime.EffectiveState != app.ScheduleStateCompleted || runtime.LastOutcome != schedulerOutcomeAccepted || runtime.LastOccurrenceAt != prepared.CoalescedThrough {
+		t.Fatalf("recovered occurrence checkpoint = %#v, %v", runtime, err)
+	}
+	if _, err := native.Reconcile(context.Background(), now.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if messages := scheduleOccurrenceMessages(t, workspace.Path, schedule.Target); len(messages) != 1 || messages[0].ID != prepared.MessageID {
+		t.Fatalf("recovery duplicated occurrence: %#v", messages)
+	}
+}
+
+func TestNativeSchedulerTransientBindingPreflightUsesBackoff(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	failCatalog := true
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if failCatalog && r.Method == http.MethodGet && r.URL.Path == "/v1/agents" {
+			failCatalog = false
+			w.WriteHeader(http.StatusServiceUnavailable)
+			writeRuntimeFakeJSON(w, map[string]any{"error": map[string]any{
+				"code": "runtime_unavailable", "message": "synthetic catalog outage", "retryable": true,
+			}})
+			return
+		}
+		fake.ServeHTTP(w, r)
+	}))
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().UTC().Add(time.Minute).Truncate(time.Second)
+	schedule, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Retry transiently", Condition: "once", Target: "project1.task1",
+		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: at.Format(time.RFC3339Nano)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := at.Add(time.Second)
+	native := newNativeScheduler(manager, workspace)
+	deadline, err := native.Reconcile(context.Background(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := native.schedulerRuntime(schedule.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.EffectiveState == schedulerOutcomeAttention || runtime.Prepared == nil || runtime.RetryAt == "" || runtime.NextRunAt != at.Format(time.RFC3339Nano) || runtime.LastOccurrenceAt != "" {
+		t.Fatalf("transient preflight classification = %#v", runtime)
+	}
+	retryAt := generationTime(runtime.RetryAt)
+	if retryAt.IsZero() || !deadline.Equal(retryAt) {
+		t.Fatalf("transient retry deadline = %s, want %s", deadline, retryAt)
+	}
+	prepared := *runtime.Prepared
+	if messages := scheduleOccurrenceMessages(t, workspace.Path, schedule.Target); len(messages) != 0 {
+		t.Fatalf("transient preflight accepted mailbox work: %#v", messages)
+	}
+	if _, err := native.Reconcile(context.Background(), retryAt); err != nil {
+		t.Fatal(err)
+	}
+	messages := scheduleOccurrenceMessages(t, workspace.Path, schedule.Target)
+	if len(messages) != 1 || messages[0].ID != prepared.MessageID {
+		t.Fatalf("transient retry lost stable occurrence: %#v, want %s", messages, prepared.MessageID)
+	}
+}
+
+func rewriteSchedulerTestProfiles(t *testing.T, configPath string, profiles []agentHubProfileRoute) {
+	t.Helper()
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg agentHubServeConfig
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg.AgentProfiles = profiles
+	data, err = json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestNativeSchedulerDoesNotReplayCompletedOneTimeOnSemanticEdit(t *testing.T) {
-	manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+	fake := newRuntimeFakeAgentHub()
+	hub := httptest.NewServer(fake)
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
 	puaWorkspace, _ := app.OpenWorkspace(workspace.Path)
 	at := time.Now().UTC().Add(time.Minute).Truncate(time.Second)
 	created, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
@@ -595,7 +745,10 @@ func TestNativeSchedulerResumeSkipsExpiredOneTimeWithoutReconcile(t *testing.T) 
 }
 
 func TestNativeSchedulerArchivedTargetRequiresAttentionUntilModified(t *testing.T) {
-	manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+	fake := newRuntimeFakeAgentHub()
+	hub := httptest.NewServer(fake)
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
 	puaWorkspace, _ := app.OpenWorkspace(workspace.Path)
 	at := time.Now().UTC().Add(time.Minute).Truncate(time.Second)
 	created, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{

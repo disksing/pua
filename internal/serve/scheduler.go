@@ -274,8 +274,14 @@ func (n *NativeScheduler) reconcileSchedule(ctx context.Context, schedule app.Sc
 	if schedule.State == app.ScheduleStatePaused {
 		return n.reconcilePausedSchedule(schedule, runtime, now)
 	}
-	if runtime.EffectiveState == app.ScheduleStateCompleted || runtime.EffectiveState == schedulerOutcomeAttention {
+	if runtime.EffectiveState == app.ScheduleStateCompleted {
 		return nil
+	}
+	if runtime.EffectiveState == schedulerOutcomeAttention {
+		if runtime.Prepared == nil {
+			return nil
+		}
+		return n.deliverPrepared(ctx, schedule, runtime, now)
 	}
 	if retry := generationTime(runtime.RetryAt); !retry.IsZero() && now.Before(retry) {
 		return nil
@@ -436,12 +442,12 @@ func (n *NativeScheduler) deliverPrepared(ctx context.Context, schedule app.Sche
 	}
 
 	deliver := func() error {
-		if schedule.Trigger.Type != app.ScheduleTriggerAt {
-			_, alreadyAccepted, err := mailboxMessageByID(n.workspace.Path, prepared.MessageID)
-			if err != nil {
-				return err
-			}
-			if !alreadyAccepted {
+		_, alreadyAccepted, err := mailboxMessageByID(n.workspace.Path, prepared.MessageID)
+		if err != nil {
+			return err
+		}
+		if !alreadyAccepted {
+			if schedule.Trigger.Type != app.ScheduleTriggerAt {
 				busy, err := n.targetBusy(prepared.Target)
 				if err != nil {
 					return err
@@ -458,7 +464,25 @@ func (n *NativeScheduler) deliverPrepared(ctx context.Context, schedule app.Sche
 					return n.storeSchedulerRuntime(schedule.ID, runtime)
 				}
 			}
+			if _, _, _, err := n.manager.resolveMailboxGenerationAgent(ctx, n.workspace, prepared.Target); err != nil {
+				var apiErr *resourceAPIError
+				if errors.As(err, &apiErr) && apiErr.Code == "binding_unavailable" {
+					runtime.NextRunAt = ""
+					runtime.RetryAt = ""
+					runtime.RetryCount = 0
+					runtime.EffectiveState = schedulerOutcomeAttention
+					runtime.LastOutcome = schedulerOutcomeAttention
+					runtime.LastError = err.Error()
+					runtime.AttentionTarget = prepared.Target
+					return n.storeSchedulerRuntime(schedule.ID, runtime)
+				}
+				runtime.EffectiveState = schedule.State
+				runtime.AttentionTarget = ""
+				return err
+			}
 		}
+		runtime.EffectiveState = schedule.State
+		runtime.AttentionTarget = ""
 		message := resourceMailboxMessage{
 			ID: prepared.MessageID, ResourceID: prepared.Target, Text: prepared.Text,
 			RequestedMode: resourceMessageModeEnqueue, ActualMode: resourceMessageModeEnqueue, ModeFrozen: true,

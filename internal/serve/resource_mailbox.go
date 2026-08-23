@@ -909,6 +909,33 @@ func (m *agentManager) ensureRuntime(workspace serveWorkspace, record generation
 	return rt
 }
 
+// resolveMailboxGenerationAgent is the authoritative binding/profile/catalog
+// preflight for mailbox delivery that may need to create a generation. Only
+// semantic binding or catalog unavailability is permanent; configuration I/O
+// and AgentHub transport failures remain retryable errors.
+func (m *agentManager) resolveMailboxGenerationAgent(ctx context.Context, workspace serveWorkspace, resourceID string) (config, *agentHubClient, resolvedResourceAgent, error) {
+	cfg, client, err := m.agentHubRuntimeConfig()
+	if err != nil {
+		return config{}, nil, resolvedResourceAgent{}, err
+	}
+	resolved, err := m.resolveResourceAgent(workspace, resourceID, cfg)
+	if err != nil {
+		if isResourceAgentBindingUnavailable(err) {
+			err = &resourceAPIError{Code: "binding_unavailable", Message: err.Error()}
+		}
+		return config{}, client, resolved, err
+	}
+	resolved.AgentName, err = validateAgentHubGenerationAgent(ctx, client, resolved.AgentName)
+	if err != nil {
+		var unavailable *agentHubGenerationAgentUnavailableError
+		if errors.As(err, &unavailable) {
+			err = &resourceAPIError{Code: "binding_unavailable", Message: err.Error()}
+		}
+		return config{}, client, resolved, err
+	}
+	return cfg, client, resolved, nil
+}
+
 func (m *agentManager) ensureMailboxGeneration(ctx context.Context, workspace serveWorkspace, resourceID string) (generationRecord, *agentRuntime, *agentHubClient, error) {
 	if record, found, err := currentResourceGeneration(workspace.Path, resourceID); err != nil {
 		return generationRecord{}, nil, nil, err
@@ -919,21 +946,8 @@ func (m *agentManager) ensureMailboxGeneration(ctx context.Context, workspace se
 		}
 		return record, m.ensureRuntime(workspace, record, client), client, nil
 	}
-	cfg, client, err := m.agentHubRuntimeConfig()
+	cfg, client, resolved, err := m.resolveMailboxGenerationAgent(ctx, workspace, resourceID)
 	if err != nil {
-		return generationRecord{}, nil, nil, err
-	}
-	resolved, err := m.resolveResourceAgent(workspace, resourceID, cfg)
-	if err != nil {
-		return generationRecord{}, nil, client, &resourceAPIError{Code: "binding_unavailable", Message: err.Error()}
-	}
-	if err == nil {
-		resolved.AgentName, err = validateAgentHubGenerationAgent(ctx, client, resolved.AgentName)
-	}
-	if err != nil {
-		if strings.Contains(err.Error(), " is unavailable") || strings.Contains(err.Error(), "not present in the catalog") {
-			err = &resourceAPIError{Code: "binding_unavailable", Message: err.Error()}
-		}
 		return generationRecord{}, nil, client, err
 	}
 	cwd, err := m.generationCwd(ctx, workspace, resourceID, "")

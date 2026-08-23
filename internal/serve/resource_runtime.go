@@ -21,6 +21,23 @@ type resolvedResourceAgent struct {
 	InstanceID      string
 }
 
+type resourceAgentBindingUnavailableError struct {
+	cause error
+}
+
+func (e *resourceAgentBindingUnavailableError) Error() string {
+	return e.cause.Error()
+}
+
+func (e *resourceAgentBindingUnavailableError) Unwrap() error {
+	return e.cause
+}
+
+func isResourceAgentBindingUnavailable(err error) bool {
+	var unavailable *resourceAgentBindingUnavailableError
+	return errors.As(err, &unavailable)
+}
+
 func generationSourceInstanceID(cfg config, record generationRecord) string {
 	if value := strings.TrimSpace(record.SourceInstanceID); value != "" {
 		return value
@@ -73,6 +90,9 @@ func (m *agentManager) resolveResourceAgent(workspace serveWorkspace, resourceID
 	}
 	binding, err := puaWorkspace.ResourceAgentBinding(resourceID)
 	if err != nil {
+		if app.IsKind(err, "binding") {
+			return resolvedResourceAgent{}, &resourceAgentBindingUnavailableError{cause: err}
+		}
 		return resolvedResourceAgent{}, err
 	}
 	resolved := resolvedResourceAgent{Binding: binding, InstanceID: runtimeConfig.InstanceID}
@@ -108,7 +128,7 @@ func (m *agentManager) resolveResourceAgent(workspace serveWorkspace, resourceID
 		digest := sha256.Sum256([]byte(requested + "\x00" + resolved.ResolvedProfile + "\x00" + resolved.AgentName + "\x00" + resolved.ConfigError))
 		resolved.ProfileRevision = hex.EncodeToString(digest[:8])
 	default:
-		return resolvedResourceAgent{}, fmt.Errorf("unsupported resource agent binding kind %q", binding.Kind)
+		return resolvedResourceAgent{}, &resourceAgentBindingUnavailableError{cause: fmt.Errorf("unsupported resource agent binding kind %q", binding.Kind)}
 	}
 	return resolved, nil
 }
@@ -147,7 +167,7 @@ func workspaceResourceDefaultForKind(runtimeConfig app.WorkspaceRuntimeConfig, k
 
 func resolvedAgentError(resolved resolvedResourceAgent, requested, fallback string) (resolvedResourceAgent, error) {
 	resolved.ConfigError = fmt.Sprintf("Agent Profile %q cannot be resolved; type default %q and global Profile \"default\" are unavailable", requested, fallback)
-	return resolved, errors.New(resolved.ConfigError + "; configure one of these Profiles before starting a new generation")
+	return resolved, &resourceAgentBindingUnavailableError{cause: errors.New(resolved.ConfigError + "; configure one of these Profiles before starting a new generation")}
 }
 
 func nextResourceGeneration(workspacePath, resourceID string) (int, error) {
@@ -412,6 +432,9 @@ func (m *agentManager) prepareResourceGenerationForNewTurnLocked(ctx context.Con
 	}
 	resolved, resolveErr := m.resolveResourceAgent(workspace, record.ResourceID, cfg)
 	if resolveErr != nil {
+		if !isResourceAgentBindingUnavailable(resolveErr) {
+			return false, resolveErr
+		}
 		if rt != nil {
 			_, persistErr := rt.mutateGeneration(func(current *generationRecord) {
 				current.AgentConfigError = resolved.ConfigError

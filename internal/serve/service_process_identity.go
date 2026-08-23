@@ -54,14 +54,4 @@ func environmentHasSingleValue(environment []string, name, want string) bool {
 	return found
 }
 
-// readProcessCommand is kept small and side-effect free for diagnostics and
-// tests that need to verify PID-reuse protection.
-func readProcessCommand(pid int) string {
-	identity, err := readServiceProcessIdentity(pid)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(identity.command)
-}
-
 var errProcessIdentityUnavailable = errors.New("process identity is unavailable")

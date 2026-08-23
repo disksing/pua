@@ -61,8 +61,8 @@ func TestAgentHubClientContract(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 				t.Errorf("decode resume request: %v", err)
 			}
-			if len(request.LaunchEnvironment) != 0 {
-				t.Errorf("unexpected resume environment overlay: %#v", request.LaunchEnvironment)
+			if len(request.LaunchEnvironment) != 0 || len(request.EphemeralEnvironment) != 0 {
+				t.Errorf("unexpected resume environment overlays: %+v", request)
 			}
 			writeFakeAgentHubJSON(t, w, sessionEnvelope("ses_1", "ready"))
 		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/sessions/ses_1/"):
@@ -130,7 +130,7 @@ func TestAgentHubClientContract(t *testing.T) {
 	if _, err := client.Stop(ctx, "ses_1"); err != nil {
 		t.Fatal(err)
 	}
-	if resumed, err := client.Resume(ctx, "ses_1", nil); err != nil || resumed.ID != "ses_1" || resumed.State != "ready" {
+	if resumed, err := client.ResumeWithEnvironment(ctx, "ses_1", nil, nil); err != nil || resumed.ID != "ses_1" || resumed.State != "ready" {
 		t.Fatalf("resume: %+v, %v", resumed, err)
 	}
 	archived, err := client.Archive(ctx, "ses_1")

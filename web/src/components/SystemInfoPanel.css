@@ -2,7 +2,7 @@
 
 :where([data-component-owner="system-info-panel"]) .system-info-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
 }
 
@@ -149,12 +149,6 @@
 
 :where([data-component-owner="system-info-panel"]) .system-info-error {
   margin: 12px 0 0;
-}
-
-@media (max-width: 760px) {
-  :where([data-component-owner="system-info-panel"]) .system-info-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
 }
 
 @media (max-width: 360px) {

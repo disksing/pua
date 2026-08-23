@@ -2570,6 +2570,12 @@ test("opens read-only System information by default", async ({ page }) => {
   await expect(panel).toContainText("/tmp/pua-e2e");
   await expect(panel).toContainText("/tmp/agenthub/sessions");
   await expect(panel.locator("input, select, textarea, [type=submit]")).toHaveCount(0);
+
+  const cards = panel.locator(".system-info-card");
+  await expect(cards).toHaveCount(2);
+  const puaBox = (await cards.nth(0).boundingBox())!;
+  const agentHubBox = (await cards.nth(1).boundingBox())!;
+  expect(agentHubBox.y).toBeGreaterThanOrEqual(puaBox.y + puaBox.height);
 });
 
 test("shows an unavailable AgentHub without hiding PUA system information", async ({ page }) => {

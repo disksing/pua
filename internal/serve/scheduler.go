@@ -610,9 +610,18 @@ func (n *NativeScheduler) deliverPrepared(ctx context.Context, schedule app.Sche
 	}
 
 	deliver := func() error {
-		_, alreadyAccepted, err := mailboxMessageByID(n.workspace.Path, prepared.MessageID)
+		accepted, alreadyAccepted, err := mailboxMessageByID(n.workspace.Path, prepared.MessageID)
+		expiredAcceptance := false
 		if err != nil {
-			return err
+			var apiErr *resourceAPIError
+			if !errors.As(err, &apiErr) || apiErr.Code != "message_receipt_expired" {
+				return err
+			}
+			// An expired receipt is still authoritative proof that the target
+			// accepted this deterministic message ID. Prepared pins keep that
+			// evidence until this source cursor commits the accepted outcome.
+			alreadyAccepted = true
+			expiredAcceptance = true
 		}
 		if !alreadyAccepted {
 			if schedule.Trigger.Type != app.ScheduleTriggerAt {
@@ -649,18 +658,20 @@ func (n *NativeScheduler) deliverPrepared(ctx context.Context, schedule app.Sche
 				return err
 			}
 		}
+		if !expiredAcceptance {
+			message := resourceMailboxMessage{
+				ID: prepared.MessageID, ResourceID: prepared.Target, Text: prepared.Text,
+				RequestedMode: resourceMessageModeEnqueue, ActualMode: resourceMessageModeEnqueue, ModeFrozen: true,
+				Type: resourceMessageTypeScheduleOccurrence, Causation: cloneMailboxCausation(prepared.Causation),
+				SenderWorkspaceInstanceID: prepared.Causation.SourceWorkspaceInstanceID,
+			}
+			accepted, err = acceptGeneratedMailboxMessage(n.workspace.Path, message)
+			if err != nil {
+				return err
+			}
+		}
 		runtime.EffectiveState = schedule.State
 		runtime.AttentionTarget = ""
-		message := resourceMailboxMessage{
-			ID: prepared.MessageID, ResourceID: prepared.Target, Text: prepared.Text,
-			RequestedMode: resourceMessageModeEnqueue, ActualMode: resourceMessageModeEnqueue, ModeFrozen: true,
-			Type: resourceMessageTypeScheduleOccurrence, Causation: cloneMailboxCausation(prepared.Causation),
-			SenderWorkspaceInstanceID: prepared.Causation.SourceWorkspaceInstanceID,
-		}
-		accepted, err := acceptGeneratedMailboxMessage(n.workspace.Path, message)
-		if err != nil {
-			return err
-		}
 		runtime.Prepared = nil
 		runtime.NextRunAt = prepared.NextRunAt
 		runtime.RetryAt = ""

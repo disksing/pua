@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1193,6 +1194,230 @@ func assertSingleDurableOccurrence(t *testing.T, workspacePath string, prepared 
 	}
 	if hotCopies+receiptCopies != want {
 		t.Fatalf("physical occurrence copies = hot %d + receipts %d, want %d", hotCopies, receiptCopies, want)
+	}
+}
+
+func setPreparedReceiptRetentionForTest(t *testing.T, receiptCount int, receiptWindow time.Duration, expiredCount int, expiredWindow time.Duration) {
+	t.Helper()
+	previousReceiptCount, previousReceiptWindow := resourceMailboxReceiptRetentionCount, resourceMailboxReceiptRetentionWindow
+	previousExpiredCount, previousExpiredWindow := resourceMailboxExpiredRetentionCount, resourceMailboxExpiredRetentionWindow
+	resourceMailboxReceiptRetentionCount, resourceMailboxReceiptRetentionWindow = receiptCount, receiptWindow
+	resourceMailboxExpiredRetentionCount, resourceMailboxExpiredRetentionWindow = expiredCount, expiredWindow
+	t.Cleanup(func() {
+		resourceMailboxReceiptRetentionCount, resourceMailboxReceiptRetentionWindow = previousReceiptCount, previousReceiptWindow
+		resourceMailboxExpiredRetentionCount, resourceMailboxExpiredRetentionWindow = previousExpiredCount, previousExpiredWindow
+	})
+}
+
+func TestNativeSchedulerPreparedPinsAcceptedReceipt(t *testing.T) {
+	setPreparedReceiptRetentionForTest(t, 2, time.Hour, 2, 24*time.Hour)
+	for _, target := range []string{"workspace", app.SchedulerResourceID} {
+		t.Run(target, func(t *testing.T) {
+			manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+			puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			at := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+			schedule, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+				Description: "Retain accepted evidence", Condition: "once", Target: target,
+				Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: at.Format(time.RFC3339Nano)},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			native := newNativeScheduler(manager, workspace)
+			prepared, err := native.prepareOccurrence(schedule, at, at, time.Time{}, 1, false, time.Time{}, schedulerOccurrenceReasonTime)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtime, err := initialScheduleRuntime(schedule, at.Add(-time.Second))
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtime.Prepared = &prepared
+			if err := native.storeSchedulerRuntime(schedule.ID, runtime); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := acceptGeneratedMailboxMessage(workspace.Path, preparedOccurrenceMessage(prepared)); err != nil {
+				t.Fatal(err)
+			}
+
+			oldStamp := time.Now().Add(-2 * time.Hour).Format(time.RFC3339Nano)
+			recent := time.Now().Add(-time.Minute)
+			if _, err := mutateResourceMailboxStoreForResource(workspace.Path, target, func(store *resourceMailboxStore) error {
+				found := false
+				for index := range store.Mailbox.Messages {
+					message := &store.Mailbox.Messages[index]
+					if message.ID != prepared.MessageID {
+						continue
+					}
+					found = true
+					message.Status = resourceMessageDelivered
+					message.AcceptedAt, message.UpdatedAt = oldStamp, oldStamp
+					message.DeliveredAt, message.TerminalAt = oldStamp, oldStamp
+				}
+				if !found {
+					return errors.New("accepted occurrence fixture is missing")
+				}
+				for index := 0; index < 3; index++ {
+					stamp := recent.Add(-time.Duration(index) * time.Second).Format(time.RFC3339Nano)
+					store.Mailbox.NextSequence++
+					store.Mailbox.Messages = append(store.Mailbox.Messages, resourceMailboxMessage{
+						ID: fmt.Sprintf("unrelated-receipt-%s-%d", target, index), Sequence: store.Mailbox.NextSequence,
+						ResourceID: target, Role: "system", RequestedMode: resourceMessageModeEnqueue,
+						ActualMode: resourceMessageModeEnqueue, Status: resourceMessageDelivered,
+						AcceptedAt: stamp, UpdatedAt: stamp, DeliveredAt: stamp, TerminalAt: stamp,
+					})
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			store, err := loadResourceMailboxStoreForRead(workspace.Path, target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pinnedReceipts, unrelatedReceipts := 0, 0
+			for _, receipt := range store.Receipts.Receipts {
+				switch {
+				case receipt.ID == prepared.MessageID:
+					pinnedReceipts++
+				case strings.HasPrefix(receipt.ID, "unrelated-receipt-"):
+					unrelatedReceipts++
+				}
+			}
+			if pinnedReceipts != 1 || unrelatedReceipts != 2 || len(store.Receipts.Expired) != 1 {
+				t.Fatalf("prepared receipt retention = pinned %d unrelated %d expired %d", pinnedReceipts, unrelatedReceipts, len(store.Receipts.Expired))
+			}
+			assertSingleDurableOccurrence(t, workspace.Path, prepared, 1)
+
+			// A daemon restart reconstructs both the Prepared reference and the
+			// target receipt solely from the atomically renamed JSON documents.
+			restarted := newNativeScheduler(newAgentManager(manager.server), workspace)
+			persisted, err := restarted.schedulerRuntime(schedule.ID)
+			if err != nil || persisted.Prepared == nil || persisted.Prepared.MessageID != prepared.MessageID {
+				t.Fatalf("restarted Prepared checkpoint = %#v, %v", persisted, err)
+			}
+			accepted, found, err := mailboxMessageByID(workspace.Path, prepared.MessageID)
+			if err != nil || !found || !accepted.receipt || accepted.ID != prepared.MessageID {
+				t.Fatalf("restarted accepted evidence = %#v, found=%v err=%v", accepted, found, err)
+			}
+		})
+	}
+}
+
+func TestNativeSchedulerExpiredPreparedReceiptReplaysAccepted(t *testing.T) {
+	setPreparedReceiptRetentionForTest(t, 1, time.Hour, 2, time.Hour)
+	fake := newRuntimeFakeAgentHub()
+	hub := httptest.NewServer(fake)
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().UTC().Add(time.Minute).Truncate(time.Second)
+	schedule, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Replay expired acceptance", Condition: "once", Target: "workspace",
+		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: at.Format(time.RFC3339Nano)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	native := newNativeScheduler(manager, workspace)
+	prepared, err := native.prepareOccurrence(schedule, at, at, time.Time{}, 1, false, time.Time{}, schedulerOccurrenceReasonTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := initialScheduleRuntime(schedule, at.Add(-time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.Prepared = &prepared
+	if err := native.storeSchedulerRuntime(schedule.ID, runtime); err != nil {
+		t.Fatal(err)
+	}
+
+	oldStamp := time.Now().Add(-2 * time.Hour).Format(time.RFC3339Nano)
+	recent := time.Now().Add(-time.Minute)
+	if _, err := mutateResourceMailboxStoreForResource(workspace.Path, prepared.Target, func(store *resourceMailboxStore) error {
+		store.Receipts.Expired = append(store.Receipts.Expired, resourceMailboxExpiredEntry{ID: prepared.MessageID, ExpiredAt: oldStamp})
+		for index := 0; index < 4; index++ {
+			store.Receipts.Expired = append(store.Receipts.Expired, resourceMailboxExpiredEntry{
+				ID:        fmt.Sprintf("unrelated-expired-%d", index),
+				ExpiredAt: recent.Add(-time.Duration(index) * time.Second).Format(time.RFC3339Nano),
+			})
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	store, err := loadResourceMailboxStoreForRead(workspace.Path, prepared.Target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(store.Mailbox.Messages) != 0 || len(store.Receipts.Receipts) != 0 || len(store.Receipts.Expired) != 3 {
+		t.Fatalf("pinned expired fixture = hot/receipts %d/%d expired %d", len(store.Mailbox.Messages), len(store.Receipts.Receipts), len(store.Receipts.Expired))
+	}
+	if _, found, err := mailboxMessageByID(workspace.Path, prepared.MessageID); found {
+		t.Fatalf("expired prepared lookup unexpectedly found a message")
+	} else {
+		var apiErr *resourceAPIError
+		if !errors.As(err, &apiErr) || apiErr.Code != "message_receipt_expired" {
+			t.Fatalf("expired prepared lookup error = %v", err)
+		}
+	}
+
+	// Restart with only the persisted Prepared cursor and expired tombstone.
+	// Replay must commit acceptance without appending or waking the target.
+	restartedManager := newAgentManager(manager.server)
+	restartedManager.now = func() time.Time { return at.Add(time.Second) }
+	manager.server.agents = restartedManager
+	fake.mu.Lock()
+	beforeActions, beforeMessages, beforeSessions := len(fake.actions), len(fake.messageIDs), len(fake.sessions)
+	fake.mu.Unlock()
+	if _, err := newNativeScheduler(restartedManager, workspace).Reconcile(context.Background(), at.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := newNativeScheduler(restartedManager, workspace).schedulerRuntime(schedule.ID)
+	if err != nil || persisted.Prepared != nil || persisted.LastOutcome != schedulerOutcomeAccepted || persisted.EffectiveState != app.ScheduleStateCompleted || persisted.RetryAt != "" {
+		t.Fatalf("expired evidence replay checkpoint = %#v, %v", persisted, err)
+	}
+	store, err = loadResourceMailboxStoreForRead(workspace.Path, prepared.Target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.Mailbox.NextSequence != 0 || len(store.Mailbox.Messages) != 0 || len(store.Receipts.Receipts) != 0 || len(store.Receipts.Expired) != 3 {
+		t.Fatalf("expired replay appended a physical copy: next=%d hot/receipts=%d/%d expired=%d", store.Mailbox.NextSequence, len(store.Mailbox.Messages), len(store.Receipts.Receipts), len(store.Receipts.Expired))
+	}
+	fake.mu.Lock()
+	afterActions, afterMessages, afterSessions := len(fake.actions), len(fake.messageIDs), len(fake.sessions)
+	fake.mu.Unlock()
+	if afterActions != beforeActions || afterMessages != beforeMessages || afterSessions != beforeSessions {
+		t.Fatalf("expired replay woke target: actions=%d/%d messages=%d/%d sessions=%d/%d", afterActions, beforeActions, afterMessages, beforeMessages, afterSessions, beforeSessions)
+	}
+
+	// Once Prepared is durably clear, the target's next ordinary compaction can
+	// release its evidence while the two unrelated tombstones remain bounded.
+	if _, err := mutateResourceMailboxStoreForResource(workspace.Path, prepared.Target, func(*resourceMailboxStore) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	store, err = loadResourceMailboxStoreForRead(workspace.Path, prepared.Target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(store.Receipts.Expired) != 2 {
+		t.Fatalf("released Prepared evidence left expired count %d, want 2", len(store.Receipts.Expired))
+	}
+	for _, entry := range store.Receipts.Expired {
+		if entry.ID == prepared.MessageID {
+			t.Fatalf("cleared Prepared still pinned %s", entry.ID)
+		}
+	}
+	if _, found, err := mailboxMessageByID(workspace.Path, prepared.MessageID); err != nil || found {
+		t.Fatalf("released Prepared evidence lookup = found=%v err=%v", found, err)
 	}
 }
 

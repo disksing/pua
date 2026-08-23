@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/disksing/pua/internal/app"
 )
 
 const (
@@ -1016,7 +1018,44 @@ func uniqueMailboxReceipts(receipts []resourceMailboxReceipt) []resourceMailboxR
 	return result
 }
 
-func prepareResourceMailboxDocuments(store resourceMailboxStore) (resourceMailboxHotDocument, resourceMailboxReceiptDocument, resourceMailboxOutboxDocument, resourceSchedulerCheckpoint) {
+func schedulerPreparedMessagePins(workspacePath string, store resourceMailboxStore) (map[string]bool, error) {
+	checkpoint := store.Scheduler
+	if store.ResourceID != app.SchedulerResourceID {
+		// Target persistence already holds this resource's mailbox lock. Read the
+		// Scheduler's atomically renamed checkpoint directly so delivery never
+		// acquires the source lock in the opposite order. An in-progress source
+		// commit exposes the older final file, which only retains evidence longer.
+		schedulerStore := defaultResourceMailboxStore(workspacePath, app.SchedulerResourceID)
+		var persisted resourceSchedulerCheckpoint
+		found, err := readResourceMailboxJSON(resourceMailboxSchedulerPath(schedulerStore.Directory), &persisted)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			return map[string]bool{}, nil
+		}
+		checkpoint = persisted
+	}
+
+	pins := make(map[string]bool)
+	for _, runtime := range checkpoint.Schedules {
+		prepared := runtime.Prepared
+		if prepared == nil || strings.TrimSpace(prepared.MessageID) == "" {
+			continue
+		}
+		target := strings.TrimSpace(prepared.Target)
+		if target == "" {
+			target = strings.TrimSpace(runtime.Target)
+		}
+		if target == "" || normalizedResourceID(target) != store.ResourceID {
+			continue
+		}
+		pins[strings.TrimSpace(prepared.MessageID)] = true
+	}
+	return pins, nil
+}
+
+func prepareResourceMailboxDocuments(store resourceMailboxStore, pinnedMessageIDs map[string]bool) (resourceMailboxHotDocument, resourceMailboxReceiptDocument, resourceMailboxOutboxDocument, resourceSchedulerCheckpoint) {
 	byID := make(map[string]resourceMailboxMessage, len(store.Mailbox.Messages))
 	for _, message := range store.Mailbox.Messages {
 		if strings.TrimSpace(message.ID) == "" {
@@ -1059,10 +1098,15 @@ func prepareResourceMailboxDocuments(store resourceMailboxStore) (resourceMailbo
 	now := time.Now()
 	retained := make([]resourceMailboxReceipt, 0, len(receipts))
 	dropped := make([]resourceMailboxExpiredEntry, 0)
-	for index, receipt := range receipts {
+	ordinaryReceiptIndex := 0
+	for _, receipt := range receipts {
+		pinned := pinnedMessageIDs[receipt.ID]
 		receiptTime := mailboxReceiptRetentionTime(receipt)
-		keepByTime := receiptTime.IsZero() || resourceMailboxReceiptRetentionWindow <= 0 || now.Sub(receiptTime) <= resourceMailboxReceiptRetentionWindow
-		keepByCount := resourceMailboxReceiptRetentionCount <= 0 || index < resourceMailboxReceiptRetentionCount
+		keepByTime := pinned || receiptTime.IsZero() || resourceMailboxReceiptRetentionWindow <= 0 || now.Sub(receiptTime) <= resourceMailboxReceiptRetentionWindow
+		keepByCount := pinned || resourceMailboxReceiptRetentionCount <= 0 || ordinaryReceiptIndex < resourceMailboxReceiptRetentionCount
+		if !pinned {
+			ordinaryReceiptIndex++
+		}
 		if keepByTime && keepByCount {
 			retained = append(retained, receipt)
 		} else {
@@ -1081,7 +1125,7 @@ func prepareResourceMailboxDocuments(store resourceMailboxStore) (resourceMailbo
 	expired = expired[:0]
 	for _, entry := range expiredByID {
 		parsed, parseErr := time.Parse(time.RFC3339Nano, entry.ExpiredAt)
-		if parseErr == nil && resourceMailboxExpiredRetentionWindow > 0 && now.Sub(parsed) > resourceMailboxExpiredRetentionWindow {
+		if !pinnedMessageIDs[entry.ID] && parseErr == nil && resourceMailboxExpiredRetentionWindow > 0 && now.Sub(parsed) > resourceMailboxExpiredRetentionWindow {
 			continue
 		}
 		expired = append(expired, entry)
@@ -1101,8 +1145,18 @@ func prepareResourceMailboxDocuments(store resourceMailboxStore) (resourceMailbo
 	}
 	expired = filteredExpired
 	sort.SliceStable(expired, func(i, j int) bool { return expired[i].ExpiredAt > expired[j].ExpiredAt })
-	if resourceMailboxExpiredRetentionCount > 0 && len(expired) > resourceMailboxExpiredRetentionCount {
-		expired = expired[:resourceMailboxExpiredRetentionCount]
+	if resourceMailboxExpiredRetentionCount > 0 {
+		bounded := make([]resourceMailboxExpiredEntry, 0, len(expired))
+		ordinaryExpiredCount := 0
+		for _, entry := range expired {
+			if pinnedMessageIDs[entry.ID] || ordinaryExpiredCount < resourceMailboxExpiredRetentionCount {
+				bounded = append(bounded, entry)
+			}
+			if !pinnedMessageIDs[entry.ID] {
+				ordinaryExpiredCount++
+			}
+		}
+		expired = bounded
 	}
 	receiptDoc := resourceMailboxReceiptDocument{Version: resourceMailboxStoreVersion, ResourceID: store.ResourceID, Receipts: retained, Expired: expired}
 	outbox := store.Outbox
@@ -1269,7 +1323,11 @@ func updateResourceMailboxLocators(workspacePath string, store resourceMailboxSt
 }
 
 func persistResourceMailboxStore(workspacePath string, store resourceMailboxStore, before resourceMailboxStore) error {
-	hot, receipts, outbox, scheduler := prepareResourceMailboxDocuments(store)
+	pinnedMessageIDs, err := schedulerPreparedMessagePins(workspacePath, store)
+	if err != nil {
+		return err
+	}
+	hot, receipts, outbox, scheduler := prepareResourceMailboxDocuments(store, pinnedMessageIDs)
 	active := resourceMailboxStoreNeedsHotWork(store)
 	if active {
 		// Keep the marker and mailbox commit in one ordering boundary. If the

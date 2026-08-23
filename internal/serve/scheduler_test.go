@@ -84,6 +84,47 @@ func TestSchedulerHTTPAPIRoutesNaturalLanguageAndNativeChanges(t *testing.T) {
 	}
 }
 
+func TestSchedulerNativeChangeValidatesTrailingData(t *testing.T) {
+	root := t.TempDir()
+	if _, err := app.Initialize(root, "en"); err != nil {
+		t.Fatal(err)
+	}
+	workspace := serveWorkspace{ID: "workspace-scheduler", Name: "Scheduler", Path: root}
+	s := &server{config: filepath.Join(t.TempDir(), "serve.json")}
+	if err := s.saveConfig(config{Version: agentHubConfigVersion, Workspaces: []serveWorkspace{workspace}}); err != nil {
+		t.Fatal(err)
+	}
+	s.agents = newAgentManager(s)
+
+	tests := []struct {
+		name      string
+		body      string
+		wantError string
+	}{
+		{name: "whitespace", body: "{\"operation\":\"restart\"} \n\t", wantError: `unsupported Scheduler change "restart"`},
+		{name: "second value", body: `{"operation":"restart"} {}`, wantError: "request body must contain exactly one JSON value"},
+		{name: "malformed bytes", body: `{"operation":"restart"} trailing`, wantError: "invalid character"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "/api/workspaces/workspace-scheduler/scheduler/changes", strings.NewReader(test.body))
+			s.handleWorkspace(recorder, request)
+
+			if recorder.Code != http.StatusBadRequest || recorder.Header().Get("Content-Type") != "application/json" {
+				t.Fatalf("response = %d %q: %s", recorder.Code, recorder.Header().Get("Content-Type"), recorder.Body.String())
+			}
+			var response map[string]string
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode error response: %v", err)
+			}
+			if !strings.Contains(response["error"], test.wantError) {
+				t.Fatalf("error = %q, want substring %q", response["error"], test.wantError)
+			}
+		})
+	}
+}
+
 func scheduleOccurrenceMessages(t *testing.T, workspacePath, resourceID string) []resourceMailboxMessage {
 	t.Helper()
 	mailbox, err := loadResourceMailboxForResource(workspacePath, resourceID)

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
@@ -116,18 +115,7 @@ func decodeSchedulerBody(r *http.Request, output any) error {
 	if err := decoder.Decode(output); err != nil {
 		return err
 	}
-	return ensureJSONRequestEOF(decoder)
-}
-
-func ensureJSONRequestEOF(decoder *json.Decoder) error {
-	var extra any
-	if err := decoder.Decode(&extra); err != nil {
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
-		return err
-	}
-	return errors.New("unexpected data after JSON document")
+	return ensureJSONEOF(decoder)
 }
 
 func schedulerNativeChange(body schedulerChangeRequest) (NativeSchedulerChange, error) {

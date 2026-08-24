@@ -42,9 +42,11 @@ func normalizeResourceDefaults(value ResourceAgentDefaults) ResourceAgentDefault
 
 func defaultGenerationPolicy() GenerationPolicy {
 	return GenerationPolicy{
-		Enabled:                   true,
+		BudgetEnabled:             true,
 		MaxTurns:                  DefaultGenerationMaxTurns,
 		MaxAccumulatedTurnMinutes: DefaultGenerationMaxAccumulatedTurnMinutes,
+		InactivityEnabled:         true,
+		MaxInactivityMinutes:      DefaultGenerationMaxInactivityMinutes,
 	}
 }
 
@@ -57,14 +59,26 @@ func defaultStallWatchdogPolicy() StallWatchdogPolicy {
 
 func resolveGenerationPolicy(value GenerationPolicyConfig) (GenerationPolicy, error) {
 	policy := defaultGenerationPolicy()
+	legacyEnabled := true
 	if value.Enabled != nil {
-		policy.Enabled = *value.Enabled
+		legacyEnabled = *value.Enabled
+	}
+	policy.BudgetEnabled = legacyEnabled
+	policy.InactivityEnabled = legacyEnabled
+	if value.BudgetEnabled != nil {
+		policy.BudgetEnabled = *value.BudgetEnabled
 	}
 	if value.MaxTurns != nil {
 		policy.MaxTurns = *value.MaxTurns
 	}
 	if value.MaxAccumulatedTurnMinutes != nil {
 		policy.MaxAccumulatedTurnMinutes = *value.MaxAccumulatedTurnMinutes
+	}
+	if value.InactivityEnabled != nil {
+		policy.InactivityEnabled = *value.InactivityEnabled
+	}
+	if value.MaxInactivityMinutes != nil {
+		policy.MaxInactivityMinutes = *value.MaxInactivityMinutes
 	}
 	return normalizeGenerationPolicy(policy)
 }
@@ -76,20 +90,27 @@ func normalizeGenerationPolicy(policy GenerationPolicy) (GenerationPolicy, error
 	if policy.MaxAccumulatedTurnMinutes < 0 || policy.MaxAccumulatedTurnMinutes > 525600 {
 		return GenerationPolicy{}, errors.New("generation accumulated turn minutes must be between 0 and 525600")
 	}
-	if policy.Enabled && policy.MaxTurns == 0 && policy.MaxAccumulatedTurnMinutes == 0 {
-		return GenerationPolicy{}, errors.New("an enabled generation policy requires at least one non-zero budget")
+	if policy.BudgetEnabled && policy.MaxTurns == 0 && policy.MaxAccumulatedTurnMinutes == 0 {
+		return GenerationPolicy{}, errors.New("enabled generation budget rotation requires at least one non-zero budget")
+	}
+	if policy.MaxInactivityMinutes < 1 || policy.MaxInactivityMinutes > 525600 {
+		return GenerationPolicy{}, errors.New("generation inactivity minutes must be between 1 and 525600")
 	}
 	return policy, nil
 }
 
 func generationPolicyConfig(policy GenerationPolicy) GenerationPolicyConfig {
-	enabled := policy.Enabled
+	budgetEnabled := policy.BudgetEnabled
 	maxTurns := policy.MaxTurns
 	maxMinutes := policy.MaxAccumulatedTurnMinutes
+	inactivityEnabled := policy.InactivityEnabled
+	maxInactivityMinutes := policy.MaxInactivityMinutes
 	return GenerationPolicyConfig{
-		Enabled:                   &enabled,
+		BudgetEnabled:             &budgetEnabled,
 		MaxTurns:                  &maxTurns,
 		MaxAccumulatedTurnMinutes: &maxMinutes,
+		InactivityEnabled:         &inactivityEnabled,
+		MaxInactivityMinutes:      &maxInactivityMinutes,
 	}
 }
 
@@ -174,7 +195,9 @@ func (w *Workspace) EnsureResourceRuntime() (WorkspaceRuntimeConfig, error) {
 		if err != nil {
 			return err
 		}
-		if cfg.GenerationPolicy.Enabled == nil || cfg.GenerationPolicy.MaxTurns == nil || cfg.GenerationPolicy.MaxAccumulatedTurnMinutes == nil {
+		if cfg.GenerationPolicy.Enabled != nil || cfg.GenerationPolicy.BudgetEnabled == nil || cfg.GenerationPolicy.MaxTurns == nil ||
+			cfg.GenerationPolicy.MaxAccumulatedTurnMinutes == nil || cfg.GenerationPolicy.InactivityEnabled == nil ||
+			cfg.GenerationPolicy.MaxInactivityMinutes == nil {
 			cfg.GenerationPolicy = generationPolicyConfig(generationPolicy)
 			changed = true
 		}

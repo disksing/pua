@@ -33,7 +33,7 @@ function resourceModel(overrides: Partial<DetailPanelModel> = {}): DetailPanelMo
     workspaceDefaults: { project: { kind: "profile", name: "default" }, task: { kind: "profile", name: "default" } },
     workspaceUsers: [],
     currentUserName: "User",
-    generationPolicy: { enabled: true, maxTurns: 20, maxAccumulatedTurnMinutes: 120 },
+    generationPolicy: { budgetEnabled: true, maxTurns: 20, maxAccumulatedTurnMinutes: 120, inactivityEnabled: true, maxInactivityMinutes: 1440 },
     stallWatchdogPolicy: { enabled: true, timeoutMinutes: 30 },
     agentBinding: { kind: "profile", name: "default" },
     agentProfiles: [{ key: "default", description: "Default", agentName: "fake-agent" }],
@@ -520,21 +520,27 @@ describe("DetailPanel", () => {
     (Array.from(target.querySelectorAll(".details-tab")) as HTMLButtonElement[]).find((button) => button.textContent?.includes("Settings"))!.click();
     await tick();
 
-    const enabled = target.querySelector<HTMLInputElement>('[aria-label="Enable automatic Generation rotation"]')!;
+    const budgetEnabled = target.querySelector<HTMLInputElement>('[aria-label="Enable usage-based Generation rotation"]')!;
+    const inactivityEnabled = target.querySelector<HTMLInputElement>('[aria-label="Enable inactivity-based Generation rotation"]')!;
     const maxTurns = target.querySelector<HTMLInputElement>('[aria-label="Maximum Turns per Generation"]')!;
     const maxMinutes = target.querySelector<HTMLInputElement>('[aria-label="Maximum accumulated Turn minutes per Generation"]')!;
-    expect(enabled.checked).toBe(true);
+    const maxInactivityMinutes = target.querySelector<HTMLInputElement>('[aria-label="Maximum inactivity minutes per Generation"]')!;
+    expect(budgetEnabled.checked).toBe(true);
+    expect(inactivityEnabled.checked).toBe(true);
     expect(maxTurns.value).toBe("20");
     expect(maxMinutes.value).toBe("120");
+    expect(maxInactivityMinutes.value).toBe("1440");
 
-    enabled.click();
+    budgetEnabled.click();
     maxTurns.value = "25";
     maxTurns.dispatchEvent(new InputEvent("input", { bubbles: true }));
     maxMinutes.value = "150";
     maxMinutes.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    maxInactivityMinutes.value = "2880";
+    maxInactivityMinutes.dispatchEvent(new InputEvent("input", { bubbles: true }));
     await tick();
-    target.querySelector<HTMLButtonElement>(".resource-settings-policy-controls button")!.click();
-    await vi.waitFor(() => expect(savePolicy).toHaveBeenCalledWith({ enabled: false, maxTurns: 25, maxAccumulatedTurnMinutes: 150 }));
+    target.querySelector<HTMLButtonElement>(".resource-settings-generation-controls button")!.click();
+    await vi.waitFor(() => expect(savePolicy).toHaveBeenCalledWith({ budgetEnabled: false, maxTurns: 25, maxAccumulatedTurnMinutes: 150, inactivityEnabled: true, maxInactivityMinutes: 2880 }));
   });
 
   it("shows the inheritable Task default on the project settings tab", async () => {

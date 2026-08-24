@@ -76,9 +76,11 @@ export interface ResourceAgentDefaultsRecord {
 }
 
 export interface GenerationPolicyRecord {
-  enabled: boolean;
+  budgetEnabled: boolean;
   maxTurns: number;
   maxAccumulatedTurnMinutes: number;
+  inactivityEnabled: boolean;
+  maxInactivityMinutes: number;
 }
 
 export interface StallWatchdogPolicyRecord {

@@ -11,8 +11,15 @@ describe("workspace icons", () => {
       id: "",
       label: "PUA default",
       src: "/workspace-icons/pua-yellow.png",
+      faviconSrc: "/workspace-icons/pua-yellow-opaque.png",
       type: "image/png",
     });
+    expect(WORKSPACE_ICONS.slice(1, 5).map((icon) => icon.faviconSrc)).toEqual([
+      "/workspace-icons/pua-red-opaque.png",
+      "/workspace-icons/pua-green-opaque.png",
+      "/workspace-icons/pua-blue-opaque.png",
+      "/workspace-icons/pua-purple-opaque.png",
+    ]);
     expect(WORKSPACE_ICONS[5].id).toBe("home-base");
   });
 

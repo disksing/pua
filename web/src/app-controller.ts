@@ -830,7 +830,7 @@ function updateWorkspaceFavicon(workspace: { icon?: string } | null | undefined)
 		document.head.appendChild(link);
 	}
 	link.type = "type" in option ? String(option.type || "image/png") : "image/png";
-	link.href = option.src;
+	link.href = option.faviconSrc || option.src;
 }
 function renderWorkspaceSelect() {
 	const active = controllerState.config?.workspaces?.find((workspace) => workspace.id === controllerState.activeWorkspaceId);
@@ -1284,7 +1284,7 @@ function detailPanelModel(): DetailPanelModel {
 		},
 		workspaceUsers: controllerState.workspaceUsers,
 		currentUserName: currentUserName(),
-		generationPolicy: controllerState.tree?.generationPolicy || { enabled: true, maxTurns: 20, maxAccumulatedTurnMinutes: 120 },
+			generationPolicy: controllerState.tree?.generationPolicy || { budgetEnabled: true, maxTurns: 20, maxAccumulatedTurnMinutes: 120, inactivityEnabled: true, maxInactivityMinutes: 1440 },
 		stallWatchdogPolicy: controllerState.tree?.stallWatchdogPolicy || { enabled: true, timeoutMinutes: 30 },
 		agentBinding: controllerState.selectedId === "workspace"
 			? controllerState.tree?.agentBinding || { kind: "profile", name: "default" }

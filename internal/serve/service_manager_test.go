@@ -1477,6 +1477,116 @@ func TestServiceManagerRejectsSecretRotationBeforePersistingLaterLogs(t *testing
 	}
 }
 
+func TestServiceManagerRedactsFailedReadinessExportReplacement(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		replacement   string
+		candidateName string
+		candidate     string
+	}{
+		{
+			name:          "rejected secret rotation",
+			replacement:   `{"schemaVersion":1,"variables":{"PUBLIC":"rejected-public"},"secrets":{"REJECTED_TOKEN_NAME":"rejected-readiness-secret"}}`,
+			candidateName: "REJECTED_TOKEN_NAME",
+			candidate:     "rejected-readiness-secret",
+		},
+		{
+			name:          "malformed secret candidate",
+			replacement:   `{"schemaVersion":1,"secrets":{"MALFORMED_TOKEN_NAME":"malformed-readiness-secret"`,
+			candidateName: "MALFORMED_TOKEN_NAME",
+			candidate:     "malformed-readiness-secret",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			runtimeDir := serviceRuntimePath(root, "exporter")
+			cfg := ServiceConfig{
+				SchemaVersion: serviceSchemaVersion,
+				ID:            "exporter",
+				Enabled:       true,
+				Exports:       true,
+				Command: []string{"/bin/sh", "-c", `
+					tmp="$PUA_SERVICE_EXPORT_PATH.tmp"
+					printf '%s' '{"schemaVersion":1,"variables":{"PUBLIC":"initial"},"secrets":{"INITIAL_TOKEN":"initial-readiness-secret"}}' > "$tmp"
+					mv "$tmp" "$PUA_SERVICE_EXPORT_PATH"
+					exec sleep 30
+				`},
+				Readiness: &ServiceReadinessConfig{
+					Command: []string{"/bin/sh", "-c", fmt.Sprintf(`
+						tmp="$PUA_SERVICE_EXPORT_PATH.tmp"
+						printf '%%s' %s > "$tmp"
+						mv "$tmp" "$PUA_SERVICE_EXPORT_PATH"
+						printf 'candidate-name=%%s\n' %s
+						printf 'candidate-value=%%s\n' %s >&2
+						exit 23
+					`, shellQuote(test.replacement), shellQuote(test.candidateName), shellQuote(test.candidate))},
+					Interval: time.Second,
+					Timeout:  time.Second,
+				},
+				Restart: ServiceRestartConfig{InitialDelay: time.Second, Multiplier: 2, MaxDelay: time.Second},
+			}
+			writeTestService(t, root, cfg)
+			manager, err := NewServiceManager(root, ServiceManagerOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := manager.Start(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = manager.Stop(context.Background()) })
+
+			status, err := manager.Show("exporter")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if status.State != ServiceStateBackoff && status.State != ServiceStateAttentionRequired {
+				t.Fatalf("state = %q, want failed readiness to stop service", status.State)
+			}
+			if status.Readiness.Ready || status.Exports.Variables["PUBLIC"] == "rejected-public" {
+				t.Fatalf("failed readiness candidate was published: %#v", status)
+			}
+			projection, err := json.Marshal(status)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertNoReadinessCandidate := func(location string, data []byte) {
+				t.Helper()
+				for _, forbidden := range []string{test.candidateName, test.candidate} {
+					if bytes.Contains(data, []byte(forbidden)) {
+						t.Fatalf("failed readiness candidate %q reached %s: %s", forbidden, location, data)
+					}
+				}
+			}
+			assertNoReadinessCandidate("API status", projection)
+			for _, name := range []string{"events.jsonl", "state.json"} {
+				data, err := os.ReadFile(filepath.Join(runtimeDir, name))
+				if err != nil {
+					t.Fatal(err)
+				}
+				assertNoReadinessCandidate(name, data)
+			}
+			for _, name := range []string{"stdout.log", "stderr.log"} {
+				data, err := os.ReadFile(filepath.Join(runtimeDir, name))
+				if err != nil && os.IsNotExist(err) {
+					continue
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				assertNoReadinessCandidate(name, data)
+			}
+			handoff, err := os.ReadFile(filepath.Join(runtimeDir, "export.json"))
+			if err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			assertNoReadinessCandidate("export.json", handoff)
+			if err == nil && !json.Valid(handoff) {
+				t.Fatalf("failed readiness hand-off was not replaced with valid sanitized JSON: %s", handoff)
+			}
+		})
+	}
+}
+
 func TestServiceManagerPreservesExportReplacementForLogGuard(t *testing.T) {
 	const (
 		initialSecret = "initial-handoff-secret"

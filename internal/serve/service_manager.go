@@ -1348,22 +1348,24 @@ func openServiceExportHandoffWithOpen(path string, openFile func(string, int, os
 
 func (m *ServiceManager) readExportHandoffWithGateLocked(rt *serviceRuntime, handoff *serviceExportHandoff, fromLog bool) (ServiceExportFile, error) {
 	if len(handoff.data) > 1<<20 {
+		candidateSecrets := bestEffortJSONStrings(handoff.data)
+		registerServiceExportCandidates(rt, candidateSecrets)
 		cause := errors.New("service export exceeds 1 MiB")
 		cause = scrubRejectedExport(handoff, serviceExportSchema, cause)
-		return ServiceExportFile{}, m.rejectExportLocked(rt, cause, nil, fromLog)
+		return ServiceExportFile{}, m.rejectExportLocked(rt, cause, candidateSecrets, fromLog)
 	}
 	var export ServiceExportFile
 	if err := decodeStrictServiceJSON(bytes.NewReader(handoff.data), &export); err != nil {
+		candidateSecrets := bestEffortJSONStrings(handoff.data)
+		registerServiceExportCandidates(rt, candidateSecrets)
 		cause := scrubRejectedExport(handoff, serviceExportSchema, errors.New("decode export: invalid JSON hand-off"))
-		return ServiceExportFile{}, m.rejectExportLocked(rt, cause, nil, fromLog)
+		return ServiceExportFile{}, m.rejectExportLocked(rt, cause, candidateSecrets, fromLog)
 	}
-	candidateSecrets := make([]string, 0, len(export.Secrets))
-	for _, value := range export.Secrets {
-		candidateSecrets = append(candidateSecrets, value)
-		if rt.redactor != nil {
-			rt.redactor.Register(value)
-		}
+	candidateSecrets := make([]string, 0, len(export.Secrets)*2)
+	for name, value := range export.Secrets {
+		candidateSecrets = append(candidateSecrets, name, value)
 	}
+	registerServiceExportCandidates(rt, candidateSecrets)
 	if export.SchemaVersion != serviceExportSchema {
 		cause := scrubRejectedExport(handoff, serviceExportSchema, fmt.Errorf("unsupported export schema version %d", export.SchemaVersion))
 		return ServiceExportFile{}, m.rejectExportLocked(rt, cause, candidateSecrets, fromLog)
@@ -1401,10 +1403,12 @@ func (m *ServiceManager) readExportHandoffWithGateLocked(rt *serviceRuntime, han
 	if len(export.Secrets) > 0 {
 		if !rt.exportAccepted {
 			rt.exportSecrets = cloneStringMap(export.Secrets)
-			for name, value := range export.Secrets {
+			for name := range export.Secrets {
 				rt.secretNames[name] = ServiceSecretMetadata{Name: name, Source: "service-export", UpdatedAt: m.now().Format(time.RFC3339Nano)}
-				if !containsString(rt.secretValues, value) {
-					rt.secretValues = append(rt.secretValues, value)
+			}
+			for _, candidate := range candidateSecrets {
+				if !containsString(rt.secretValues, candidate) {
+					rt.secretValues = append(rt.secretValues, candidate)
 				}
 			}
 		}
@@ -1424,6 +1428,53 @@ func (m *ServiceManager) readExportHandoffWithGateLocked(rt *serviceRuntime, han
 	}
 	rt.exportAccepted = true
 	return export, nil
+}
+
+func registerServiceExportCandidates(rt *serviceRuntime, candidates []string) {
+	if rt == nil || rt.redactor == nil {
+		return
+	}
+	for _, candidate := range candidates {
+		rt.redactor.Register(candidate)
+	}
+}
+
+// bestEffortJSONStrings recovers complete JSON string tokens even when the
+// surrounding export document is malformed. Rejected hand-offs are otherwise
+// reported opaquely, but their candidate names and values may also have been
+// printed by the process before rejection and must join the redaction set.
+func bestEffortJSONStrings(data []byte) []string {
+	values := []string{}
+	seen := map[string]struct{}{}
+	for start := bytes.IndexByte(data, '"'); start >= 0; {
+		end := start + 1
+		for end < len(data) {
+			switch data[end] {
+			case '\\':
+				end += 2
+				continue
+			case '"':
+				var value string
+				if err := json.Unmarshal(data[start:end+1], &value); err == nil && value != "" {
+					if _, found := seen[value]; !found {
+						seen[value] = struct{}{}
+						values = append(values, value)
+					}
+				}
+				data = data[end+1:]
+				start = bytes.IndexByte(data, '"')
+				end = -1
+			}
+			if end < 0 {
+				break
+			}
+			end++
+		}
+		if end >= len(data) {
+			break
+		}
+	}
+	return values
 }
 
 func (m *ServiceManager) rejectExportLocked(rt *serviceRuntime, cause error, secretValues []string, fromLog bool) error {
@@ -1770,17 +1821,19 @@ func (m *ServiceManager) runReadinessLocked(ctx context.Context, rt *serviceRunt
 }
 
 func (m *ServiceManager) readinessFailedLocked(ctx context.Context, rt *serviceRuntime, cause error) error {
+	// Read and scrub the exact hand-off left by the failed readiness command
+	// before its output can enter any durable diagnostic. A rejected or unsafe
+	// hand-off makes the unverified command output unusable; retain only the
+	// opaque protocol failure in that case.
+	if _, exportErr := m.readExportsLocked(rt); exportErr != nil {
+		cause = fmt.Errorf("readiness failed after rejected export hand-off: %w", exportErr)
+	}
 	message := security.NewRedactor(rt.secretValues...).RedactString(cause.Error())
 	rt.status.Readiness.Ready = false
 	rt.status.Readiness.LastCheck = m.now().Format(time.RFC3339Nano)
 	rt.status.Readiness.LastError = message
 	rt.status.LastError = message
 	_ = m.appendEventLocked(rt, map[string]any{"type": "readiness_failed", "error": message, "time": rt.status.Readiness.LastCheck})
-	// An export may have been written even though the readiness command failed;
-	// load it before closing the gated log writers so any newly exported secret
-	// is included in cleanup/error redaction. The startup buffer is discarded
-	// because readiness did not establish that the service is safe to publish.
-	_, _ = m.readExportsLocked(rt)
 	cleanupErr := m.stopProcessLocked(ctx, rt, false)
 	if cleanupErr != nil {
 		cleanupMessage := security.NewRedactor(rt.secretValues...).RedactString(cleanupErr.Error())

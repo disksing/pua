@@ -136,7 +136,18 @@ func (n *NativeScheduler) Snapshot(now time.Time) (app.SchedulerSnapshot, error)
 }
 
 func schedulerRuntimeCanProjectForward(runtime schedulerScheduleRuntime, schedule app.Schedule) (bool, error) {
-	if runtime.Revision == 0 || runtime.Revision >= schedule.Revision || runtime.EffectiveState == "" || runtime.TriggerDigest == "" {
+	if runtime.Revision == 0 || runtime.Revision >= schedule.Revision {
+		return false, nil
+	}
+	return schedulerRuntimeMatchesPortableDefinition(runtime, schedule)
+}
+
+// schedulerRuntimeMatchesPortableDefinition is the shared semantic projection
+// contract for Snapshot and metadata activation preflight. Revision ordering is
+// intentionally left to those callers because Snapshot requires a strictly
+// older checkpoint while activation also accepts the current revision.
+func schedulerRuntimeMatchesPortableDefinition(runtime schedulerScheduleRuntime, schedule app.Schedule) (bool, error) {
+	if runtime.EffectiveState == "" || runtime.TriggerDigest == "" {
 		return false, nil
 	}
 	triggerDigest, err := schedulerTriggerDigest(schedule.Trigger)
@@ -236,14 +247,18 @@ func (n *NativeScheduler) Change(ctx context.Context, change NativeSchedulerChan
 			if err != nil {
 				return app.Schedule{}, err
 			}
-			materialize = runtime.Revision == 0
+			projectable, err := schedulerRuntimePreservesRepeatingActivation(runtime, current)
+			if err != nil {
+				return app.Schedule{}, err
+			}
+			materialize = !projectable
 		}
 		mutationBoundary := time.Now()
 		if n.manager != nil {
 			mutationBoundary = n.manager.now()
 		}
 		if materialize {
-			if err := n.reconcileSchedule(ctx, current, mutationBoundary); err != nil {
+			if err := n.materializeScheduleActivation(ctx, current, mutationBoundary); err != nil {
 				return app.Schedule{}, err
 			}
 		}
@@ -371,6 +386,64 @@ func scheduleUpdatePreservesRepeatingActivation(current, updated app.Schedule) b
 	default:
 		return false
 	}
+}
+
+// schedulerRuntimePreservesRepeatingActivation proves that a checkpoint
+// already represents the portable activation boundary, either at the current
+// revision or through metadata-only revisions. A nonzero revision alone is
+// insufficient: a semantic edit may have committed while the checkpoint still
+// describes the preceding trigger or target.
+func schedulerRuntimePreservesRepeatingActivation(runtime schedulerScheduleRuntime, schedule app.Schedule) (bool, error) {
+	if runtime.Revision == 0 || runtime.Revision > schedule.Revision || runtime.EffectiveState == "" ||
+		schedule.State != app.ScheduleStateActive || schedule.Trigger == nil {
+		return false, nil
+	}
+	switch schedule.Trigger.Type {
+	case app.ScheduleTriggerInterval, app.ScheduleTriggerCron:
+	default:
+		return false, nil
+	}
+	projectable, err := schedulerRuntimeMatchesPortableDefinition(runtime, schedule)
+	if err != nil {
+		return false, err
+	}
+	if !projectable {
+		return false, nil
+	}
+	if runtime.Prepared != nil {
+		prepared := runtime.Prepared
+		if prepared.ScheduleID != schedule.ID || prepared.ScheduleRevision == 0 || prepared.ScheduleRevision > runtime.Revision ||
+			prepared.Target != schedule.Target {
+			return false, nil
+		}
+	}
+	switch runtime.EffectiveState {
+	case app.ScheduleStateActive:
+		if runtime.Prepared != nil {
+			return true, nil
+		}
+		_, err := time.Parse(time.RFC3339Nano, runtime.NextRunAt)
+		return err == nil, nil
+	case schedulerOutcomeAttention:
+		return runtime.Prepared != nil, nil
+	default:
+		return false, nil
+	}
+}
+
+// materializeScheduleActivation replaces a semantically stale checkpoint with
+// the current definition's own UpdatedAt boundary before processing due work.
+// This explicit reset is required for malformed lifecycle/prepared states that
+// ordinary revision promotion must not preserve.
+func (n *NativeScheduler) materializeScheduleActivation(ctx context.Context, schedule app.Schedule, now time.Time) error {
+	runtime, err := initialScheduleRuntime(schedule, now)
+	if err != nil {
+		return err
+	}
+	if err := n.storeSchedulerRuntime(schedule.ID, runtime); err != nil {
+		return err
+	}
+	return n.reconcileSchedule(ctx, schedule, now)
 }
 
 // Reconcile recovers any frozen occurrence, prepares due work, advances

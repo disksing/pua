@@ -1013,6 +1013,9 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	cfg := defaultServiceConfig(rt.config)
 	processConfig := cloneServiceConfig(cfg)
 	rt.processConfig = &processConfig
@@ -1036,6 +1039,9 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 	env, secrets, names, exports, err := m.resolveEnvironmentLocked(cfg)
 	if err != nil {
 		return m.failStartLocked(ctx, rt, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if !pathWithinResolved(filepath.Join(m.root, ".pua"), serviceRuntimePath(m.root, cfg.ID)) {
 		return m.failStartLocked(ctx, rt, errors.New("service runtime path escapes the workspace control directory"))
@@ -3354,17 +3360,29 @@ func serviceDefinitionOperationError(rt *serviceRuntime, err error) error {
 // Apply calls did historically, but validation and rollback cover the entire
 // request rather than each element independently.
 func (m *ServiceManager) ApplyAll(configs []ServiceConfig) error {
+	return m.ApplyAllContext(context.Background(), configs)
+}
+
+// ApplyAllContext applies a collection while allowing an admitted request or
+// supervisor shutdown to revoke process and hook side effects.
+func (m *ServiceManager) ApplyAllContext(ctx context.Context, configs []ServiceConfig) error {
 	if m == nil {
 		return errors.New("service manager is unavailable")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	releaseDefinitionTransaction := acquireServiceDefinitionTransactionLock(m.root)
 	defer releaseDefinitionTransaction()
-	return m.applyAllLocked(configs, true)
+	return m.applyAllLocked(ctx, configs, true)
 }
 
-func (m *ServiceManager) applyAllLocked(configs []ServiceConfig, rollbackLifecycle bool) error {
+func (m *ServiceManager) applyAllLocked(ctx context.Context, configs []ServiceConfig, rollbackLifecycle bool) error {
 	if len(configs) == 0 {
 		return nil
 	}
@@ -3457,7 +3475,7 @@ func (m *ServiceManager) applyAllLocked(configs []ServiceConfig, rollbackLifecyc
 			return errors.Join(cause, m.finishServiceDefinitionTransactionLocked())
 		}
 		definitionRollbackErr := m.beginServiceDefinitionTransactionLocked(oldConfigs, changed, definitionSnapshots)
-		rollbackErr := m.rollbackAppliedServicesLocked(transactionIDs, newStopOrder, oldOrder, oldConfigs, oldGraph, runtimeSnapshots, stateSnapshots, eventSnapshots)
+		rollbackErr := m.rollbackAppliedServicesLocked(ctx, transactionIDs, newStopOrder, oldOrder, oldConfigs, oldGraph, runtimeSnapshots, stateSnapshots, eventSnapshots)
 		// Runtime cleanup can remain retryable after the old definitions are
 		// durably restored. Do not retain a completed definition transaction just
 		// because a replacement process still needs termination attention.
@@ -3515,7 +3533,7 @@ func (m *ServiceManager) applyAllLocked(configs []ServiceConfig, rollbackLifecyc
 		if rt == nil || (rt.process == nil && rt.status.ProcessGroup <= 0) {
 			continue
 		}
-		if err := m.stopRuntimeForDependencyChangeLocked(context.Background(), rt); err != nil {
+		if err := m.stopRuntimeForDependencyChangeLocked(ctx, rt); err != nil {
 			return rollback(err)
 		}
 	}
@@ -3531,7 +3549,7 @@ func (m *ServiceManager) applyAllLocked(configs []ServiceConfig, rollbackLifecyc
 		}
 	}
 	if m.started && !m.stopping {
-		if err := m.reconcileLocked(context.Background()); err != nil {
+		if err := m.reconcileLocked(ctx); err != nil {
 			return rollback(err)
 		}
 	}
@@ -3780,7 +3798,7 @@ func restoreServiceFile(snapshot serviceFileSnapshot) error {
 	return writeServiceDataAtomic(snapshot.path, snapshot.data, snapshot.mode, os.Rename)
 }
 
-func (m *ServiceManager) rollbackAppliedServicesLocked(ids, stopOrder, restartOrder []string, configs map[string]ServiceConfig, graph serviceDependencyGraph, runtimes map[string]serviceRuntimeConfigSnapshot, states, events map[string]serviceFileSnapshot) error {
+func (m *ServiceManager) rollbackAppliedServicesLocked(ctx context.Context, ids, stopOrder, restartOrder []string, configs map[string]ServiceConfig, graph serviceDependencyGraph, runtimes map[string]serviceRuntimeConfigSnapshot, states, events map[string]serviceFileSnapshot) error {
 	var result error
 	uncertain := make(map[string]struct{})
 	for _, id := range stopOrder {
@@ -3789,7 +3807,7 @@ func (m *ServiceManager) rollbackAppliedServicesLocked(ids, stopOrder, restartOr
 		if !serviceRuntimeOwnsProcess(rt) || (existed && serviceRuntimeOwnsSnapshotProcess(rt, snapshot)) {
 			continue
 		}
-		if err := m.stopProcessLocked(context.Background(), rt, false); err != nil {
+		if err := m.stopProcessLocked(ctx, rt, false); err != nil {
 			result = errors.Join(result, err)
 			if serviceRuntimeOwnsProcess(rt) {
 				// The replacement may still be live. Its process pointer, immutable
@@ -3858,7 +3876,7 @@ func (m *ServiceManager) rollbackAppliedServicesLocked(ids, stopOrder, restartOr
 			continue
 		}
 		if m.started && !m.stopping {
-			result = errors.Join(result, m.reconcileOneLocked(context.Background(), m.runtimes[id], graph[id]))
+			result = errors.Join(result, m.reconcileOneLocked(ctx, m.runtimes[id], graph[id]))
 		}
 	}
 	return result
@@ -3880,14 +3898,25 @@ func serviceRuntimeOwnsSnapshotProcess(rt *serviceRuntime, snapshot serviceRunti
 }
 
 func (m *ServiceManager) Apply(cfg ServiceConfig) error {
+	return m.ApplyContext(context.Background(), cfg)
+}
+
+// ApplyContext applies one definition with revocable lifecycle side effects.
+func (m *ServiceManager) ApplyContext(ctx context.Context, cfg ServiceConfig) error {
 	if m == nil {
 		return errors.New("service manager is unavailable")
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	releaseDefinitionTransaction := acquireServiceDefinitionTransactionLock(m.root)
 	defer releaseDefinitionTransaction()
-	return m.applyAllLocked([]ServiceConfig{cfg}, false)
+	return m.applyAllLocked(ctx, []ServiceConfig{cfg}, false)
 }
 
 func (m *ServiceManager) Remove(ctx context.Context, id string) error {
@@ -3971,8 +4000,19 @@ func (m *ServiceManager) Remove(ctx context.Context, id string) error {
 }
 
 func (m *ServiceManager) Enable(id string) error {
+	return m.EnableContext(context.Background(), id)
+}
+
+// EnableContext enables and reconciles a service within a revocable operation.
+func (m *ServiceManager) EnableContext(ctx context.Context, id string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	cfg, ok := m.configs[id]
 	if !ok {
 		return os.ErrNotExist
@@ -4006,7 +4046,7 @@ func (m *ServiceManager) Enable(id string) error {
 		return err
 	}
 	if m.started && !m.stopping {
-		return m.reconcileLocked(context.Background())
+		return m.reconcileLocked(ctx)
 	}
 	return nil
 }

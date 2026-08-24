@@ -15,6 +15,8 @@ func (s *server) handleWorkspaceServices(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	defer lease.Release()
+	operationContext, cancelOperation := lease.Context(r.Context())
+	defer cancelOperation()
 	manager, workspace := lease.manager, lease.workspace
 	if ownershipErr := s.requireWorkspaceOwnership(workspace.Path); ownershipErr != nil {
 		writeError(w, ownershipErr, http.StatusConflict)
@@ -32,7 +34,7 @@ func (s *server) handleWorkspaceServices(w http.ResponseWriter, r *http.Request,
 				writeError(w, err, http.StatusBadRequest)
 				return
 			}
-			if err := manager.ApplyAll(body.Services); err != nil {
+			if err := manager.ApplyAllContext(operationContext, body.Services); err != nil {
 				writeError(w, err, http.StatusBadRequest)
 				return
 			}
@@ -69,14 +71,14 @@ func (s *server) handleWorkspaceServices(w http.ResponseWriter, r *http.Request,
 				writeError(w, errors.New("service id does not match URL"), http.StatusBadRequest)
 				return
 			}
-			if err := manager.Apply(cfg); err != nil {
+			if err := manager.ApplyContext(operationContext, cfg); err != nil {
 				writeError(w, err, http.StatusBadRequest)
 				return
 			}
 			status, _ := manager.Show(id)
 			writeJSON(w, status)
 		case http.MethodDelete:
-			if err := manager.Remove(r.Context(), id); err != nil {
+			if err := manager.Remove(operationContext, id); err != nil {
 				writeError(w, err, http.StatusNotFound)
 				return
 			}
@@ -96,11 +98,11 @@ func (s *server) handleWorkspaceServices(w http.ResponseWriter, r *http.Request,
 		var operationErr error
 		switch action {
 		case "start":
-			operationErr = manager.StartService(r.Context(), id)
+			operationErr = manager.StartService(operationContext, id)
 		case "stop":
-			operationErr = manager.StopService(r.Context(), id)
+			operationErr = manager.StopService(operationContext, id)
 		case "restart":
-			operationErr = manager.RestartService(r.Context(), id)
+			operationErr = manager.RestartService(operationContext, id)
 		}
 		if operationErr != nil {
 			writeError(w, serviceActionAPIError(operationErr), statusForServiceError(operationErr))
@@ -115,9 +117,9 @@ func (s *server) handleWorkspaceServices(w http.ResponseWriter, r *http.Request,
 		}
 		var operationErr error
 		if action == "enable" {
-			operationErr = manager.Enable(id)
+			operationErr = manager.EnableContext(operationContext, id)
 		} else {
-			operationErr = manager.Disable(r.Context(), id)
+			operationErr = manager.Disable(operationContext, id)
 		}
 		if operationErr != nil {
 			writeError(w, operationErr, statusForServiceError(operationErr))

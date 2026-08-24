@@ -1,12 +1,15 @@
 package serve
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -345,8 +348,11 @@ func TestServiceShutdownDrainsAllManagersAfterStopFailure(t *testing.T) {
 	s := newServiceLifecycleTestServer(t, first, second)
 	injected := errors.New("stop failed")
 	stopped := make(map[string]int)
+	var stoppedMu sync.Mutex
 	s.serviceShutdownStopper = func(manager *ServiceManager, _ context.Context) error {
+		stoppedMu.Lock()
 		stopped[manager.Root()]++
+		stoppedMu.Unlock()
 		if manager.Root() == first.Path {
 			return injected
 		}
@@ -356,7 +362,145 @@ func TestServiceShutdownDrainsAllManagersAfterStopFailure(t *testing.T) {
 	if err := s.stopServices(context.Background()); !errors.Is(err, injected) {
 		t.Fatalf("shutdown error = %v, want %v", err, injected)
 	}
+	stoppedMu.Lock()
+	defer stoppedMu.Unlock()
 	if stopped[first.Path] != 1 || stopped[second.Path] != 1 {
 		t.Fatalf("stop attempts = %#v, want every manager once", stopped)
+	}
+}
+
+func TestServiceShutdownRevokesApplyReadinessAndReapsProcessGroup(t *testing.T) {
+	root := t.TempDir()
+	workspace := serveWorkspace{ID: "workspace-one", Path: root}
+	s := newServiceLifecycleTestServer(t, workspace)
+	s.serviceShutdownForceTimeout = time.Second
+	manager, _, err := serviceManagerForWorkspaceTest(s, workspace.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.processTerminationGrace = 20 * time.Millisecond
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	processesPath := filepath.Join(root, "processes")
+	readinessPath := filepath.Join(root, "readiness-entered")
+	cfg := ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "worker",
+		Enabled:       true,
+		Command: []string{"/bin/sh", "-c",
+			"sleep 30 & child=$!; printf '%s %s\\n' \"$$\" \"$child\" > " + shellQuote(processesPath) + "; exec sleep 30"},
+		Readiness: &ServiceReadinessConfig{
+			Command:  []string{"/bin/sh", "-c", "printf ready > " + shellQuote(readinessPath) + "; exec sleep 30"},
+			Interval: time.Second,
+			Timeout:  30 * time.Second,
+		},
+	}
+	body, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPut, "/api/workspaces/workspace-one/services/worker", bytes.NewReader(body))
+	recorder := httptest.NewRecorder()
+	requestDone := make(chan struct{})
+	go func() {
+		s.handleWorkspaceServices(recorder, request, workspace.ID, []string{"worker"})
+		close(requestDone)
+	}()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := os.Stat(readinessPath); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Apply did not enter its readiness command")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	processData, err := os.ReadFile(processesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	processFields := strings.Fields(string(processData))
+	if len(processFields) != 2 {
+		t.Fatalf("recorded processes = %q, want leader and descendant", processData)
+	}
+	leaderPID, err := strconv.Atoi(processFields[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	childPID, err := strconv.Atoi(processFields[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	drainContext, cancelDrain := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	started := time.Now()
+	shutdownErr := s.stopServices(drainContext)
+	cancelDrain()
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("shutdown took %v, want a bounded forced stop", elapsed)
+	}
+	if shutdownErr != nil && !errors.Is(shutdownErr, context.DeadlineExceeded) {
+		t.Fatalf("shutdown error = %v, want nil or drain deadline", shutdownErr)
+	}
+	select {
+	case <-requestDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("revoked Apply request did not return")
+	}
+	waitForProcessGone(t, leaderPID)
+	waitForProcessGone(t, childPID)
+	if present, err := processGroupPresent(leaderPID); err != nil || present {
+		t.Fatalf("service process group %d present = %v, %v, want reaped", leaderPID, present, err)
+	}
+}
+
+func TestServiceShutdownDrainDeadlineStillInvokesEveryManagerStop(t *testing.T) {
+	first := serveWorkspace{ID: "workspace-one", Path: t.TempDir()}
+	second := serveWorkspace{ID: "workspace-two", Path: t.TempDir()}
+	s := newServiceLifecycleTestServer(t, first, second)
+	s.serviceShutdownForceTimeout = 100 * time.Millisecond
+	lease, err := s.acquireServiceManagerLease(first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
+
+	blocked := make(chan struct{})
+	defer close(blocked)
+	called := make(chan string, 2)
+	s.serviceShutdownStopper = func(manager *ServiceManager, _ context.Context) error {
+		called <- manager.Root()
+		if manager.Root() == first.Path {
+			<-blocked
+		}
+		return nil
+	}
+	drainContext, cancelDrain := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	started := time.Now()
+	shutdownErr := s.stopServices(drainContext)
+	cancelDrain()
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("shutdown took %v with a blocked manager", elapsed)
+	}
+	if !errors.Is(shutdownErr, context.DeadlineExceeded) {
+		t.Fatalf("shutdown error = %v, want drain or force deadline", shutdownErr)
+	}
+	stopped := map[string]bool{}
+	for len(stopped) < 2 {
+		select {
+		case root := <-called:
+			stopped[root] = true
+		case <-time.After(time.Second):
+			t.Fatalf("stop calls = %#v, want every registered manager", stopped)
+		}
+	}
+	if !stopped[first.Path] || !stopped[second.Path] {
+		t.Fatalf("stop calls = %#v, want %q and %q", stopped, first.Path, second.Path)
 	}
 }

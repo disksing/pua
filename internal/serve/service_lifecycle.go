@@ -7,6 +7,7 @@ import (
 	"log"
 	"sort"
 	"sync"
+	"time"
 )
 
 var (
@@ -16,6 +17,8 @@ var (
 	errWorkspaceAdditionRetained            = errors.New("workspace remains configured and owned; retry service supervision")
 	errServiceLifecycleClosing              = errors.New("workspace service lifecycle is shutting down")
 )
+
+const defaultServiceShutdownForceTimeout = 10 * time.Second
 
 type serviceWorkspaceKey struct {
 	workspaceID string
@@ -40,6 +43,8 @@ type serviceManagerLease struct {
 	workspaceID string
 	manager     *ServiceManager
 	workspace   serveWorkspace
+	context     context.Context
+	cancel      context.CancelFunc
 	releaseOnce sync.Once
 }
 
@@ -97,9 +102,35 @@ func (s *server) beginServiceLifecycleShutdown() {
 	s.serviceMu.Lock()
 	if !s.serviceClosing {
 		s.serviceClosing = true
+		for lease := range s.serviceLeaseSet {
+			lease.cancel()
+		}
 		s.notifyServiceLifecycleChangedLocked()
 	}
 	s.serviceMu.Unlock()
+}
+
+// Context combines request cancellation with the revocable lifetime of this
+// admitted manager operation. Shutdown can therefore interrupt readiness and
+// hook commands before waiting for the operation lease to drain.
+func (lease *serviceManagerLease) Context(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	if lease == nil || lease.context == nil {
+		return context.WithCancel(parent)
+	}
+	// Make the lease the direct parent so revocation closes Done synchronously
+	// at the shutdown fence. The request is the secondary cancellation source.
+	ctx, cancel := context.WithCancel(lease.context)
+	stop := context.AfterFunc(parent, cancel)
+	if parent.Err() != nil {
+		cancel()
+	}
+	return ctx, func() {
+		stop()
+		cancel()
+	}
 }
 
 func (lease *serviceManagerLease) Release() {
@@ -107,7 +138,7 @@ func (lease *serviceManagerLease) Release() {
 		return
 	}
 	lease.releaseOnce.Do(func() {
-		lease.server.releaseServiceManagerLease(lease.workspaceID)
+		lease.server.releaseServiceManagerLease(lease)
 	})
 }
 
@@ -115,19 +146,37 @@ func (s *server) newServiceManagerLeaseLocked(workspace serveWorkspace, manager 
 	if s.serviceLeases == nil {
 		s.serviceLeases = make(map[string]int)
 	}
+	if s.serviceLeaseSet == nil {
+		s.serviceLeaseSet = make(map[*serviceManagerLease]struct{})
+	}
 	s.serviceLeases[workspace.ID]++
 	s.notifyServiceLifecycleChangedLocked()
-	return &serviceManagerLease{
+	base := s.serviceContext
+	if base == nil {
+		base = context.Background()
+	}
+	operationContext, cancel := context.WithCancel(base)
+	lease := &serviceManagerLease{
 		server:      s,
 		workspaceID: workspace.ID,
 		manager:     manager,
 		workspace:   workspace,
+		context:     operationContext,
+		cancel:      cancel,
 	}
+	s.serviceLeaseSet[lease] = struct{}{}
+	return lease
 }
 
-func (s *server) releaseServiceManagerLease(workspaceID string) {
+func (s *server) releaseServiceManagerLease(lease *serviceManagerLease) {
 	s.serviceMu.Lock()
 	defer s.serviceMu.Unlock()
+	if lease == nil {
+		return
+	}
+	lease.cancel()
+	delete(s.serviceLeaseSet, lease)
+	workspaceID := lease.workspaceID
 	count := s.serviceLeases[workspaceID]
 	if count <= 1 {
 		delete(s.serviceLeases, workspaceID)
@@ -485,6 +534,20 @@ func (s *server) acquireServiceManagerLeaseAtLookupBoundary(id string, lookupPre
 		s.serviceMu.Unlock()
 		return nil, err
 	}
+	if s.serviceClosing {
+		// The manager construction crossed the shutdown fence. Keep the newly
+		// reconstructed manager registered so the final snapshot can stop any
+		// durably owned process groups, but do not admit or start a new operation.
+		if registered == nil && latestKey == key {
+			if s.services == nil {
+				s.services = make(map[serviceWorkspaceKey]*ServiceManager)
+			}
+			s.services[key] = manager
+		}
+		s.finishServiceManagerLookupLocked(id, lookup)
+		s.serviceMu.Unlock()
+		return nil, errServiceLifecycleClosing
+	}
 	if registered != nil {
 		lease := s.newServiceManagerLeaseLocked(workspace, registered)
 		s.finishServiceManagerLookupLocked(id, lookup)
@@ -515,6 +578,11 @@ func (s *server) acquireServiceManagerLeaseAtLookupBoundary(id string, lookupPre
 		}
 	}
 	s.serviceMu.Lock()
+	if s.serviceClosing {
+		s.finishServiceManagerLookupLocked(id, lookup)
+		s.serviceMu.Unlock()
+		return nil, errServiceLifecycleClosing
+	}
 	lease := s.newServiceManagerLeaseLocked(workspace, manager)
 	s.finishServiceManagerLookupLocked(id, lookup)
 	s.serviceMu.Unlock()
@@ -534,9 +602,11 @@ func (s *server) startServices(ctx context.Context) {
 		if lease == nil {
 			continue
 		}
-		if err := lease.manager.Start(ctx); err != nil {
+		operationContext, cancel := lease.Context(ctx)
+		if err := lease.manager.Start(operationContext); err != nil {
 			log.Printf("start workspace services in %s: %v", lease.manager.Root(), err)
 		}
+		cancel()
 		lease.Release()
 	}
 }
@@ -554,9 +624,11 @@ func (s *server) reconcileServices(ctx context.Context) error {
 		if lease == nil {
 			continue
 		}
-		if err := lease.manager.Reconcile(ctx); err != nil {
+		operationContext, cancel := lease.Context(ctx)
+		if err := lease.manager.Reconcile(operationContext); err != nil {
 			log.Printf("reconcile workspace services in %s: %v", lease.manager.Root(), err)
 		}
+		cancel()
 		lease.Release()
 	}
 	return nil
@@ -568,15 +640,12 @@ func (s *server) stopServices(ctx context.Context) error {
 	}
 	s.beginServiceLifecycleShutdown()
 
-	var managers []*ServiceManager
-	for {
+	var drainErr error
+	draining := true
+	for draining {
 		s.serviceMu.Lock()
 		if len(s.serviceLeases) == 0 && len(s.serviceLookups) == 0 &&
 			len(s.serviceRemovals) == 0 && s.serviceMutations == 0 {
-			managers = make([]*ServiceManager, 0, len(s.services))
-			for _, manager := range s.services {
-				managers = append(managers, manager)
-			}
 			s.serviceMu.Unlock()
 			break
 		}
@@ -584,10 +653,30 @@ func (s *server) stopServices(ctx context.Context) error {
 		s.serviceMu.Unlock()
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			drainErr = ctx.Err()
+			draining = false
 		case <-changed:
 		}
 	}
+
+	// A drain deadline is not permission to omit final process termination.
+	// Snapshot every manager still registered behind the closing fence, then
+	// invoke all stops concurrently so one manager mutex cannot prevent another
+	// Workspace's process groups from receiving their final signals.
+	s.serviceMu.Lock()
+	managers := make([]*ServiceManager, 0, len(s.services))
+	seen := make(map[*ServiceManager]struct{}, len(s.services))
+	for _, manager := range s.services {
+		if manager == nil {
+			continue
+		}
+		if _, duplicate := seen[manager]; duplicate {
+			continue
+		}
+		seen[manager] = struct{}{}
+		managers = append(managers, manager)
+	}
+	s.serviceMu.Unlock()
 	sort.Slice(managers, func(i, j int) bool {
 		return managers[i].Root() < managers[j].Root()
 	})
@@ -598,10 +687,48 @@ func (s *server) stopServices(ctx context.Context) error {
 			return manager.Stop(ctx)
 		}
 	}
-	var result error
+	forceTimeout := s.serviceShutdownForceTimeout
+	if forceTimeout <= 0 {
+		forceTimeout = defaultServiceShutdownForceTimeout
+	}
+	forceContext, cancelForce := context.WithTimeout(context.Background(), forceTimeout)
+	defer cancelForce()
+	type stopResult struct {
+		manager *ServiceManager
+		err     error
+	}
+	results := make(chan stopResult, len(managers))
+	pending := make(map[*ServiceManager]struct{}, len(managers))
 	for _, manager := range managers {
-		if err := stopper(manager, ctx); err != nil {
-			result = errors.Join(result, fmt.Errorf("stop workspace services in %s: %w", manager.Root(), err))
+		pending[manager] = struct{}{}
+		go func(manager *ServiceManager) {
+			results <- stopResult{manager: manager, err: stopper(manager, forceContext)}
+		}(manager)
+	}
+	result := drainErr
+	for len(pending) > 0 {
+		select {
+		case stopped := <-results:
+			delete(pending, stopped.manager)
+			if stopped.err != nil {
+				result = errors.Join(result, fmt.Errorf("stop workspace services in %s: %w", stopped.manager.Root(), stopped.err))
+			}
+		case <-forceContext.Done():
+			// Prefer completed results already queued at the deadline boundary.
+			for {
+				select {
+				case stopped := <-results:
+					delete(pending, stopped.manager)
+					if stopped.err != nil {
+						result = errors.Join(result, fmt.Errorf("stop workspace services in %s: %w", stopped.manager.Root(), stopped.err))
+					}
+				default:
+					for manager := range pending {
+						result = errors.Join(result, fmt.Errorf("stop workspace services in %s: %w", manager.Root(), forceContext.Err()))
+					}
+					return result
+				}
+			}
 		}
 	}
 	return result

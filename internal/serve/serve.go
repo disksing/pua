@@ -181,27 +181,29 @@ type uiState struct {
 }
 
 type server struct {
-	addr                   string
-	config                 string
-	agentHubMode           string
-	agentHubEndpoint       string
-	agents                 *agentManager
-	doctor                 *doctorMonitor
-	locks                  *workspaceLockManager
-	serviceMu              sync.Mutex
-	services               map[serviceWorkspaceKey]*ServiceManager
-	serviceLookups         map[string]*serviceManagerLookup
-	serviceLeases          map[string]int
-	serviceRemovals        map[string]*serviceManagerRemoval
-	serviceClosing         bool
-	serviceMutations       int
-	serviceChanged         chan struct{}
-	serviceContext         context.Context
-	serviceFactory         func(string, ServiceManagerOptions) (*ServiceManager, error)
-	serviceStarter         func(*ServiceManager, context.Context) error
-	serviceStopper         func(*ServiceManager, context.Context) error
-	serviceShutdownStopper func(*ServiceManager, context.Context) error
-	uiStateMu              sync.Mutex
+	addr                        string
+	config                      string
+	agentHubMode                string
+	agentHubEndpoint            string
+	agents                      *agentManager
+	doctor                      *doctorMonitor
+	locks                       *workspaceLockManager
+	serviceMu                   sync.Mutex
+	services                    map[serviceWorkspaceKey]*ServiceManager
+	serviceLookups              map[string]*serviceManagerLookup
+	serviceLeases               map[string]int
+	serviceLeaseSet             map[*serviceManagerLease]struct{}
+	serviceRemovals             map[string]*serviceManagerRemoval
+	serviceClosing              bool
+	serviceMutations            int
+	serviceChanged              chan struct{}
+	serviceContext              context.Context
+	serviceFactory              func(string, ServiceManagerOptions) (*ServiceManager, error)
+	serviceStarter              func(*ServiceManager, context.Context) error
+	serviceStopper              func(*ServiceManager, context.Context) error
+	serviceShutdownStopper      func(*ServiceManager, context.Context) error
+	serviceShutdownForceTimeout time.Duration
+	uiStateMu                   sync.Mutex
 }
 
 const (

@@ -31,6 +31,7 @@ trap cleanup EXIT HUP INT TERM
 sparkle=$("$root/scripts/fetch-sparkle")
 mkdir -p "$stage/PUA.app/Contents/MacOS" "$stage/PUA.app/Contents/Resources" "$stage/PUA.app/Contents/Frameworks"
 cp "$root/desktop/macos/Info.plist" "$stage/PUA.app/Contents/Info.plist"
+"$root/scripts/build-icon" "$root/desktop/macos/AppIcon-Dev.png" "$stage/PUA.app/Contents/Resources/AppIcon.icns"
 cp "$stage/backend/pua" "$stage/PUA.app/Contents/Resources/pua"
 cp "$stage/backend/agenthub" "$stage/PUA.app/Contents/Resources/agenthub"
 cp -R "$sparkle/Sparkle.framework" "$stage/PUA.app/Contents/Frameworks/Sparkle.framework"

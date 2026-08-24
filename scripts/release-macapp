@@ -15,7 +15,7 @@ component_version=$(tr -d '[:space:]' <"$root/versions/macapp")
 [ "$version" = "$release_version" ] || die "version $version does not match versions/release ($release_version)"
 [ "$version" = "$component_version" ] || die "macapp does not participate in release $release_version"
 [ "$(uname -s)" = Darwin ] || die "mac app releases must run on macOS"
-for name in go git npm codesign security xcrun hdiutil lipo install_name_tool ditto plutil shasum curl tar; do require "$name"; done
+for name in go git npm codesign security xcrun hdiutil lipo install_name_tool ditto plutil shasum curl tar sips iconutil; do require "$name"; done
 [ -n "${SPARKLE_PUBLIC_KEY:-}" ] || die "SPARKLE_PUBLIC_KEY is required"
 [ -n "${SPARKLE_PRIVATE_KEY:-}${SPARKLE_KEY_ACCOUNT:-}" ] || die "SPARKLE_PRIVATE_KEY or SPARKLE_KEY_ACCOUNT is required"
 [ -n "${COMPONENT_UPDATE_PUBLIC_KEY:-}" ] || die "COMPONENT_UPDATE_PUBLIC_KEY is required"
@@ -51,6 +51,7 @@ trap cleanup EXIT HUP INT TERM
 app=$stage/PUA.app
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app/Contents/Frameworks"
 cp "$root/desktop/macos/Info.plist" "$app/Contents/Info.plist"
+"$root/scripts/build-icon" "$root/desktop/macos/AppIcon.png" "$app/Contents/Resources/AppIcon.icns"
 cp -R "$sparkle/Sparkle.framework" "$app/Contents/Frameworks/Sparkle.framework"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $build_number" "$app/Contents/Info.plist"

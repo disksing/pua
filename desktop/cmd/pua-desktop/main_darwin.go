@@ -116,32 +116,46 @@ func (set *windowSet) show(name string) {
 	default:
 		options.Name, options.Title, name = "main", "PUA", "main"
 	}
+	if name != "services" {
+		options.URL = set.currentWindowURL(name)
+	}
 	window := set.app.Window.NewWithOptions(options)
 	set.windows[name] = window
-	if name != "services" {
-		set.updateRemoteURL(name, window)
-	}
 	window.RegisterHook(events.Common.WindowClosing, func(event *application.WindowEvent) {
 		event.Cancel()
 		window.Hide()
 	})
 }
 
-func (set *windowSet) updateRemoteURL(name string, window *application.WebviewWindow) {
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-	status := set.manager.Status(ctx)
-	cancel()
+// windowURL resolves the remote URL a service window should show. PUA windows
+// load the PUA server; AgentHub and Beeper windows load the standalone
+// AgentHub endpoint directly, because a managed PUA server runs with
+// --agenthub-mode=external and does not serve /agenthub/ itself.
+func windowURL(status desktop.Status, name string) string {
 	base := strings.TrimRight(status.PUA.Endpoint, "/")
+	suffix := "/"
+	if name == "agenthub" || name == "beeper" {
+		base = strings.TrimRight(status.AgentHub.Endpoint, "/")
+		if name == "beeper" {
+			suffix = "/beeper"
+		}
+	}
 	if base == "" {
-		return
+		return ""
 	}
-	path := "/"
-	if name == "agenthub" {
-		path = "/agenthub/"
-	} else if name == "beeper" {
-		path = "/agenthub/beeper"
+	return base + suffix
+}
+
+func (set *windowSet) currentWindowURL(name string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	return windowURL(set.manager.Status(ctx), name)
+}
+
+func (set *windowSet) updateRemoteURL(name string, window *application.WebviewWindow) {
+	if url := set.currentWindowURL(name); url != "" {
+		window.SetURL(url)
 	}
-	window.SetURL(base + path)
 }
 
 func (set *windowSet) refreshRemoteWindows() {

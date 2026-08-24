@@ -38,6 +38,9 @@ open "bin/PUA Dev.app"
 正式版更新；要端到端测试开发 App 的 Sparkle 更新，可同时设置 `PUA_DEV_SPARKLE_FEED_URL` 和
 `PUA_DEV_SPARKLE_PUBLIC_KEY`。正式发布由 release 脚本生成 Developer ID 签名、公证的 Universal DMG。
 
+App 图标由 `scripts/build-icon` 在构建时从 `desktop/macos/` 下的 PNG 源生成 `.icns`：开发 App
+使用紫色透明雨伞 `AppIcon-Dev.png`，正式发布使用黄色透明雨伞 `AppIcon.png`。
+
 开发和隔离测试可使用以下环境变量：
 
 - `PUA_DESKTOP_BACKEND`：指定 bootstrap `pua` 可执行文件；它仍会复制到版本化目录。

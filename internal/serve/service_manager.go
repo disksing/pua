@@ -160,7 +160,11 @@ type serviceRuntime struct {
 	terminationPending    bool
 	orphanRecoveryPending bool
 	orphanCleanupComplete bool
-	processOwnership      serviceProcessOwnership
+	// rollbackRemovalPending marks an owned generation whose ApplyAll-created
+	// definition was rolled back completely. It must be terminated and removed
+	// without consulting the definition graph or ever becoming restartable.
+	rollbackRemovalPending bool
+	processOwnership       serviceProcessOwnership
 }
 
 type serviceRuntimeConfigSnapshot struct {
@@ -190,6 +194,7 @@ type serviceRuntimeConfigSnapshot struct {
 	terminationPending      bool
 	orphanRecoveryPending   bool
 	orphanCleanupComplete   bool
+	rollbackRemovalPending  bool
 	processOwnership        serviceProcessOwnership
 }
 
@@ -209,6 +214,9 @@ type persistedServiceRuntimeState struct {
 	// SuppressHookDiagnostics preserves the fail-closed generation boundary
 	// across manager reconstruction without retaining any hand-off bytes.
 	SuppressHookDiagnostics bool `json:"suppressHookDiagnostics,omitempty"`
+	// RollbackRemovalPending keeps a newly added generation discoverable after
+	// its definition rollback removed the service from the desired graph.
+	RollbackRemovalPending bool `json:"rollbackRemovalPending,omitempty"`
 }
 
 type persistedServiceProcessConfig struct {
@@ -325,13 +333,85 @@ func (m *ServiceManager) loadLocked() error {
 		}
 		rt.status.Dependencies = append([]string(nil), graph[id]...)
 	}
+	if err := m.loadRollbackRemovalRuntimesLocked(configs); err != nil {
+		return err
+	}
 	for id := range m.runtimes {
-		if _, ok := configs[id]; !ok && m.runtimes[id].process == nil {
+		if _, ok := configs[id]; !ok && m.runtimes[id].process == nil && !m.runtimes[id].rollbackRemovalPending {
 			delete(m.runtimes, id)
 		}
 	}
 	if _, err := m.loadBindingsLocked(); err != nil {
 		return err
+	}
+	return nil
+}
+
+func (m *ServiceManager) loadRollbackRemovalRuntimesLocked(configs map[string]ServiceConfig) error {
+	dir := filepath.Dir(serviceRuntimePath(m.root, "placeholder"))
+	if !pathWithinResolved(filepath.Join(m.root, ".pua"), dir) {
+		return errors.New("service runtime directory escapes the workspace control directory")
+	}
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect service rollback runtimes: %w", err)
+	}
+	readFile := m.runtimeStateStore.readFile
+	if readFile == nil {
+		readFile = os.ReadFile
+	}
+	for _, entry := range entries {
+		id := entry.Name()
+		if !entry.IsDir() || !serviceIDPattern.MatchString(id) {
+			continue
+		}
+		if _, configured := configs[id]; configured {
+			continue
+		}
+		statePath := filepath.Join(serviceRuntimePath(m.root, id), "state.json")
+		if !pathWithinResolved(dir, statePath) {
+			return fmt.Errorf("service %s rollback runtime path escapes the runtime directory", id)
+		}
+		data, err := readFile(statePath)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("inspect service %s rollback runtime: %w", id, err)
+		}
+		var marker struct {
+			RollbackRemovalPending bool `json:"rollbackRemovalPending"`
+		}
+		if err := json.Unmarshal(data, &marker); err != nil || !marker.RollbackRemovalPending {
+			continue
+		}
+		var persisted persistedServiceRuntimeState
+		if err := json.Unmarshal(data, &persisted); err != nil {
+			return fmt.Errorf("inspect service %s rollback runtime: %w", id, err)
+		}
+		cfg := defaultServiceConfig(ServiceConfig{
+			SchemaVersion: serviceSchemaVersion,
+			ID:            id,
+			Enabled:       false,
+			Command:       []string{"/bin/true"},
+		})
+		if persisted.ProcessConfig != nil {
+			cfg = persisted.ProcessConfig.serviceConfig()
+			cfg.Enabled = false
+		}
+		rt := &serviceRuntime{
+			config:                 cfg,
+			status:                 initialServiceStatus(cfg),
+			rollbackRemovalPending: true,
+		}
+		m.runtimes[id] = rt
+		if err := m.loadStatusLocked(rt); err != nil {
+			delete(m.runtimes, id)
+			return fmt.Errorf("load service %s rollback runtime state: %w", id, err)
+		}
 	}
 	return nil
 }
@@ -439,6 +519,7 @@ func (m *ServiceManager) loadStatusLocked(rt *serviceRuntime) error {
 		status.Exports.Variables = map[string]string{}
 	}
 	rt.orphanRecoveryPending = persisted.OrphanRecoveryPending || status.PID > 0 || status.ProcessGroup > 0
+	rt.rollbackRemovalPending = persisted.RollbackRemovalPending
 	rt.suppressHookDiagnostics.Store(persisted.SuppressHookDiagnostics)
 	rt.orphanCleanupComplete = false
 	if persisted.ProcessConfig != nil {
@@ -522,6 +603,9 @@ func (m *ServiceManager) Stop(ctx context.Context) error {
 	m.stopping = true
 	m.started = false
 	var first error
+	if err := m.reconcileRollbackRemovalsLocked(ctx); err != nil {
+		first = err
+	}
 	ids := m.sortedIDsLocked()
 	for i := len(ids) - 1; i >= 0; i-- {
 		rt := m.runtimes[ids[i]]
@@ -581,7 +665,8 @@ func (m *ServiceManager) reconcileLocked(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	result := m.recoverOrphansLocked()
+	result := m.reconcileRollbackRemovalsLocked(ctx)
+	result = errors.Join(result, m.recoverOrphansLocked())
 	if err := m.invalidateStaleServiceGenerationsLocked(ctx); err != nil {
 		return errors.Join(result, err)
 	}
@@ -609,6 +694,59 @@ func (m *ServiceManager) reconcileLocked(ctx context.Context) error {
 		}
 	}
 	return errors.Join(result, manualStopErr)
+}
+
+// reconcileRollbackRemovalsLocked terminates generations created by a failed
+// ApplyAll after their definitions have been removed from desired state. These
+// runtimes deliberately bypass the dependency graph: no definition exists to
+// make them reachable there, and they must never become restart candidates.
+func (m *ServiceManager) reconcileRollbackRemovalsLocked(ctx context.Context) error {
+	ids := make([]string, 0)
+	for id, rt := range m.runtimes {
+		if rt != nil && rt.rollbackRemovalPending {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	var result error
+	for _, id := range ids {
+		rt := m.runtimes[id]
+		if rt == nil || !rt.rollbackRemovalPending {
+			continue
+		}
+		if serviceRuntimeOwnsProcess(rt) {
+			if err := m.stopProcessLocked(ctx, rt, false); err != nil {
+				result = errors.Join(result, fmt.Errorf("remove rolled-back service %q: %w", id, err))
+				continue
+			}
+		}
+		if err := m.removeRollbackRuntimeFilesLocked(rt); err != nil {
+			rt.status.AttentionRequired = true
+			rt.status.State = ServiceStateAttentionRequired
+			rt.status.LastError = err.Error()
+			result = errors.Join(result, err, m.persistStatusLocked(rt))
+			continue
+		}
+		delete(m.runtimes, id)
+	}
+	return result
+}
+
+func (m *ServiceManager) removeRollbackRuntimeFilesLocked(rt *serviceRuntime) error {
+	if rt == nil {
+		return nil
+	}
+	root := serviceRuntimePath(m.root, rt.status.ID)
+	if !pathWithinResolved(filepath.Join(m.root, ".pua"), root) {
+		return errors.New("rolled-back service runtime path escapes the workspace control directory")
+	}
+	var result error
+	for _, name := range []string{"events.jsonl", "state.json"} {
+		if err := os.Remove(filepath.Join(root, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			result = errors.Join(result, fmt.Errorf("remove rolled-back service %s %s: %w", rt.status.ID, name, err))
+		}
+	}
+	return result
 }
 
 // reconcileManualStopChainsLocked resumes a StopService operation that
@@ -747,8 +885,18 @@ func (m *ServiceManager) invalidateStaleServiceGenerationsLocked(ctx context.Con
 		return err
 	}
 	for _, id := range stopOrder {
-		if err := m.stopRuntimeForDependencyChangeLocked(ctx, m.runtimes[id]); err != nil {
+		rt := m.runtimes[id]
+		retryingTermination := rt != nil && rt.terminationPending
+		if err := m.stopRuntimeForDependencyChangeLocked(ctx, rt); err != nil {
 			return err
+		}
+		if retryingTermination {
+			rt.status.AttentionRequired = false
+			rt.status.LastError = ""
+			rt.status.State = ServiceStateStopped
+			if err := m.persistStatusLocked(rt); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -2605,6 +2753,7 @@ func (m *ServiceManager) persistStatusLocked(rt *serviceRuntime) error {
 		OrphanRecoveryPending:   rt.orphanRecoveryPending,
 		PendingExportChanges:    sortedStringSet(rt.pendingExportKeys),
 		SuppressHookDiagnostics: rt.suppressHookDiagnostics.Load(),
+		RollbackRemovalPending:  rt.rollbackRemovalPending,
 	}
 	if (rt.status.PID > 0 || rt.status.ProcessGroup > 0 || rt.orphanRecoveryPending) && rt.processConfig != nil {
 		persisted.ProcessConfig = newPersistedServiceProcessConfig(rt)
@@ -3180,7 +3329,10 @@ func (m *ServiceManager) applyAllLocked(configs []ServiceConfig, rollbackLifecyc
 		}
 		definitionRollbackErr := m.beginServiceDefinitionTransactionLocked(oldConfigs, changed, definitionSnapshots)
 		rollbackErr := m.rollbackAppliedServicesLocked(transactionIDs, newStopOrder, oldOrder, oldConfigs, oldGraph, runtimeSnapshots, stateSnapshots, eventSnapshots)
-		if definitionRollbackErr == nil && rollbackErr == nil {
+		// Runtime cleanup can remain retryable after the old definitions are
+		// durably restored. Do not retain a completed definition transaction just
+		// because a replacement process still needs termination attention.
+		if definitionRollbackErr == nil {
 			definitionRollbackErr = m.finishServiceDefinitionTransactionLocked()
 		}
 		return errors.Join(cause, definitionRollbackErr, rollbackErr)
@@ -3402,6 +3554,7 @@ func snapshotServiceRuntimeConfig(rt *serviceRuntime) serviceRuntimeConfigSnapsh
 		terminationPending:      rt.terminationPending,
 		orphanRecoveryPending:   rt.orphanRecoveryPending,
 		orphanCleanupComplete:   rt.orphanCleanupComplete,
+		rollbackRemovalPending:  rt.rollbackRemovalPending,
 		processOwnership:        rt.processOwnership,
 	}
 }
@@ -3466,6 +3619,7 @@ func restoreServiceRuntimeConfig(rt *serviceRuntime, snapshot serviceRuntimeConf
 	rt.terminationPending = snapshot.terminationPending
 	rt.orphanRecoveryPending = snapshot.orphanRecoveryPending
 	rt.orphanCleanupComplete = snapshot.orphanCleanupComplete
+	rt.rollbackRemovalPending = snapshot.rollbackRemovalPending
 	rt.processOwnership = snapshot.processOwnership
 }
 
@@ -3496,17 +3650,45 @@ func restoreServiceFile(snapshot serviceFileSnapshot) error {
 
 func (m *ServiceManager) rollbackAppliedServicesLocked(ids, stopOrder, restartOrder []string, configs map[string]ServiceConfig, graph serviceDependencyGraph, runtimes map[string]serviceRuntimeConfigSnapshot, states, events map[string]serviceFileSnapshot) error {
 	var result error
+	uncertain := make(map[string]struct{})
 	for _, id := range stopOrder {
 		rt := m.runtimes[id]
 		snapshot, existed := runtimes[id]
-		if rt != nil && rt.process != nil && (!existed || rt.process != snapshot.process) {
-			result = errors.Join(result, m.stopProcessLocked(context.Background(), rt, false))
+		if !serviceRuntimeOwnsProcess(rt) || (existed && serviceRuntimeOwnsSnapshotProcess(rt, snapshot)) {
+			continue
+		}
+		if err := m.stopProcessLocked(context.Background(), rt, false); err != nil {
+			result = errors.Join(result, err)
+			if serviceRuntimeOwnsProcess(rt) {
+				// The replacement may still be live. Its process pointer, immutable
+				// processConfig, identity tuple, and termination intent remain
+				// authoritative until a later reconciliation confirms exit.
+				uncertain[id] = struct{}{}
+			}
 		}
 	}
 	m.configs, m.graph = configs, graph
 	restart := make(map[string]struct{})
 	for _, id := range ids {
 		snapshot, existed := runtimes[id]
+		if _, pending := uncertain[id]; pending {
+			rt := m.runtimes[id]
+			if existed {
+				// config is desired state; processConfig continues to describe the
+				// replacement generation that this manager still owns.
+				rt.config = cloneServiceConfig(snapshot.config)
+			} else {
+				// No prior definition exists to make this runtime reachable from the
+				// rolled-back graph. Persist an explicit removal-only intent and a
+				// disabled desired config so neither this manager nor a reconstructed
+				// manager can restart the newly added generation.
+				rt.rollbackRemovalPending = true
+				rt.config.Enabled = false
+				rt.status.Enabled = false
+			}
+			result = errors.Join(result, m.persistStatusLocked(rt))
+			continue
+		}
 		if !existed {
 			delete(m.runtimes, id)
 			continue
@@ -3532,7 +3714,11 @@ func (m *ServiceManager) rollbackAppliedServicesLocked(ids, stopOrder, restartOr
 	}
 	for _, snapshots := range []map[string]serviceFileSnapshot{states, events} {
 		for index := len(ids) - 1; index >= 0; index-- {
-			result = errors.Join(result, restoreServiceFile(snapshots[ids[index]]))
+			id := ids[index]
+			if _, pending := uncertain[id]; pending {
+				continue
+			}
+			result = errors.Join(result, restoreServiceFile(snapshots[id]))
 		}
 	}
 	for _, id := range restartOrder {
@@ -3544,6 +3730,21 @@ func (m *ServiceManager) rollbackAppliedServicesLocked(ids, stopOrder, restartOr
 		}
 	}
 	return result
+}
+
+func serviceRuntimeOwnsProcess(rt *serviceRuntime) bool {
+	return rt != nil && (rt.process != nil || rt.status.PID > 0 || rt.status.ProcessGroup > 0)
+}
+
+func serviceRuntimeOwnsSnapshotProcess(rt *serviceRuntime, snapshot serviceRuntimeConfigSnapshot) bool {
+	if rt == nil {
+		return false
+	}
+	return rt.process == snapshot.process &&
+		rt.status.PID == snapshot.status.PID &&
+		rt.status.ProcessGroup == snapshot.status.ProcessGroup &&
+		rt.status.ProcessStartID == snapshot.status.ProcessStartID &&
+		rt.status.InstanceToken == snapshot.status.InstanceToken
 }
 
 func (m *ServiceManager) Apply(cfg ServiceConfig) error {

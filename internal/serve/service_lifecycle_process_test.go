@@ -1296,6 +1296,250 @@ func TestServiceManagerApplyAllRollbackRestoresProcessCleanupSnapshot(t *testing
 	}
 }
 
+func TestServiceManagerApplyAllRollbackRetainsUncertainReplacement(t *testing.T) {
+	root := t.TempDir()
+	config := func(id, label string, dependencies ...string) ServiceConfig {
+		return ServiceConfig{
+			SchemaVersion: serviceSchemaVersion,
+			ID:            id,
+			Enabled:       true,
+			Command:       []string{"/bin/sh", "-c", "exec sleep 30"},
+			Args:          []string{label},
+			DependsOn:     dependencies,
+		}
+	}
+	oldAlpha := config("alpha", "alpha-old")
+	oldBravo := config("bravo", "bravo-old", "alpha")
+	writeTestService(t, root, oldAlpha)
+	writeTestService(t, root, oldBravo)
+	manager, err := NewServiceManager(root, ServiceManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopProcessTestManager(t, &manager)
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	originalAlpha := waitForServiceState(t, manager, "alpha", ServiceStateReady)
+	originalBravo := waitForServiceState(t, manager, "bravo", ServiceStateReady)
+
+	newAlpha := config("alpha", "alpha-new")
+	newBravo := config("bravo", "bravo-new", "alpha")
+	nativeWrite := manager.runtimeStateStore.writeJSON
+	injectedLifecycle := errors.New("injected bravo replacement state failure")
+	var replacementAlpha persistedServiceRuntimeState
+	manager.runtimeStateStore.writeJSON = func(path string, value any, mode os.FileMode) error {
+		persisted, ok := value.(persistedServiceRuntimeState)
+		if ok && persisted.ID == "alpha" && persisted.PID > 0 && persisted.PID != originalAlpha.PID {
+			replacementAlpha = persisted
+		}
+		if ok && persisted.ID == "bravo" && persisted.PID > 0 && persisted.PID != originalBravo.PID {
+			return injectedLifecycle
+		}
+		return nativeWrite(path, value, mode)
+	}
+	nativeSignal := manager.processPlatform.signalProcessGroup
+	injectedStop := errors.New("injected replacement termination failure")
+	manager.processPlatform.signalProcessGroup = func(group int, signal syscall.Signal) error {
+		if replacementAlpha.ProcessGroup > 0 && group == replacementAlpha.ProcessGroup {
+			return injectedStop
+		}
+		return nativeSignal(group, signal)
+	}
+
+	applyErr := manager.ApplyAll([]ServiceConfig{newAlpha, newBravo})
+	manager.runtimeStateStore.writeJSON = nativeWrite
+	manager.processPlatform.signalProcessGroup = nativeSignal
+	if !errors.Is(applyErr, injectedLifecycle) || !strings.Contains(applyErr.Error(), injectedStop.Error()) {
+		t.Fatalf("ApplyAll error = %v, want lifecycle and replacement termination failures", applyErr)
+	}
+	if replacementAlpha.PID <= 0 || replacementAlpha.ProcessGroup <= 0 {
+		t.Fatalf("replacement alpha was not observed: %#v", replacementAlpha.ServiceStatus)
+	}
+	if _, err := os.Stat(serviceDefinitionTransactionPath(root)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("completed definition rollback journal remains: %v", err)
+	}
+	persistedDefinition, err := LoadServiceConfig(serviceConfigPath(root, "alpha"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := persistedDefinition.Args, oldAlpha.Args; len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("definition args after rollback = %v, want %v", got, want)
+	}
+
+	runtime := manager.runtimes["alpha"]
+	status, err := manager.Show("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.process == nil || runtime.process.Process.Pid != replacementAlpha.PID ||
+		status.PID != replacementAlpha.PID || status.ProcessGroup != replacementAlpha.ProcessGroup ||
+		status.ProcessStartID != replacementAlpha.ProcessStartID || status.InstanceToken != replacementAlpha.InstanceToken {
+		t.Fatalf("rollback lost replacement ownership: status=%#v persisted=%#v", status, replacementAlpha.ServiceStatus)
+	}
+	if runtime.processConfig == nil || serviceConfigDigest(*runtime.processConfig) != serviceConfigDigest(defaultServiceConfig(newAlpha)) ||
+		serviceConfigDigest(runtime.config) != serviceConfigDigest(defaultServiceConfig(oldAlpha)) {
+		t.Fatalf("rollback generation configs = desired %#v, process %#v", runtime.config, runtime.processConfig)
+	}
+	if !runtime.terminationPending || !status.AttentionRequired || status.State != ServiceStateAttentionRequired {
+		t.Fatalf("uncertain replacement status = %#v, termination pending %t", status, runtime.terminationPending)
+	}
+	if status.PID == originalAlpha.PID {
+		t.Fatalf("old alpha restarted before replacement termination: %#v", status)
+	}
+
+	stateData, err := os.ReadFile(filepath.Join(serviceRuntimePath(root, "alpha"), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var durable persistedServiceRuntimeState
+	if err := json.Unmarshal(stateData, &durable); err != nil {
+		t.Fatal(err)
+	}
+	if durable.PID != replacementAlpha.PID || durable.ProcessGroup != replacementAlpha.ProcessGroup ||
+		durable.ProcessStartID != replacementAlpha.ProcessStartID || durable.InstanceToken != replacementAlpha.InstanceToken ||
+		durable.ProcessConfig == nil || durable.ProcessConfig.CommandDigest != serviceCommandDigest(newAlpha) ||
+		!durable.AttentionRequired {
+		t.Fatalf("durable replacement ownership = %#v", durable)
+	}
+
+	if err := manager.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	restartedAlpha := waitForServiceState(t, manager, "alpha", ServiceStateReady)
+	restartedBravo := waitForServiceState(t, manager, "bravo", ServiceStateReady)
+	if restartedAlpha.PID <= 0 || restartedAlpha.PID == replacementAlpha.PID ||
+		restartedAlpha.CommandDigest != serviceCommandDigest(oldAlpha) || restartedAlpha.AttentionRequired {
+		t.Fatalf("alpha after termination retry = %#v", restartedAlpha)
+	}
+	if restartedBravo.PID <= 0 || restartedBravo.CommandDigest != serviceCommandDigest(oldBravo) {
+		t.Fatalf("bravo after dependency-ordered recovery = %#v", restartedBravo)
+	}
+	if runtime.terminationPending || runtime.processConfig == nil || serviceConfigDigest(*runtime.processConfig) != serviceConfigDigest(defaultServiceConfig(oldAlpha)) {
+		t.Fatalf("alpha runtime after recovery = %#v, termination pending %t", runtime.processConfig, runtime.terminationPending)
+	}
+}
+
+func TestServiceManagerApplyAllRollbackRemovesUncertainNewService(t *testing.T) {
+	root := t.TempDir()
+	startPath := filepath.Join(root, "alpha-starts")
+	alpha := ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "alpha",
+		Enabled:       true,
+		Command: []string{"/bin/sh", "-c",
+			"printf 'start\\n' >> " + shellQuote(startPath) + "; exec sleep 30"},
+	}
+	bravo := ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "bravo",
+		Enabled:       true,
+		Command:       []string{"/bin/sh", "-c", "exec sleep 30"},
+		DependsOn:     []string{"alpha"},
+	}
+	manager, err := NewServiceManager(root, ServiceManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopProcessTestManager(t, &manager)
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	nativeWrite := manager.runtimeStateStore.writeJSON
+	injectedLifecycle := errors.New("injected new bravo state failure")
+	var alphaGeneration persistedServiceRuntimeState
+	manager.runtimeStateStore.writeJSON = func(path string, value any, mode os.FileMode) error {
+		persisted, ok := value.(persistedServiceRuntimeState)
+		if ok && persisted.ID == "alpha" && persisted.PID > 0 {
+			alphaGeneration = persisted
+		}
+		if ok && persisted.ID == "bravo" && persisted.PID > 0 {
+			return injectedLifecycle
+		}
+		return nativeWrite(path, value, mode)
+	}
+	nativeSignal := manager.processPlatform.signalProcessGroup
+	injectedStop := errors.New("injected new alpha termination failure")
+	manager.processPlatform.signalProcessGroup = func(group int, signal syscall.Signal) error {
+		if alphaGeneration.ProcessGroup > 0 && group == alphaGeneration.ProcessGroup {
+			return injectedStop
+		}
+		return nativeSignal(group, signal)
+	}
+
+	applyErr := manager.ApplyAll([]ServiceConfig{alpha, bravo})
+	manager.runtimeStateStore.writeJSON = nativeWrite
+	manager.processPlatform.signalProcessGroup = nativeSignal
+	if !errors.Is(applyErr, injectedLifecycle) || !strings.Contains(applyErr.Error(), injectedStop.Error()) {
+		t.Fatalf("ApplyAll error = %v, want lifecycle and new-service termination failures", applyErr)
+	}
+	waitForTestPath(t, startPath, "start")
+	if _, ok := manager.configs["alpha"]; ok {
+		t.Fatal("rolled-back new alpha remains in desired configs")
+	}
+	runtime := manager.runtimes["alpha"]
+	if runtime == nil || !runtime.rollbackRemovalPending || runtime.config.Enabled ||
+		runtime.process == nil || runtime.process.Process.Pid != alphaGeneration.PID ||
+		runtime.processConfig == nil || serviceConfigDigest(*runtime.processConfig) != serviceConfigDigest(defaultServiceConfig(alpha)) {
+		t.Fatalf("new alpha rollback runtime = %#v", runtime)
+	}
+	for _, id := range []string{"alpha", "bravo"} {
+		if _, err := os.Stat(serviceConfigPath(root, id)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("rolled-back definition %s remains: %v", id, err)
+		}
+	}
+	if _, err := os.Stat(serviceDefinitionTransactionPath(root)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("completed definition rollback journal remains: %v", err)
+	}
+	statePath := filepath.Join(serviceRuntimePath(root, "alpha"), "state.json")
+	stateData, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var durable persistedServiceRuntimeState
+	if err := json.Unmarshal(stateData, &durable); err != nil {
+		t.Fatal(err)
+	}
+	if !durable.RollbackRemovalPending || durable.PID != alphaGeneration.PID ||
+		durable.ProcessGroup != alphaGeneration.ProcessGroup || durable.ProcessConfig == nil ||
+		durable.ProcessConfig.CommandDigest != serviceCommandDigest(alpha) {
+		t.Fatalf("durable new-service removal ownership = %#v", durable)
+	}
+
+	reconstructed, err := NewServiceManager(root, ServiceManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopProcessTestManager(t, &reconstructed)
+	recovered := reconstructed.runtimes["alpha"]
+	if recovered == nil || !recovered.rollbackRemovalPending || recovered.process != nil ||
+		recovered.status.PID != alphaGeneration.PID || recovered.status.ProcessGroup != alphaGeneration.ProcessGroup ||
+		recovered.processConfig == nil {
+		t.Fatalf("reconstructed new-service removal = %#v", recovered)
+	}
+	// The reconstructed manager now owns durable cleanup. Avoid asking the
+	// original manager's stale in-memory process handle to signal it again.
+	manager = nil
+	if err := reconstructed.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconstructed.Show("alpha"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rolled-back alpha remains visible after termination: %v", err)
+	}
+	if _, ok := reconstructed.runtimes["alpha"]; ok {
+		t.Fatal("rolled-back alpha runtime remains after confirmed termination")
+	}
+	for _, name := range []string{"state.json", "events.jsonl"} {
+		if _, err := os.Stat(filepath.Join(serviceRuntimePath(root, "alpha"), name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("rolled-back alpha %s remains: %v", name, err)
+		}
+	}
+	if count := serviceTransactionMarkerCount(t, startPath, "start"); count != 1 {
+		t.Fatalf("rolled-back alpha starts = %d, want 1", count)
+	}
+}
+
 func TestServiceManagerReconstructedOrphanUsesPersistedCleanupSnapshot(t *testing.T) {
 	const (
 		launchSecret    = "launch-only-cleanup-secret"

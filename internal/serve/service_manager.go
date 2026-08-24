@@ -540,6 +540,12 @@ func (m *ServiceManager) reconcileLocked(ctx context.Context) error {
 	if err := m.invalidateStaleServiceGenerationsLocked(ctx); err != nil {
 		return errors.Join(result, err)
 	}
+	if err := m.reconcileManualStopChainsLocked(ctx); err != nil {
+		// A live dependent still protects every dependency below it. Do not enter
+		// ordinary startup reconciliation until the persisted stop intent has
+		// converged, or a partially stopped chain could be relaunched.
+		return errors.Join(result, err)
+	}
 	ids := m.sortedIDsLocked()
 	for _, id := range ids {
 		rt := m.runtimes[id]
@@ -551,6 +557,95 @@ func (m *ServiceManager) reconcileLocked(ctx context.Context) error {
 		}
 	}
 	return result
+}
+
+// reconcileManualStopChainsLocked resumes a StopService operation that
+// persisted its operator intent but failed before reaching the selected
+// service. All live manual-stop targets are combined into one reverse-
+// topological pass so overlapping chains are stopped once in stable order.
+func (m *ServiceManager) reconcileManualStopChainsLocked(ctx context.Context) error {
+	targets := make(map[string]struct{})
+	for id, rt := range m.runtimes {
+		if rt == nil || !rt.status.ManualStop || rt.orphanRecoveryPending || (rt.process == nil && rt.status.ProcessGroup <= 0) {
+			continue
+		}
+		targets[id] = struct{}{}
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+
+	impacted := serviceDependencyChangeSet(m.graph, m.graph, targets)
+	stopOrder, err := serviceGraphSubsetStopOrder(m.graph, impacted)
+	if err != nil {
+		return err
+	}
+	var result error
+	for _, id := range stopOrder {
+		rt := m.runtimes[id]
+		if rt == nil || rt.orphanRecoveryPending || (rt.process == nil && rt.status.ProcessGroup <= 0) {
+			continue
+		}
+		// When a prior stop in this pass failed, keep its dependencies alive.
+		// Independent chains remain eligible, allowing multiple durable targets
+		// to make progress without violating dependent-first shutdown.
+		if m.hasLiveServiceDependentLocked(id) {
+			continue
+		}
+
+		_, manualTarget := targets[id]
+		retryingTermination := rt.terminationPending
+		if manualTarget {
+			err = m.stopProcessLocked(ctx, rt, true)
+			if err == nil {
+				rt.status.Readiness.Ready = false
+				if retryingTermination {
+					rt.status.AttentionRequired = false
+					rt.status.LastError = ""
+				}
+				if !rt.status.AttentionRequired {
+					rt.status.State = ServiceStateStopped
+				}
+				err = m.persistStatusLocked(rt)
+			}
+		} else {
+			err = m.stopRuntimeForDependencyChangeLocked(ctx, rt)
+			if err == nil && retryingTermination {
+				rt.status.AttentionRequired = false
+				rt.status.LastError = ""
+				rt.status.State = ServiceStateStopped
+				err = m.persistStatusLocked(rt)
+			}
+		}
+		if err != nil {
+			result = errors.Join(result, fmt.Errorf("retry manual stop at service %q: %w", id, err))
+		}
+	}
+	if result == nil {
+		for _, id := range stopOrder {
+			if _, target := targets[id]; !target {
+				continue
+			}
+			rt := m.runtimes[id]
+			if rt != nil && (rt.process != nil || rt.status.ProcessGroup > 0) {
+				return fmt.Errorf("retry manual stop at service %q: live dependent still blocks shutdown", id)
+			}
+		}
+	}
+	return result
+}
+
+func (m *ServiceManager) hasLiveServiceDependentLocked(id string) bool {
+	dependents := serviceDependencyChangeSet(m.graph, m.graph, map[string]struct{}{id: {}})
+	delete(dependents, id)
+	for candidateID := range dependents {
+		candidate := m.runtimes[candidateID]
+		if candidate == nil || (candidate.process == nil && candidate.status.ProcessGroup <= 0) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // invalidateStaleServiceGenerationsLocked completes an Apply whose desired

@@ -510,6 +510,173 @@ func TestServiceManagerStopAndDisableRetainTargetWhenDependentStopFails(t *testi
 	}
 }
 
+func TestServiceManagerReconcileRetriesFailedManualStopChain(t *testing.T) {
+	root := t.TempDir()
+	tracePath := filepath.Join(root, "dependency-manual-stop-retry-trace")
+	alpha := dependencyRestartNode(tracePath, "alpha", "", "one")
+	bravo := dependencyRestartNode(tracePath, "bravo", "alpha", "")
+	charlie := dependencyRestartNode(tracePath, "charlie", "bravo", "")
+	delta := dependencyRestartNode(tracePath, "delta", "", "stable")
+	manager := startDependencyRestartManager(t, root, alpha, bravo, charlie, delta)
+	deltaPID := servicePIDs(t, manager, "delta")["delta"]
+	bravoStatus, err := manager.Show("bravo")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	injected := errors.New("injected dependent stop failure")
+	nativeSignal := manager.processPlatform.signalProcessGroup
+	manager.processPlatform.signalProcessGroup = func(group int, signal syscall.Signal) error {
+		if group == bravoStatus.ProcessGroup {
+			return injected
+		}
+		return nativeSignal(group, signal)
+	}
+	t.Cleanup(func() { manager.processPlatform.signalProcessGroup = nativeSignal })
+	resetDependencyRestartTrace(t, tracePath)
+	if stopErr := manager.StopService(context.Background(), "alpha"); stopErr == nil || !strings.Contains(stopErr.Error(), injected.Error()) {
+		t.Fatalf("StopService error = %v, want injected dependent failure", stopErr)
+	}
+	if got := dependencyRestartTrace(t, tracePath, 1); !reflect.DeepEqual(got, []string{"stop:charlie:one-bravo-charlie"}) {
+		t.Fatalf("initial failed Stop lifecycle trace = %v, want only charlie stopped", got)
+	}
+	resetDependencyRestartTrace(t, tracePath)
+	if reconcileErr := manager.Reconcile(context.Background()); reconcileErr == nil || !strings.Contains(reconcileErr.Error(), injected.Error()) {
+		t.Fatalf("failed retry Reconcile error = %v, want injected dependent failure", reconcileErr)
+	}
+	if data, err := os.ReadFile(tracePath); err != nil || len(data) != 0 {
+		t.Fatalf("failed retry lifecycle trace = %q, error %v", data, err)
+	}
+	bravoEvents, err := os.ReadFile(filepath.Join(serviceRuntimePath(root, "bravo"), "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(bravoEvents), `"type":"stop_failed"`); got != 1 {
+		t.Fatalf("bravo stop_failed events after repeated failure = %d, want 1: %s", got, bravoEvents)
+	}
+
+	manager.processPlatform.signalProcessGroup = nativeSignal
+	resetDependencyRestartTrace(t, tracePath)
+	if err := manager.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	wantTrace := []string{
+		"stop:bravo:one-bravo",
+		"stop:alpha:one",
+	}
+	if got := dependencyRestartTrace(t, tracePath, len(wantTrace)); !reflect.DeepEqual(got, wantTrace) {
+		t.Fatalf("retried manual Stop lifecycle trace = %v, want %v", got, wantTrace)
+	}
+	if got := servicePIDs(t, manager, "delta")["delta"]; got != deltaPID {
+		t.Fatalf("manual Stop retry changed unrelated delta PID %d to %d", deltaPID, got)
+	}
+	for _, id := range []string{"alpha", "bravo", "charlie"} {
+		status, err := manager.Show(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status.PID != 0 || status.ProcessGroup != 0 {
+			t.Fatalf("%s after retried manual Stop = %#v", id, status)
+		}
+		if id == "alpha" && status.State != ServiceStateStopped {
+			t.Fatalf("manual target after retry = %#v", status)
+		}
+		if got, want := status.ManualStop, id == "alpha"; got != want {
+			t.Fatalf("%s ManualStop after retry = %t, want %t", id, got, want)
+		}
+	}
+
+	resetDependencyRestartTrace(t, tracePath)
+	if err := manager.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(tracePath); err != nil || len(data) != 0 {
+		t.Fatalf("stable manual Stop reconcile trace = %q, error %v", data, err)
+	}
+
+	if err := manager.StartService(context.Background(), "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	wantTrace = []string{
+		"start:alpha:one",
+		"start:bravo:one-bravo",
+		"start:charlie:one-bravo-charlie",
+	}
+	if got := dependencyRestartTrace(t, tracePath, len(wantTrace)); !reflect.DeepEqual(got, wantTrace) {
+		t.Fatalf("explicit Start recovery trace = %v, want %v", got, wantTrace)
+	}
+}
+
+func TestServiceManagerReconcileMergesOverlappingManualStopChains(t *testing.T) {
+	root := t.TempDir()
+	tracePath := filepath.Join(root, "dependency-overlapping-manual-stop-trace")
+	alpha := dependencyRestartNode(tracePath, "alpha", "", "one")
+	bravo := dependencyRestartNode(tracePath, "bravo", "alpha", "")
+	charlie := dependencyRestartNode(tracePath, "charlie", "bravo", "")
+	manager := startDependencyRestartManager(t, root, alpha, bravo, charlie)
+	bravoStatus, err := manager.Show("bravo")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	injected := errors.New("injected overlapping stop failure")
+	nativeSignal := manager.processPlatform.signalProcessGroup
+	manager.processPlatform.signalProcessGroup = func(group int, signal syscall.Signal) error {
+		if group == bravoStatus.ProcessGroup {
+			return injected
+		}
+		return nativeSignal(group, signal)
+	}
+	t.Cleanup(func() { manager.processPlatform.signalProcessGroup = nativeSignal })
+	if err := manager.StopService(context.Background(), "alpha"); err == nil || !strings.Contains(err.Error(), injected.Error()) {
+		t.Fatalf("StopService alpha error = %v, want injected failure", err)
+	}
+	if err := manager.StopService(context.Background(), "bravo"); err == nil || !strings.Contains(err.Error(), injected.Error()) {
+		t.Fatalf("StopService bravo error = %v, want injected failure", err)
+	}
+
+	manager.processPlatform.signalProcessGroup = nativeSignal
+	resetDependencyRestartTrace(t, tracePath)
+	if err := manager.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	wantTrace := []string{"stop:bravo:one-bravo", "stop:alpha:one"}
+	if got := dependencyRestartTrace(t, tracePath, len(wantTrace)); !reflect.DeepEqual(got, wantTrace) {
+		t.Fatalf("overlapping retry trace = %v, want %v", got, wantTrace)
+	}
+	for _, id := range []string{"alpha", "bravo", "charlie"} {
+		status, err := manager.Show(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status.PID != 0 || status.ProcessGroup != 0 {
+			t.Fatalf("%s after overlapping retries = %#v", id, status)
+		}
+		if got, want := status.ManualStop, id == "alpha" || id == "bravo"; got != want {
+			t.Fatalf("%s ManualStop after overlapping retries = %t, want %t", id, got, want)
+		}
+	}
+
+	resetDependencyRestartTrace(t, tracePath)
+	if err := manager.StartService(context.Background(), "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	if got := dependencyRestartTrace(t, tracePath, 1); !reflect.DeepEqual(got, []string{"start:alpha:one"}) {
+		t.Fatalf("Start alpha with manual bravo trace = %v, want only alpha", got)
+	}
+	if err := manager.StartService(context.Background(), "bravo"); err != nil {
+		t.Fatal(err)
+	}
+	wantTrace = []string{
+		"start:alpha:one",
+		"start:bravo:one-bravo",
+		"start:charlie:one-bravo-charlie",
+	}
+	if got := dependencyRestartTrace(t, tracePath, len(wantTrace)); !reflect.DeepEqual(got, wantTrace) {
+		t.Fatalf("overlapping explicit Start trace = %v, want %v", got, wantTrace)
+	}
+}
+
 func TestServiceManagerDependencyStopFailureRollsBackApplyAll(t *testing.T) {
 	root := t.TempDir()
 	tracePath := filepath.Join(root, "dependency-restart-trace")

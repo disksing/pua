@@ -1215,10 +1215,28 @@ func writeSanitizedExportHandoff(handoff *serviceExportHandoff, export ServiceEx
 	return nil
 }
 
+type serviceExportHandoffOperations struct {
+	rename func(string, string) error
+	link   func(string, string) error
+	remove func(string) error
+}
+
+func defaultServiceExportHandoffOperations() serviceExportHandoffOperations {
+	return serviceExportHandoffOperations{
+		rename: os.Rename,
+		link:   os.Link,
+		remove: os.Remove,
+	}
+}
+
 // removeVerifiedServiceExportHandoff removes only the inode already held by
 // file. Renaming it to a private name before unlinking closes the lstat/remove
 // race; if the pathname changed, the replacement is left untouched.
 func removeVerifiedServiceExportHandoff(path string, file *os.File) error {
+	return removeVerifiedServiceExportHandoffWithOperations(path, file, defaultServiceExportHandoffOperations())
+}
+
+func removeVerifiedServiceExportHandoffWithOperations(path string, file *os.File, operations serviceExportHandoffOperations) error {
 	openedInfo, err := file.Stat()
 	if err != nil {
 		return err
@@ -1239,11 +1257,11 @@ func removeVerifiedServiceExportHandoff(path string, file *os.File) error {
 	}
 	quarantinePath := temp.Name()
 	if closeErr := temp.Close(); closeErr != nil {
-		_ = os.Remove(quarantinePath)
+		_ = operations.remove(quarantinePath)
 		return closeErr
 	}
-	if err := os.Rename(path, quarantinePath); err != nil {
-		_ = os.Remove(quarantinePath)
+	if err := operations.rename(path, quarantinePath); err != nil {
+		_ = operations.remove(quarantinePath)
 		return err
 	}
 	quarantineInfo, err := os.Lstat(quarantinePath)
@@ -1251,14 +1269,115 @@ func removeVerifiedServiceExportHandoff(path string, file *os.File) error {
 		return err
 	}
 	if os.SameFile(openedInfo, quarantineInfo) {
-		return os.Remove(quarantinePath)
+		return operations.remove(quarantinePath)
 	}
 	// The path changed between verification and rename. Restore the moved
 	// replacement without overwriting a still newer hand-off.
-	if err := os.Link(quarantinePath, path); err != nil {
-		return fmt.Errorf("restore concurrently replaced export hand-off: %w", err)
+	if err := operations.link(quarantinePath, path); err != nil {
+		restoreErr := fmt.Errorf("restore concurrently replaced export hand-off: %w", err)
+		cleanupErr := scrubAndRemoveQuarantinedServiceExport(quarantinePath, quarantineInfo, operations)
+		if cleanupErr != nil {
+			return errors.Join(restoreErr, fmt.Errorf("discard unrestored export hand-off: %w", cleanupErr))
+		}
+		return restoreErr
 	}
-	return os.Remove(quarantinePath)
+	return operations.remove(quarantinePath)
+}
+
+// scrubAndRemoveQuarantinedServiceExport destroys the contents of the exact
+// inode moved into quarantine before unlinking its private pathname. Truncating
+// through a verified descriptor also scrubs any hard links to that inode. A
+// symlink is unlinked without following it, and a changed quarantine pathname
+// is left untouched.
+func scrubAndRemoveQuarantinedServiceExport(path string, expected os.FileInfo, operations serviceExportHandoffOperations) error {
+	if !expected.Mode().IsRegular() {
+		current, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !os.SameFile(expected, current) {
+			return errors.New("quarantined export hand-off changed before unlink")
+		}
+		return operations.remove(path)
+	}
+
+	file, err := openQuarantinedServiceExportForScrubbing(path, expected)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	if err := file.Truncate(0); err != nil {
+		return fmt.Errorf("scrub quarantined export hand-off: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("sync scrubbed export hand-off: %w", err)
+	}
+	current, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	opened, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(opened, current) {
+		return errors.New("quarantined export hand-off changed before unlink")
+	}
+	return operations.remove(path)
+}
+
+func openQuarantinedServiceExportForScrubbing(path string, expected os.FileInfo) (*os.File, error) {
+	file, err := os.OpenFile(path, os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err == nil {
+		if verifyErr := verifyQuarantinedServiceExport(file, expected); verifyErr != nil {
+			_ = file.Close()
+			return nil, verifyErr
+		}
+		return file, nil
+	}
+
+	// A concurrent replacement may be read-only. Grant write access through a
+	// verified descriptor, then reopen and verify the same inode before use.
+	readFile, readErr := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if readErr != nil {
+		return nil, errors.Join(err, readErr)
+	}
+	defer readFile.Close()
+	if verifyErr := verifyQuarantinedServiceExport(readFile, expected); verifyErr != nil {
+		return nil, verifyErr
+	}
+	if chmodErr := readFile.Chmod(0o600); chmodErr != nil {
+		return nil, errors.Join(err, fmt.Errorf("prepare quarantined export hand-off for scrubbing: %w", chmodErr))
+	}
+	file, err = os.OpenFile(path, os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	if verifyErr := verifyQuarantinedServiceExport(file, expected); verifyErr != nil {
+		_ = file.Close()
+		return nil, verifyErr
+	}
+	return file, nil
+}
+
+func verifyQuarantinedServiceExport(file *os.File, expected os.FileInfo) error {
+	opened, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(opened, expected) {
+		return errors.New("quarantined export hand-off changed before scrubbing")
+	}
+	return nil
 }
 
 func writeSanitizedExport(file *os.File, export ServiceExportFile) error {

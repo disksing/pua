@@ -792,6 +792,135 @@ func TestServiceManagerWriteOpenFailurePreservesReplacementHandoff(t *testing.T)
 	}
 }
 
+func TestRemoveVerifiedServiceExportHandoffScrubsUnrestoredReplacement(t *testing.T) {
+	const quarantinedSecret = "quarantined-replacement-secret"
+	root := t.TempDir()
+	path := filepath.Join(root, "export.json")
+	original := []byte(`{"schemaVersion":1,"variables":{"PUBLIC":"original"}}`)
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opened, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer opened.Close()
+
+	replacement := []byte(`{"schemaVersion":1,"secrets":{"TOKEN":"` + quarantinedSecret + `"}}`)
+	newer := []byte(`{"schemaVersion":1,"variables":{"PUBLIC":"newer"}}`)
+	var quarantinePath string
+	operations := defaultServiceExportHandoffOperations()
+	operations.rename = func(oldPath, newPath string) error {
+		replacementPath := oldPath + ".replacement"
+		if err := os.WriteFile(replacementPath, replacement, 0o400); err != nil {
+			return err
+		}
+		if err := os.Link(replacementPath, filepath.Join(root, "replacement-hardlink")); err != nil {
+			return err
+		}
+		if err := os.Rename(replacementPath, oldPath); err != nil {
+			return err
+		}
+		if err := os.Rename(oldPath, newPath); err != nil {
+			return err
+		}
+		quarantinePath = newPath
+		return os.WriteFile(oldPath, newer, 0o600)
+	}
+
+	err = removeVerifiedServiceExportHandoffWithOperations(path, opened, operations)
+	if err == nil || !errors.Is(err, os.ErrExist) || !strings.Contains(err.Error(), "restore concurrently replaced export hand-off") {
+		t.Fatalf("remove error = %v, want restore failure", err)
+	}
+	active, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(active, newer) {
+		t.Fatalf("newer export hand-off changed: %s", active)
+	}
+	if _, err := os.Lstat(quarantinePath); !os.IsNotExist(err) {
+		t.Fatalf("quarantine remains after failed restore: %v", err)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(root, entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(data, []byte(quarantinedSecret)) {
+			t.Fatalf("managed export directory retained secret in %s: %s", entry.Name(), data)
+		}
+	}
+}
+
+func TestRemoveVerifiedServiceExportHandoffJoinsQuarantineCleanupFailure(t *testing.T) {
+	const quarantinedSecret = "cleanup-failure-secret"
+	root := t.TempDir()
+	path := filepath.Join(root, "export.json")
+	if err := os.WriteFile(path, []byte(`{"schemaVersion":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opened, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer opened.Close()
+
+	newer := []byte(`{"schemaVersion":1,"variables":{"PUBLIC":"newer"}}`)
+	var quarantinePath string
+	cleanupFailure := errors.New("injected quarantine unlink failure")
+	operations := defaultServiceExportHandoffOperations()
+	operations.rename = func(oldPath, newPath string) error {
+		replacementPath := oldPath + ".replacement"
+		if err := os.WriteFile(replacementPath, []byte(quarantinedSecret), 0o600); err != nil {
+			return err
+		}
+		if err := os.Rename(replacementPath, oldPath); err != nil {
+			return err
+		}
+		if err := os.Rename(oldPath, newPath); err != nil {
+			return err
+		}
+		quarantinePath = newPath
+		return os.WriteFile(oldPath, newer, 0o600)
+	}
+	operations.remove = func(removePath string) error {
+		if removePath == quarantinePath {
+			return cleanupFailure
+		}
+		return os.Remove(removePath)
+	}
+
+	err = removeVerifiedServiceExportHandoffWithOperations(path, opened, operations)
+	if err == nil || !errors.Is(err, os.ErrExist) || !errors.Is(err, cleanupFailure) ||
+		!strings.Contains(err.Error(), "restore concurrently replaced export hand-off") ||
+		!strings.Contains(err.Error(), "discard unrestored export hand-off") ||
+		!strings.Contains(err.Error(), "injected quarantine unlink failure") {
+		t.Fatalf("remove error = %v, want joined restore and cleanup failures", err)
+	}
+	active, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(active, newer) {
+		t.Fatalf("newer export hand-off changed: %s", active)
+	}
+	quarantine, err := os.ReadFile(quarantinePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(quarantine, []byte(quarantinedSecret)) || len(quarantine) != 0 {
+		t.Fatalf("failed quarantine unlink retained secret bytes: %q", quarantine)
+	}
+}
+
 func TestServiceManagerRejectedExportScrubsOpenedDescriptorBeforeReplacement(t *testing.T) {
 	const (
 		openedSecret      = "opened-rejected-secret"

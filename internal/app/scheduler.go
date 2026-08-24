@@ -36,6 +36,11 @@ var ErrScheduleOccurrenceDue = errors.New("one-time schedule occurrence is due")
 // round-tripped through the Scheduler's RFC3339Nano runtime persistence.
 var ErrScheduleOccurrenceOutOfRange = errors.New("schedule occurrence is outside the RFC3339Nano persistence range")
 
+// ErrScheduleCronSuccessorUnavailable identifies a parsed cron schedule that
+// violates the recurring successor contract by returning a non-monotonic
+// instant or no instant within a complete Gregorian calendar cycle.
+var ErrScheduleCronSuccessorUnavailable = errors.New("cron schedule has no monotonic successor within a Gregorian calendar cycle")
+
 // ErrScheduleRevisionExhausted identifies a schedule whose revision cannot be
 // incremented without wrapping the persisted uint64 value.
 var ErrScheduleRevisionExhausted = errors.New("schedule revision is exhausted")
@@ -60,6 +65,9 @@ const (
 	maximumScheduleEverySeconds = int64(^uint64(0)>>1) / int64(time.Second)
 	maximumScheduleTextLength   = 64 * 1024
 	maximumCronOccurrences      = 100000
+	robfigCronSearchWindowYears = 5
+	cronGregorianCycleYears     = 400
+	maximumCronSuccessorCalls   = cronGregorianCycleYears / robfigCronSearchWindowYears
 )
 
 const (
@@ -624,12 +632,13 @@ func ValidateScheduleTrigger(trigger ScheduleTrigger) error {
 			return fmt.Errorf("invalid six-field cron expression: %w", err)
 		}
 		probe := time.Date(2000, time.January, 1, 0, 0, 0, 0, location).Add(-time.Nanosecond)
-		first, second := parsed.Next(probe), time.Time{}
-		if !first.IsZero() {
-			second = parsed.Next(first)
+		first, err := nextParsedScheduleCronOccurrence(parsed, location, probe)
+		if err != nil {
+			return fmt.Errorf("cron must produce recurring occurrences: %w", err)
 		}
-		if first.IsZero() || second.IsZero() {
-			return errors.New("cron must produce recurring occurrences")
+		second, err := nextParsedScheduleCronOccurrence(parsed, location, first)
+		if err != nil {
+			return fmt.Errorf("cron must produce recurring occurrences: %w", err)
 		}
 		if second.Sub(first) < time.Duration(minimumScheduleEverySeconds)*time.Second {
 			return fmt.Errorf("cron occurrences must be at least %d seconds apart", minimumScheduleEverySeconds)
@@ -697,6 +706,46 @@ func parseScheduleCron(trigger ScheduleTrigger) (cron.Schedule, error) {
 	return scheduleCronParser().Parse("CRON_TZ=" + trigger.TimeZone + " " + trigger.Cron)
 }
 
+// nextParsedScheduleCronOccurrence extends robfig/cron's five-year search
+// window across one complete Gregorian calendar cycle. Successive windows
+// overlap within their shared boundary year, so advancing the probe cannot
+// skip a valid instant when AddDate crosses a leap day or IANA offset change.
+func nextParsedScheduleCronOccurrence(schedule cron.Schedule, location *time.Location, after time.Time) (time.Time, error) {
+	if schedule == nil || location == nil {
+		return time.Time{}, ErrScheduleCronSuccessorUnavailable
+	}
+	originalLocation := after.Location()
+	cursor := after.In(location)
+	for call := 0; call < maximumCronSuccessorCalls; call++ {
+		candidate := schedule.Next(cursor)
+		if !candidate.IsZero() {
+			if !candidate.After(cursor) || !candidate.After(after) {
+				return time.Time{}, ErrScheduleCronSuccessorUnavailable
+			}
+			candidate = candidate.In(originalLocation)
+			if !scheduleOccurrenceRepresentable(candidate) {
+				return time.Time{}, ErrScheduleOccurrenceOutOfRange
+			}
+			return candidate, nil
+		}
+
+		// A zero result proves robfig exhausted cursor's local start year and
+		// the following five years. Once that proof reaches year 9999, no
+		// successor can be persisted and extending the search would only
+		// manufacture an invalid RFC3339Nano timestamp.
+		searchStart := cursor.Add(time.Second - time.Duration(cursor.Nanosecond())*time.Nanosecond)
+		if searchStart.Year()+robfigCronSearchWindowYears >= 9999 {
+			return time.Time{}, ErrScheduleOccurrenceOutOfRange
+		}
+		nextCursor := cursor.AddDate(robfigCronSearchWindowYears, 0, 0)
+		if !nextCursor.After(cursor) {
+			return time.Time{}, ErrScheduleCronSuccessorUnavailable
+		}
+		cursor = nextCursor
+	}
+	return time.Time{}, ErrScheduleCronSuccessorUnavailable
+}
+
 // NextScheduleOccurrence returns the first nominal occurrence strictly after
 // after. The at trigger is returned only when it is still in the future.
 func NextScheduleOccurrence(trigger ScheduleTrigger, after time.Time) (time.Time, error) {
@@ -719,7 +768,8 @@ func NextScheduleOccurrence(trigger ScheduleTrigger, after time.Time) (time.Time
 		if err != nil {
 			return time.Time{}, err
 		}
-		return schedule.Next(after), nil
+		location, _ := time.LoadLocation(trigger.TimeZone)
+		return nextParsedScheduleCronOccurrence(schedule, location, after)
 	default:
 		return time.Time{}, errors.New("unsupported trigger")
 	}
@@ -753,15 +803,28 @@ func CoalescedScheduleOccurrence(trigger ScheduleTrigger, first, now time.Time) 
 	if err != nil {
 		return time.Time{}, time.Time{}, 0, false, err
 	}
+	location, _ := time.LoadLocation(trigger.TimeZone)
 	cursor := first
 	for count < maximumCronOccurrences {
-		candidate := parsed.Next(cursor)
+		candidate, nextErr := nextParsedScheduleCronOccurrence(parsed, location, cursor)
+		if nextErr != nil {
+			if errors.Is(nextErr, ErrScheduleOccurrenceOutOfRange) {
+				return last, time.Time{}, count, false, nil
+			}
+			return time.Time{}, time.Time{}, 0, false, nextErr
+		}
 		if candidate.After(now) {
 			return last, candidate, count, false, nil
 		}
 		last, cursor, count = candidate, candidate, count+1
 	}
-	next = parsed.Next(now)
+	next, err = nextParsedScheduleCronOccurrence(parsed, location, now)
+	if errors.Is(err, ErrScheduleOccurrenceOutOfRange) {
+		return last, time.Time{}, count, true, nil
+	}
+	if err != nil {
+		return time.Time{}, time.Time{}, 0, false, err
+	}
 	return last, next, count, true, nil
 }
 

@@ -734,6 +734,68 @@ func TestCronDowntimeCoalescingIsBounded(t *testing.T) {
 	}
 }
 
+func TestCronSuccessorExtendsAcrossSparseLeapGaps(t *testing.T) {
+	trigger := app.ScheduleTrigger{Type: app.ScheduleTriggerCron, Cron: "0 0 0 29 2 *", TimeZone: "UTC"}
+	after := time.Date(2096, time.February, 29, 0, 0, 0, 0, time.UTC)
+	next, err := app.NextScheduleOccurrence(trigger, after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := time.Date(2104, time.February, 29, 0, 0, 0, 0, time.UTC); !next.Equal(want) {
+		t.Fatalf("sparse leap successor = %s, want %s", next, want)
+	}
+
+	last, next, count, truncated, err := app.CoalescedScheduleOccurrence(
+		trigger,
+		time.Date(2096, time.February, 29, 0, 0, 0, 0, time.UTC),
+		time.Date(2104, time.March, 1, 0, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wantLast, wantNext := time.Date(2104, time.February, 29, 0, 0, 0, 0, time.UTC), time.Date(2108, time.February, 29, 0, 0, 0, 0, time.UTC); !last.Equal(wantLast) || !next.Equal(wantNext) || count != 2 || truncated {
+		t.Fatalf("sparse coalescing = last %s next %s count %d truncated %v", last, next, count, truncated)
+	}
+}
+
+func TestCronSuccessorPreservesSixFieldSecond(t *testing.T) {
+	trigger := app.ScheduleTrigger{Type: app.ScheduleTriggerCron, Cron: "30 * * * * *", TimeZone: "UTC"}
+	after := time.Date(2026, time.August, 24, 12, 0, 29, 999999999, time.UTC)
+	next, err := app.NextScheduleOccurrence(trigger, after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := time.Date(2026, time.August, 24, 12, 0, 30, 0, time.UTC); !next.Equal(want) {
+		t.Fatalf("second-field successor = %s, want %s", next, want)
+	}
+}
+
+func TestCronSuccessorTerminatesAtPersistenceBoundary(t *testing.T) {
+	trigger := app.ScheduleTrigger{Type: app.ScheduleTriggerCron, Cron: "59 59 23 31 12 *", TimeZone: "UTC"}
+	latest := time.Date(9999, time.December, 31, 23, 59, 59, 0, time.UTC)
+	if next, err := app.NextScheduleOccurrence(trigger, latest); !errors.Is(err, app.ErrScheduleOccurrenceOutOfRange) || !next.IsZero() {
+		t.Fatalf("terminal cron successor = %s, %v", next, err)
+	}
+
+	last, next, count, truncated, err := app.CoalescedScheduleOccurrence(trigger, latest, latest)
+	if err != nil || !last.Equal(latest) || !next.IsZero() || count != 1 || truncated {
+		t.Fatalf("terminal cron coalescing = last %s next %s count %d truncated %v err %v", last, next, count, truncated, err)
+	}
+}
+
+func TestCronTruncationTerminatesAtPersistenceBoundary(t *testing.T) {
+	trigger := app.ScheduleTrigger{Type: app.ScheduleTriggerCron, Cron: "0 * * * * *", TimeZone: "UTC"}
+	now := time.Date(9999, time.December, 31, 23, 59, 59, 0, time.UTC)
+	first := now.Truncate(time.Minute).Add(-100_001 * time.Minute)
+	last, next, count, truncated, err := app.CoalescedScheduleOccurrence(trigger, first, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wantLast := first.Add(99_999 * time.Minute); !last.Equal(wantLast) || !next.IsZero() || count != 100_000 || !truncated {
+		t.Fatalf("terminal truncation = last %s next %s count %d truncated %v", last, next, count, truncated)
+	}
+}
+
 func TestIntervalNextOccurrenceUsesOverflowSafeOrdinals(t *testing.T) {
 	ancient := time.Date(1700, time.January, 1, 0, 0, 0, 123456789, time.UTC)
 	aligned := time.Date(2026, time.August, 24, 12, 34, 0, 123456789, time.UTC)

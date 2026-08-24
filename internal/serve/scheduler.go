@@ -799,7 +799,7 @@ func (n *NativeScheduler) targetBusy(resourceID string) (bool, error) {
 }
 
 func (n *NativeScheduler) recordScheduleError(id string, runtime schedulerScheduleRuntime, now time.Time, cause error) error {
-	if errors.Is(cause, app.ErrScheduleOccurrenceOutOfRange) {
+	if errors.Is(cause, app.ErrScheduleOccurrenceOutOfRange) || errors.Is(cause, app.ErrScheduleCronSuccessorUnavailable) {
 		runtime.EffectiveState = schedulerOutcomeAttention
 		runtime.NextRunAt = ""
 		runtime.RetryAt = ""

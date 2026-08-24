@@ -2681,6 +2681,30 @@ func TestNativeSchedulerIntervalRangeFailureDoesNotRetry(t *testing.T) {
 	}
 }
 
+func TestNativeSchedulerCronSuccessorFailureDoesNotRetry(t *testing.T) {
+	manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+	native := newNativeScheduler(manager, workspace)
+	now := time.Date(2026, time.August, 24, 12, 0, 0, 0, time.UTC)
+	runtime := schedulerScheduleRuntime{
+		Revision:       1,
+		EffectiveState: app.ScheduleStateActive,
+		NextRunAt:      now.Format(time.RFC3339Nano),
+	}
+	if err := native.storeSchedulerRuntime("schedule-cron-contract", runtime); err != nil {
+		t.Fatal(err)
+	}
+	if err := native.recordScheduleError("schedule-cron-contract", runtime, now, app.ErrScheduleCronSuccessorUnavailable); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := native.schedulerRuntime("schedule-cron-contract")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.EffectiveState != schedulerOutcomeAttention || persisted.LastOutcome != schedulerOutcomeAttention || persisted.NextRunAt != "" || persisted.RetryAt != "" || persisted.RetryCount != 0 || persisted.LastError != app.ErrScheduleCronSuccessorUnavailable.Error() {
+		t.Fatalf("cron successor failure runtime = %#v", persisted)
+	}
+}
+
 func prepareResourceBindingAttention(t *testing.T) (*agentManager, serveWorkspace, app.Schedule, schedulerPreparedOccurrence) {
 	t.Helper()
 	fake := newRuntimeFakeAgentHub()

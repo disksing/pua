@@ -13,13 +13,33 @@ import (
 func testManifest() Manifest {
 	asset := func(name string) Asset {
 		return Asset{OS: "darwin", Arch: "arm64", URL: "https://github.com/disksing/pua/releases/download/" + name + "/asset.zip",
-			SHA256: strings.Repeat("a", 64), Size: 123, CodeIdentity: "Developer ID Application: Test"}
+			SHA256: strings.Repeat("a", 64), Size: 123, SigningTeamID: "TESTTEAM01", SigningIdentifier: "com.example.component"}
 	}
 	return Manifest{SchemaVersion: ManifestSchemaVersion, Channel: "stable", GeneratedAt: time.Now().UTC(),
 		PUA: ComponentRelease{Component: "pua", Version: "0.4.2", Commit: "pua-sha", MinDesktopManagerProtocol: 1,
 			APIMajor: "1", MinAgentHubVersion: "0.7.0", Assets: []Asset{asset("pua-v0.4.2")}},
 		AgentHub: ComponentRelease{Component: "agenthub", Version: "0.7.1", Commit: "hub-sha", MinDesktopManagerProtocol: 1,
 			APIMajor: "1", Assets: []Asset{asset("agenthub-v0.7.1")}},
+	}
+}
+
+func TestManifestAcceptsLegacyCodeIdentity(t *testing.T) {
+	manifest := testManifest()
+	for _, release := range []*ComponentRelease{&manifest.PUA, &manifest.AgentHub} {
+		release.Assets[0].SigningTeamID = ""
+		release.Assets[0].SigningIdentifier = ""
+		release.Assets[0].CodeIdentity = "Developer ID Application: Test"
+	}
+	if err := manifest.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestManifestRejectsIncompleteSigningMetadata(t *testing.T) {
+	manifest := testManifest()
+	manifest.PUA.Assets[0].SigningIdentifier = ""
+	if err := manifest.Validate(); err == nil {
+		t.Fatal("manifest accepted incomplete Developer ID signing metadata")
 	}
 }
 

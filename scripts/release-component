@@ -76,9 +76,16 @@ for target in darwin:arm64 darwin:amd64 linux:arm64 linux:amd64; do
 	os=${target%:*}; arch=${target#*:}; name=$component-$version-$os-$arch
 	digest=$(shasum -a 256 "$output/$name" | awk '{print $1}')
 	size=$(stat -f %z "$output/$name")
-	code_identity=''
-	[ "$os" != darwin ] || code_identity=$identity
-	assets_json=$(printf '%s' "$assets_json" | jq --arg os "$os" --arg arch "$arch" --arg url "$release_url_base/$name" --arg sha "$digest" --argjson size "$size" --arg identity "$code_identity" '. + [{os:$os,arch:$arch,url:$url,sha256:$sha,size:$size,codeIdentity:$identity}]')
+	signing_team_id=''
+	signing_identifier=''
+	if [ "$os" = darwin ]; then
+		codesign_metadata=$(codesign -d --verbose=4 "$output/$name" 2>&1)
+		signing_team_id=$(printf '%s\n' "$codesign_metadata" | sed -n 's/^TeamIdentifier=//p')
+		signing_identifier=$(printf '%s\n' "$codesign_metadata" | sed -n 's/^Identifier=//p')
+		[ -n "$signing_team_id" ] && [ -n "$signing_identifier" ] || die "incomplete signing metadata for $name"
+	fi
+	assets_json=$(printf '%s' "$assets_json" | jq --arg os "$os" --arg arch "$arch" --arg url "$release_url_base/$name" --arg sha "$digest" --argjson size "$size" --arg team "$signing_team_id" --arg identifier "$signing_identifier" \
+		'. + [{os:$os,arch:$arch,url:$url,sha256:$sha,size:$size} + (if $team == "" then {} else {signingTeamId:$team,signingIdentifier:$identifier} end)]')
 done
 api_major=1
 if [ "$component" = pua ]; then

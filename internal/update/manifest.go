@@ -38,11 +38,15 @@ type ComponentRelease struct {
 }
 
 type Asset struct {
-	OS           string `json:"os"`
-	Arch         string `json:"arch"`
-	URL          string `json:"url"`
-	SHA256       string `json:"sha256"`
-	Size         int64  `json:"size"`
+	OS                string `json:"os"`
+	Arch              string `json:"arch"`
+	URL               string `json:"url"`
+	SHA256            string `json:"sha256"`
+	Size              int64  `json:"size"`
+	SigningTeamID     string `json:"signingTeamId,omitempty"`
+	SigningIdentifier string `json:"signingIdentifier,omitempty"`
+	// CodeIdentity is accepted for manifests published before signingTeamId and
+	// signingIdentifier were introduced. New release descriptors omit it.
 	CodeIdentity string `json:"codeIdentity,omitempty"`
 }
 
@@ -127,8 +131,14 @@ func validateRelease(release ComponentRelease, component, channel string) error 
 		if asset.OS == "" || asset.Arch == "" || asset.Size < 1 {
 			return fmt.Errorf("%s asset %s is incomplete", component, key)
 		}
-		if asset.OS == "darwin" && strings.TrimSpace(asset.CodeIdentity) == "" {
-			return fmt.Errorf("%s asset %s has no Developer ID identity", component, key)
+		if asset.OS == "darwin" {
+			hasSigningPair := strings.TrimSpace(asset.SigningTeamID) != "" && strings.TrimSpace(asset.SigningIdentifier) != ""
+			if !hasSigningPair && strings.TrimSpace(asset.CodeIdentity) == "" {
+				return fmt.Errorf("%s asset %s has no Developer ID signing metadata", component, key)
+			}
+			if (strings.TrimSpace(asset.SigningTeamID) == "") != (strings.TrimSpace(asset.SigningIdentifier) == "") {
+				return fmt.Errorf("%s asset %s has incomplete Developer ID signing metadata", component, key)
+			}
 		}
 		if digest, err := hex.DecodeString(asset.SHA256); err != nil || len(digest) != sha256.Size {
 			return fmt.Errorf("%s asset %s has invalid SHA-256", component, key)

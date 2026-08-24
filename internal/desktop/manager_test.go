@@ -8,6 +8,19 @@ import (
 	"time"
 )
 
+func TestCodesignMetadataValue(t *testing.T) {
+	output := "Executable=/tmp/pua\nIdentifier=com.disksing.pua\nAuthority=Developer ID Application: Example (TESTTEAM01)\nTeamIdentifier=TESTTEAM01\n"
+	if value := codesignMetadataValue(output, "Identifier"); value != "com.disksing.pua" {
+		t.Fatalf("Identifier = %q", value)
+	}
+	if value := codesignMetadataValue(output, "TeamIdentifier"); value != "TESTTEAM01" {
+		t.Fatalf("TeamIdentifier = %q", value)
+	}
+	if value := codesignMetadataValue(output, "Missing"); value != "" {
+		t.Fatalf("Missing = %q", value)
+	}
+}
+
 func TestNormalizeConfig(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

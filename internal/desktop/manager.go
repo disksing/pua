@@ -399,7 +399,7 @@ func (m *Manager) InstallUpdates(ctx context.Context, components []string) error
 		if err := componentupdate.DownloadAsset(ctx, m.options.HTTPClient, component.selection.Asset, component.path); err != nil {
 			return err
 		}
-		if err := verifyDeveloperID(component.path, component.selection.Asset.CodeIdentity); err != nil {
+		if err := verifyDeveloperID(component.path, component.selection.Asset); err != nil {
 			return err
 		}
 		version, _ := binaryBuildInfo(ctx, component.path, component.selection.Release.Component)
@@ -469,7 +469,7 @@ func runtimeArch() string {
 	return runtime.GOARCH
 }
 
-func verifyDeveloperID(path, identity string) error {
+func verifyDeveloperID(path string, asset componentupdate.Asset) error {
 	verify := exec.Command("codesign", "--verify", "--strict", "--verbose=2", path)
 	if output, err := verify.CombinedOutput(); err != nil {
 		return fmt.Errorf("verify downloaded component code signature: %w: %s", err, strings.TrimSpace(string(output)))
@@ -479,10 +479,29 @@ func verifyDeveloperID(path, identity string) error {
 	if err != nil {
 		return fmt.Errorf("inspect downloaded component code signature: %w", err)
 	}
-	if !strings.Contains(string(output), "Authority="+identity) {
-		return fmt.Errorf("downloaded component is not signed by %q", identity)
+	if asset.SigningTeamID != "" || asset.SigningIdentifier != "" {
+		teamID := codesignMetadataValue(string(output), "TeamIdentifier")
+		identifier := codesignMetadataValue(string(output), "Identifier")
+		if teamID != asset.SigningTeamID || identifier != asset.SigningIdentifier {
+			return fmt.Errorf("downloaded component signing metadata is %q/%q, want %q/%q",
+				teamID, identifier, asset.SigningTeamID, asset.SigningIdentifier)
+		}
+		return nil
+	}
+	if !strings.Contains(string(output), "Authority="+asset.CodeIdentity) {
+		return fmt.Errorf("downloaded component is not signed by %q", asset.CodeIdentity)
 	}
 	return nil
+}
+
+func codesignMetadataValue(output, key string) string {
+	prefix := key + "="
+	for _, line := range strings.Split(output, "\n") {
+		if value, found := strings.CutPrefix(strings.TrimSpace(line), prefix); found {
+			return value
+		}
+	}
+	return ""
 }
 
 func (m *Manager) Options() Options {

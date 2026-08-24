@@ -35,6 +35,11 @@ release cannot overwrite one another:
 - `macapp-appcast.xml`, `macapp-SHA256SUMS`, and
   `macapp-notarization.json`.
 
+Darwin component descriptors record the public Apple Team ID and Mach-O signing
+identifier. The desktop manager verifies both after validating the code signature;
+descriptors do not repeat the certificate authority's display name. Legacy
+descriptors containing `codeIdentity` remain readable during channel migration.
+
 After publishing, `scripts/build-release-site` copies the complete static website
 and rebuilds the stable feeds from release history. It independently finds the
 newest stable `vX.Y.Z` release containing each descriptor, so PUA and AgentHub do

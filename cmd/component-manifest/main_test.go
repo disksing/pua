@@ -43,7 +43,7 @@ func TestCommandCreatesVerifiableManifest(t *testing.T) {
 }
 
 func testReleaseManifest() componentupdate.Manifest {
-	asset := componentupdate.Asset{OS: "darwin", Arch: "arm64", URL: "https://example.test/component", SHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Size: 10, CodeIdentity: "Developer ID Application: Example"}
+	asset := componentupdate.Asset{OS: "darwin", Arch: "arm64", URL: "https://example.test/component", SHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Size: 10, SigningTeamID: "TESTTEAM01", SigningIdentifier: "com.example.component"}
 	return componentupdate.Manifest{PUA: componentupdate.ComponentRelease{Component: "pua", Version: "1.0.0", Commit: "abc", MinDesktopManagerProtocol: 1, APIMajor: "1", MinAgentHubVersion: "1.0.0", Assets: []componentupdate.Asset{asset}},
 		AgentHub: componentupdate.ComponentRelease{Component: "agenthub", Version: "1.0.0", Commit: "def", MinDesktopManagerProtocol: 1, APIMajor: "1", Assets: []componentupdate.Asset{asset}}}
 }

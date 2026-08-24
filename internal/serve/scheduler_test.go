@@ -3231,9 +3231,12 @@ func TestWorkspaceDefaultsMutationRequestsSchedulerOnlyAfterMaterialSuccess(t *t
 }
 
 type schedulerSettingsFakeAgentHub struct {
-	base   *runtimeFakeAgentHub
-	mu     sync.Mutex
-	config agentHubConfiguredConfig
+	base                *runtimeFakeAgentHub
+	mu                  sync.Mutex
+	config              agentHubConfiguredConfig
+	mutationAttempts    atomic.Int32
+	failMutations       bool
+	afterMutationCommit func(*http.Request, string)
 }
 
 func newSchedulerSettingsFakeAgentHub(config agentHubConfiguredConfig) *schedulerSettingsFakeAgentHub {
@@ -3248,13 +3251,15 @@ func (f *schedulerSettingsFakeAgentHub) ServeHTTP(w http.ResponseWriter, r *http
 		})
 		return
 	case r.URL.Path == "/v1/config":
-		f.mu.Lock()
-		defer f.mu.Unlock()
 		if r.Method == http.MethodGet {
-			writeRuntimeFakeJSON(w, map[string]any{"config": f.config})
+			f.mu.Lock()
+			configured := f.config
+			f.mu.Unlock()
+			writeRuntimeFakeJSON(w, map[string]any{"config": configured})
 			return
 		}
 		if r.Method == http.MethodPut {
+			f.mutationAttempts.Add(1)
 			var request struct {
 				Config agentHubConfiguredConfig `json:"config"`
 			}
@@ -3262,11 +3267,26 @@ func (f *schedulerSettingsFakeAgentHub) ServeHTTP(w http.ResponseWriter, r *http
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
+			if f.failMutations {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				writeRuntimeFakeJSON(w, map[string]any{"error": map[string]any{
+					"code": "runtime_unavailable", "message": "synthetic Settings mutation failure", "retryable": true,
+				}})
+				return
+			}
+			f.mu.Lock()
 			f.config = request.Config
-			writeRuntimeFakeJSON(w, map[string]any{"config": f.config})
+			configured := f.config
+			hook := f.afterMutationCommit
+			f.mu.Unlock()
+			if hook != nil {
+				hook(r, "config")
+			}
+			writeRuntimeFakeJSON(w, map[string]any{"config": configured})
 			return
 		}
 	case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/v1/config/providers/"):
+		f.mutationAttempts.Add(1)
 		providerID, _ := url.PathUnescape(strings.TrimPrefix(r.URL.Path, "/v1/config/providers/"))
 		var request struct {
 			Enabled bool `json:"enabled"`
@@ -3275,15 +3295,28 @@ func (f *schedulerSettingsFakeAgentHub) ServeHTTP(w http.ResponseWriter, r *http
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
+		if f.failMutations {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			writeRuntimeFakeJSON(w, map[string]any{"error": map[string]any{
+				"code": "runtime_unavailable", "message": "synthetic Settings mutation failure", "retryable": true,
+			}})
+			return
+		}
 		f.mu.Lock()
-		defer f.mu.Unlock()
 		for index := range f.config.AgentProviders {
 			if f.config.AgentProviders[index].ID == providerID {
 				f.config.AgentProviders[index].Enabled = request.Enabled
-				writeRuntimeFakeJSON(w, map[string]any{"provider": f.config.AgentProviders[index]})
+				provider := f.config.AgentProviders[index]
+				hook := f.afterMutationCommit
+				f.mu.Unlock()
+				if hook != nil {
+					hook(r, "provider")
+				}
+				writeRuntimeFakeJSON(w, map[string]any{"provider": provider})
 				return
 			}
 		}
+		f.mu.Unlock()
 		w.WriteHeader(http.StatusNotFound)
 		return
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/agents":
@@ -3313,6 +3346,258 @@ func (f *schedulerSettingsFakeAgentHub) ServeHTTP(w http.ResponseWriter, r *http
 		return
 	}
 	f.base.ServeHTTP(w, r)
+}
+
+type agentHubSettingsRemoteMutationCase struct {
+	name          string
+	initial       agentHubConfiguredConfig
+	request       func(string, bool) *http.Request
+	invoke        func(*server, *httptest.ResponseRecorder, *http.Request)
+	remoteChanged func(agentHubConfiguredConfig) bool
+	localChanged  func(agentHubServeConfig) bool
+}
+
+func agentHubSettingsRemoteMutationCases() []agentHubSettingsRemoteMutationCase {
+	provider := agentHubConfiguredProvider{ID: "fake", Name: "Fake", Type: "fake", Enabled: true}
+	return []agentHubSettingsRemoteMutationCase{
+		{
+			name: "agent config and profile",
+			initial: agentHubConfiguredConfig{
+				Version: 1, AgentProviders: []agentHubConfiguredProvider{provider},
+				Agents: []agentHubConfiguredAgent{{Name: "fake-agent", ProviderID: provider.ID}},
+			},
+			request: func(endpoint string, changed bool) *http.Request {
+				agentName := "fake-agent"
+				if changed {
+					agentName = "settings-agent"
+				}
+				body, _ := json.Marshal(updateAgentHubSettingsRequest{
+					Endpoint: endpoint,
+					AgentProfiles: []agentHubProfileRoute{
+						{Key: "default", AgentName: agentName},
+					},
+					AgentProviders: []agentHubConfiguredProvider{provider},
+					Agents:         []agentHubConfiguredAgent{{Name: agentName, ProviderID: provider.ID}},
+				})
+				return httptest.NewRequest(http.MethodPut, "/api/settings/agenthub", bytes.NewReader(body))
+			},
+			invoke: func(server *server, recorder *httptest.ResponseRecorder, request *http.Request) {
+				server.handleAgentHubSettings(recorder, request)
+			},
+			remoteChanged: func(config agentHubConfiguredConfig) bool {
+				return len(config.Agents) == 1 && config.Agents[0].Name == "settings-agent"
+			},
+			localChanged: func(config agentHubServeConfig) bool {
+				return configuredAgentHubProfileTarget(config.AgentProfiles, "default") == "settings-agent"
+			},
+		},
+		{
+			name: "provider",
+			initial: agentHubConfiguredConfig{
+				Version: 1,
+				AgentProviders: []agentHubConfiguredProvider{
+					{ID: provider.ID, Name: provider.Name, Type: provider.Type, Enabled: false},
+				},
+				Agents: []agentHubConfiguredAgent{{Name: "fake-agent", ProviderID: provider.ID}},
+			},
+			request: func(_ string, changed bool) *http.Request {
+				return httptest.NewRequest(http.MethodPut, "/api/settings/agenthub/providers/fake", strings.NewReader(fmt.Sprintf(`{"enabled":%t}`, changed)))
+			},
+			invoke: func(server *server, recorder *httptest.ResponseRecorder, request *http.Request) {
+				server.handleAgentHubProviderSettings(recorder, request, "fake")
+			},
+			remoteChanged: func(config agentHubConfiguredConfig) bool {
+				return len(config.AgentProviders) == 1 && config.AgentProviders[0].Enabled
+			},
+		},
+	}
+}
+
+func schedulerSettingsConfigSnapshot(fake *schedulerSettingsFakeAgentHub) agentHubConfiguredConfig {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	return fake.config
+}
+
+func prepareAgentHubSettingsMutationTest(
+	t *testing.T,
+	test agentHubSettingsRemoteMutationCase,
+) (*schedulerSettingsFakeAgentHub, *httptest.Server, *agentManager, serveWorkspace, string) {
+	t.Helper()
+	fake := newSchedulerSettingsFakeAgentHub(test.initial)
+	hub := httptest.NewServer(fake)
+	t.Cleanup(hub.Close)
+	manager, workspace, configPath := newRuntimeTestManager(t, hub.URL)
+	rewriteSchedulerTestProfiles(t, configPath, []agentHubProfileRoute{{
+		Key: "default", Description: systemAgentProfileDefinitions[0].Description, AgentName: "fake-agent",
+	}})
+	manager.reconcileWake = make(chan struct{}, 4)
+	_ = manager.takeReconcileRequests()
+	return fake, hub, manager, workspace, configPath
+}
+
+func assertAgentHubSettingsSchedulerWake(t *testing.T, manager *agentManager, want bool) {
+	t.Helper()
+	request := manager.takeReconcileRequests()
+	if got := request&reconcileScheduler != 0; got != want {
+		t.Fatalf("Settings Scheduler reconcile request = %08b, want wake %v", request, want)
+	}
+	wakes := len(manager.reconcileWake)
+	wantWakes := 0
+	if want {
+		wantWakes = 1
+	}
+	if wakes != wantWakes {
+		t.Fatalf("Settings reconcile wake count = %d, want %d", wakes, wantWakes)
+	}
+}
+
+func assertAgentHubSettingsLocalChange(t *testing.T, test agentHubSettingsRemoteMutationCase, configPath string) {
+	t.Helper()
+	if test.localChanged == nil {
+		return
+	}
+	config, err := readAgentHubConfigFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !test.localChanged(config) {
+		t.Fatalf("confirmed remote mutation did not persist required local config: %#v", config)
+	}
+}
+
+func TestAgentHubSettingsRemoteMutationCancellationBoundaries(t *testing.T) {
+	for _, test := range agentHubSettingsRemoteMutationCases() {
+		t.Run(test.name+" cancelled before start", func(t *testing.T) {
+			fake, hub, manager, _, _ := prepareAgentHubSettingsMutationTest(t, test)
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			request := test.request(hub.URL, true).WithContext(ctx)
+			recorder := httptest.NewRecorder()
+			test.invoke(manager.server, recorder, request)
+			if recorder.Code == http.StatusOK {
+				t.Fatalf("cancelled Settings mutation unexpectedly succeeded: %s", recorder.Body.String())
+			}
+			if attempts := fake.mutationAttempts.Load(); attempts != 0 {
+				t.Fatalf("cancelled Settings mutation reached AgentHub %d times", attempts)
+			}
+			if test.remoteChanged(schedulerSettingsConfigSnapshot(fake)) {
+				t.Fatal("cancelled Settings mutation changed durable AgentHub config")
+			}
+			assertAgentHubSettingsSchedulerWake(t, manager, false)
+		})
+
+		t.Run(test.name+" cancelled after remote commit", func(t *testing.T) {
+			fake, hub, manager, _, configPath := prepareAgentHubSettingsMutationTest(t, test)
+			committed := make(chan struct{}, 1)
+			release := make(chan struct{})
+			requestCancelled := make(chan struct{}, 1)
+			fake.afterMutationCommit = func(request *http.Request, _ string) {
+				committed <- struct{}{}
+				select {
+				case <-release:
+				case <-request.Context().Done():
+					requestCancelled <- struct{}{}
+					<-release
+				}
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			request := test.request(hub.URL, true).WithContext(ctx)
+			recorder := httptest.NewRecorder()
+			done := make(chan struct{})
+			go func() {
+				test.invoke(manager.server, recorder, request)
+				close(done)
+			}()
+			select {
+			case <-committed:
+			case <-time.After(time.Second):
+				t.Fatal("Settings mutation did not reach its remote commit")
+			}
+			cancel()
+			select {
+			case <-requestCancelled:
+				t.Fatal("committed AgentHub mutation retained the cancelled HTTP context")
+			case <-time.After(20 * time.Millisecond):
+			}
+			close(release)
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("confirmed Settings mutation did not finish")
+			}
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("confirmed Settings mutation returned %d: %s", recorder.Code, recorder.Body.String())
+			}
+			if attempts := fake.mutationAttempts.Load(); attempts != 1 {
+				t.Fatalf("confirmed Settings mutation attempts = %d, want 1", attempts)
+			}
+			if !test.remoteChanged(schedulerSettingsConfigSnapshot(fake)) {
+				t.Fatal("confirmed Settings mutation was not durable in AgentHub")
+			}
+			assertAgentHubSettingsLocalChange(t, test, configPath)
+			assertAgentHubSettingsSchedulerWake(t, manager, true)
+		})
+	}
+}
+
+func TestAgentHubSettingsRemoteMutationQuietOutcomes(t *testing.T) {
+	for _, test := range agentHubSettingsRemoteMutationCases() {
+		t.Run(test.name+" remote failure", func(t *testing.T) {
+			fake, hub, manager, _, _ := prepareAgentHubSettingsMutationTest(t, test)
+			fake.failMutations = true
+			recorder := httptest.NewRecorder()
+			test.invoke(manager.server, recorder, test.request(hub.URL, true))
+			if recorder.Code == http.StatusOK {
+				t.Fatalf("failed Settings mutation unexpectedly succeeded: %s", recorder.Body.String())
+			}
+			if attempts := fake.mutationAttempts.Load(); attempts != 1 {
+				t.Fatalf("failed Settings mutation attempts = %d, want 1", attempts)
+			}
+			if test.remoteChanged(schedulerSettingsConfigSnapshot(fake)) {
+				t.Fatal("failed Settings mutation changed durable AgentHub config")
+			}
+			assertAgentHubSettingsSchedulerWake(t, manager, false)
+		})
+
+		t.Run(test.name+" no-op", func(t *testing.T) {
+			fake, hub, manager, _, _ := prepareAgentHubSettingsMutationTest(t, test)
+			recorder := httptest.NewRecorder()
+			test.invoke(manager.server, recorder, test.request(hub.URL, false))
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("no-op Settings mutation returned %d: %s", recorder.Code, recorder.Body.String())
+			}
+			if attempts := fake.mutationAttempts.Load(); attempts != 0 {
+				t.Fatalf("no-op Settings mutation reached AgentHub %d times", attempts)
+			}
+			if test.remoteChanged(schedulerSettingsConfigSnapshot(fake)) {
+				t.Fatal("no-op Settings mutation changed durable AgentHub config")
+			}
+			assertAgentHubSettingsSchedulerWake(t, manager, false)
+		})
+
+		t.Run(test.name+" ownership lost", func(t *testing.T) {
+			fake, hub, manager, workspace, configPath := prepareAgentHubSettingsMutationTest(t, test)
+			manager.server.locks = newWorkspaceLockManager("127.0.0.1:4936", manager.server.config)
+			t.Cleanup(manager.server.locks.closeAll)
+			if _, err := manager.server.locks.acquire(workspace.Path); err != nil {
+				t.Fatal(err)
+			}
+			fake.afterMutationCommit = func(_ *http.Request, _ string) {
+				manager.server.locks.release(workspace.Path)
+			}
+			recorder := httptest.NewRecorder()
+			test.invoke(manager.server, recorder, test.request(hub.URL, true))
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("ownership-lost Settings mutation returned %d: %s", recorder.Code, recorder.Body.String())
+			}
+			if !test.remoteChanged(schedulerSettingsConfigSnapshot(fake)) {
+				t.Fatal("ownership-lost Settings mutation was not durable in AgentHub")
+			}
+			assertAgentHubSettingsLocalChange(t, test, configPath)
+			assertAgentHubSettingsSchedulerWake(t, manager, false)
+		})
+	}
 }
 
 func TestAgentHubSettingsMutationWakesAttentionHeldScheduler(t *testing.T) {

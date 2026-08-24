@@ -145,7 +145,7 @@ func (s *server) readAgentHubSettings(ctx context.Context) (agentHubSettingsResp
 		configChanged = true
 	}
 	if configChanged {
-		s.agents.requestReconcile(reconcileScheduler)
+		s.requestSchedulerReconcileForOwnedWorkspaces(cfg.Workspaces)
 	}
 	response.Config = cfg
 	response.Revision = s.settingsRevisionOrEmpty()
@@ -153,6 +153,9 @@ func (s *server) readAgentHubSettings(ctx context.Context) (agentHubSettingsResp
 }
 
 func (s *server) saveAgentHubSettings(ctx context.Context, request updateAgentHubSettingsRequest) (agentHubSettingsResponse, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	cfg, err := readAgentHubConfigFile(s.config)
 	if err != nil {
 		return agentHubSettingsResponse{}, err
@@ -186,6 +189,7 @@ func (s *server) saveAgentHubSettings(ctx context.Context, request updateAgentHu
 	}
 	var configuredAgentHub agentHubConfiguredConfig
 	agentHubConfigChanged := false
+	remoteMutationStarted := false
 	if request.AgentProviders != nil || request.Agents != nil {
 		configuredAgentHub, err = client.Config(ctx)
 		if err != nil {
@@ -199,12 +203,21 @@ func (s *server) saveAgentHubSettings(ctx context.Context, request updateAgentHu
 			configuredAgentHub.Agents = request.Agents
 		}
 		if !reflect.DeepEqual(persistedAgentHub, configuredAgentHub) {
-			configuredAgentHub, err = client.SaveConfig(ctx, configuredAgentHub)
+			mutationContext, cancelMutation, contextErr := agentHubSettingsMutationContext(ctx)
+			if contextErr != nil {
+				return agentHubSettingsResponse{}, contextErr
+			}
+			remoteMutationStarted = true
+			configuredAgentHub, err = client.SaveConfig(mutationContext, configuredAgentHub)
+			cancelMutation()
 			if err != nil {
 				return agentHubSettingsResponse{}, fmt.Errorf("save AgentHub config: %w", err)
 			}
 			agentHubConfigChanged = !reflect.DeepEqual(persistedAgentHub, configuredAgentHub)
 		}
+	}
+	if !remoteMutationStarted && ctx.Err() != nil {
+		return agentHubSettingsResponse{}, ctx.Err()
 	}
 	cfg.AgentHubEndpoint = configured
 	cfg.AgentProfiles = request.AgentProfiles
@@ -216,7 +229,7 @@ func (s *server) saveAgentHubSettings(ctx context.Context, request updateAgentHu
 		return agentHubSettingsResponse{}, err
 	}
 	if agentHubConfigChanged || !reflect.DeepEqual(persistedConfig, cfg) {
-		s.agents.requestReconcile(reconcileScheduler)
+		s.requestSchedulerReconcileForOwnedWorkspaces(cfg.Workspaces)
 	}
 	return agentHubSettingsResponse{
 		Mode:               s.agentHubMode,
@@ -299,16 +312,54 @@ func (s *server) handleAgentHubProviderSettings(w http.ResponseWriter, r *http.R
 		}
 	}
 	if changed {
-		provider, err = client.SetProviderEnabled(r.Context(), providerID, *request.Enabled)
+		persistedProvider := provider
+		mutationContext, cancelMutation, contextErr := agentHubSettingsMutationContext(r.Context())
+		if contextErr != nil {
+			writeError(w, contextErr, http.StatusBadRequest)
+			return
+		}
+		provider, err = client.SetProviderEnabled(mutationContext, providerID, *request.Enabled)
+		cancelMutation()
 		if err != nil {
 			writeError(w, err, http.StatusBadRequest)
 			return
 		}
-		s.agents.requestReconcile(reconcileScheduler)
+		if !reflect.DeepEqual(persistedProvider, provider) {
+			s.requestSchedulerReconcileForOwnedWorkspaces(cfg.Workspaces)
+		}
 	}
 	writeJSON(w, struct {
 		Provider agentHubConfiguredProvider `json:"provider"`
 	}{Provider: provider})
+}
+
+// agentHubSettingsMutationContext makes the remote commit boundary explicit.
+// Cancellation before this helper runs prevents the mutation; after it starts,
+// the bounded AgentHub request can confirm its durable result independently of
+// an HTTP client disconnect.
+func agentHubSettingsMutationContext(ctx context.Context) (context.Context, context.CancelFunc, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	mutationContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), agentHubRequestTimeout)
+	return mutationContext, cancel, nil
+}
+
+// requestSchedulerReconcileForOwnedWorkspaces keeps a global settings change
+// quiet when this Server no longer owns any Workspace that could consume it.
+func (s *server) requestSchedulerReconcileForOwnedWorkspaces(workspaces []serveWorkspace) {
+	if s == nil || s.agents == nil {
+		return
+	}
+	for _, workspace := range workspaces {
+		if s.ownsWorkspace(workspace.Path) {
+			s.agents.requestReconcile(reconcileScheduler)
+			return
+		}
+	}
 }
 
 // settingsRevisionOrEmpty best-effort computes the settings revision after a

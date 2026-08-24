@@ -374,7 +374,7 @@ func (m *agentManager) runResourceBindingControllerJob(
 		outcome := resourceBindingMutationOutcome{}
 		if m.server == nil {
 			outcome.err = errors.New("resource binding owner Server is unavailable")
-		} else if ownershipErr := m.server.requireWorkspaceOwnership(workspace.Path); ownershipErr != nil {
+		} else if _, ownershipErr := m.server.revalidateWorkspaceMutation(workspace); ownershipErr != nil {
 			outcome.err = ownershipErr
 		} else if mutation != nil {
 			outcome = mutation(context.WithoutCancel(ctx))

@@ -1791,7 +1791,10 @@ func (m *agentManager) handleResourceMessages(w http.ResponseWriter, r *http.Req
 	// touch the user's read cursor.
 	if message.Role == "user" {
 		if userName, userErr := m.server.workspaceUserName(r, workspace.Path); userErr == nil {
-			m.server.markResourceReadOnUserMessage(workspace.Path, resourceID, userName)
+			_ = m.server.withWorkspaceMutation(context.WithoutCancel(r.Context()), workspace, resourceID, func(current serveWorkspace) error {
+				m.server.markResourceReadOnUserMessage(current.Path, resourceID, userName)
+				return nil
+			})
 		}
 	}
 	if wakeErr := m.enqueueResourceController(workspace, resourceID, func() error {

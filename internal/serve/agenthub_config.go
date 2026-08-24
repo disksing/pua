@@ -287,5 +287,16 @@ func atomicWriteConfig(path string, data []byte) error {
 	if err := file.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tempPath, path)
+	if err := os.Rename(tempPath, path); err != nil {
+		return err
+	}
+	// Sync the directory entry as well as the file contents. Without this
+	// barrier a successful return can still lose the rename after a crash,
+	// allowing runtime effects that no durable configuration owns.
+	directory, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
 }

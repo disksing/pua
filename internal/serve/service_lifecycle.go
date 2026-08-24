@@ -11,6 +11,7 @@ var (
 	errWorkspaceRemovalServicesActive       = errors.New("workspace could not be removed because services remain active; resolve attention-required service state and retry")
 	errWorkspaceRemovalLifecycleUnavailable = errors.New("workspace could not be removed because service lifecycle ownership is unavailable; retry after the current operation completes")
 	errWorkspaceServiceRemovalInProgress    = errors.New("workspace service removal is in progress")
+	errWorkspaceAdditionRetained            = errors.New("workspace remains configured and owned; retry service supervision")
 )
 
 type serviceWorkspaceKey struct {
@@ -355,12 +356,13 @@ func (s *server) initializeServiceManagers() error {
 	if err != nil {
 		return err
 	}
-	s.serviceMu.Lock()
-	defer s.serviceMu.Unlock()
 	for _, workspace := range cfg.Workspaces {
+		s.lockServiceLifecycleAfterLookup(workspace.ID)
 		if _, _, err := s.ensureServiceManagerLocked(workspace); err != nil {
+			s.serviceMu.Unlock()
 			return err
 		}
+		s.serviceMu.Unlock()
 	}
 	return nil
 }

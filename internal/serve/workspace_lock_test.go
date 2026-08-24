@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -239,10 +241,31 @@ func TestAddWorkspaceRollbackOnConfigSaveFailure(t *testing.T) {
 	workspace := t.TempDir()
 	// Point the config at an existing directory so the atomic rename fails.
 	configPath := t.TempDir()
-	s := &server{config: configPath, locks: newWorkspaceLockManager("", configPath)}
+	serviceContext, cancelServices := context.WithCancel(context.Background())
+	defer cancelServices()
+	var factoryCalls atomic.Int32
+	s := &server{
+		config:         configPath,
+		locks:          newWorkspaceLockManager("", configPath),
+		serviceContext: serviceContext,
+		serviceFactory: func(root string, options ServiceManagerOptions) (*ServiceManager, error) {
+			factoryCalls.Add(1)
+			return NewServiceManager(root, options)
+		},
+	}
 
 	if _, err := s.addWorkspace(context.Background(), workspace); err == nil {
 		t.Fatal("expected addWorkspace to fail when the config cannot be saved")
+	}
+	if got := factoryCalls.Load(); got != 0 {
+		t.Fatalf("config save failure constructed %d service managers, want 0 effects", got)
+	}
+	s.serviceMu.Lock()
+	managerCount := len(s.services)
+	lookupCount := len(s.serviceLookups)
+	s.serviceMu.Unlock()
+	if managerCount != 0 || lookupCount != 0 {
+		t.Fatalf("config save failure left (%d managers, %d reservations), want zero effects", managerCount, lookupCount)
 	}
 	if s.locks.owns(workspace) {
 		t.Fatal("failed add must roll back the workspace lock")
@@ -250,6 +273,219 @@ func TestAddWorkspaceRollbackOnConfigSaveFailure(t *testing.T) {
 	probe := newWorkspaceLockManager("", "")
 	if _, err := probe.acquire(workspace); err != nil {
 		t.Fatalf("expected another instance to acquire after rollback, got %v", err)
+	}
+}
+
+func TestAddWorkspaceCommittedMembershipRecoversBeforeManagerConstruction(t *testing.T) {
+	workspace := t.TempDir()
+	if _, err := app.Initialize(workspace, "en"); err != nil {
+		t.Fatal(err)
+	}
+	launches := filepath.Join(workspace, "recovered-launches")
+	writeTestService(t, workspace, ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "worker",
+		Enabled:       true,
+		Command: []string{"/bin/sh", "-c",
+			"printf 'launched\\n' >> " + shellQuote(launches) + "; exec sleep 30"},
+	})
+
+	configPath := filepath.Join(t.TempDir(), "serve.json")
+	serviceContext, cancelServices := context.WithCancel(context.Background())
+	defer cancelServices()
+	original := &server{
+		config:         configPath,
+		locks:          newWorkspaceLockManager("127.0.0.1:4936", configPath),
+		serviceContext: serviceContext,
+	}
+	t.Cleanup(original.locks.closeAll)
+	factoryEntered := make(chan struct{})
+	releaseFactory := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseFactory) }) }
+	t.Cleanup(release)
+	injected := errors.New("simulated crash before manager construction")
+	original.serviceFactory = func(string, ServiceManagerOptions) (*ServiceManager, error) {
+		close(factoryEntered)
+		<-releaseFactory
+		return nil, injected
+	}
+
+	result := make(chan error, 1)
+	go func() {
+		_, err := original.addWorkspace(context.Background(), workspace)
+		result <- err
+	}()
+	waitForWorkspaceConfigTransactionBarrier(t, factoryEntered)
+	assertWorkspaceConfigIDs(t, original, workspaceID(workspace))
+	if _, err := os.Stat(launches); !os.IsNotExist(err) {
+		t.Fatalf("service launched before committed membership recovery: %v", err)
+	}
+
+	// Model process loss at the after-commit/before-construction barrier. A new
+	// server can take ownership using only serve.json and normal startup then
+	// constructs and starts the committed Workspace manager.
+	original.locks.closeAll()
+	recoveredContext, cancelRecovered := context.WithCancel(context.Background())
+	recovered := &server{
+		config:         configPath,
+		locks:          newWorkspaceLockManager("127.0.0.1:4999", configPath),
+		serviceContext: recoveredContext,
+	}
+	if err := recovered.acquireConfiguredWorkspaceLocks(); err != nil {
+		t.Fatal(err)
+	}
+	if err := recovered.initializeServiceManagers(); err != nil {
+		t.Fatal(err)
+	}
+	recovered.startServices(recoveredContext)
+	waitForLaunches(t, launches, 1)
+	stopContext, cancelStop := context.WithTimeout(context.Background(), 2*time.Second)
+	if err := recovered.stopServices(stopContext); err != nil {
+		t.Fatal(err)
+	}
+	cancelStop()
+	cancelRecovered()
+	recovered.locks.closeAll()
+
+	release()
+	if err := <-result; !errors.Is(err, injected) {
+		t.Fatalf("interrupted add error = %v, want injected failure", err)
+	}
+}
+
+func TestAddWorkspaceStartReservationFencesRemovalAndKeepsMetadata(t *testing.T) {
+	workspace := t.TempDir()
+	if _, err := app.Initialize(workspace, "en"); err != nil {
+		t.Fatal(err)
+	}
+	launches := filepath.Join(workspace, "launches")
+	writeTestService(t, workspace, ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "worker",
+		Enabled:       true,
+		Command: []string{"/bin/sh", "-c",
+			"printf 'launched\\n' >> " + shellQuote(launches) + "; exec sleep 30"},
+	})
+
+	configPath := filepath.Join(t.TempDir(), "serve.json")
+	serviceContext, cancelServices := context.WithCancel(context.Background())
+	defer cancelServices()
+	s := &server{
+		config:         configPath,
+		locks:          newWorkspaceLockManager("127.0.0.1:4936", configPath),
+		serviceContext: serviceContext,
+	}
+	t.Cleanup(s.locks.closeAll)
+	startEntered := make(chan struct{})
+	releaseStart := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseStart) }) }
+	t.Cleanup(release)
+	s.serviceStarter = func(manager *ServiceManager, ctx context.Context) error {
+		if err := manager.Start(ctx); err != nil {
+			return err
+		}
+		close(startEntered)
+		<-releaseStart
+		return nil
+	}
+
+	type addResult struct {
+		workspace serveWorkspace
+		err       error
+	}
+	addedResult := make(chan addResult, 1)
+	go func() {
+		added, err := s.addWorkspace(context.Background(), workspace)
+		addedResult <- addResult{workspace: added, err: err}
+	}()
+	waitForWorkspaceConfigTransactionBarrier(t, startEntered)
+	waitForLaunches(t, launches, 1)
+	id := workspaceID(workspace)
+	assertWorkspaceConfigIDs(t, s, id)
+	if _, err := s.updateWorkspaceIcon(id, "research-lab"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.updateWorkspaceName(id, "Started Workspace"); err != nil {
+		t.Fatal(err)
+	}
+
+	removeResult := make(chan error, 1)
+	go func() { removeResult <- s.removeWorkspace(id) }()
+	select {
+	case err := <-removeResult:
+		t.Fatalf("removal crossed an in-progress addition/start reservation: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	release()
+	added := <-addedResult
+	if added.err != nil {
+		t.Fatal(added.err)
+	}
+	if added.workspace.Icon != "research-lab" || added.workspace.Name != "Started Workspace" {
+		t.Fatalf("add result lost concurrent metadata: %#v", added.workspace)
+	}
+	if err := <-removeResult; err != nil {
+		t.Fatal(err)
+	}
+	assertWorkspaceConfigIDs(t, s)
+	s.serviceMu.Lock()
+	managerCount := len(s.services)
+	lookupCount := len(s.serviceLookups)
+	s.serviceMu.Unlock()
+	if managerCount != 0 || lookupCount != 0 {
+		t.Fatalf("completed removal left (%d managers, %d reservations)", managerCount, lookupCount)
+	}
+	if s.locks.owns(workspace) {
+		t.Fatal("completed removal retained Workspace ownership")
+	}
+}
+
+func TestAddWorkspaceRetainsCommittedOwnershipWhenStartCleanupFails(t *testing.T) {
+	workspace := t.TempDir()
+	if _, err := app.Initialize(workspace, "en"); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(t.TempDir(), "serve.json")
+	serviceContext, cancelServices := context.WithCancel(context.Background())
+	defer cancelServices()
+	startErr := errors.New("injected start failure")
+	stopErr := errors.New("injected stop failure")
+	s := &server{
+		config:         configPath,
+		locks:          newWorkspaceLockManager("127.0.0.1:4936", configPath),
+		serviceContext: serviceContext,
+		serviceStarter: func(*ServiceManager, context.Context) error { return startErr },
+		serviceStopper: func(*ServiceManager, context.Context) error { return stopErr },
+	}
+	t.Cleanup(s.locks.closeAll)
+
+	if _, err := s.addWorkspace(context.Background(), workspace); !errors.Is(err, startErr) || !errors.Is(err, stopErr) || !errors.Is(err, errWorkspaceAdditionRetained) {
+		t.Fatalf("addWorkspace error = %v, want start, stop, and retained-state errors", err)
+	}
+	id := workspaceID(workspace)
+	assertWorkspaceConfigIDs(t, s, id)
+	if !s.locks.owns(workspace) {
+		t.Fatal("uncertain cleanup released ownership of the committed Workspace")
+	}
+	s.serviceMu.Lock()
+	managerCount := len(s.services)
+	lookupCount := len(s.serviceLookups)
+	s.serviceMu.Unlock()
+	if managerCount != 1 || lookupCount != 0 {
+		t.Fatalf("uncertain cleanup retained (%d managers, %d reservations), want authoritative manager only", managerCount, lookupCount)
+	}
+
+	// Once cleanup is available, the normal removal path can stop the retained
+	// manager, remove the durable membership, and release ownership.
+	s.serviceStopper = nil
+	if err := s.removeWorkspace(id); err != nil {
+		t.Fatal(err)
+	}
+	assertWorkspaceConfigIDs(t, s)
+	if s.locks.owns(workspace) {
+		t.Fatal("successful retry retained Workspace ownership")
 	}
 }
 

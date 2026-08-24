@@ -1744,59 +1744,29 @@ func (s *server) addWorkspaceWithOptions(ctx context.Context, path string, creat
 	return workspace, nil
 }
 
-// commitWorkspaceAddition publishes a Workspace and its service supervisor as
-// one runtime transaction. Callers finish all Workspace initialization first;
-// this commit boundary then serializes against service removal and concurrent
-// additions, starts services with the server lifecycle (never the HTTP request
-// context), and leaves neither configuration nor a manager behind on failure.
-// The boolean result asks the caller to retain its Workspace lock only when a
-// failed process cleanup makes the registered manager the remaining safe owner.
+// commitWorkspaceAddition durably publishes a Workspace before its service
+// supervisor can have any runtime effect. A per-Workspace lookup reservation
+// fences removal and service operations while the manager is constructed and
+// started outside the global lifecycle mutex. A crash anywhere after the
+// config commit is therefore recovered by normal startup from that membership.
+//
+// The boolean result asks the caller to retain its Workspace lock when a
+// post-commit failure could not safely roll the durable membership back.
 func (s *server) commitWorkspaceAddition(workspace serveWorkspace) (serveWorkspace, bool, error) {
 	s.lockServiceLifecycleAfterLookup(workspace.ID)
-	defer s.serviceMu.Unlock()
-
 	if s.serviceRemovals[workspace.ID] != nil {
+		s.serviceMu.Unlock()
 		return serveWorkspace{}, false, errWorkspaceServiceRemovalInProgress
 	}
 	key, manager, err := s.registeredServiceManagerLocked(workspace)
 	if err != nil {
+		s.serviceMu.Unlock()
 		return serveWorkspace{}, false, fmt.Errorf("resolve Workspace service supervision: %w", err)
 	}
-	created := false
-	if manager == nil {
-		factory := s.serviceFactory
-		if factory == nil {
-			factory = NewServiceManager
-		}
-		manager, err = factory(key.root, ServiceManagerOptions{})
-		if err != nil {
-			return serveWorkspace{}, false, fmt.Errorf("initialize Workspace service supervision: %w", err)
-		}
-		if s.services == nil {
-			s.services = make(map[serviceWorkspaceKey]*ServiceManager)
-		}
-		s.services[key] = manager
-		created = true
-	}
-
-	startAttempted := false
-	if s.serviceContext != nil {
-		startAttempted = true
-		starter := s.serviceStarter
-		if starter == nil {
-			starter = func(manager *ServiceManager, ctx context.Context) error {
-				return manager.Start(ctx)
-			}
-		}
-		if startErr := starter(manager, s.serviceContext); startErr != nil {
-			rollbackErr := s.rollbackAddedServiceManagerLocked(key, manager, created, startAttempted)
-			return serveWorkspace{}, rollbackErr != nil, errors.Join(
-				fmt.Errorf("start Workspace service supervision: %w", startErr),
-				rollbackErr,
-			)
-		}
-	}
+	previousActiveID := ""
+	inserted := false
 	committed, err := s.transactConfigLocked(func(cfg *config) (bool, error) {
+		previousActiveID = cfg.ActiveID
 		// Refresh the cached name at the commit seam so a concurrent name edit
 		// cannot be overwritten by an add that prepared an older snapshot.
 		workspace.Name = workspaceName(workspace.Path)
@@ -1812,13 +1782,14 @@ func (s *server) commitWorkspaceAddition(workspace serveWorkspace) (serveWorkspa
 		}
 		if !replaced {
 			cfg.Workspaces = append(cfg.Workspaces, workspace)
+			inserted = true
 		}
 		cfg.ActiveID = workspace.ID
 		return true, nil
 	})
 	if err != nil {
-		rollbackErr := s.rollbackAddedServiceManagerLocked(key, manager, created, startAttempted)
-		return serveWorkspace{}, rollbackErr != nil, errors.Join(err, rollbackErr)
+		s.serviceMu.Unlock()
+		return serveWorkspace{}, false, err
 	}
 	for _, candidate := range committed.Workspaces {
 		if candidate.ID == workspace.ID {
@@ -1826,26 +1797,176 @@ func (s *server) commitWorkspaceAddition(workspace serveWorkspace) (serveWorkspa
 			break
 		}
 	}
+	lookup := &serviceManagerLookup{done: make(chan struct{})}
+	if s.serviceLookups == nil {
+		s.serviceLookups = make(map[string]*serviceManagerLookup)
+	}
+	s.serviceLookups[workspace.ID] = lookup
+	factory := s.serviceFactory
+	if factory == nil {
+		factory = NewServiceManager
+	}
+	starter := s.serviceStarter
+	if starter == nil {
+		starter = func(manager *ServiceManager, ctx context.Context) error {
+			return manager.Start(ctx)
+		}
+	}
+	serviceContext := s.serviceContext
+	s.serviceMu.Unlock()
+
+	created := false
+	if manager == nil {
+		manager, err = factory(key.root, ServiceManagerOptions{})
+		if err != nil {
+			return s.failWorkspaceAddition(workspace, previousActiveID, key, nil, lookup, inserted, false,
+				fmt.Errorf("initialize Workspace service supervision: %w", err))
+		}
+		created = true
+		s.serviceMu.Lock()
+		if s.serviceLookups[workspace.ID] != lookup {
+			s.serviceMu.Unlock()
+			return serveWorkspace{}, true, errors.Join(
+				errors.New("Workspace service addition ownership changed"),
+				errWorkspaceAdditionRetained,
+			)
+		}
+		if s.services == nil {
+			s.services = make(map[serviceWorkspaceKey]*ServiceManager)
+		}
+		s.services[key] = manager
+		s.serviceMu.Unlock()
+	}
+
+	startAttempted := serviceContext != nil
+	if startAttempted {
+		if startErr := starter(manager, serviceContext); startErr != nil {
+			return s.failWorkspaceAddition(workspace, previousActiveID, key, manager, lookup, inserted, created,
+				fmt.Errorf("start Workspace service supervision: %w", startErr))
+		}
+	}
+
+	s.serviceMu.Lock()
+	defer s.serviceMu.Unlock()
+	if s.serviceLookups[workspace.ID] != lookup || s.services[key] != manager {
+		if s.serviceLookups[workspace.ID] == lookup {
+			s.finishServiceManagerLookupLocked(workspace.ID, lookup)
+		}
+		return serveWorkspace{}, true, errors.Join(
+			errors.New("Workspace service addition ownership changed"),
+			errWorkspaceAdditionRetained,
+		)
+	}
+	latest, _, loadErr := readServeConfigFile(s.config)
+	if loadErr != nil {
+		s.finishServiceManagerLookupLocked(workspace.ID, lookup)
+		return serveWorkspace{}, true, errors.Join(loadErr, errWorkspaceAdditionRetained)
+	}
+	found := false
+	for _, candidate := range latest.Workspaces {
+		if candidate.ID == workspace.ID {
+			workspace = candidate
+			found = true
+			break
+		}
+	}
+	if !found {
+		s.finishServiceManagerLookupLocked(workspace.ID, lookup)
+		return serveWorkspace{}, true, errors.Join(
+			errors.New("Workspace membership changed during service supervision startup"),
+			errWorkspaceAdditionRetained,
+		)
+	}
+	s.finishServiceManagerLookupLocked(workspace.ID, lookup)
 	return workspace, false, nil
 }
 
-func (s *server) rollbackAddedServiceManagerLocked(key serviceWorkspaceKey, manager *ServiceManager, created, startAttempted bool) error {
-	if !created {
-		return nil
-	}
-	if startAttempted {
+// failWorkspaceAddition compensates a synchronous post-commit failure while
+// the addition reservation still fences every competing lifecycle operation.
+// New runtime effects are stopped before a newly inserted membership is
+// removed. If either step is uncertain, config, manager, and Workspace lock
+// remain together so startup or a later retry can recover them.
+func (s *server) failWorkspaceAddition(workspace serveWorkspace, previousActiveID string, key serviceWorkspaceKey, manager *ServiceManager, lookup *serviceManagerLookup, inserted, created bool, cause error) (serveWorkspace, bool, error) {
+	if created && manager != nil {
 		stopContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		stopErr := manager.Stop(stopContext)
+		stopper := s.serviceStopper
+		if stopper == nil {
+			stopper = func(manager *ServiceManager, ctx context.Context) error {
+				return manager.Stop(ctx)
+			}
+		}
+		stopErr := stopper(manager, stopContext)
 		cancel()
 		if stopErr != nil {
-			return fmt.Errorf("roll back Workspace service supervision: %w", stopErr)
+			s.serviceMu.Lock()
+			s.finishServiceManagerLookupLocked(workspace.ID, lookup)
+			s.serviceMu.Unlock()
+			return serveWorkspace{}, true, errors.Join(
+				cause,
+				fmt.Errorf("roll back Workspace service supervision: %w", stopErr),
+				errWorkspaceAdditionRetained,
+			)
 		}
 	}
-	if s.services[key] != manager {
-		return errors.New("roll back Workspace service supervision: manager ownership changed")
+
+	s.serviceMu.Lock()
+	defer s.serviceMu.Unlock()
+	if s.serviceLookups[workspace.ID] != lookup {
+		return serveWorkspace{}, true, errors.Join(cause, errWorkspaceAdditionRetained)
 	}
-	delete(s.services, key)
-	return nil
+	if !created && manager != nil {
+		s.finishServiceManagerLookupLocked(workspace.ID, lookup)
+		return serveWorkspace{}, true, errors.Join(cause, errWorkspaceAdditionRetained)
+	}
+	if !inserted {
+		s.finishServiceManagerLookupLocked(workspace.ID, lookup)
+		return serveWorkspace{}, true, errors.Join(cause, errWorkspaceAdditionRetained)
+	}
+	_, rollbackErr := s.transactConfigLocked(func(cfg *config) (bool, error) {
+		next := make([]serveWorkspace, 0, len(cfg.Workspaces))
+		removed := false
+		for _, candidate := range cfg.Workspaces {
+			if candidate.ID == workspace.ID {
+				removed = true
+				continue
+			}
+			next = append(next, candidate)
+		}
+		if !removed {
+			return false, errors.New("roll back Workspace addition: durable membership changed")
+		}
+		cfg.Workspaces = next
+		if cfg.ActiveID == workspace.ID {
+			cfg.ActiveID = ""
+			for _, candidate := range cfg.Workspaces {
+				if candidate.ID == previousActiveID {
+					cfg.ActiveID = previousActiveID
+					break
+				}
+			}
+			if cfg.ActiveID == "" && len(cfg.Workspaces) > 0 {
+				cfg.ActiveID = cfg.Workspaces[0].ID
+			}
+		}
+		return true, nil
+	})
+	if rollbackErr != nil {
+		s.finishServiceManagerLookupLocked(workspace.ID, lookup)
+		return serveWorkspace{}, true, errors.Join(cause, rollbackErr, errWorkspaceAdditionRetained)
+	}
+	if created && manager != nil {
+		if s.services[key] != manager {
+			s.finishServiceManagerLookupLocked(workspace.ID, lookup)
+			return serveWorkspace{}, true, errors.Join(
+				cause,
+				errors.New("roll back Workspace service supervision: manager ownership changed"),
+				errWorkspaceAdditionRetained,
+			)
+		}
+		delete(s.services, key)
+	}
+	s.finishServiceManagerLookupLocked(workspace.ID, lookup)
+	return serveWorkspace{}, false, cause
 }
 
 func (s *server) ensureConfiguredResourceRuntimes() error {

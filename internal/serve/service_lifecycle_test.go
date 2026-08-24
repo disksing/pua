@@ -222,6 +222,210 @@ func TestRemoveWorkspaceStopsOnlyItsRegisteredManager(t *testing.T) {
 	}
 }
 
+func TestServiceManagerLookupDoesNotRecreateRemovedWorkspace(t *testing.T) {
+	s, workspaces := newWorkspaceConfigTransactionFixture(t, 1)
+	workspace := workspaces[0]
+	launchMarker := filepath.Join(workspace.Path, "stale-lookup-launched")
+	writeTestService(t, workspace.Path, ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "worker",
+		Enabled:       true,
+		Command: []string{"/bin/sh", "-c",
+			"touch " + shellQuote(launchMarker) + "; exec sleep 30"},
+	})
+	lookupPrepared := make(chan struct{})
+	releaseLookup := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseLookup) }) }
+	t.Cleanup(release)
+
+	type lookupResult struct {
+		manager *ServiceManager
+		err     error
+	}
+	result := make(chan lookupResult, 1)
+	go func() {
+		manager, _, err := s.serviceManagerForWorkspaceAtLookupBoundary(workspace.ID, func() {
+			close(lookupPrepared)
+			<-releaseLookup
+		})
+		result <- lookupResult{manager: manager, err: err}
+	}()
+	waitForWorkspaceConfigTransactionBarrier(t, lookupPrepared)
+
+	if err := s.removeWorkspace(workspace.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertWorkspaceConfigIDs(t, s)
+	if s.locks.owns(workspace.Path) {
+		t.Fatal("completed removal retained Workspace ownership")
+	}
+	if manager := registeredWorkspaceManager(t, s, workspace); manager != nil {
+		t.Fatal("completed removal retained its service manager")
+	}
+
+	release()
+	select {
+	case got := <-result:
+		if got.manager != nil {
+			t.Fatal("stale lookup returned a service manager after removal")
+		}
+		if got.err == nil || !strings.Contains(got.err.Error(), "workspace not found") {
+			t.Fatalf("stale lookup error = %v, want workspace not found", got.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("stale lookup did not finish after removal")
+	}
+	assertWorkspaceConfigIDs(t, s)
+	if s.locks.owns(workspace.Path) {
+		t.Fatal("stale lookup reacquired Workspace ownership")
+	}
+	if manager := registeredWorkspaceManager(t, s, workspace); manager != nil {
+		t.Fatal("stale lookup recreated the removed Workspace manager")
+	}
+	if _, err := os.Stat(launchMarker); !os.IsNotExist(err) {
+		t.Fatalf("stale lookup launched a removed Workspace service: %v", err)
+	}
+}
+
+func TestConcurrentServiceManagerLookupsShareConstruction(t *testing.T) {
+	root := t.TempDir()
+	workspace := serveWorkspace{ID: "workspace-one", Name: "Workspace One", Path: root}
+	configPath := filepath.Join(t.TempDir(), "serve.json")
+	serviceContext, cancelServices := context.WithCancel(context.Background())
+	s := &server{
+		config:         configPath,
+		locks:          newWorkspaceLockManager("127.0.0.1:4936", configPath),
+		serviceContext: serviceContext,
+	}
+	if err := s.saveConfig(config{Version: agentHubConfigVersion, Workspaces: []serveWorkspace{workspace}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.locks.acquire(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		cancelServices()
+		s.locks.closeAll()
+	})
+
+	factoryEntered := make(chan struct{})
+	releaseFactory := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseFactory) }) }
+	t.Cleanup(release)
+	var factoryCalls atomic.Int32
+	s.serviceFactory = func(root string, options ServiceManagerOptions) (*ServiceManager, error) {
+		if factoryCalls.Add(1) == 1 {
+			close(factoryEntered)
+		}
+		<-releaseFactory
+		return NewServiceManager(root, options)
+	}
+
+	type lookupResult struct {
+		manager *ServiceManager
+		err     error
+	}
+	start := make(chan struct{})
+	results := make(chan lookupResult, 2)
+	for range 2 {
+		go func() {
+			<-start
+			manager, _, err := s.serviceManagerForWorkspace(workspace.ID)
+			results <- lookupResult{manager: manager, err: err}
+		}()
+	}
+	close(start)
+	waitForWorkspaceConfigTransactionBarrier(t, factoryEntered)
+	release()
+
+	first := <-results
+	second := <-results
+	if first.err != nil || second.err != nil {
+		t.Fatalf("concurrent lookup errors = (%v, %v), want nil", first.err, second.err)
+	}
+	if first.manager == nil || first.manager != second.manager {
+		t.Fatalf("concurrent lookups returned managers (%p, %p), want one shared manager", first.manager, second.manager)
+	}
+	if got := factoryCalls.Load(); got != 1 {
+		t.Fatalf("concurrent lookups constructed %d managers, want 1", got)
+	}
+	s.serviceMu.Lock()
+	managerCount := len(s.services)
+	lookupCount := len(s.serviceLookups)
+	s.serviceMu.Unlock()
+	if managerCount != 1 || lookupCount != 0 {
+		t.Fatalf("concurrent lookup registry = (%d managers, %d reservations), want (1, 0)", managerCount, lookupCount)
+	}
+}
+
+func TestPausedServiceManagerLookupUsesReaddedWorkspaceGeneration(t *testing.T) {
+	s, workspaces := newWorkspaceConfigTransactionFixture(t, 1)
+	workspace := workspaces[0]
+	lookupPrepared := make(chan struct{})
+	releaseLookup := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseLookup) }) }
+	t.Cleanup(release)
+
+	type lookupResult struct {
+		manager   *ServiceManager
+		workspace serveWorkspace
+		err       error
+	}
+	result := make(chan lookupResult, 1)
+	go func() {
+		manager, resolved, err := s.serviceManagerForWorkspaceAtLookupBoundary(workspace.ID, func() {
+			close(lookupPrepared)
+			<-releaseLookup
+		})
+		result <- lookupResult{manager: manager, workspace: resolved, err: err}
+	}()
+	waitForWorkspaceConfigTransactionBarrier(t, lookupPrepared)
+
+	if err := s.removeWorkspace(workspace.ID); err != nil {
+		t.Fatal(err)
+	}
+	readded, err := s.addWorkspace(context.Background(), workspace.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readded.ID != workspace.ID {
+		t.Fatalf("re-added Workspace ID = %q, want %q", readded.ID, workspace.ID)
+	}
+	wantManager := registeredWorkspaceManager(t, s, readded)
+	if wantManager == nil {
+		t.Fatal("re-added Workspace has no service manager")
+	}
+
+	release()
+	select {
+	case got := <-result:
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
+		if got.workspace != readded {
+			t.Fatalf("paused lookup resolved Workspace %#v, want latest generation %#v", got.workspace, readded)
+		}
+		if got.manager != wantManager {
+			t.Fatal("paused lookup did not use the re-added generation's manager")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("paused lookup did not resolve the re-added Workspace")
+	}
+	assertWorkspaceConfigIDs(t, s, workspace.ID)
+	if !s.locks.owns(workspace.Path) {
+		t.Fatal("re-added Workspace lost ownership")
+	}
+	s.serviceMu.Lock()
+	managerCount := len(s.services)
+	s.serviceMu.Unlock()
+	if managerCount != 1 {
+		t.Fatalf("re-added Workspace has %d managers, want 1", managerCount)
+	}
+}
+
 func TestRemoveWorkspaceRetainsManagerAndLockWhenServiceStopFails(t *testing.T) {
 	s, workspace, manager := newWorkspaceRemovalTestServer(t)
 	var present atomic.Bool

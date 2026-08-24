@@ -190,6 +190,7 @@ type server struct {
 	locks            *workspaceLockManager
 	serviceMu        sync.Mutex
 	services         map[serviceWorkspaceKey]*ServiceManager
+	serviceLookups   map[string]*serviceManagerLookup
 	serviceRemovals  map[string]*serviceManagerRemoval
 	serviceContext   context.Context
 	serviceFactory   func(string, ServiceManagerOptions) (*ServiceManager, error)
@@ -1750,7 +1751,7 @@ func (s *server) addWorkspaceWithOptions(ctx context.Context, path string, creat
 // The boolean result asks the caller to retain its Workspace lock only when a
 // failed process cleanup makes the registered manager the remaining safe owner.
 func (s *server) commitWorkspaceAddition(workspace serveWorkspace) (serveWorkspace, bool, error) {
-	s.serviceMu.Lock()
+	s.lockServiceLifecycleAfterLookup(workspace.ID)
 	defer s.serviceMu.Unlock()
 
 	if s.serviceRemovals[workspace.ID] != nil {

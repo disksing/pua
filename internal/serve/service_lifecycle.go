@@ -25,6 +25,14 @@ type serviceManagerRemoval struct {
 	result      error
 }
 
+// serviceManagerLookup reserves one Workspace lifecycle generation while a
+// manager is constructed and started without holding the global lifecycle
+// mutex. Removal and addition wait for the reservation before changing that
+// Workspace's durable membership or authoritative manager.
+type serviceManagerLookup struct {
+	done chan struct{}
+}
+
 func newServiceWorkspaceKey(workspace serveWorkspace) (serviceWorkspaceKey, error) {
 	root, err := canonicalWorkspacePath(workspace.Path)
 	if err != nil {
@@ -81,12 +89,50 @@ func (s *server) ensureServiceManagerLocked(workspace serveWorkspace) (*ServiceM
 	return manager, true, nil
 }
 
+func (s *server) lockServiceLifecycleAfterLookup(id string) {
+	for {
+		s.serviceMu.Lock()
+		lookup := s.serviceLookups[id]
+		if lookup == nil {
+			return
+		}
+		done := lookup.done
+		s.serviceMu.Unlock()
+		<-done
+	}
+}
+
+func (s *server) finishServiceManagerLookupLocked(id string, lookup *serviceManagerLookup) {
+	if lookup == nil || s.serviceLookups[id] != lookup {
+		return
+	}
+	delete(s.serviceLookups, id)
+	close(lookup.done)
+}
+
+func (s *server) configuredWorkspaceLocked(id string) (serveWorkspace, error) {
+	cfg, err := s.transactConfigLocked(nil)
+	if err != nil {
+		return serveWorkspace{}, err
+	}
+	for _, workspace := range cfg.Workspaces {
+		if workspace.ID != id {
+			continue
+		}
+		if err := s.requireWorkspaceOwnership(workspace.Path); err != nil {
+			return serveWorkspace{}, err
+		}
+		return workspace, nil
+	}
+	return serveWorkspace{}, errors.New("workspace not found: " + id)
+}
+
 // beginWorkspaceServiceManagerRemoval resolves the Workspace and claims its
 // lifecycle ownership at the same transaction boundary used by additions and
 // removal commits. Concurrent callers share the same completion instead of
 // stopping, detaching, or releasing the authoritative manager more than once.
 func (s *server) beginWorkspaceServiceManagerRemoval(id string) (*serviceManagerRemoval, bool, error) {
-	s.serviceMu.Lock()
+	s.lockServiceLifecycleAfterLookup(id)
 	defer s.serviceMu.Unlock()
 	if removal := s.serviceRemovals[id]; removal != nil {
 		return removal, false, nil
@@ -190,12 +236,34 @@ func (s *server) finishServiceManagerRemoval(removal *serviceManagerRemoval, res
 func (s *server) serviceManagersLocked() []*ServiceManager {
 	managers := make([]*ServiceManager, 0, len(s.services))
 	for key, manager := range s.services {
+		if s.serviceLookups[key.workspaceID] != nil {
+			continue
+		}
 		if removal := s.serviceRemovals[key.workspaceID]; removal != nil && removal.manager == manager {
 			continue
 		}
 		managers = append(managers, manager)
 	}
 	return managers
+}
+
+func (s *server) serviceManagersAfterLookups() []*ServiceManager {
+	for {
+		s.serviceMu.Lock()
+		if len(s.serviceLookups) == 0 {
+			managers := s.serviceManagersLocked()
+			s.serviceMu.Unlock()
+			return managers
+		}
+		lookups := make([]<-chan struct{}, 0, len(s.serviceLookups))
+		for _, lookup := range s.serviceLookups {
+			lookups = append(lookups, lookup.done)
+		}
+		s.serviceMu.Unlock()
+		for _, done := range lookups {
+			<-done
+		}
+	}
 }
 
 func (s *server) initializeServiceManagers() error {
@@ -217,26 +285,104 @@ func (s *server) initializeServiceManagers() error {
 }
 
 func (s *server) serviceManagerForWorkspace(id string) (*ServiceManager, serveWorkspace, error) {
-	workspace, err := s.workspace(id)
+	return s.serviceManagerForWorkspaceAtLookupBoundary(id, nil)
+}
+
+func (s *server) serviceManagerForWorkspaceAtLookupBoundary(id string, lookupPrepared func()) (*ServiceManager, serveWorkspace, error) {
+	if lookupPrepared != nil {
+		lookupPrepared()
+	}
+	s.lockServiceLifecycleAfterLookup(id)
+	workspace, err := s.configuredWorkspaceLocked(id)
 	if err != nil {
+		s.serviceMu.Unlock()
 		return nil, serveWorkspace{}, err
 	}
-	s.serviceMu.Lock()
-	defer s.serviceMu.Unlock()
 	if s.serviceRemovals[workspace.ID] != nil {
+		s.serviceMu.Unlock()
 		return nil, workspace, errWorkspaceServiceRemovalInProgress
 	}
-	manager, created, err := s.ensureServiceManagerLocked(workspace)
+	key, manager, err := s.registeredServiceManagerLocked(workspace)
 	if err != nil {
+		s.serviceMu.Unlock()
 		return nil, workspace, err
 	}
-	if created {
-		if s.serviceContext != nil {
-			if startErr := manager.Start(s.serviceContext); startErr != nil {
-				log.Printf("start workspace services in %s: %v", manager.Root(), startErr)
+	if manager != nil {
+		s.serviceMu.Unlock()
+		return manager, workspace, nil
+	}
+	lookup := &serviceManagerLookup{done: make(chan struct{})}
+	if s.serviceLookups == nil {
+		s.serviceLookups = make(map[string]*serviceManagerLookup)
+	}
+	s.serviceLookups[id] = lookup
+	factory := s.serviceFactory
+	if factory == nil {
+		factory = NewServiceManager
+	}
+	s.serviceMu.Unlock()
+
+	manager, err = factory(key.root, ServiceManagerOptions{})
+	if err != nil {
+		s.serviceMu.Lock()
+		s.finishServiceManagerLookupLocked(id, lookup)
+		s.serviceMu.Unlock()
+		return nil, workspace, err
+	}
+
+	s.serviceMu.Lock()
+	if s.serviceLookups[id] != lookup {
+		s.serviceMu.Unlock()
+		return nil, workspace, errors.New("workspace service lookup ownership changed")
+	}
+	workspace, err = s.configuredWorkspaceLocked(id)
+	if err != nil {
+		s.finishServiceManagerLookupLocked(id, lookup)
+		s.serviceMu.Unlock()
+		return nil, serveWorkspace{}, err
+	}
+	if s.serviceRemovals[id] != nil {
+		s.finishServiceManagerLookupLocked(id, lookup)
+		s.serviceMu.Unlock()
+		return nil, workspace, errWorkspaceServiceRemovalInProgress
+	}
+	latestKey, registered, err := s.registeredServiceManagerLocked(workspace)
+	if err != nil {
+		s.finishServiceManagerLookupLocked(id, lookup)
+		s.serviceMu.Unlock()
+		return nil, workspace, err
+	}
+	if registered != nil {
+		s.finishServiceManagerLookupLocked(id, lookup)
+		s.serviceMu.Unlock()
+		return registered, workspace, nil
+	}
+	if latestKey != key {
+		s.finishServiceManagerLookupLocked(id, lookup)
+		s.serviceMu.Unlock()
+		return nil, workspace, errors.New("workspace changed during service manager lookup: " + id)
+	}
+	if s.services == nil {
+		s.services = make(map[serviceWorkspaceKey]*ServiceManager)
+	}
+	s.services[key] = manager
+	serviceContext := s.serviceContext
+	starter := s.serviceStarter
+	s.serviceMu.Unlock()
+
+	if serviceContext != nil {
+		if starter == nil {
+			starter = func(manager *ServiceManager, ctx context.Context) error {
+				return manager.Start(ctx)
 			}
 		}
+		if startErr := starter(manager, serviceContext); startErr != nil {
+			log.Printf("start workspace services in %s: %v", manager.Root(), startErr)
+		}
 	}
+	s.serviceMu.Lock()
+	s.finishServiceManagerLookupLocked(id, lookup)
+	s.serviceMu.Unlock()
 	return manager, workspace, nil
 }
 
@@ -264,9 +410,10 @@ func (s *server) reconcileServices(ctx context.Context) error {
 }
 
 func (s *server) stopServices(ctx context.Context) error {
-	s.serviceMu.Lock()
-	managers := s.serviceManagersLocked()
-	s.serviceMu.Unlock()
+	// A lookup starts its manager outside serviceMu while its Workspace
+	// reservation prevents removal or replacement. Preserve the old shutdown
+	// guarantee by waiting for those starts before taking the stop snapshot.
+	managers := s.serviceManagersAfterLookups()
 	var first error
 	for _, manager := range managers {
 		if err := manager.Stop(ctx); err != nil && first == nil {

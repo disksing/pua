@@ -79,6 +79,90 @@ output. Readiness-only services omit the flag and do not perform an export
 hand-off. Later atomic hand-offs may update public variables; secret names and
 values are immutable until the service restarts.
 
+#### Service definition schema
+
+Each file in `.pua/services/` contains one strict JSON object. The filename must
+be `<id>.json`, and its `id` must match the filename. A complete definition can
+use the following shape (all fields except `schemaVersion`, `id`, `enabled`,
+and `command` are optional):
+
+```json
+{
+  "schemaVersion": 1,
+  "id": "api",
+  "enabled": true,
+  "command": ["./bin/api"],
+  "args": ["--port", "8080"],
+  "cwd": ".",
+  "environment": {
+    "APP_ENV": "production",
+    "UPSTREAM_URL": "${service.database.URL}",
+    "API_TOKEN": { "secret": "provider/api-token" }
+  },
+  "dependsOn": ["database"],
+  "exports": true,
+  "readiness": {
+    "command": ["./bin/api", "healthcheck"],
+    "interval": "5s",
+    "timeout": "3s"
+  },
+  "cleanup": {
+    "command": ["./bin/api", "cleanup"],
+    "timeout": "10s",
+    "retries": 2
+  },
+  "restart": {
+    "initialDelay": "1s",
+    "multiplier": 2,
+    "maxDelay": "5m",
+    "resetAfter": "10m"
+  },
+  "logRotation": {
+    "maxBytes": 10485760,
+    "maxFiles": 5
+  }
+}
+```
+
+`command` and `args` are concatenated into one argument vector and are never
+interpreted by a shell. The first `command` element is the executable; keep
+arguments in `args` unless an interpreter invocation such as `["python3", "-m"]`
+is clearer. `cwd` may be absolute or Workspace-relative, but must remain inside
+the Workspace. Service IDs must match `^[a-z][a-z0-9_-]{0,63}$`; environment
+names must be valid shell-style names (`[A-Za-z_][A-Za-z0-9_]*`).
+
+Environment values may be literal strings, service templates such as
+`${service.database.URL}`, or secret references such as `${secret.API_TOKEN}`
+and `{ "secret": "API_TOKEN" }`. A service template creates a dependency on
+the referenced service and is resolved only when that service is ready.
+
+`readiness.command` and `cleanup.command` use the same argument-array rules.
+Duration fields accept strings such as `"500ms"`, `"5s"`, and `"1m"` (positive
+nanosecond integers are also accepted). Defaults are 5s for readiness interval
+and timeout, 10s for cleanup timeout, 1s/2/5m/10m for restart delay,
+multiplier, maximum delay, and reset window, and 10 MiB/5 files for log
+rotation. `restart.multiplier` must be at least 1; `restart.maxDelay` must not
+be less than `restart.initialDelay`.
+
+When `exports` is true, the service must atomically replace the path in
+`PUA_SERVICE_EXPORT_PATH` with a document of this form:
+
+```json
+{
+  "schemaVersion": 1,
+  "variables": { "URL": "http://127.0.0.1:8080" },
+  "secrets": { "TOKEN": "secret-value" }
+}
+```
+
+`variables` are public values and `secrets` are held only in memory after the
+initial hand-off; secret values are scrubbed from the hand-off file and are
+never returned by the API or CLI. Later replacements may change public
+variables, but the accepted secret names and values must remain unchanged.
+Write a temporary file in the same runtime directory and rename it over
+`PUA_SERVICE_EXPORT_PATH`; writing the path in place can expose a partial JSON
+document. Apply a definition with `pua service apply --file=<config>`.
+
 Use `pua service list`, `show`, `apply`, `start`, `stop`, `restart`, `logs`,
 `exports`, and `validate` to inspect and control them. Secret references are
 resolved only when a process starts; secret values are held in memory and are

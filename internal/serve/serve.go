@@ -191,6 +191,7 @@ type server struct {
 	serviceMu        sync.Mutex
 	services         map[serviceWorkspaceKey]*ServiceManager
 	serviceLookups   map[string]*serviceManagerLookup
+	serviceLeases    map[string]int
 	serviceRemovals  map[string]*serviceManagerRemoval
 	serviceContext   context.Context
 	serviceFactory   func(string, ServiceManagerOptions) (*ServiceManager, error)
@@ -1934,6 +1935,7 @@ func (s *server) removeWorkspace(id string) error {
 	if !owner {
 		return waitForServiceManagerRemoval(removal)
 	}
+	<-removal.leasesDone
 	if removal.manager != nil {
 		stopContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		stopper := s.serviceStopper

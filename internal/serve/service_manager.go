@@ -27,7 +27,10 @@ type ServiceSecretResolver interface {
 	ResolveSecret(name string) (value string, source string, err error)
 }
 
-var errServiceDisabled = errors.New("service is disabled; enable it first")
+var (
+	errServiceDisabled        = errors.New("service is disabled; enable it first")
+	errServiceManagerStopping = errors.New("service manager is stopping")
+)
 
 type ServiceSecretResolverFunc func(string) (string, string, error)
 
@@ -3472,6 +3475,9 @@ func (m *ServiceManager) Disable(ctx context.Context, id string) error {
 func (m *ServiceManager) StartService(ctx context.Context, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.stopping {
+		return errServiceManagerStopping
+	}
 	rt := m.runtimes[id]
 	if rt == nil {
 		return os.ErrNotExist
@@ -3500,7 +3506,6 @@ func (m *ServiceManager) StartService(ctx context.Context, id string) error {
 	rt.status.State = ServiceStateStopped
 	if !m.started {
 		m.started = true
-		m.stopping = false
 	}
 	if err := m.persistStatusLocked(rt); err != nil {
 		return err
@@ -3567,6 +3572,9 @@ func (m *ServiceManager) stopServiceDependencyChainLocked(ctx context.Context, i
 func (m *ServiceManager) RestartService(ctx context.Context, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.stopping {
+		return errServiceManagerStopping
+	}
 	rt := m.runtimes[id]
 	if rt == nil {
 		return os.ErrNotExist
@@ -3599,7 +3607,6 @@ func (m *ServiceManager) RestartService(ctx context.Context, id string) error {
 	rt.status.State = ServiceStateStopped
 	if !m.started {
 		m.started = true
-		m.stopping = false
 	}
 	if err := m.persistStatusLocked(rt); err != nil {
 		return err

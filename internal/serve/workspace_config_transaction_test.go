@@ -334,7 +334,7 @@ func TestRemoveWorkspaceSaveFailurePreservesConcurrentAddition(t *testing.T) {
 	restorePermissions()
 
 	assertWorkspaceConfigIDs(t, s, removed.ID, retained.ID, added.ID)
-	manager, _, lookupErr := s.serviceManagerForWorkspace(removed.ID)
+	manager, _, lookupErr := serviceManagerForWorkspaceTest(s, removed.ID)
 	if lookupErr != nil {
 		t.Fatalf("failed removal left Workspace supervision fenced: %v", lookupErr)
 	}

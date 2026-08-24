@@ -9,11 +9,13 @@ import (
 )
 
 func (s *server) handleWorkspaceServices(w http.ResponseWriter, r *http.Request, workspaceID string, parts []string) {
-	manager, workspace, err := s.serviceManagerForWorkspace(workspaceID)
+	lease, err := s.acquireServiceManagerLease(workspaceID)
 	if err != nil {
 		writeError(w, err, http.StatusNotFound)
 		return
 	}
+	defer lease.Release()
+	manager, workspace := lease.manager, lease.workspace
 	if ownershipErr := s.requireWorkspaceOwnership(workspace.Path); ownershipErr != nil {
 		writeError(w, ownershipErr, http.StatusConflict)
 		return
@@ -143,6 +145,9 @@ func (s *server) handleWorkspaceServices(w http.ResponseWriter, r *http.Request,
 			writeError(w, err, http.StatusNotFound)
 			return
 		}
+		// The reader owns the already-open log file; manager lifecycle ownership
+		// is no longer needed while a follow response streams to the client.
+		lease.Release()
 		defer reader.Close()
 		var destination io.Writer = w
 		if follow {
@@ -205,12 +210,13 @@ func serviceActionAPIError(err error) error {
 }
 
 func (s *server) handleServiceBindings(w http.ResponseWriter, r *http.Request, workspaceID string) {
-	manager, workspace, err := s.serviceManagerForWorkspace(workspaceID)
+	lease, err := s.acquireServiceManagerLease(workspaceID)
 	if err != nil {
 		writeError(w, err, http.StatusNotFound)
 		return
 	}
-	_ = manager
+	defer lease.Release()
+	manager, workspace := lease.manager, lease.workspace
 	if ownershipErr := s.requireWorkspaceOwnership(workspace.Path); ownershipErr != nil {
 		writeError(w, ownershipErr, http.StatusConflict)
 		return

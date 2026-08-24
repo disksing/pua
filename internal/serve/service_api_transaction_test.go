@@ -39,7 +39,7 @@ func TestWorkspaceServicesCollectionPutValidatesBeforeMutation(t *testing.T) {
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("collection PUT returned %d: %s", recorder.Code, recorder.Body.String())
 	}
-	manager, _, err := server.serviceManagerForWorkspace(workspace.ID)
+	manager, _, err := serviceManagerForWorkspaceTest(server, workspace.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

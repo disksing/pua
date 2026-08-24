@@ -36,6 +36,26 @@ func newServiceLifecycleTestServer(t *testing.T, workspaces ...serveWorkspace) *
 	return s
 }
 
+func serviceManagerForWorkspaceTest(s *server, id string) (*ServiceManager, serveWorkspace, error) {
+	lease, err := s.acquireServiceManagerLease(id)
+	if err != nil {
+		return nil, serveWorkspace{}, err
+	}
+	manager, workspace := lease.manager, lease.workspace
+	lease.Release()
+	return manager, workspace, nil
+}
+
+func serviceManagerForWorkspaceAtLookupBoundaryTest(s *server, id string, lookupPrepared func()) (*ServiceManager, serveWorkspace, error) {
+	lease, err := s.acquireServiceManagerLeaseAtLookupBoundary(id, lookupPrepared)
+	if err != nil {
+		return nil, serveWorkspace{}, err
+	}
+	manager, workspace := lease.manager, lease.workspace
+	lease.Release()
+	return manager, workspace, nil
+}
+
 func serviceManagerIsStopping(manager *ServiceManager) bool {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
@@ -76,7 +96,7 @@ func newWorkspaceRemovalTestServer(t *testing.T) (*server, serveWorkspace, *Serv
 	if err := s.initializeServiceManagers(); err != nil {
 		t.Fatal(err)
 	}
-	manager, _, err := s.serviceManagerForWorkspace(workspace.ID)
+	manager, _, err := serviceManagerForWorkspaceTest(s, workspace.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +138,7 @@ func TestServiceRegistryCanonicalizesWorkspacePathAliases(t *testing.T) {
 	}
 	workspace := serveWorkspace{ID: "workspace-one", Path: root}
 	s := newServiceLifecycleTestServer(t, workspace)
-	manager, _, err := s.serviceManagerForWorkspace(workspace.ID)
+	manager, _, err := serviceManagerForWorkspaceTest(s, workspace.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +151,7 @@ func TestServiceRegistryCanonicalizesWorkspacePathAliases(t *testing.T) {
 	if err := s.saveConfig(cfg); err != nil {
 		t.Fatal(err)
 	}
-	aliasManager, _, err := s.serviceManagerForWorkspace(workspace.ID)
+	aliasManager, _, err := serviceManagerForWorkspaceTest(s, workspace.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +171,7 @@ func TestServiceRegistryCanonicalizesWorkspacePathAliases(t *testing.T) {
 	if err := s.saveConfig(cfg); err != nil {
 		t.Fatal(err)
 	}
-	linkManager, _, err := s.serviceManagerForWorkspace(workspace.ID)
+	linkManager, _, err := serviceManagerForWorkspaceTest(s, workspace.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +187,7 @@ func TestRegisteredServiceManagerFindsWorkspaceAfterCanonicalizationError(t *tes
 	root := t.TempDir()
 	workspace := serveWorkspace{ID: "workspace-one", Path: root}
 	s := newServiceLifecycleTestServer(t, workspace)
-	manager, _, err := s.serviceManagerForWorkspace(workspace.ID)
+	manager, _, err := serviceManagerForWorkspaceTest(s, workspace.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,11 +212,11 @@ func TestRemoveWorkspaceStopsOnlyItsRegisteredManager(t *testing.T) {
 	first := serveWorkspace{ID: "workspace-one", Path: t.TempDir()}
 	second := serveWorkspace{ID: "workspace-two", Path: t.TempDir()}
 	s := newServiceLifecycleTestServer(t, first, second)
-	firstManager, _, err := s.serviceManagerForWorkspace(first.ID)
+	firstManager, _, err := serviceManagerForWorkspaceTest(s, first.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondManager, _, err := s.serviceManagerForWorkspace(second.ID)
+	secondManager, _, err := serviceManagerForWorkspaceTest(s, second.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +233,7 @@ func TestRemoveWorkspaceStopsOnlyItsRegisteredManager(t *testing.T) {
 	if got := len(s.services); got != 1 {
 		t.Fatalf("service manager count after removal = %d, want 1", got)
 	}
-	remaining, _, err := s.serviceManagerForWorkspace(second.ID)
+	remaining, _, err := serviceManagerForWorkspaceTest(s, second.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +265,7 @@ func TestServiceManagerLookupDoesNotRecreateRemovedWorkspace(t *testing.T) {
 	}
 	result := make(chan lookupResult, 1)
 	go func() {
-		manager, _, err := s.serviceManagerForWorkspaceAtLookupBoundary(workspace.ID, func() {
+		manager, _, err := serviceManagerForWorkspaceAtLookupBoundaryTest(s, workspace.ID, func() {
 			close(lookupPrepared)
 			<-releaseLookup
 		})
@@ -332,7 +352,7 @@ func TestConcurrentServiceManagerLookupsShareConstruction(t *testing.T) {
 	for range 2 {
 		go func() {
 			<-start
-			manager, _, err := s.serviceManagerForWorkspace(workspace.ID)
+			manager, _, err := serviceManagerForWorkspaceTest(s, workspace.ID)
 			results <- lookupResult{manager: manager, err: err}
 		}()
 	}
@@ -376,7 +396,7 @@ func TestPausedServiceManagerLookupUsesReaddedWorkspaceGeneration(t *testing.T) 
 	}
 	result := make(chan lookupResult, 1)
 	go func() {
-		manager, resolved, err := s.serviceManagerForWorkspaceAtLookupBoundary(workspace.ID, func() {
+		manager, resolved, err := serviceManagerForWorkspaceAtLookupBoundaryTest(s, workspace.ID, func() {
 			close(lookupPrepared)
 			<-releaseLookup
 		})
@@ -448,7 +468,7 @@ func TestRemoveWorkspaceRetainsManagerAndLockWhenServiceStopFails(t *testing.T) 
 	if len(cfg.Workspaces) != 1 || cfg.Workspaces[0].ID != workspace.ID {
 		t.Fatalf("failed removal discarded Workspace config: %#v", cfg.Workspaces)
 	}
-	retained, _, lookupErr := s.serviceManagerForWorkspace(workspace.ID)
+	retained, _, lookupErr := serviceManagerForWorkspaceTest(s, workspace.ID)
 	if lookupErr != nil {
 		t.Fatalf("failed removal lost manager lookup: %v", lookupErr)
 	}
@@ -528,7 +548,7 @@ func TestRemoveWorkspaceRestartsServicesWhenConfigSaveFails(t *testing.T) {
 	if err := s.initializeServiceManagers(); err != nil {
 		t.Fatal(err)
 	}
-	manager, _, err := s.serviceManagerForWorkspace(workspace.ID)
+	manager, _, err := serviceManagerForWorkspaceTest(s, workspace.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -581,7 +601,7 @@ func TestRemoveWorkspaceRestartsServicesWhenConfigSaveFails(t *testing.T) {
 	if len(cfg.Workspaces) != 1 || cfg.Workspaces[0].ID != workspace.ID {
 		t.Fatalf("failed removal discarded Workspace config: %#v", cfg.Workspaces)
 	}
-	retained, _, err := s.serviceManagerForWorkspace(workspace.ID)
+	retained, _, err := serviceManagerForWorkspaceTest(s, workspace.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -598,7 +618,7 @@ func TestRemoveWorkspaceRestartsServicesWhenConfigSaveFails(t *testing.T) {
 	if s.locks.owns(workspace.Path) {
 		t.Fatal("successful retry retained Workspace ownership")
 	}
-	if _, _, err := s.serviceManagerForWorkspace(workspace.ID); err == nil || !strings.Contains(err.Error(), "workspace not found") {
+	if _, _, err := serviceManagerForWorkspaceTest(s, workspace.ID); err == nil || !strings.Contains(err.Error(), "workspace not found") {
 		t.Fatalf("successful retry retained Workspace manager lookup: %v", err)
 	}
 }

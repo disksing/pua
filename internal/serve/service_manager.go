@@ -152,11 +152,15 @@ type serviceRuntime struct {
 	// names whose accepted values moved after this generation became ready.
 	// The committed bit prevents a dependent process from being stopped before
 	// the producer's matching public status has been durably written.
-	pendingExportKeys     map[string]struct{}
-	exportKeysCommitted   bool
-	redactor              *security.Redactor
-	exports               ServiceExportFile
-	logWriters            []*serviceLogWriter
+	pendingExportKeys   map[string]struct{}
+	exportKeysCommitted bool
+	redactor            *security.Redactor
+	exports             ServiceExportFile
+	logWriters          []*serviceLogWriter
+	// launchPending is durable while a newly forked helper remains behind the
+	// execution barrier. A reconstructed pending launch can be reaped without
+	// running service cleanup because service code was never authorized.
+	launchPending         bool
 	terminationPending    bool
 	orphanRecoveryPending bool
 	orphanCleanupComplete bool
@@ -191,6 +195,7 @@ type serviceRuntimeConfigSnapshot struct {
 	redactor                *security.Redactor
 	exports                 ServiceExportFile
 	logWriters              []*serviceLogWriter
+	launchPending           bool
 	terminationPending      bool
 	orphanRecoveryPending   bool
 	orphanCleanupComplete   bool
@@ -206,6 +211,7 @@ type persistedServiceRuntimeState struct {
 	ServiceStatus
 	ProcessConfig         *persistedServiceProcessConfig `json:"processConfig,omitempty"`
 	OrphanRecoveryPending bool                           `json:"orphanRecoveryPending,omitempty"`
+	LaunchPending         bool                           `json:"launchPending,omitempty"`
 	// PendingExportChanges contains public variable names only. Persisting the
 	// names with the accepted status lets reconstruction preserve an unfinished
 	// invalidation without retaining another copy of public values or any
@@ -255,6 +261,10 @@ type ServiceManager struct {
 	runtimeStateStore          serviceRuntimeStateStore
 	exportOpenFile             func(string, int, os.FileMode) (*os.File, error)
 	exportScrubPath            func(string) error
+	// beforeServiceLaunchRelease is a test checkpoint at the last point where
+	// service code must still be unable to execute.
+	beforeServiceLaunchRelease func()
+	releaseServiceLaunch       func(*serviceLaunchBarrier) error
 	stopping                   bool
 	started                    bool
 }
@@ -518,7 +528,8 @@ func (m *ServiceManager) loadStatusLocked(rt *serviceRuntime) error {
 	if status.Exports.Variables == nil {
 		status.Exports.Variables = map[string]string{}
 	}
-	rt.orphanRecoveryPending = persisted.OrphanRecoveryPending || status.PID > 0 || status.ProcessGroup > 0
+	rt.launchPending = persisted.LaunchPending
+	rt.orphanRecoveryPending = persisted.OrphanRecoveryPending || persisted.LaunchPending || status.PID > 0 || status.ProcessGroup > 0
 	rt.rollbackRemovalPending = persisted.RollbackRemovalPending
 	rt.suppressHookDiagnostics.Store(persisted.SuppressHookDiagnostics)
 	rt.orphanCleanupComplete = false
@@ -536,7 +547,7 @@ func (m *ServiceManager) loadStatusLocked(rt *serviceRuntime) error {
 		if err := validateServiceConfig(m.root, processConfig); err != nil {
 			return fmt.Errorf("runtime process config: %w", err)
 		}
-		if status.PID > 0 || status.ProcessGroup > 0 || persisted.OrphanRecoveryPending {
+		if status.PID > 0 || status.ProcessGroup > 0 || persisted.OrphanRecoveryPending || persisted.LaunchPending {
 			rt.processConfig = &processConfig
 			rt.processCommandDigest = persisted.ProcessConfig.CommandDigest
 		}
@@ -1029,7 +1040,6 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 	}
 	rt.exportCleanupFailure = ""
 	command := append(append([]string{}, cfg.Command...), cfg.Args...)
-	cmd := exec.Command(command[0], command[1:]...)
 	cwd := cfg.CWD
 	if cwd == "" {
 		cwd = m.root
@@ -1037,28 +1047,11 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 	if !filepath.IsAbs(cwd) {
 		cwd = filepath.Join(m.root, cwd)
 	}
-	cmd.Dir = filepath.Clean(cwd)
-	if !pathWithinResolved(m.root, cmd.Dir) {
+	cwd = filepath.Clean(cwd)
+	if !pathWithinResolved(m.root, cwd) {
 		return m.failStartLocked(ctx, rt, errors.New("service cwd escapes the workspace"))
 	}
-	cmd.Env = env
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	// A service descendant may inherit the copy pipes that os/exec creates for
-	// the redacting log writers. Once the leader exits, bound the final pipe
-	// drain so the descendant cannot hide that exit from reconciliation. The
-	// existing unexpected-exit path then verifies and reaps the residual group.
-	cmd.WaitDelay = serviceCommandWaitDelay
 	instanceToken := valueFromEnvironment(env, serviceInstanceTokenEnvironment)
-	var identityMarker *os.File
-	identityMarkerPath := ""
-	processPlatform := m.serviceProcessPlatform()
-	if processPlatform.identityMarkerRequired {
-		identityMarker, identityMarkerPath, err = openServiceProcessIdentityMarker(m.root, cfg.ID, instanceToken)
-		if err != nil {
-			return m.failStartLocked(ctx, rt, err)
-		}
-		cmd.ExtraFiles = []*os.File{identityMarker}
-	}
 	redactor := security.NewRedactor(secrets...)
 	stdoutSink := newServiceLogSink(filepath.Join(serviceRuntimePath(m.root, cfg.ID), "stdout.log"), cfg.LogRotation)
 	stderrSink := newServiceLogSink(filepath.Join(serviceRuntimePath(m.root, cfg.ID), "stderr.log"), cfg.LogRotation)
@@ -1072,10 +1065,9 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 	}
 	stdoutWriter := newServiceLogWriter(stdoutSink, redactor, gatedLogs, exportGuard)
 	stderrWriter := newServiceLogWriter(stderrSink, redactor, gatedLogs, exportGuard)
-	cmd.Stdout, cmd.Stderr = stdoutWriter, stderrWriter
-	// Keep the resolved environment in the runtime before Start so a failed
-	// exec can still run cleanup with the same environment and redact any
-	// resolver-provided secret from its diagnostics.
+	// Record a durable intent before forking any process. It contains no secret
+	// values or numeric process ownership, but preserves the immutable config
+	// and launch token needed to clean a partially-created generation.
 	rt.environment = env
 	rt.secretValues = secrets
 	rt.secretNames = names
@@ -1086,12 +1078,74 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 	rt.rejectedExportSecrets = nil
 	rt.redactor = redactor
 	rt.exports = exports
+	rt.config = cfg
+	rt.started = m.now()
+	rt.stableSince = rt.started
+	rt.launchPending = true
+	rt.processOwnership = serviceProcessOwnershipReconstructed
+	rt.status.State = ServiceStateStarting
+	rt.status.PID = 0
+	rt.status.ProcessGroup = 0
+	rt.status.StartedAt = rt.started.Format(time.RFC3339Nano)
+	rt.status.ExitedAt = ""
+	rt.status.ExitCode = 0
+	rt.status.ExitError = ""
+	rt.status.LastError = ""
+	rt.status.NextRetryAt = ""
+	rt.status.CommandDigest = serviceCommandDigest(cfg)
+	rt.status.InstanceToken = instanceToken
+	rt.status.ProcessStartID = ""
+	rt.status.Readiness = ServiceReadinessStatus{Configured: cfg.Readiness != nil}
+	rt.status.Cleanup = ServiceCleanupStatus{Configured: cfg.Cleanup != nil}
 	rt.status.Exports = publicExports(exports, names)
-	if err := cmd.Start(); err != nil {
+	if err := m.persistStatusLocked(rt); err != nil {
+		rt.launchPending = false
+		_ = stdoutWriter.Close()
+		_ = stderrWriter.Close()
+		return m.failStartLocked(ctx, rt, err)
+	}
+
+	var identityMarker *os.File
+	identityMarkerPath := ""
+	processPlatform := m.serviceProcessPlatform()
+	extraFiles := []*os.File(nil)
+	if processPlatform.identityMarkerRequired {
+		identityMarker, identityMarkerPath, err = openServiceProcessIdentityMarker(m.root, cfg.ID, instanceToken)
+		if err != nil {
+			rt.launchPending = false
+			_ = stdoutWriter.Close()
+			_ = stderrWriter.Close()
+			return m.failStartLocked(ctx, rt, err)
+		}
+		extraFiles = append(extraFiles, identityMarker)
+	}
+	barrier, err := newServiceLaunchBarrier(command, env, extraFiles)
+	if err != nil {
 		if identityMarker != nil {
 			_ = identityMarker.Close()
 			_ = os.Remove(identityMarkerPath)
 		}
+		rt.launchPending = false
+		_ = stdoutWriter.Close()
+		_ = stderrWriter.Close()
+		return m.failStartLocked(ctx, rt, err)
+	}
+	defer barrier.close()
+	cmd := barrier.command
+	cmd.Dir = cwd
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// A service descendant may inherit the copy pipes that os/exec creates for
+	// the redacting log writers. Once the leader exits, bound the final pipe
+	// drain so the descendant cannot hide that exit from reconciliation. The
+	// existing unexpected-exit path then verifies and reaps the residual group.
+	cmd.WaitDelay = serviceCommandWaitDelay
+	cmd.Stdout, cmd.Stderr = stdoutWriter, stderrWriter
+	if err := barrier.start(); err != nil {
+		if identityMarker != nil {
+			_ = identityMarker.Close()
+			_ = os.Remove(identityMarkerPath)
+		}
+		rt.launchPending = false
 		_ = stdoutWriter.Close()
 		_ = stderrWriter.Close()
 		return m.failStartLocked(ctx, rt, err)
@@ -1103,11 +1157,13 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 	if processPlatform.identityInspectionAvailable {
 		processIdentity, identityErr := processPlatform.readProcessIdentity(cmd.Process.Pid)
 		if identityErr != nil || processIdentity.processGroup != cmd.Process.Pid || processIdentity.startID == "" {
+			barrier.close()
 			_ = terminateProcessGroup(cmd.Process.Pid, true)
 			_ = cmd.Wait()
 			_ = os.Remove(identityMarkerPath)
 			_ = stdoutWriter.Close()
 			_ = stderrWriter.Close()
+			rt.launchPending = false
 			if identityErr == nil {
 				identityErr = errProcessIdentityUnavailable
 			}
@@ -1136,23 +1192,15 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 	rt.exports = exports
 	rt.logWriters = []*serviceLogWriter{stdoutWriter, stderrWriter}
 	rt.processOwnership = serviceProcessOwnershipCurrentManager
-	rt.status.State = ServiceStateStarting
 	rt.status.PID = cmd.Process.Pid
 	rt.status.ProcessGroup = cmd.Process.Pid
-	rt.status.StartedAt = rt.started.Format(time.RFC3339Nano)
-	rt.status.ExitedAt = ""
-	rt.status.ExitCode = 0
-	rt.status.ExitError = ""
-	rt.status.LastError = ""
-	rt.status.NextRetryAt = ""
-	rt.status.CommandDigest = serviceCommandDigest(cfg)
-	rt.status.InstanceToken = instanceToken
 	rt.status.ProcessStartID = processStartID
-	rt.status.Readiness = ServiceReadinessStatus{Configured: cfg.Readiness != nil}
-	rt.status.Cleanup = ServiceCleanupStatus{Configured: cfg.Cleanup != nil}
-	rt.status.Exports = publicExports(exports, names)
 	rt.status.UpdatedAt = rt.started.Format(time.RFC3339Nano)
+	// Persist exact helper ownership while the command remains blocked. A crash
+	// here closes the release pipe; reconstruction verifies PID incarnation,
+	// token, digest, and (on Darwin) the inherited marker before signaling.
 	if err := m.persistStatusLocked(rt); err != nil {
+		barrier.close()
 		stopErr := m.stopProcessLocked(ctx, rt, false)
 		message := security.NewRedactor(rt.secretValues...).RedactString(err.Error())
 		rt.status.State = ServiceStateAttentionRequired
@@ -1161,11 +1209,43 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 		rt.status.LastError = message
 		return errors.Join(err, stopErr)
 	}
+	if m.beforeServiceLaunchRelease != nil {
+		m.beforeServiceLaunchRelease()
+	}
+	// Authorization itself is durable before the one-byte release. If the
+	// supervisor disappears after this write, recovery conservatively treats
+	// the generation as possibly executed even though EOF still stops a helper
+	// that has not received the byte.
+	rt.launchPending = false
+	if err := m.persistStatusLocked(rt); err != nil {
+		rt.launchPending = true
+		barrier.close()
+		stopErr := m.stopProcessLocked(ctx, rt, false)
+		message := security.NewRedactor(rt.secretValues...).RedactString(err.Error())
+		rt.status.State = ServiceStateAttentionRequired
+		rt.status.AttentionRequired = true
+		rt.status.Readiness.Ready = false
+		rt.status.LastError = message
+		return errors.Join(err, stopErr)
+	}
+	releaseLaunch := barrier.release
+	if m.releaseServiceLaunch != nil {
+		releaseLaunch = func() error { return m.releaseServiceLaunch(barrier) }
+	}
+	if err := releaseLaunch(); err != nil {
+		stopErr := m.stopProcessLocked(ctx, rt, false)
+		failureErr := m.failStartLocked(ctx, rt, err)
+		// Exec failures participate in the same persisted backoff policy as the
+		// direct os/exec Start failures used before the barrier existed. Only a
+		// failed reap or failed failure-state write escapes reconciliation.
+		return errors.Join(stopErr, failureErr)
+	}
 	_ = m.appendEventLocked(rt, map[string]any{"type": "started", "pid": cmd.Process.Pid, "time": rt.status.StartedAt})
 	return m.observeReadyLocked(ctx, rt)
 }
 
 func (m *ServiceManager) failStartLocked(ctx context.Context, rt *serviceRuntime, cause error) error {
+	rt.launchPending = false
 	message := security.NewRedactor(rt.secretValues...).RedactString(cause.Error())
 	transitionAt := m.now()
 	_ = m.appendEventLocked(rt, map[string]any{"type": "start_failed", "error": message, "time": transitionAt.Format(time.RFC3339Nano)})
@@ -2310,6 +2390,7 @@ func (m *ServiceManager) stopProcessLocked(ctx context.Context, rt *serviceRunti
 	rt.process = nil
 	rt.exit = nil
 	rt.logWriters = nil
+	rt.launchPending = false
 	rt.terminationPending = false
 	rt.processOwnership = serviceProcessOwnershipReconstructed
 	rt.status.PID, rt.status.ProcessGroup = 0, 0
@@ -2643,8 +2724,16 @@ func (m *ServiceManager) recoverOrphanLocked(rt *serviceRuntime) error {
 		}
 		rt.processOwnership = serviceProcessOwnershipReconstructed
 		rt.status.PID, rt.status.ProcessGroup = 0, 0
+	} else if rt.launchPending && m.serviceProcessPlatform().identityMarkerRequired {
+		markerPath := serviceProcessIdentityMarkerPath(m.root, rt.status.ID, rt.status.InstanceToken)
+		if err := os.Remove(markerPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return m.failOrphanRecoveryLocked(rt, fmt.Errorf("remove pending launch identity marker: %w", err))
+		}
 	}
-	if !rt.orphanCleanupComplete {
+	// A durable pending launch has not crossed the execution barrier. It owns
+	// the helper process when PID identity was recorded, but service code and
+	// cleanup side effects were never authorized.
+	if !rt.launchPending && !rt.orphanCleanupComplete {
 		cleanupErr := m.restoreProcessCleanupEnvironmentLocked(rt)
 		if cleanupErr == nil {
 			cleanupErr = m.runCleanupLocked(context.Background(), rt)
@@ -2662,8 +2751,10 @@ func (m *ServiceManager) recoverOrphanLocked(rt *serviceRuntime) error {
 	}
 	processConfig := rt.processConfig
 	processCommandDigest := rt.processCommandDigest
+	launchPending := rt.launchPending
 	rt.orphanRecoveryPending = false
 	rt.orphanCleanupComplete = false
+	rt.launchPending = false
 	rt.processConfig = nil
 	rt.processCommandDigest = ""
 	rt.status.State = ServiceStateStopped
@@ -2677,7 +2768,8 @@ func (m *ServiceManager) recoverOrphanLocked(rt *serviceRuntime) error {
 		// cleanup already completed in this manager, so a retry only rewrites the
 		// status and cannot duplicate the cleanup side effect or launch a process.
 		rt.orphanRecoveryPending = true
-		rt.orphanCleanupComplete = true
+		rt.orphanCleanupComplete = !launchPending
+		rt.launchPending = launchPending
 		rt.processConfig = processConfig
 		rt.processCommandDigest = processCommandDigest
 		message := security.NewRedactor(rt.secretValues...).RedactString(err.Error())
@@ -2751,11 +2843,12 @@ func (m *ServiceManager) persistStatusLocked(rt *serviceRuntime) error {
 	persisted := persistedServiceRuntimeState{
 		ServiceStatus:           cloneServiceStatus(rt.status),
 		OrphanRecoveryPending:   rt.orphanRecoveryPending,
+		LaunchPending:           rt.launchPending,
 		PendingExportChanges:    sortedStringSet(rt.pendingExportKeys),
 		SuppressHookDiagnostics: rt.suppressHookDiagnostics.Load(),
 		RollbackRemovalPending:  rt.rollbackRemovalPending,
 	}
-	if (rt.status.PID > 0 || rt.status.ProcessGroup > 0 || rt.orphanRecoveryPending) && rt.processConfig != nil {
+	if (rt.status.PID > 0 || rt.status.ProcessGroup > 0 || rt.orphanRecoveryPending || rt.launchPending) && rt.processConfig != nil {
 		persisted.ProcessConfig = newPersistedServiceProcessConfig(rt)
 	}
 	if err := writeJSON(path, persisted, 0o600); err != nil {
@@ -3551,6 +3644,7 @@ func snapshotServiceRuntimeConfig(rt *serviceRuntime) serviceRuntimeConfigSnapsh
 		redactor:                rt.redactor,
 		exports:                 cloneServiceExportFile(rt.exports),
 		logWriters:              append([]*serviceLogWriter(nil), rt.logWriters...),
+		launchPending:           rt.launchPending,
 		terminationPending:      rt.terminationPending,
 		orphanRecoveryPending:   rt.orphanRecoveryPending,
 		orphanCleanupComplete:   rt.orphanCleanupComplete,
@@ -3616,6 +3710,7 @@ func restoreServiceRuntimeConfig(rt *serviceRuntime, snapshot serviceRuntimeConf
 	rt.redactor = snapshot.redactor
 	rt.exports = cloneServiceExportFile(snapshot.exports)
 	rt.logWriters = append([]*serviceLogWriter(nil), snapshot.logWriters...)
+	rt.launchPending = snapshot.launchPending
 	rt.terminationPending = snapshot.terminationPending
 	rt.orphanRecoveryPending = snapshot.orphanRecoveryPending
 	rt.orphanCleanupComplete = snapshot.orphanCleanupComplete

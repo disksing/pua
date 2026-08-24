@@ -209,6 +209,8 @@ type agentManager struct {
 	backgroundWork        sync.WaitGroup
 	resourceControllersMu sync.Mutex
 	resourceControllers   map[resourceControllerKey]*resourceController
+	workspaceBarriersMu   sync.Mutex
+	workspaceBarriers     map[string]*workspaceHandoffBarrier
 	runtimes              map[string]*agentRuntime
 	subscribers           map[string]map[chan agentStreamMessage]bool
 	reconcileWake         chan struct{}
@@ -246,6 +248,7 @@ func newAgentManager(s *server) *agentManager {
 	return &agentManager{
 		server:               s,
 		resourceControllers:  make(map[resourceControllerKey]*resourceController),
+		workspaceBarriers:    make(map[string]*workspaceHandoffBarrier),
 		runtimes:             make(map[string]*agentRuntime),
 		subscribers:          make(map[string]map[chan agentStreamMessage]bool),
 		reconcileWake:        make(chan struct{}, 1),

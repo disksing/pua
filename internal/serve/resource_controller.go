@@ -3,6 +3,7 @@ package serve
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -22,6 +23,190 @@ type resourceControllerJob struct {
 	ctx  context.Context
 	fn   func() error
 	done chan error
+}
+
+// workspaceHandoffBarrier prevents a Server from releasing Workspace
+// ownership while one of its resource jobs can still mutate durable state or
+// contact AgentHub. New readers stop at the first waiting writer so removal
+// has a bounded handoff point even when unrelated resource controllers remain
+// busy.
+type workspaceHandoffBarrier struct {
+	mu             sync.Mutex
+	changed        chan struct{}
+	readers        int
+	writer         bool
+	writersWaiting int
+	epoch          uint64
+	retired        bool
+}
+
+var errWorkspaceHandoffComplete = errors.New("Workspace ownership handoff completed")
+
+func newWorkspaceHandoffBarrier() *workspaceHandoffBarrier {
+	return &workspaceHandoffBarrier{changed: make(chan struct{})}
+}
+
+func (b *workspaceHandoffBarrier) signalLocked() {
+	close(b.changed)
+	b.changed = make(chan struct{})
+}
+
+func (b *workspaceHandoffBarrier) ticket() uint64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.epoch
+}
+
+func (b *workspaceHandoffBarrier) acquireShared(ctx context.Context, ticket uint64) (func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	b.mu.Lock()
+	for b.writer || b.writersWaiting > 0 {
+		changed := b.changed
+		b.mu.Unlock()
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		b.mu.Lock()
+	}
+	if b.retired || ticket != b.epoch {
+		b.mu.Unlock()
+		return nil, errWorkspaceHandoffComplete
+	}
+	if err := ctx.Err(); err != nil {
+		b.mu.Unlock()
+		return nil, err
+	}
+	b.readers++
+	b.mu.Unlock()
+	return func() {
+		b.mu.Lock()
+		b.readers--
+		b.signalLocked()
+		b.mu.Unlock()
+	}, nil
+}
+
+func (b *workspaceHandoffBarrier) retireExclusive() {
+	b.mu.Lock()
+	b.epoch++
+	b.retired = true
+	b.signalLocked()
+	b.mu.Unlock()
+}
+
+func (b *workspaceHandoffBarrier) revive() {
+	b.mu.Lock()
+	if b.retired {
+		b.epoch++
+		b.retired = false
+		b.signalLocked()
+	}
+	b.mu.Unlock()
+}
+
+func (b *workspaceHandoffBarrier) acquireExclusive(ctx context.Context) (func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	b.mu.Lock()
+	b.writersWaiting++
+	b.signalLocked()
+	for b.writer || b.readers > 0 {
+		changed := b.changed
+		b.mu.Unlock()
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			b.mu.Lock()
+			b.writersWaiting--
+			b.signalLocked()
+			b.mu.Unlock()
+			return nil, ctx.Err()
+		}
+		b.mu.Lock()
+	}
+	if err := ctx.Err(); err != nil {
+		b.writersWaiting--
+		b.signalLocked()
+		b.mu.Unlock()
+		return nil, err
+	}
+	b.writersWaiting--
+	b.writer = true
+	b.signalLocked()
+	b.mu.Unlock()
+	return func() {
+		b.mu.Lock()
+		b.writer = false
+		b.signalLocked()
+		b.mu.Unlock()
+	}, nil
+}
+
+func (m *agentManager) workspaceBarrier(workspacePath string) (*workspaceHandoffBarrier, error) {
+	canonical, err := canonicalWorkspacePath(workspacePath)
+	if err != nil {
+		return nil, err
+	}
+	m.workspaceBarriersMu.Lock()
+	defer m.workspaceBarriersMu.Unlock()
+	barrier := m.workspaceBarriers[canonical]
+	if barrier == nil {
+		barrier = newWorkspaceHandoffBarrier()
+		m.workspaceBarriers[canonical] = barrier
+	}
+	return barrier, nil
+}
+
+func (m *agentManager) workspaceBarrierTicket(workspacePath string) (*workspaceHandoffBarrier, uint64, error) {
+	barrier, err := m.workspaceBarrier(workspacePath)
+	if err != nil {
+		return nil, 0, err
+	}
+	return barrier, barrier.ticket(), nil
+}
+
+func (m *agentManager) withWorkspaceResourceJob(ctx context.Context, workspacePath string, barrier *workspaceHandoffBarrier, ticket uint64, fn func() error) error {
+	release, err := barrier.acquireShared(ctx, ticket)
+	if err != nil {
+		if errors.Is(err, errWorkspaceHandoffComplete) {
+			message := fmt.Sprintf("workspace %s is not owned by this pua serve instance; ownership handoff completed before the resource job started", workspacePath)
+			return &resourceAPIError{Code: "workspace_not_owned", Message: message}
+		}
+		return err
+	}
+	defer release()
+	return fn()
+}
+
+func (m *agentManager) withWorkspaceHandoff(ctx context.Context, workspacePath string, fn func() error) error {
+	barrier, err := m.workspaceBarrier(workspacePath)
+	if err != nil {
+		return err
+	}
+	release, err := barrier.acquireExclusive(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	err = fn()
+	if err == nil {
+		barrier.retireExclusive()
+	}
+	return err
+}
+
+func (m *agentManager) reviveWorkspaceBarrier(workspacePath string) error {
+	barrier, err := m.workspaceBarrier(workspacePath)
+	if err != nil {
+		return err
+	}
+	barrier.revive()
+	return nil
 }
 
 func (c *resourceController) enqueue(ctx context.Context, fn func() error) <-chan error {
@@ -155,6 +340,10 @@ func (m *agentManager) controllerForResource(workspace serveWorkspace, resourceI
 	return m.controllerForResourceKey(key), nil
 }
 
+// withResourceControllerInstanceID and withStaleWorkspacePathController are
+// path/identity-only primitives for the outer removal controller. Their
+// production callback must acquire the exclusive Workspace handoff barrier;
+// ordinary production jobs enter through withResourceController instead.
 func (m *agentManager) withResourceControllerInstanceID(ctx context.Context, instanceID, resourceID string, fn func() error) error {
 	controller, err := m.controllerForResourceInstanceID(instanceID, resourceID)
 	if err != nil {
@@ -172,6 +361,10 @@ func (m *agentManager) withStaleWorkspacePathController(ctx context.Context, wor
 }
 
 func (m *agentManager) withResourceController(ctx context.Context, workspace serveWorkspace, resourceID string, fn func() error) error {
+	barrier, ticket, err := m.workspaceBarrierTicket(workspace.Path)
+	if err != nil {
+		return err
+	}
 	controller, err := m.controllerForResource(workspace, resourceID)
 	if err != nil {
 		return err
@@ -179,7 +372,9 @@ func (m *agentManager) withResourceController(ctx context.Context, workspace ser
 	// Track even synchronously requested workers. They can enqueue asynchronous
 	// follow-up jobs before the caller returns; keeping the worker registered
 	// until its FIFO is empty prevents shutdown from racing those follow-ups.
-	return controller.doWithStart(ctx, fn, m.runBackground)
+	return controller.doWithStart(ctx, func() error {
+		return m.withWorkspaceResourceJob(ctx, workspace.Path, barrier, ticket, fn)
+	}, m.runBackground)
 }
 
 // withResourceControllers serializes one operation with every listed stable
@@ -187,6 +382,9 @@ func (m *agentManager) withResourceController(ctx context.Context, workspace ser
 // so overlapping multi-resource operations cannot invert their lock order.
 // Callers already running under a resource controller must not include it and
 // must ensure no path holding an inner controller can acquire their outer one.
+// This helper is intentionally for a job that already owns the Workspace
+// shared barrier (native Scheduler delivery is the production caller), so the
+// nested controllers must not try to reacquire it while removal is waiting.
 func (m *agentManager) withResourceControllers(ctx context.Context, workspace serveWorkspace, resourceIDs []string, fn func() error) error {
 	ids := make([]string, 0, len(resourceIDs))
 	seen := make(map[string]bool, len(resourceIDs))
@@ -204,14 +402,22 @@ func (m *agentManager) withResourceControllers(ctx context.Context, workspace se
 		if index == len(ids) {
 			return fn()
 		}
-		return m.withResourceController(ctx, workspace, ids[index], func() error {
+		controller, err := m.controllerForResource(workspace, ids[index])
+		if err != nil {
+			return err
+		}
+		return controller.doWithStart(ctx, func() error {
 			return acquire(index + 1)
-		})
+		}, m.runBackground)
 	}
 	return acquire(0)
 }
 
 func (m *agentManager) enqueueResourceController(workspace serveWorkspace, resourceID string, fn func() error) error {
+	barrier, ticket, err := m.workspaceBarrierTicket(workspace.Path)
+	if err != nil {
+		return err
+	}
 	controller, err := m.controllerForResource(workspace, resourceID)
 	if err != nil {
 		return err
@@ -220,7 +426,9 @@ func (m *agentManager) enqueueResourceController(workspace serveWorkspace, resou
 	// making fire-and-forget work observable during shutdown, this ordering
 	// lets a tracked worker enqueue follow-up work without racing the final
 	// background wait.
-	controller.enqueueWithStart(context.Background(), fn, m.runBackground)
+	controller.enqueueWithStart(context.Background(), func() error {
+		return m.withWorkspaceResourceJob(context.Background(), workspace.Path, barrier, ticket, fn)
+	}, m.runBackground)
 	return nil
 }
 

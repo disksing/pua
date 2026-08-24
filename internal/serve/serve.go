@@ -1766,6 +1766,11 @@ func (s *server) addWorkspaceWithOptionsAndSave(ctx context.Context, path string
 	if err := save(cfg); err != nil {
 		return serveWorkspace{}, err
 	}
+	if s.agents != nil {
+		if err := s.agents.reviveWorkspaceBarrier(workspace.Path); err != nil {
+			return serveWorkspace{}, err
+		}
+	}
 	if s.doctor != nil {
 		s.doctor.requestScan()
 	}
@@ -1969,14 +1974,17 @@ func (s *server) removeWorkspace(id string) error {
 		}
 	}
 	remove := func() error {
-		return s.removeWorkspaceLocked(id, expectedPath, controllerInstanceID, legacyInstanceLookup, staleLegacyRemoval)
+		return s.agents.withWorkspaceHandoff(context.Background(), expectedPath, func() error {
+			return s.removeWorkspaceLocked(id, expectedPath, controllerInstanceID, legacyInstanceLookup, staleLegacyRemoval)
+		})
 	}
 	if s.agents == nil {
-		return remove()
+		return s.removeWorkspaceLocked(id, expectedPath, controllerInstanceID, legacyInstanceLookup, staleLegacyRemoval)
 	}
-	// Ownership release is a Scheduler-controller operation. Jobs that were
-	// already queued finish while this Server still owns the Workspace; jobs
-	// behind removal revalidate ownership and fail before a durable write.
+	// The Scheduler controller establishes one outer lock order for Scheduler
+	// delivery and removal. The exclusive Workspace barrier then drains jobs on
+	// every resource controller before config deletion and advisory-lock release;
+	// jobs starting behind the handoff revalidate ownership and fail closed.
 	if staleLegacyRemoval {
 		return s.agents.withStaleWorkspacePathController(context.Background(), expectedPath, app.SchedulerResourceID, remove)
 	}

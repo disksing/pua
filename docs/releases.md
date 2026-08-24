@@ -44,6 +44,12 @@ The component feed is generated only after stable PUA and AgentHub descriptors
 both exist. The Sparkle feed is copied from the newest release containing a macOS
 App appcast. These `/updates/` URLs are release API and must remain stable.
 
+Before enabling automatic website deployments from `master`, configure Pages to
+use GitHub Actions and set the repository Actions variable
+`PUA_PAGES_ENABLED=true`. Until then, ordinary website-source pushes skip the
+deployment job instead of failing. A release tag and a manual workflow dispatch
+still request deployment so release/setup errors remain visible.
+
 ## Keys and compatibility
 
 Generate the component manifest key once with:

@@ -35,9 +35,10 @@ type serviceManagerRemoval struct {
 }
 
 // serviceManagerLease keeps one Workspace manager attached and owned while a
-// caller uses it. Removal fences new leases under serviceMu, waits for all
-// admitted operations to release, and only then stops or detaches the manager.
-// Slow manager work therefore never holds the global lifecycle mutex.
+// caller uses it. Removal fences new leases under serviceMu, revokes the leases
+// for that Workspace, waits for all admitted operations to release, and only
+// then stops or detaches the manager. Slow manager work therefore never holds
+// the global lifecycle mutex.
 type serviceManagerLease struct {
 	server      *server
 	workspaceID string
@@ -343,6 +344,14 @@ func (s *server) beginWorkspaceServiceManagerRemoval(id string, mutation *servic
 		done:        make(chan struct{}),
 	}
 	s.serviceRemovals[workspace.ID] = removal
+	// Revoke only this Workspace generation. Long-lived readers and hook work
+	// must finish before manager stop and ownership release, while unrelated
+	// Workspace streams remain attached to their own managers.
+	for lease := range s.serviceLeaseSet {
+		if lease.workspaceID == workspace.ID {
+			lease.cancel()
+		}
+	}
 	s.notifyServiceLifecycleChangedLocked()
 	if s.serviceLeases[workspace.ID] == 0 {
 		close(removal.leasesDone)

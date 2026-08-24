@@ -142,14 +142,11 @@ func (s *server) handleWorkspaceServices(w http.ResponseWriter, r *http.Request,
 			writeError(w, errors.New("stream must be stdout or stderr"), http.StatusBadRequest)
 			return
 		}
-		reader, err := manager.LogsContext(r.Context(), id, stream, follow)
+		reader, err := manager.LogsContext(operationContext, id, stream, follow)
 		if err != nil {
 			writeError(w, err, http.StatusNotFound)
 			return
 		}
-		// The reader owns the already-open log file; manager lifecycle ownership
-		// is no longer needed while a follow response streams to the client.
-		lease.Release()
 		defer reader.Close()
 		var destination io.Writer = w
 		if follow {

@@ -4442,21 +4442,26 @@ func (m *ServiceManager) LogsContext(ctx context.Context, id, stream string, fol
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	followContext, cancel := context.WithCancel(ctx)
 	return &followLogReader{
 		file:         file,
 		path:         path,
 		boundary:     filepath.Join(m.root, ".pua"),
-		ctx:          ctx,
+		ctx:          followContext,
+		cancel:       cancel,
 		pollInterval: 200 * time.Millisecond,
 	}, nil
 }
 
 type followLogReader struct {
+	mu           sync.Mutex
 	file         *os.File
 	path         string
 	boundary     string
 	ctx          context.Context
+	cancel       context.CancelFunc
 	pollInterval time.Duration
+	closed       bool
 }
 
 func (r *followLogReader) Read(p []byte) (int, error) {
@@ -4464,25 +4469,52 @@ func (r *followLogReader) Read(p []byte) (int, error) {
 		return 0, nil
 	}
 	for {
+		if r.contextCanceled() {
+			return 0, io.EOF
+		}
+		r.mu.Lock()
+		if r.closed || r.file == nil || r.contextCanceled() {
+			r.mu.Unlock()
+			return 0, io.EOF
+		}
 		n, err := r.file.Read(p)
 		if n > 0 {
+			r.mu.Unlock()
 			return n, nil
 		}
 		if err != io.EOF {
+			r.mu.Unlock()
 			return n, err
 		}
-		retry, refreshErr := r.refreshAtEOF()
+		retry, refreshErr := r.refreshAtEOFLocked()
+		r.mu.Unlock()
 		if refreshErr != nil {
 			return 0, refreshErr
 		}
 		if retry {
 			continue
 		}
+		timer := time.NewTimer(r.pollInterval)
 		select {
 		case <-r.ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
 			return 0, io.EOF
-		case <-time.After(r.pollInterval):
+		case <-timer.C:
 		}
+	}
+}
+
+func (r *followLogReader) contextCanceled() bool {
+	select {
+	case <-r.ctx.Done():
+		return true
+	default:
+		return false
 	}
 }
 
@@ -4490,7 +4522,10 @@ func (r *followLogReader) Read(p []byte) (int, error) {
 // file that was truncated in place. When rotation replaces the active inode,
 // the old descriptor is drained before it is closed so writes completed just
 // before the rename are not skipped.
-func (r *followLogReader) refreshAtEOF() (bool, error) {
+func (r *followLogReader) refreshAtEOFLocked() (bool, error) {
+	if r.contextCanceled() || r.closed || r.file == nil {
+		return false, nil
+	}
 	offset, err := r.file.Seek(0, io.SeekCurrent)
 	if err != nil {
 		return false, err
@@ -4501,6 +4536,9 @@ func (r *followLogReader) refreshAtEOF() (bool, error) {
 	}
 	if currentInfo.Size() > offset {
 		return true, nil
+	}
+	if r.contextCanceled() {
+		return false, nil
 	}
 
 	activeInfo, err := os.Lstat(r.path)
@@ -4521,6 +4559,9 @@ func (r *followLogReader) refreshAtEOF() (bool, error) {
 		return false, nil
 	}
 
+	if r.contextCanceled() {
+		return false, nil
+	}
 	replacement, err := os.Open(r.path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -4540,6 +4581,10 @@ func (r *followLogReader) refreshAtEOF() (bool, error) {
 		if err != nil && !os.IsNotExist(err) {
 			return false, err
 		}
+		return false, nil
+	}
+	if r.contextCanceled() {
+		_ = replacement.Close()
 		return false, nil
 	}
 
@@ -4563,4 +4608,23 @@ func (r *followLogReader) refreshAtEOF() (bool, error) {
 	return true, nil
 }
 
-func (r *followLogReader) Close() error { return r.file.Close() }
+func (r *followLogReader) Close() error {
+	if r == nil {
+		return nil
+	}
+	if r.cancel != nil {
+		r.cancel()
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return nil
+	}
+	r.closed = true
+	if r.file == nil {
+		return nil
+	}
+	err := r.file.Close()
+	r.file = nil
+	return err
+}

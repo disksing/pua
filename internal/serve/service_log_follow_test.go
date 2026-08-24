@@ -10,8 +10,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/disksing/pua/internal/app"
 )
 
 func TestWorkspaceServiceFollowLogsStreamsBeforeRequestEnds(t *testing.T) {
@@ -116,6 +119,182 @@ func TestWorkspaceServiceFollowLogsStreamsBeforeRequestEnds(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("follow handler did not stop after request cancellation")
 	}
+	server.serviceMu.Lock()
+	leaseCount := server.serviceLeases[workspace.ID]
+	server.serviceMu.Unlock()
+	if leaseCount != 0 {
+		t.Fatalf("canceled follow request retained %d service operation references", leaseCount)
+	}
+}
+
+func TestWorkspaceRemovalRevokesFollowedLogsBeforeNewGeneration(t *testing.T) {
+	root := t.TempDir()
+	if _, err := app.Initialize(root, "en"); err != nil {
+		t.Fatal(err)
+	}
+	writeTestService(t, root, ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "worker",
+		Command:       []string{"true"},
+	})
+	logPath := filepath.Join(serviceRuntimePath(root, "worker"), "stdout.log")
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, []byte("old generation\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	workspace := serveWorkspace{ID: workspaceID(root), Path: root}
+	server := newServiceLifecycleTestServer(t, workspace)
+	httpServer := httptest.NewServer(http.HandlerFunc(server.handleWorkspace))
+	t.Cleanup(httpServer.Close)
+	response := openFollowedServiceLog(t, httpServer.URL, workspace.ID, "worker")
+	t.Cleanup(func() { _ = response.Body.Close() })
+	readFollowedHTTPChunk(t, response.Body, "old generation\n")
+
+	stopEntered := make(chan struct{})
+	releaseStop := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseStop) }) }
+	t.Cleanup(release)
+	server.serviceStopper = func(manager *ServiceManager, ctx context.Context) error {
+		close(stopEntered)
+		<-releaseStop
+		return manager.Stop(ctx)
+	}
+	removeResult := make(chan error, 1)
+	go func() { removeResult <- server.removeWorkspace(workspace.ID) }()
+	select {
+	case <-stopEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Workspace removal did not reach the manager stop boundary")
+	}
+	assertFollowedHTTPLogEOF(t, response.Body,
+		"old followed log remained active at the ownership release boundary")
+	server.serviceMu.Lock()
+	leaseCount := server.serviceLeases[workspace.ID]
+	server.serviceMu.Unlock()
+	if leaseCount != 0 {
+		t.Fatalf("Workspace removal reached manager stop with %d followed-log leases", leaseCount)
+	}
+
+	release()
+	select {
+	case err := <-removeResult:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Workspace removal did not finish")
+	}
+	if _, err := server.addWorkspace(context.Background(), root); err != nil {
+		t.Fatalf("re-add Workspace: %v", err)
+	}
+	rotatedPath := logPath + ".previous"
+	if err := os.Rename(logPath, rotatedPath); err != nil {
+		t.Fatalf("rotate old-generation log: %v", err)
+	}
+	if err := os.WriteFile(logPath, []byte("new generation\n"), 0o600); err != nil {
+		t.Fatalf("write new-generation log: %v", err)
+	}
+	assertFollowedHTTPLogEOF(t, response.Body,
+		"old followed log read bytes from the replacement manager generation")
+}
+
+func TestWorkspaceRemovalRevokesOnlyItsFollowedLogs(t *testing.T) {
+	workspaces := make([]serveWorkspace, 0, 2)
+	for _, id := range []string{"workspace-one", "workspace-two"} {
+		root := t.TempDir()
+		writeTestService(t, root, ServiceConfig{
+			SchemaVersion: serviceSchemaVersion,
+			ID:            "worker",
+			Command:       []string{"true"},
+		})
+		logPath := filepath.Join(serviceRuntimePath(root, "worker"), "stdout.log")
+		if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(logPath, []byte(id+" initial\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		workspaces = append(workspaces, serveWorkspace{ID: id, Path: root})
+	}
+	server := newServiceLifecycleTestServer(t, workspaces...)
+	httpServer := httptest.NewServer(http.HandlerFunc(server.handleWorkspace))
+	t.Cleanup(httpServer.Close)
+	first := openFollowedServiceLog(t, httpServer.URL, workspaces[0].ID, "worker")
+	t.Cleanup(func() { _ = first.Body.Close() })
+	second := openFollowedServiceLog(t, httpServer.URL, workspaces[1].ID, "worker")
+	t.Cleanup(func() { _ = second.Body.Close() })
+	readFollowedHTTPChunk(t, first.Body, "workspace-one initial\n")
+	readFollowedHTTPChunk(t, second.Body, "workspace-two initial\n")
+
+	if err := server.removeWorkspace(workspaces[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	assertFollowedHTTPLogEOF(t, first.Body, "removed Workspace follower remained active")
+	secondLog := filepath.Join(serviceRuntimePath(workspaces[1].Path, "worker"), "stdout.log")
+	file, err := os.OpenFile(secondLog, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString("still owned\n"); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	readFollowedHTTPChunk(t, second.Body, "still owned\n")
+	server.serviceMu.Lock()
+	firstLeases := server.serviceLeases[workspaces[0].ID]
+	secondLeases := server.serviceLeases[workspaces[1].ID]
+	server.serviceMu.Unlock()
+	if firstLeases != 0 || secondLeases != 1 {
+		t.Fatalf("followed-log leases after isolated removal = (%d, %d), want (0, 1)", firstLeases, secondLeases)
+	}
+}
+
+func TestServiceShutdownRevokesFollowedLogs(t *testing.T) {
+	root := t.TempDir()
+	writeTestService(t, root, ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "worker",
+		Command:       []string{"true"},
+	})
+	logPath := filepath.Join(serviceRuntimePath(root, "worker"), "stdout.log")
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, []byte("before shutdown\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workspace := serveWorkspace{ID: "workspace-one", Path: root}
+	server := newServiceLifecycleTestServer(t, workspace)
+	httpServer := httptest.NewServer(http.HandlerFunc(server.handleWorkspace))
+	t.Cleanup(httpServer.Close)
+	response := openFollowedServiceLog(t, httpServer.URL, workspace.ID, "worker")
+	t.Cleanup(func() { _ = response.Body.Close() })
+	readFollowedHTTPChunk(t, response.Body, "before shutdown\n")
+
+	shutdown := make(chan error, 1)
+	go func() { shutdown <- server.stopServices(context.Background()) }()
+	select {
+	case err := <-shutdown:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("service shutdown did not revoke the followed log")
+	}
+	assertFollowedHTTPLogEOF(t, response.Body, "followed log remained active after service shutdown")
+	server.serviceMu.Lock()
+	leaseCount := server.serviceLeases[workspace.ID]
+	server.serviceMu.Unlock()
+	if leaseCount != 0 {
+		t.Fatalf("service shutdown retained %d followed-log leases", leaseCount)
+	}
 }
 
 func TestWorkspaceServiceFollowLogsRejectsWriterWithoutFlusher(t *testing.T) {
@@ -206,11 +385,51 @@ func TestServiceManagerFollowLogsAcrossRotationAndTruncation(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("followed log did not stop after cancellation")
 	}
+	if err := os.Rename(path, path+".canceled"); err != nil {
+		t.Fatalf("rotate log after cancellation: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("must not reopen\n"), 0o600); err != nil {
+		t.Fatalf("replace log after cancellation: %v", err)
+	}
+	if n, err := reader.Read(make([]byte, len("must not reopen\n"))); n != 0 || !errors.Is(err, io.EOF) {
+		t.Fatalf("read replacement after cancellation = (%d, %v), want (0, EOF)", n, err)
+	}
 	activeFile := follower.file
 	if err := reader.Close(); err != nil {
 		t.Fatalf("close followed log: %v", err)
 	}
+	if err := reader.Close(); err != nil {
+		t.Fatalf("close followed log twice: %v", err)
+	}
 	assertFollowLogFileClosed(t, activeFile)
+}
+
+func TestServiceManagerFollowLogsCloseInterruptsConcurrentRead(t *testing.T) {
+	manager, _ := newFollowLogTestManager(t, "")
+	reader, err := manager.LogsContext(context.Background(), "worker", "stdout", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader.(*followLogReader).pollInterval = time.Second
+	readDone := make(chan error, 1)
+	go func() {
+		_, readErr := reader.Read(make([]byte, 1))
+		readDone <- readErr
+	}()
+	if err := reader.Close(); err != nil {
+		t.Fatalf("close followed log: %v", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatalf("close followed log twice: %v", err)
+	}
+	select {
+	case err := <-readDone:
+		if !errors.Is(err, io.EOF) {
+			t.Fatalf("concurrent read after close error = %v, want EOF", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("close did not interrupt concurrent followed-log read")
+	}
 }
 
 func TestServiceManagerFollowLogsRejectsSymlinkReplacement(t *testing.T) {
@@ -289,5 +508,62 @@ func assertFollowLogFileClosed(t *testing.T, file *os.File) {
 	t.Helper()
 	if _, err := file.Stat(); !errors.Is(err, os.ErrClosed) {
 		t.Fatalf("rotated log descriptor remains open: %v", err)
+	}
+}
+
+func openFollowedServiceLog(t *testing.T, baseURL, workspaceID, serviceID string) *http.Response {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodGet,
+		baseURL+"/api/workspaces/"+workspaceID+"/services/"+serviceID+"/logs?follow=true", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("open followed log: %v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		_ = response.Body.Close()
+		t.Fatalf("followed log status = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+	return response
+}
+
+func readFollowedHTTPChunk(t *testing.T, reader io.Reader, want string) {
+	t.Helper()
+	type result struct {
+		data []byte
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		data := make([]byte, len(want))
+		_, err := io.ReadFull(reader, data)
+		done <- result{data: data, err: err}
+	}()
+	select {
+	case got := <-done:
+		if got.err != nil || string(got.data) != want {
+			t.Fatalf("followed HTTP log chunk = (%q, %v), want (%q, nil)", got.data, got.err, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for followed HTTP log chunk %q", want)
+	}
+}
+
+func assertFollowedHTTPLogEOF(t *testing.T, reader io.Reader, message string) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() {
+		_, err := reader.Read(make([]byte, 1))
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, io.EOF) {
+			t.Fatalf("%s: read error = %v, want EOF", message, err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal(message)
 	}
 }

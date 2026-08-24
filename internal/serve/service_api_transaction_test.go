@@ -76,9 +76,9 @@ func TestServiceManagerApplyAllRollsBackDefinitionCommit(t *testing.T) {
 	writeJSON := manager.definitionStore.writeJSON
 	injected := errors.New("injected second definition failure")
 	var writes atomic.Int32
-	manager.definitionStore.writeJSON = func(path string, value any, mode os.FileMode, rename func(string, string) error) error {
+	manager.definitionStore.writeJSON = func(path string, value any, mode os.FileMode, rename func(string, string) error, syncDir func(string) error) error {
 		write := writes.Add(1)
-		if err := writeJSON(path, value, mode, rename); err != nil {
+		if err := writeJSON(path, value, mode, rename, syncDir); err != nil {
 			return err
 		}
 		if write == 2 {

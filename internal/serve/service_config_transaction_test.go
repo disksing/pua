@@ -95,7 +95,7 @@ func TestServiceManagerEnableWriteFailureIsAtomic(t *testing.T) {
 	}
 	listBefore := manager.List()
 	injected := errors.New("injected definition write failure")
-	manager.definitionStore.writeJSON = func(string, any, os.FileMode, func(string, string) error) error {
+	manager.definitionStore.writeJSON = func(string, any, os.FileMode, func(string, string) error, func(string) error) error {
 		return injected
 	}
 
@@ -254,7 +254,7 @@ func TestServiceManagerRemoveWriteFailureHasNoLifecycleEffects(t *testing.T) {
 	}
 	listBefore := manager.List()
 	injected := errors.New("injected definition write failure containing " + secret)
-	manager.definitionStore.writeJSON = func(string, any, os.FileMode, func(string, string) error) error {
+	manager.definitionStore.writeJSON = func(string, any, os.FileMode, func(string, string) error, func(string) error) error {
 		return injected
 	}
 	var removes atomic.Int32
@@ -615,7 +615,7 @@ func TestServiceManagerApplyPersistenceFailureIsAtomic(t *testing.T) {
 				injected := errors.New("injected definition " + failurePoint + " failure")
 				switch failurePoint {
 				case "write":
-					manager.definitionStore.writeJSON = func(string, any, os.FileMode, func(string, string) error) error {
+					manager.definitionStore.writeJSON = func(string, any, os.FileMode, func(string, string) error, func(string) error) error {
 						return injected
 					}
 				case "rename":
@@ -829,8 +829,8 @@ func TestServiceManagerApplyKeepsReconcileOutsideTransaction(t *testing.T) {
 	release := func() { releaseOnce.Do(func() { close(releaseWrite) }) }
 	defer release()
 	writeJSON := manager.definitionStore.writeJSON
-	manager.definitionStore.writeJSON = func(path string, value any, mode os.FileMode, rename func(string, string) error) error {
-		if err := writeJSON(path, value, mode, rename); err != nil {
+	manager.definitionStore.writeJSON = func(path string, value any, mode os.FileMode, rename func(string, string) error, syncDir func(string) error) error {
+		if err := writeJSON(path, value, mode, rename, syncDir); err != nil {
 			return err
 		}
 		close(persisted)

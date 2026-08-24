@@ -1256,13 +1256,13 @@ func TestServiceManagerApplyAllRollbackRestoresProcessCleanupSnapshot(t *testing
 	nativeWrite := manager.runtimeStateStore.writeJSON
 	injected := errors.New("injected bravo replacement state failure")
 	failed := false
-	manager.runtimeStateStore.writeJSON = func(path string, value any, mode os.FileMode) error {
+	manager.runtimeStateStore.writeJSON = func(path string, value any, mode os.FileMode, syncDir func(string) error) error {
 		persisted, ok := value.(persistedServiceRuntimeState)
 		if ok && !failed && persisted.ID == "bravo" && persisted.PID > 0 && persisted.PID != bravo.PID {
 			failed = true
 			return injected
 		}
-		return nativeWrite(path, value, mode)
+		return nativeWrite(path, value, mode, syncDir)
 	}
 	applyErr := manager.ApplyAll([]ServiceConfig{config("alpha", "alpha-new"), config("bravo", "bravo-new")})
 	manager.runtimeStateStore.writeJSON = nativeWrite
@@ -1328,7 +1328,7 @@ func TestServiceManagerApplyAllRollbackRetainsUncertainReplacement(t *testing.T)
 	nativeWrite := manager.runtimeStateStore.writeJSON
 	injectedLifecycle := errors.New("injected bravo replacement state failure")
 	var replacementAlpha persistedServiceRuntimeState
-	manager.runtimeStateStore.writeJSON = func(path string, value any, mode os.FileMode) error {
+	manager.runtimeStateStore.writeJSON = func(path string, value any, mode os.FileMode, syncDir func(string) error) error {
 		persisted, ok := value.(persistedServiceRuntimeState)
 		if ok && persisted.ID == "alpha" && persisted.PID > 0 && persisted.PID != originalAlpha.PID {
 			replacementAlpha = persisted
@@ -1336,7 +1336,7 @@ func TestServiceManagerApplyAllRollbackRetainsUncertainReplacement(t *testing.T)
 		if ok && persisted.ID == "bravo" && persisted.PID > 0 && persisted.PID != originalBravo.PID {
 			return injectedLifecycle
 		}
-		return nativeWrite(path, value, mode)
+		return nativeWrite(path, value, mode, syncDir)
 	}
 	nativeSignal := manager.processPlatform.signalProcessGroup
 	injectedStop := errors.New("injected replacement termination failure")
@@ -1449,7 +1449,7 @@ func TestServiceManagerApplyAllRollbackRemovesUncertainNewService(t *testing.T) 
 	nativeWrite := manager.runtimeStateStore.writeJSON
 	injectedLifecycle := errors.New("injected new bravo state failure")
 	var alphaGeneration persistedServiceRuntimeState
-	manager.runtimeStateStore.writeJSON = func(path string, value any, mode os.FileMode) error {
+	manager.runtimeStateStore.writeJSON = func(path string, value any, mode os.FileMode, syncDir func(string) error) error {
 		persisted, ok := value.(persistedServiceRuntimeState)
 		if ok && persisted.ID == "alpha" && persisted.PID > 0 {
 			alphaGeneration = persisted
@@ -1457,7 +1457,7 @@ func TestServiceManagerApplyAllRollbackRemovesUncertainNewService(t *testing.T) 
 		if ok && persisted.ID == "bravo" && persisted.PID > 0 {
 			return injectedLifecycle
 		}
-		return nativeWrite(path, value, mode)
+		return nativeWrite(path, value, mode, syncDir)
 	}
 	nativeSignal := manager.processPlatform.signalProcessGroup
 	injectedStop := errors.New("injected new alpha termination failure")

@@ -71,16 +71,18 @@ type ServiceManagerOptions struct {
 // definitions. Keeping it manager-local lets tests inject precise failures
 // without changing process or runtime-state persistence.
 type serviceDefinitionStore struct {
-	writeJSON func(string, any, os.FileMode, func(string, string) error) error
+	writeJSON func(string, any, os.FileMode, func(string, string) error, func(string) error) error
 	rename    func(string, string) error
 	remove    func(string) error
+	syncDir   func(string) error
 }
 
 func defaultServiceDefinitionStore() serviceDefinitionStore {
 	return serviceDefinitionStore{
-		writeJSON: writeServiceJSONWithRename,
+		writeJSON: writeServiceJSONWithStore,
 		rename:    os.Rename,
 		remove:    os.Remove,
+		syncDir:   syncServiceDataDirectory,
 	}
 }
 
@@ -89,13 +91,15 @@ func defaultServiceDefinitionStore() serviceDefinitionStore {
 // relying on platform-specific filesystem permissions.
 type serviceRuntimeStateStore struct {
 	readFile  func(string) ([]byte, error)
-	writeJSON func(string, any, os.FileMode) error
+	writeJSON func(string, any, os.FileMode, func(string) error) error
+	syncDir   func(string) error
 }
 
 func defaultServiceRuntimeStateStore() serviceRuntimeStateStore {
 	return serviceRuntimeStateStore{
 		readFile:  os.ReadFile,
-		writeJSON: writeServiceJSON,
+		writeJSON: writeServiceJSONWithSync,
+		syncDir:   syncServiceDataDirectory,
 	}
 }
 
@@ -258,6 +262,7 @@ type ServiceManager struct {
 	processPlatform            *serviceProcessPlatform
 	definitionStore            serviceDefinitionStore
 	definitionTransactionStore serviceDefinitionTransactionStore
+	definitionRemovalPending   map[string]struct{}
 	runtimeStateStore          serviceRuntimeStateStore
 	exportOpenFile             func(string, int, os.FileMode) (*os.File, error)
 	exportScrubPath            func(string) error
@@ -290,7 +295,10 @@ func newServiceManager(root string, options ServiceManagerOptions, runtimeStateS
 	if runtimeStateStore.writeJSON == nil {
 		runtimeStateStore.writeJSON = defaults.writeJSON
 	}
-	m := &ServiceManager{root: filepath.Clean(root), configs: map[string]ServiceConfig{}, graph: serviceDependencyGraph{}, runtimes: map[string]*serviceRuntime{}, resolver: options.Resolver, now: options.Now, processTerminationGrace: defaultServiceProcessTerminationGrace, processPlatform: nativeServiceProcessPlatform(), definitionStore: defaultServiceDefinitionStore(), definitionTransactionStore: defaultServiceDefinitionTransactionStore(), runtimeStateStore: runtimeStateStore}
+	if runtimeStateStore.syncDir == nil {
+		runtimeStateStore.syncDir = defaults.syncDir
+	}
+	m := &ServiceManager{root: filepath.Clean(root), configs: map[string]ServiceConfig{}, graph: serviceDependencyGraph{}, runtimes: map[string]*serviceRuntime{}, resolver: options.Resolver, now: options.Now, processTerminationGrace: defaultServiceProcessTerminationGrace, processPlatform: nativeServiceProcessPlatform(), definitionStore: defaultServiceDefinitionStore(), definitionTransactionStore: defaultServiceDefinitionTransactionStore(), definitionRemovalPending: map[string]struct{}{}, runtimeStateStore: runtimeStateStore}
 	if m.now == nil {
 		m.now = time.Now
 	}
@@ -2838,7 +2846,7 @@ func (m *ServiceManager) persistStatusLocked(rt *serviceRuntime) error {
 	}
 	writeJSON := m.runtimeStateStore.writeJSON
 	if writeJSON == nil {
-		writeJSON = writeServiceJSON
+		writeJSON = writeServiceJSONWithSync
 	}
 	persisted := persistedServiceRuntimeState{
 		ServiceStatus:           cloneServiceStatus(rt.status),
@@ -2851,7 +2859,7 @@ func (m *ServiceManager) persistStatusLocked(rt *serviceRuntime) error {
 	if (rt.status.PID > 0 || rt.status.ProcessGroup > 0 || rt.orphanRecoveryPending || rt.launchPending) && rt.processConfig != nil {
 		persisted.ProcessConfig = newPersistedServiceProcessConfig(rt)
 	}
-	if err := writeJSON(path, persisted, 0o600); err != nil {
+	if err := writeJSON(path, persisted, 0o600, m.runtimeStateStore.syncDir); err != nil {
 		return fmt.Errorf("persist service %s runtime state: %w", rt.status.ID, err)
 	}
 	return nil
@@ -3288,7 +3296,14 @@ func (m *ServiceManager) persistDefinitionLocked(cfg ServiceConfig) error {
 	if store.rename == nil {
 		store.rename = defaults.rename
 	}
-	return store.writeJSON(path, cfg, 0o600, store.rename)
+	if store.syncDir == nil {
+		store.syncDir = defaults.syncDir
+	}
+	if err := store.writeJSON(path, cfg, 0o600, store.rename, store.syncDir); err != nil {
+		return err
+	}
+	delete(m.definitionRemovalPending, cfg.ID)
+	return nil
 }
 
 func (m *ServiceManager) removeDefinitionLocked(id string) error {
@@ -3300,9 +3315,26 @@ func (m *ServiceManager) removeDefinitionLocked(id string) error {
 	if remove == nil {
 		remove = os.Remove
 	}
-	if err := remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := remove(path); errors.Is(err, os.ErrNotExist) {
+		if _, pending := m.definitionRemovalPending[id]; !pending {
+			return nil
+		}
+	} else if err != nil {
+		return err
+	} else {
+		if m.definitionRemovalPending == nil {
+			m.definitionRemovalPending = map[string]struct{}{}
+		}
+		m.definitionRemovalPending[id] = struct{}{}
+	}
+	syncDir := m.definitionStore.syncDir
+	if syncDir == nil {
+		syncDir = syncServiceDataDirectory
+	}
+	if err := syncDir(filepath.Dir(path)); err != nil {
 		return err
 	}
+	delete(m.definitionRemovalPending, id)
 	return nil
 }
 
@@ -3415,10 +3447,14 @@ func (m *ServiceManager) applyAllLocked(configs []ServiceConfig, rollbackLifecyc
 		}
 	}
 
-	useDefinitionTransaction := rollbackLifecycle
+	// Every public configuration write uses the recoverable definition journal.
+	// Apply retains its historical forward-progress behavior after lifecycle
+	// side effects begin, while ApplyAll rolls the complete lifecycle back.
+	useDefinitionTransaction := true
+	configurationActivated := false
 	rollback := func(cause error) error {
-		if !rollbackLifecycle {
-			return cause
+		if !rollbackLifecycle && configurationActivated {
+			return errors.Join(cause, m.finishServiceDefinitionTransactionLocked())
 		}
 		definitionRollbackErr := m.beginServiceDefinitionTransactionLocked(oldConfigs, changed, definitionSnapshots)
 		rollbackErr := m.rollbackAppliedServicesLocked(transactionIDs, newStopOrder, oldOrder, oldConfigs, oldGraph, runtimeSnapshots, stateSnapshots, eventSnapshots)
@@ -3444,6 +3480,7 @@ func (m *ServiceManager) applyAllLocked(configs []ServiceConfig, rollbackLifecyc
 	}
 
 	m.configs, m.graph = next, graph
+	configurationActivated = true
 	for _, id := range changed {
 		cfg := requested[id]
 		rt := m.runtimes[id]
@@ -3848,6 +3885,8 @@ func (m *ServiceManager) Apply(cfg ServiceConfig) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	releaseDefinitionTransaction := acquireServiceDefinitionTransactionLock(m.root)
+	defer releaseDefinitionTransaction()
 	return m.applyAllLocked([]ServiceConfig{cfg}, false)
 }
 
@@ -3868,6 +3907,15 @@ func (m *ServiceManager) Remove(ctx context.Context, id string) error {
 	graph, err := m.validateConfigTransactionLocked(next)
 	if err != nil {
 		return err
+	}
+	if _, pending := m.definitionRemovalPending[id]; pending {
+		if err := m.removeDefinitionLocked(id); err != nil {
+			return serviceDefinitionOperationError(rt, err)
+		}
+		m.configs = next
+		m.graph = graph
+		delete(m.runtimes, id)
+		return nil
 	}
 	// Persist a disabled definition before any process side effect. If stopping
 	// or final deletion fails (or the daemon exits between those steps), the
@@ -4151,21 +4199,32 @@ func (m *ServiceManager) RestartService(ctx context.Context, id string) error {
 }
 
 func writeServiceJSON(path string, value any, mode os.FileMode) error {
-	return writeServiceJSONWithRename(path, value, mode, os.Rename)
+	return writeServiceJSONWithStore(path, value, mode, os.Rename, syncServiceDataDirectory)
 }
 
-func writeServiceJSONWithRename(path string, value any, mode os.FileMode, rename func(string, string) error) error {
+func writeServiceJSONWithSync(path string, value any, mode os.FileMode, syncDir func(string) error) error {
+	return writeServiceJSONWithStore(path, value, mode, os.Rename, syncDir)
+}
+
+func writeServiceJSONWithStore(path string, value any, mode os.FileMode, rename func(string, string) error, syncDir func(string) error) error {
 	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
 		return err
 	}
 	data = append(data, '\n')
-	return writeServiceDataAtomic(path, data, mode, rename)
+	return writeServiceDataAtomicWithSync(path, data, mode, rename, syncDir)
 }
 
 func writeServiceDataAtomic(path string, data []byte, mode os.FileMode, rename func(string, string) error) error {
+	return writeServiceDataAtomicWithSync(path, data, mode, rename, syncServiceDataDirectory)
+}
+
+func writeServiceDataAtomicWithSync(path string, data []byte, mode os.FileMode, rename func(string, string) error, syncDir func(string) error) error {
 	if rename == nil {
 		rename = os.Rename
+	}
+	if syncDir == nil {
+		syncDir = syncServiceDataDirectory
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
@@ -4177,16 +4236,13 @@ func writeServiceDataAtomic(path string, data []byte, mode os.FileMode, rename f
 	tempPath := temp.Name()
 	defer os.Remove(tempPath)
 	if err := temp.Chmod(mode); err != nil {
-		temp.Close()
-		return err
+		return errors.Join(err, temp.Close())
 	}
 	if _, err := temp.Write(data); err != nil {
-		temp.Close()
-		return err
+		return errors.Join(err, temp.Close())
 	}
 	if err := temp.Sync(); err != nil {
-		temp.Close()
-		return err
+		return errors.Join(err, temp.Close())
 	}
 	if err := temp.Close(); err != nil {
 		return err
@@ -4194,11 +4250,7 @@ func writeServiceDataAtomic(path string, data []byte, mode os.FileMode, rename f
 	if err := rename(tempPath, path); err != nil {
 		return err
 	}
-	if dir, err := os.Open(filepath.Dir(path)); err == nil {
-		_ = dir.Sync()
-		_ = dir.Close()
-	}
-	return nil
+	return syncDir(filepath.Dir(path))
 }
 
 // ValidateServices loads a stable definition snapshot and validates

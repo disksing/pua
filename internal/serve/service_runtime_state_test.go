@@ -115,7 +115,7 @@ func TestServiceManagerReapsNewProcessWhenRuntimeStateWriteFails(t *testing.T) {
 	injected := errors.New("injected runtime state write failure")
 	startedPID := 0
 	nativeWrite := manager.runtimeStateStore.writeJSON
-	manager.runtimeStateStore.writeJSON = func(path string, value any, mode os.FileMode) error {
+	manager.runtimeStateStore.writeJSON = func(path string, value any, mode os.FileMode, syncDir func(string) error) error {
 		persisted, ok := value.(persistedServiceRuntimeState)
 		if !ok {
 			t.Fatalf("runtime state value type = %T, want persistedServiceRuntimeState", value)
@@ -124,7 +124,7 @@ func TestServiceManagerReapsNewProcessWhenRuntimeStateWriteFails(t *testing.T) {
 			startedPID = persisted.PID
 			return injected
 		}
-		return nativeWrite(path, value, mode)
+		return nativeWrite(path, value, mode, syncDir)
 	}
 
 	err = manager.Start(context.Background())
@@ -189,7 +189,7 @@ func TestServiceManagerPersistsLaunchIntentBeforeFork(t *testing.T) {
 	injected := errors.New("injected launch intent write failure")
 	forked := false
 	manager.beforeServiceLaunchRelease = func() { forked = true }
-	manager.runtimeStateStore.writeJSON = func(_ string, value any, _ os.FileMode) error {
+	manager.runtimeStateStore.writeJSON = func(_ string, value any, _ os.FileMode, _ func(string) error) error {
 		persisted, ok := value.(persistedServiceRuntimeState)
 		if !ok {
 			t.Fatalf("runtime state value type = %T, want persistedServiceRuntimeState", value)
@@ -237,7 +237,7 @@ func TestServiceManagerRecoversFailedLaunchAuthorization(t *testing.T) {
 	injected := errors.New("injected launch authorization write failure")
 	nativeWrite := manager.runtimeStateStore.writeJSON
 	startedPID := 0
-	manager.runtimeStateStore.writeJSON = func(path string, value any, mode os.FileMode) error {
+	manager.runtimeStateStore.writeJSON = func(path string, value any, mode os.FileMode, syncDir func(string) error) error {
 		persisted, ok := value.(persistedServiceRuntimeState)
 		if !ok {
 			t.Fatalf("runtime state value type = %T, want persistedServiceRuntimeState", value)
@@ -246,7 +246,7 @@ func TestServiceManagerRecoversFailedLaunchAuthorization(t *testing.T) {
 			startedPID = persisted.PID
 			return injected
 		}
-		return nativeWrite(path, value, mode)
+		return nativeWrite(path, value, mode, syncDir)
 	}
 
 	err = manager.Start(context.Background())

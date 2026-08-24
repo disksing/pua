@@ -76,13 +76,13 @@ func TestServiceManagerRetriesOrderedOrphanRecoveryFailures(t *testing.T) {
 			if test.stateWriteFailureID != "" {
 				nativeWrite := manager.runtimeStateStore.writeJSON
 				failed := false
-				manager.runtimeStateStore.writeJSON = func(path string, value any, mode os.FileMode) error {
+				manager.runtimeStateStore.writeJSON = func(path string, value any, mode os.FileMode, syncDir func(string) error) error {
 					persisted, ok := value.(persistedServiceRuntimeState)
 					if ok && !failed && persisted.ID == test.stateWriteFailureID && persisted.PID == 0 && !persisted.OrphanRecoveryPending {
 						failed = true
 						return injected
 					}
-					return nativeWrite(path, value, mode)
+					return nativeWrite(path, value, mode, syncDir)
 				}
 			}
 

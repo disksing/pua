@@ -353,7 +353,11 @@ func (m *ServiceManager) applyServiceDefinitionOperationsLocked(operations []ser
 				if rename == nil {
 					rename = os.Rename
 				}
-				err = writeServiceDataAtomic(path, operation.Data, os.FileMode(*operation.Mode), rename)
+				syncDir := m.definitionStore.syncDir
+				if syncDir == nil {
+					syncDir = syncServiceDataDirectory
+				}
+				err = writeServiceDataAtomicWithSync(path, operation.Data, os.FileMode(*operation.Mode), rename, syncDir)
 			} else {
 				err = m.persistDefinitionLocked(*operation.Config)
 			}
@@ -362,6 +366,9 @@ func (m *ServiceManager) applyServiceDefinitionOperationsLocked(operations []ser
 		}
 		if err != nil {
 			return fmt.Errorf("%s service definition %q: %w", operation.Action, operation.ID, serviceDefinitionOperationError(m.runtimes[operation.ID], err))
+		}
+		if operation.Action == "write" {
+			delete(m.definitionRemovalPending, operation.ID)
 		}
 		boundaryAction := operation.Action
 		if boundaryAction == "write" {
@@ -388,7 +395,11 @@ func (m *ServiceManager) finishServiceDefinitionTransactionLocked() error {
 		store.syncDir = defaults.syncDir
 	}
 	path := serviceDefinitionTransactionPath(m.root)
-	if err := store.remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := store.remove(path); errors.Is(err, os.ErrNotExist) {
+		// A prior finish may have unlinked the journal but failed to sync its
+		// parent. Confirm that absence before acknowledging a retry.
+		return store.syncDir(filepath.Dir(path))
+	} else if err != nil {
 		return err
 	}
 	if err := serviceDefinitionTransactionCheckpoint(store, "journal-remove"); err != nil {
@@ -462,15 +473,29 @@ func validateServiceDefinitionTransactionDirectory(root, dir string) error {
 }
 
 func syncServiceDefinitionDirectory(path string) error {
-	dir, err := os.Open(path)
+	return syncServiceDataDirectory(path)
+}
+
+type serviceDataDirectory interface {
+	Sync() error
+	Close() error
+}
+
+func syncServiceDataDirectory(path string) error {
+	return syncServiceDataDirectoryWithOpen(path, func(path string) (serviceDataDirectory, error) {
+		return os.Open(path)
+	})
+}
+
+func syncServiceDataDirectoryWithOpen(path string, open func(string) (serviceDataDirectory, error)) error {
+	if open == nil {
+		return errors.New("service data directory opener is unavailable")
+	}
+	dir, err := open(path)
 	if err != nil {
 		return err
 	}
-	if err := dir.Sync(); err != nil {
-		_ = dir.Close()
-		return err
-	}
-	return dir.Close()
+	return errors.Join(dir.Sync(), dir.Close())
 }
 
 func serviceDefinitionTransactionCheckpoint(store serviceDefinitionTransactionStore, boundary string) error {

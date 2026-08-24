@@ -406,7 +406,7 @@ func TestSchedulerRuntimePreservesRepeatingActivationRequiresSemanticCheckpoint(
 		AnchorAt: "2026-08-24T00:00:00Z",
 	}
 	schedule := app.Schedule{
-		ID: "schedule-projectable", Revision: 3, State: app.ScheduleStateActive,
+		ID: "schedule-projectable", Revision: 3, ActivationRevision: 1, State: app.ScheduleStateActive,
 		Target: "workspace", Trigger: &trigger,
 	}
 	digest := mustSchedulerTriggerDigest(t, schedule.Trigger)
@@ -419,7 +419,7 @@ func TestSchedulerRuntimePreservesRepeatingActivationRequiresSemanticCheckpoint(
 		},
 	}
 	valid := schedulerScheduleRuntime{
-		Revision: 2, TriggerDigest: digest, Target: schedule.Target,
+		Revision: 2, ActivationRevision: 1, TriggerDigest: digest, Target: schedule.Target,
 		EffectiveState: app.ScheduleStateActive, NextRunAt: "2026-08-24T00:01:00Z",
 	}
 	tests := []struct {
@@ -438,6 +438,7 @@ func TestSchedulerRuntimePreservesRepeatingActivationRequiresSemanticCheckpoint(
 		{name: "missing revision", mutate: func(runtime *schedulerScheduleRuntime) { runtime.Revision = 0 }},
 		{name: "newer revision", mutate: func(runtime *schedulerScheduleRuntime) { runtime.Revision = schedule.Revision + 1 }},
 		{name: "different trigger", mutate: func(runtime *schedulerScheduleRuntime) { runtime.TriggerDigest = "different" }},
+		{name: "different activation", mutate: func(runtime *schedulerScheduleRuntime) { runtime.ActivationRevision = 2 }},
 		{name: "different target", mutate: func(runtime *schedulerScheduleRuntime) { runtime.Target = "project1.task1" }},
 		{name: "missing lifecycle", mutate: func(runtime *schedulerScheduleRuntime) { runtime.EffectiveState = "" }},
 		{name: "paused lifecycle", mutate: func(runtime *schedulerScheduleRuntime) { runtime.EffectiveState = app.ScheduleStatePaused }},
@@ -471,6 +472,144 @@ func TestSchedulerRuntimePreservesRepeatingActivationRequiresSemanticCheckpoint(
 			got, err := schedulerRuntimePreservesRepeatingActivation(runtime, schedule)
 			if err != nil || got != test.want {
 				t.Fatalf("projectability = %v, %v; runtime=%#v", got, err, runtime)
+			}
+		})
+	}
+}
+
+func TestNativeSchedulerSemanticABADiscardsStaleActivationAfterRestart(t *testing.T) {
+	tests := []struct {
+		name     string
+		edit     string
+		prepared bool
+	}{
+		{name: "trigger cursor", edit: "trigger"},
+		{name: "trigger prepared", edit: "trigger", prepared: true},
+		{name: "target cursor", edit: "target"},
+		{name: "target prepared", edit: "target", prepared: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fake := newRuntimeFakeAgentHub()
+			hub := httptest.NewServer(fake)
+			defer hub.Close()
+			manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+			puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			base := time.Now().UTC().Truncate(time.Minute).Add(-15 * time.Minute)
+			firstBoundary := base.Add(5*time.Minute + 10*time.Second)
+			secondBoundary := base.Add(6*time.Minute + 10*time.Second)
+			now := base.Add(8*time.Minute + 30*time.Second)
+			originalTrigger := schedulerStaleActivationTrigger(app.ScheduleTriggerInterval, false, base)
+			alternateTrigger := schedulerStaleActivationTrigger(app.ScheduleTriggerInterval, true, base)
+			created, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+				Description: "Reject stale ABA activation", Condition: "every minute",
+				Target: "workspace", Trigger: &originalTrigger,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			created = rewriteSchedulerTestUpdatedAt(t, puaWorkspace, created.ID, base)
+			native := newNativeScheduler(manager, workspace)
+			staleRuntime, err := initialScheduleRuntime(created, base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			oldFirst := generationTime(staleRuntime.NextRunAt)
+			if test.prepared {
+				oldNext, err := app.NextScheduleOccurrence(*created.Trigger, oldFirst)
+				if err != nil {
+					t.Fatal(err)
+				}
+				prepared, err := native.prepareOccurrence(created, oldFirst, oldFirst, oldNext, 1, false, oldFirst, schedulerOccurrenceReasonTime)
+				if err != nil {
+					t.Fatal(err)
+				}
+				staleRuntime.Prepared = &prepared
+			}
+			if err := native.storeSchedulerRuntime(created.ID, staleRuntime); err != nil {
+				t.Fatal(err)
+			}
+
+			manager.now = func() time.Time { return firstBoundary }
+			firstChange := NativeSchedulerChange{
+				Operation: app.ScheduleChangeUpdate, ID: created.ID, ExpectedRevision: created.Revision,
+				Trigger: &originalTrigger,
+			}
+			if test.edit == "trigger" {
+				firstChange.Trigger = &alternateTrigger
+			} else {
+				alternateTarget := "project1.task1"
+				firstChange.Target = &alternateTarget
+			}
+			alternate, err := native.Change(context.Background(), firstChange)
+			if err != nil {
+				t.Fatal(err)
+			}
+			alternate = rewriteSchedulerTestUpdatedAt(t, puaWorkspace, alternate.ID, firstBoundary)
+
+			manager.now = func() time.Time { return secondBoundary }
+			secondChange := NativeSchedulerChange{
+				Operation: app.ScheduleChangeUpdate, ID: alternate.ID, ExpectedRevision: alternate.Revision,
+				Trigger: &originalTrigger,
+			}
+			if test.edit == "target" {
+				originalTarget := created.Target
+				secondChange.Target = &originalTarget
+			}
+			current, err := native.Change(context.Background(), secondChange)
+			if err != nil {
+				t.Fatal(err)
+			}
+			current = rewriteSchedulerTestUpdatedAt(t, puaWorkspace, current.ID, secondBoundary)
+			if current.ActivationRevision != current.Revision || current.ActivationRevision == created.ActivationRevision {
+				t.Fatalf("ABA activation identity = %#v", current)
+			}
+
+			restarted := newAgentManager(manager.server)
+			restarted.now = func() time.Time { return now }
+			manager.server.agents = restarted
+			native = newNativeScheduler(restarted, workspace)
+			snapshot, err := native.Snapshot(now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(snapshot.Schedules) != 1 || snapshot.Schedules[0].NextRunAt != "" || snapshot.Schedules[0].LastOccurrenceAt != "" {
+				t.Fatalf("stale ABA runtime projected before reconcile = %#v", snapshot.Schedules)
+			}
+			if _, err := native.Reconcile(context.Background(), now); err != nil {
+				t.Fatal(err)
+			}
+
+			first, err := app.NextScheduleOccurrence(*current.Trigger, secondBoundary)
+			if err != nil {
+				t.Fatal(err)
+			}
+			last, next, count, capped, err := app.CoalescedScheduleOccurrence(*current.Trigger, first, now)
+			if err != nil || capped {
+				t.Fatalf("current activation occurrences = %s %s %d %v, %v", first, next, count, capped, err)
+			}
+			runtime, err := native.schedulerRuntime(created.ID)
+			if err != nil || runtime.Revision != current.Revision || runtime.ActivationRevision != current.ActivationRevision ||
+				runtime.Prepared != nil || runtime.LastOccurrenceAt != last.Format(time.RFC3339Nano) || runtime.NextRunAt != next.Format(time.RFC3339Nano) {
+				t.Fatalf("reconciled ABA runtime = %#v, %v", runtime, err)
+			}
+			messages := scheduleOccurrenceMessages(t, workspace.Path, current.Target)
+			if len(messages) != 1 || messages[0].Causation == nil ||
+				messages[0].Causation.ScheduleRevision != current.Revision ||
+				messages[0].Causation.ScheduledFor != first.Format(time.RFC3339Nano) ||
+				messages[0].Causation.CoalescedThrough != last.Format(time.RFC3339Nano) ||
+				messages[0].Causation.CoalescedCount != count {
+				t.Fatalf("current ABA occurrence = %#v", messages)
+			}
+			if messages[0].Causation.ScheduledFor == oldFirst.Format(time.RFC3339Nano) {
+				t.Fatalf("stale ABA occurrence was reused: %#v", messages[0])
+			}
+			if got := schedulerAgentHubInputCount(fake); got != 1 {
+				t.Fatalf("ABA external inputs = %d", got)
 			}
 		})
 	}

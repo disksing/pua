@@ -105,7 +105,8 @@ func (n *NativeScheduler) Snapshot(now time.Time) (app.SchedulerSnapshot, error)
 		runtime := store.Scheduler.Schedules[schedule.ID]
 		effective := schedule.State
 		projection := app.ScheduleSnapshot{Schedule: schedule, EffectiveState: effective}
-		projectRuntime := runtime.Revision == schedule.Revision && runtime.EffectiveState != ""
+		projectRuntime := runtime.Revision == schedule.Revision &&
+			schedulerRuntimeActivationRevision(runtime) == schedulerPortableActivationRevision(schedule) && runtime.EffectiveState != ""
 		if !projectRuntime {
 			projectRuntime, err = schedulerRuntimeCanProjectForward(runtime, schedule)
 			if err != nil {
@@ -166,6 +167,9 @@ func schedulerRuntimeMatchesPortableDefinition(runtime schedulerScheduleRuntime,
 		case app.ScheduleStateActive, app.ScheduleStatePaused, app.ScheduleStateCompleted:
 			return true, nil
 		}
+	}
+	if schedulerRuntimeActivationRevision(runtime) != schedulerPortableActivationRevision(schedule) {
+		return false, nil
 	}
 	if !schedulerRuntimeTargetsSchedule(runtime, schedule.Target) {
 		return false, nil
@@ -355,6 +359,7 @@ func (n *NativeScheduler) Change(ctx context.Context, change NativeSchedulerChan
 		}
 		if runtimeCompletesSameOneTimeOccurrence(runtime, resumed) && runtime.Revision != resumed.Revision {
 			runtime.Revision = resumed.Revision
+			runtime.ActivationRevision = schedulerPortableActivationRevision(resumed)
 			runtime.TriggerDigest, runtimeErr = schedulerTriggerDigest(resumed.Trigger)
 			if runtimeErr != nil {
 				return app.Schedule{}, runtimeErr
@@ -523,11 +528,12 @@ func (n *NativeScheduler) reconcileSchedule(ctx context.Context, schedule app.Sc
 	}
 	revisionChanged := runtime.Revision != schedule.Revision
 	triggerChanged := runtime.TriggerDigest != triggerDigest
-	if revisionChanged || triggerChanged {
+	activationChanged := schedulerRuntimeActivationRevision(runtime) != schedulerPortableActivationRevision(schedule)
+	if revisionChanged || triggerChanged || activationChanged {
 		sameKnownTrigger := runtime.TriggerDigest != "" && !triggerChanged
 		_, hadKnownTarget := schedulerRuntimeKnownTarget(runtime)
 		sameTarget := schedulerRuntimeTargetsSchedule(runtime, schedule.Target)
-		sameDefinition := revisionChanged && sameKnownTrigger && sameTarget
+		sameDefinition := revisionChanged && !activationChanged && sameKnownTrigger && sameTarget
 		acceptedRetarget := false
 		if revisionChanged && sameKnownTrigger && !sameTarget && runtimeClaimsSameOneTimeOccurrence(runtime, schedule) && runtime.Prepared != nil {
 			accepted, err := n.preparedOccurrenceAccepted(runtime.Prepared)
@@ -555,6 +561,7 @@ func (n *NativeScheduler) reconcileSchedule(ctx context.Context, schedule app.Sc
 			// terminal one-time occurrence also survives a retarget because the
 			// unchanged trigger instant is the identity of its only nominal work.
 			runtime.Revision = schedule.Revision
+			runtime.ActivationRevision = schedulerPortableActivationRevision(schedule)
 			runtime.TriggerDigest = triggerDigest
 			runtime.Target = schedule.Target
 		} else {
@@ -705,7 +712,10 @@ func initialScheduleRuntime(schedule app.Schedule, now time.Time) (schedulerSche
 	if err != nil {
 		return schedulerScheduleRuntime{}, err
 	}
-	runtime := schedulerScheduleRuntime{Revision: schedule.Revision, TriggerDigest: triggerDigest, Target: schedule.Target, EffectiveState: schedule.State}
+	runtime := schedulerScheduleRuntime{
+		Revision: schedule.Revision, ActivationRevision: schedulerPortableActivationRevision(schedule),
+		TriggerDigest: triggerDigest, Target: schedule.Target, EffectiveState: schedule.State,
+	}
 	if schedule.Trigger == nil {
 		return runtime, nil
 	}
@@ -1021,7 +1031,29 @@ func (n *NativeScheduler) schedulerRuntime(id string) (schedulerScheduleRuntime,
 	if err != nil {
 		return schedulerScheduleRuntime{}, err
 	}
-	return store.Scheduler.Schedules[id], nil
+	runtime := store.Scheduler.Schedules[id]
+	if runtime.ActivationRevision == 0 {
+		// Checkpoints written before activationRevision used their revision as
+		// the only definition boundary. Materialize that meaning in memory so a
+		// same-revision upgrade remains stable and an older checkpoint cannot be
+		// promoted across a newer portable activation.
+		runtime.ActivationRevision = runtime.Revision
+	}
+	return runtime, nil
+}
+
+func schedulerRuntimeActivationRevision(runtime schedulerScheduleRuntime) uint64 {
+	if runtime.ActivationRevision != 0 {
+		return runtime.ActivationRevision
+	}
+	return runtime.Revision
+}
+
+func schedulerPortableActivationRevision(schedule app.Schedule) uint64 {
+	if schedule.ActivationRevision != 0 {
+		return schedule.ActivationRevision
+	}
+	return schedule.Revision
 }
 
 func (n *NativeScheduler) storeSchedulerRuntime(id string, runtime schedulerScheduleRuntime) error {

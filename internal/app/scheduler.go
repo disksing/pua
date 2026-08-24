@@ -131,16 +131,17 @@ type SchedulerConfig struct {
 // Schedule is the portable schedule definition. Trigger is absent only for a
 // migrated v1 definition waiting for Scheduler Agent compilation.
 type Schedule struct {
-	ID          string           `json:"id"`
-	Revision    uint64           `json:"revision"`
-	Description string           `json:"description"`
-	Condition   string           `json:"condition"`
-	Guard       string           `json:"guard,omitempty"`
-	Target      string           `json:"target"`
-	State       string           `json:"state"`
-	Trigger     *ScheduleTrigger `json:"trigger,omitempty"`
-	CreatedAt   string           `json:"createdAt"`
-	UpdatedAt   string           `json:"updatedAt"`
+	ID                 string           `json:"id"`
+	Revision           uint64           `json:"revision"`
+	ActivationRevision uint64           `json:"activationRevision"`
+	Description        string           `json:"description"`
+	Condition          string           `json:"condition"`
+	Guard              string           `json:"guard,omitempty"`
+	Target             string           `json:"target"`
+	State              string           `json:"state"`
+	Trigger            *ScheduleTrigger `json:"trigger,omitempty"`
+	CreatedAt          string           `json:"createdAt"`
+	UpdatedAt          string           `json:"updatedAt"`
 }
 
 // ScheduleTrigger is a tagged union. Only fields belonging to Type may be
@@ -397,6 +398,15 @@ func readSchedulerJSON(path string) (SchedulerConfig, error) {
 	if err := ensureJSONEOF(decoder); err != nil {
 		return SchedulerConfig{}, fmt.Errorf("read Scheduler configuration: %w", err)
 	}
+	// activationRevision was added within schema v2. Older portable files do
+	// not carry it, so use their current revision as a conservative semantic
+	// boundary. This preserves a same-revision checkpoint while preventing an
+	// older checkpoint from crossing any already-committed definition changes.
+	for index := range config.Schedules {
+		if config.Schedules[index].ActivationRevision == 0 {
+			config.Schedules[index].ActivationRevision = config.Schedules[index].Revision
+		}
+	}
 	if err := validateSchedulerConfig(config); err != nil {
 		return SchedulerConfig{}, err
 	}
@@ -462,7 +472,7 @@ func migrateSchedulerJSONLockedWithWriter(root string, writeV2 func(string, Sche
 	config := SchedulerConfig{SchemaVersion: schedulerSchemaVersion, AgentBinding: legacy.AgentBinding, Schedules: make([]Schedule, 0, len(legacy.Schedules))}
 	for _, old := range legacy.Schedules {
 		config.Schedules = append(config.Schedules, Schedule{
-			ID: old.ID, Revision: 1, Description: old.Description,
+			ID: old.ID, Revision: 1, ActivationRevision: 1, Description: old.Description,
 			Condition: old.Condition, Target: old.Target,
 			State:     ScheduleStateNeedsCompilation,
 			CreatedAt: old.CreatedAt, UpdatedAt: old.UpdatedAt,
@@ -535,6 +545,9 @@ func validateSchedule(schedule Schedule) error {
 	}
 	if schedule.Revision < 1 {
 		return errors.New("revision must be at least 1")
+	}
+	if schedule.ActivationRevision < 1 || schedule.ActivationRevision > schedule.Revision {
+		return errors.New("activationRevision must be between 1 and revision")
 	}
 	for name, value := range map[string]string{
 		"description": schedule.Description,
@@ -1014,7 +1027,7 @@ func (w *Workspace) AddSchedule(input CreateScheduleInput) (Schedule, error) {
 			return err
 		}
 		now := mutationTime.Format(time.RFC3339Nano)
-		created = Schedule{ID: id, Revision: 1, Description: description, Condition: condition, Guard: guard, Target: target, State: ScheduleStateActive, Trigger: &trigger, CreatedAt: now, UpdatedAt: now}
+		created = Schedule{ID: id, Revision: 1, ActivationRevision: 1, Description: description, Condition: condition, Guard: guard, Target: target, State: ScheduleStateActive, Trigger: &trigger, CreatedAt: now, UpdatedAt: now}
 		config.Schedules = append(config.Schedules, created)
 		return writeSchedulerJSON(schedulerJSONPath(w.root), config)
 	})
@@ -1139,11 +1152,21 @@ func (w *Workspace) prepareScheduleUpdate(current Schedule, input UpdateSchedule
 	if err := incrementScheduleRevision(&updated); err != nil {
 		return Schedule{}, err
 	}
+	if current.Target != updated.Target || !scheduleTriggersEqual(current.Trigger, updated.Trigger) {
+		updated.ActivationRevision = updated.Revision
+	}
 	updated.UpdatedAt = mutationTime.Format(time.RFC3339Nano)
 	if err := validateSchedule(updated); err != nil {
 		return Schedule{}, err
 	}
 	return updated, nil
+}
+
+func scheduleTriggersEqual(left, right *ScheduleTrigger) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }
 
 func (w *Workspace) RemoveSchedule(id string) (Schedule, error) {

@@ -175,18 +175,19 @@ type resourceSchedulerCheckpoint struct {
 }
 
 type schedulerScheduleRuntime struct {
-	Revision         uint64                       `json:"revision"`
-	TriggerDigest    string                       `json:"triggerDigest,omitempty"`
-	Target           string                       `json:"target,omitempty"`
-	EffectiveState   string                       `json:"effectiveState,omitempty"`
-	NextRunAt        string                       `json:"nextRunAt,omitempty"`
-	LastOccurrenceAt string                       `json:"lastOccurrenceAt,omitempty"`
-	LastOutcome      string                       `json:"lastOutcome,omitempty"`
-	LastError        string                       `json:"lastError,omitempty"`
-	AttentionTarget  string                       `json:"attentionTarget,omitempty"`
-	RetryAt          string                       `json:"retryAt,omitempty"`
-	RetryCount       int                          `json:"retryCount,omitempty"`
-	Prepared         *schedulerPreparedOccurrence `json:"preparedOccurrence,omitempty"`
+	Revision           uint64                       `json:"revision"`
+	ActivationRevision uint64                       `json:"activationRevision,omitempty"`
+	TriggerDigest      string                       `json:"triggerDigest,omitempty"`
+	Target             string                       `json:"target,omitempty"`
+	EffectiveState     string                       `json:"effectiveState,omitempty"`
+	NextRunAt          string                       `json:"nextRunAt,omitempty"`
+	LastOccurrenceAt   string                       `json:"lastOccurrenceAt,omitempty"`
+	LastOutcome        string                       `json:"lastOutcome,omitempty"`
+	LastError          string                       `json:"lastError,omitempty"`
+	AttentionTarget    string                       `json:"attentionTarget,omitempty"`
+	RetryAt            string                       `json:"retryAt,omitempty"`
+	RetryCount         int                          `json:"retryCount,omitempty"`
+	Prepared           *schedulerPreparedOccurrence `json:"preparedOccurrence,omitempty"`
 }
 
 type schedulerPreparedOccurrence struct {

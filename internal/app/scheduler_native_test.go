@@ -70,7 +70,7 @@ func TestSchedulerV1MigrationPreservesDefinitionsForCompilation(t *testing.T) {
 		t.Fatalf("migrated schedules = %#v", schedules)
 	}
 	schedule := schedules[0]
-	if schedule.Revision != 1 || schedule.State != app.ScheduleStateNeedsCompilation || schedule.Trigger != nil ||
+	if schedule.Revision != 1 || schedule.ActivationRevision != 1 || schedule.State != app.ScheduleStateNeedsCompilation || schedule.Trigger != nil ||
 		schedule.Description != "Keep action" || schedule.Condition != "tomorrow morning when green" || schedule.Target != app.SchedulerResourceID ||
 		schedule.CreatedAt != "2026-08-01T00:00:00Z" || schedule.UpdatedAt != "2026-08-02T00:00:00Z" {
 		t.Fatalf("migrated schedule = %#v", schedule)
@@ -92,7 +92,7 @@ func TestSchedulerV1MigrationPreservesDefinitionsForCompilation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if compiled.Revision != 2 || compiled.State != app.ScheduleStateActive || compiled.Trigger == nil || *compiled.Trigger != trigger ||
+	if compiled.Revision != 2 || compiled.ActivationRevision != compiled.Revision || compiled.State != app.ScheduleStateActive || compiled.Trigger == nil || *compiled.Trigger != trigger ||
 		compiled.Description != schedule.Description || compiled.Condition != schedule.Condition || compiled.Target != target {
 		t.Fatalf("compiled migrated schedule = %#v", compiled)
 	}
@@ -313,7 +313,7 @@ func TestScheduleTriggerValidationAndRevisionCAS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created.Revision != 1 || created.State != app.ScheduleStateActive || created.Trigger == nil || created.Trigger.At != "9999-08-30T12:00:00Z" {
+	if created.Revision != 1 || created.ActivationRevision != 1 || created.State != app.ScheduleStateActive || created.Trigger == nil || created.Trigger.At != "9999-08-30T12:00:00Z" {
 		t.Fatalf("valid create = %#v", created)
 	}
 	description := "Changed"
@@ -340,6 +340,103 @@ func TestScheduleTriggerValidationAndRevisionCAS(t *testing.T) {
 	resumed, err := workspace.ResumeSchedule(created.ID)
 	if err != nil || resumed.State != app.ScheduleStateActive || resumed.Revision != 3 {
 		t.Fatalf("resume = %#v, %v", resumed, err)
+	}
+}
+
+func TestScheduleActivationRevisionTracksOnlySemanticChanges(t *testing.T) {
+	workspace, err := app.Initialize(t.TempDir(), "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := workspace.CreateProject("Activation target", "activation-target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	trigger := app.ScheduleTrigger{
+		Type: app.ScheduleTriggerInterval, EverySeconds: 60,
+		AnchorAt: time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano),
+	}
+	created, err := workspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Track activation", Condition: "every minute", Target: "workspace", Trigger: &trigger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	description := "Metadata only"
+	metadata, err := workspace.UpdateSchedule(app.UpdateScheduleInput{
+		ID: created.ID, ExpectedRevision: created.Revision, Description: &description,
+	})
+	if err != nil || metadata.Revision != 2 || metadata.ActivationRevision != created.ActivationRevision {
+		t.Fatalf("metadata update = %#v, %v", metadata, err)
+	}
+	paused, err := workspace.PauseSchedule(created.ID)
+	if err != nil || paused.Revision != 3 || paused.ActivationRevision != created.ActivationRevision {
+		t.Fatalf("pause = %#v, %v", paused, err)
+	}
+	resumed, err := workspace.ResumeSchedule(created.ID)
+	if err != nil || resumed.Revision != 4 || resumed.ActivationRevision != created.ActivationRevision {
+		t.Fatalf("resume = %#v, %v", resumed, err)
+	}
+	target := project.ID
+	retargeted, err := workspace.UpdateSchedule(app.UpdateScheduleInput{
+		ID: created.ID, ExpectedRevision: resumed.Revision, Target: &target,
+	})
+	if err != nil || retargeted.Revision != 5 || retargeted.ActivationRevision != retargeted.Revision {
+		t.Fatalf("target update = %#v, %v", retargeted, err)
+	}
+	unchanged := *retargeted.Trigger
+	identicalTrigger, err := workspace.UpdateSchedule(app.UpdateScheduleInput{
+		ID: created.ID, ExpectedRevision: retargeted.Revision, Trigger: &unchanged,
+	})
+	if err != nil || identicalTrigger.Revision != 6 || identicalTrigger.ActivationRevision != retargeted.ActivationRevision {
+		t.Fatalf("identical trigger update = %#v, %v", identicalTrigger, err)
+	}
+	changed := unchanged
+	changed.EverySeconds = 120
+	changedTrigger, err := workspace.UpdateSchedule(app.UpdateScheduleInput{
+		ID: created.ID, ExpectedRevision: identicalTrigger.Revision, Trigger: &changed,
+	})
+	if err != nil || changedTrigger.Revision != 7 || changedTrigger.ActivationRevision != changedTrigger.Revision {
+		t.Fatalf("trigger update = %#v, %v", changedTrigger, err)
+	}
+}
+
+func TestSchedulerV2WithoutActivationRevisionLoadsConservatively(t *testing.T) {
+	workspace, err := app.Initialize(t.TempDir(), "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	trigger := app.ScheduleTrigger{
+		Type: app.ScheduleTriggerInterval, EverySeconds: 60,
+		AnchorAt: time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano),
+	}
+	created, err := workspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Legacy v2", Condition: "every minute", Target: "workspace", Trigger: &trigger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(workspace.Root(), "scheduler", "scheduler.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(raw, &document); err != nil {
+		t.Fatal(err)
+	}
+	schedules := document["schedules"].([]any)
+	delete(schedules[0].(map[string]any), "activationRevision")
+	legacy, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(legacy, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := workspace.Scheduler()
+	if err != nil || len(loaded.Schedules) != 1 || loaded.Schedules[0].ActivationRevision != created.Revision {
+		t.Fatalf("legacy v2 schedule = %#v, %v", loaded.Schedules, err)
 	}
 }
 

@@ -5861,7 +5861,7 @@ func TestExpiredOneTimePauseRuntimePathsMatch(t *testing.T) {
 	}
 	digest := mustSchedulerTriggerDigest(t, schedule.Trigger)
 	want := schedulerScheduleRuntime{
-		Revision: schedule.Revision, TriggerDigest: digest, EffectiveState: app.ScheduleStateCompleted,
+		Revision: schedule.Revision, ActivationRevision: schedule.Revision, TriggerDigest: digest, EffectiveState: app.ScheduleStateCompleted,
 		LastOccurrenceAt: at.Format(time.RFC3339Nano), LastOutcome: schedulerOutcomePaused,
 	}
 	native := newNativeScheduler(manager, workspace)

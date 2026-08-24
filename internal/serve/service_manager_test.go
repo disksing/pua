@@ -487,6 +487,163 @@ func TestServiceManagerReadinessDoesNotRequireInitialExport(t *testing.T) {
 	}
 }
 
+func TestServiceManagerScopesExportsToDeclaredGeneration(t *testing.T) {
+	root := t.TempDir()
+	consumerOutput := filepath.Join(root, "consumer-output")
+	disabledReady := filepath.Join(root, "disabled-ready")
+	staleHandoffLink := filepath.Join(root, "stale-handoff-link")
+	disabledHandoffLink := filepath.Join(root, "disabled-handoff-link")
+	exportPath := filepath.Join(serviceRuntimePath(root, "producer"), "export.json")
+	producer := ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "producer",
+		Enabled:       true,
+		Exports:       true,
+		Command: []string{"/bin/sh", "-c", `
+			tmp="$PUA_SERVICE_EXPORT_PATH.tmp"
+			printf '%s' '{"schemaVersion":1,"variables":{"PUBLIC":"old-public"},"secrets":{"TOKEN":"old-secret"}}' > "$tmp"
+			mv "$tmp" "$PUA_SERVICE_EXPORT_PATH"
+			sleep 30
+		`},
+		Cleanup: &ServiceCleanupConfig{
+			Command: []string{"/bin/sh", "-c", `
+				printf '%s' '{"schemaVersion":1,"variables":{"PUBLIC":"stale-public"},"secrets":{"TOKEN":"stale-secret"}}' > "$PUA_SERVICE_EXPORT_PATH"
+				ln "$PUA_SERVICE_EXPORT_PATH" ` + shellQuote(staleHandoffLink) + `
+			`},
+			Timeout: time.Second,
+		},
+		Restart: ServiceRestartConfig{InitialDelay: time.Millisecond, Multiplier: 2, MaxDelay: time.Second},
+	}
+	consumer := ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "consumer",
+		Enabled:       true,
+		Command:       []string{"/bin/sh", "-c", "printf '%s|%s' \"$PUBLIC\" \"$TOKEN\" > " + shellQuote(consumerOutput) + "; sleep 30"},
+		Environment: map[string]ServiceEnvironment{
+			"PUBLIC": {Template: "${service.producer.PUBLIC}"},
+			"TOKEN":  {Template: "${service.producer.TOKEN}"},
+		},
+		DependsOn: []string{"producer"},
+		Restart:   ServiceRestartConfig{InitialDelay: time.Millisecond, Multiplier: 2, MaxDelay: time.Second},
+	}
+	writeTestService(t, root, producer)
+	writeTestService(t, root, consumer)
+	manager, err := NewServiceManager(root, ServiceManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := manager.Stop(context.Background()); err != nil {
+			t.Errorf("stop manager: %v", err)
+		}
+	})
+	if _, err := manager.ApplyBindings(ServiceBindings{
+		Variables: map[string]string{"BOUND_PUBLIC": "${service.producer.PUBLIC}"},
+		Secrets:   map[string]string{"BOUND_TOKEN": "${service.producer.TOKEN}"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	waitForTestPath(t, consumerOutput, "old-public|old-secret")
+	variables, secrets, err := manager.ResolveBindings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if variables["BOUND_PUBLIC"] != "old-public" || secrets["BOUND_TOKEN"] != "old-secret" {
+		t.Fatalf("initial bindings = %#v, %#v", variables, secrets)
+	}
+	if err := os.Remove(consumerOutput); err != nil {
+		t.Fatal(err)
+	}
+
+	disabled := producer
+	disabled.Exports = false
+	disabled.Cleanup = nil
+	disabled.Command = []string{"/bin/sh", "-c", `
+		tmp="$PUA_SERVICE_EXPORT_PATH.tmp"
+		printf '%s' '{"schemaVersion":1,"variables":{"PUBLIC":"disabled-public"},"secrets":{"TOKEN":"disabled-secret"}}' > "$tmp"
+		mv "$tmp" "$PUA_SERVICE_EXPORT_PATH"
+		ln "$PUA_SERVICE_EXPORT_PATH" ` + shellQuote(disabledHandoffLink) + `
+		: > ` + shellQuote(disabledReady) + `
+		sleep 30
+	`}
+	disabled.Readiness = &ServiceReadinessConfig{
+		Command:  []string{"/bin/sh", "-c", "while [ ! -f " + shellQuote(disabledReady) + " ]; do sleep 0.01; done"},
+		Interval: time.Second,
+		Timeout:  2 * time.Second,
+	}
+	if err := manager.Apply(disabled); err != nil {
+		t.Fatal(err)
+	}
+	status, err := manager.Show("producer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != ServiceStateReady || len(status.Exports.Variables) != 0 || len(status.Exports.Secrets) != 0 {
+		t.Fatalf("disabled-export generation published exports: %#v", status)
+	}
+	if _, err := os.Stat(exportPath); !os.IsNotExist(err) {
+		data, _ := os.ReadFile(exportPath)
+		t.Fatalf("disabled-export hand-off survived scrubbing: %v: %s", err, data)
+	}
+	for _, link := range []string{staleHandoffLink, disabledHandoffLink} {
+		data, err := os.ReadFile(link)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(data) != 0 {
+			t.Fatalf("disabled-export hand-off inode retained bytes in %s: %s", filepath.Base(link), data)
+		}
+	}
+	if dependent, err := manager.Show("consumer"); err != nil {
+		t.Fatal(err)
+	} else if dependent.State == ServiceStateReady {
+		t.Fatalf("dependent remained ready with disabled exports: %#v", dependent)
+	}
+	if _, err := os.Stat(consumerOutput); !os.IsNotExist(err) {
+		data, _ := os.ReadFile(consumerOutput)
+		t.Fatalf("dependent received stale exports: %v: %s", err, data)
+	}
+	if variables, secrets, err := manager.ResolveBindings(); err == nil {
+		t.Fatalf("bindings resolved disabled exports: %#v, %#v", variables, secrets)
+	}
+	state, err := os.ReadFile(filepath.Join(serviceRuntimePath(root, "producer"), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stale := range []string{"old-public", "old-secret", "stale-public", "stale-secret", "disabled-public", "disabled-secret"} {
+		if bytes.Contains(state, []byte(stale)) {
+			t.Fatalf("disabled-export state retained %q: %s", stale, state)
+		}
+	}
+
+	reenabled := producer
+	reenabled.Cleanup = nil
+	reenabled.Command = []string{"/bin/sh", "-c", `
+		tmp="$PUA_SERVICE_EXPORT_PATH.tmp"
+		printf '%s' '{"schemaVersion":1,"variables":{"PUBLIC":"new-public"},"secrets":{"TOKEN":"new-secret"}}' > "$tmp"
+		mv "$tmp" "$PUA_SERVICE_EXPORT_PATH"
+		sleep 30
+	`}
+	if err := manager.Apply(reenabled); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	if err := manager.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	waitForTestPath(t, consumerOutput, "new-public|new-secret")
+	variables, secrets, err = manager.ResolveBindings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if variables["BOUND_PUBLIC"] != "new-public" || secrets["BOUND_TOKEN"] != "new-secret" {
+		t.Fatalf("re-enabled bindings = %#v, %#v", variables, secrets)
+	}
+}
+
 func TestServiceManagerDeclaredExporterRequiresValidInitialHandoff(t *testing.T) {
 	for _, scenario := range []struct {
 		name       string

@@ -693,6 +693,8 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 	rt.pendingExportKeys = nil
 	rt.exportKeysCommitted = false
 	rt.redactor = nil
+	rt.exports = ServiceExportFile{SchemaVersion: serviceExportSchema, Variables: map[string]string{}}
+	rt.status.Exports = publicExports(rt.exports, nil)
 	env, secrets, names, exports, err := m.resolveEnvironmentLocked(cfg)
 	if err != nil {
 		return m.failStartLocked(ctx, rt, err)
@@ -703,11 +705,9 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 	if err := os.MkdirAll(serviceRuntimePath(m.root, cfg.ID), 0o700); err != nil {
 		return m.failStartLocked(ctx, rt, err)
 	}
-	if requiresInitialExport(cfg) {
-		exportPath := filepath.Join(serviceRuntimePath(m.root, cfg.ID), "export.json")
-		if err := os.Remove(exportPath); err != nil && !os.IsNotExist(err) {
-			return m.failStartLocked(ctx, rt, fmt.Errorf("clear previous service export: %w", err))
-		}
+	exportPath := filepath.Join(serviceRuntimePath(m.root, cfg.ID), "export.json")
+	if err := scrubAndRemoveServiceExportPath(exportPath); err != nil {
+		return m.failStartLocked(ctx, rt, fmt.Errorf("clear previous service export: %w", err))
 	}
 	command := append(append([]string{}, cfg.Command...), cfg.Args...)
 	cmd := exec.Command(command[0], command[1:]...)
@@ -766,6 +766,7 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 	rt.rejectedExportSecrets = nil
 	rt.redactor = redactor
 	rt.exports = exports
+	rt.status.Exports = publicExports(exports, names)
 	if err := cmd.Start(); err != nil {
 		if identityMarker != nil {
 			_ = identityMarker.Close()
@@ -922,6 +923,17 @@ func (m *ServiceManager) observeReadyLocked(ctx context.Context, rt *serviceRunt
 	m.acceptObservedExportsLocked(rt, previousVariables, exports, wasReady)
 	if err := m.runReadinessLocked(ctx, rt); err != nil {
 		return m.readinessFailedLocked(ctx, rt, err)
+	}
+	// A process that does not declare exports may still write to the control
+	// path while its readiness command is running. Observe the path again after
+	// that synchronization point so the bytes are scrubbed without ever being
+	// decoded or published.
+	if !rt.config.Exports {
+		exports, err = m.readExportsLocked(rt)
+		if err != nil {
+			return m.readinessFailedLocked(ctx, rt, err)
+		}
+		m.acceptObservedExportsLocked(rt, previousVariables, exports, wasReady)
 	}
 	if err := m.releaseStartupLogsLocked(rt); err != nil {
 		return m.readinessFailedLocked(ctx, rt, err)
@@ -1089,13 +1101,16 @@ func (m *ServiceManager) waitForInitialExportLocked(ctx context.Context, rt *ser
 func (m *ServiceManager) readExportsLocked(rt *serviceRuntime) (ServiceExportFile, error) {
 	rt.exportMu.Lock()
 	defer rt.exportMu.Unlock()
-	m.promoteRejectedExportSecretsLocked(rt)
-	if rt.exportViolation != "" {
-		return ServiceExportFile{}, errors.New(rt.exportViolation)
-	}
 	cfg := rt.config
 	if rt.processConfig != nil && (rt.process != nil || rt.status.ProcessGroup > 0) {
 		cfg = *rt.processConfig
+	}
+	if !cfg.Exports {
+		return m.readExportsWithGateLocked(rt, cfg, false)
+	}
+	m.promoteRejectedExportSecretsLocked(rt)
+	if rt.exportViolation != "" {
+		return ServiceExportFile{}, errors.New(rt.exportViolation)
 	}
 	return m.readExportsWithGateLocked(rt, cfg, false)
 }
@@ -1108,6 +1123,10 @@ func (m *ServiceManager) readExportsLocked(rt *serviceRuntime) (ServiceExportFil
 func (m *ServiceManager) guardServiceLogExportForConfig(rt *serviceRuntime, cfg ServiceConfig) error {
 	rt.exportMu.Lock()
 	defer rt.exportMu.Unlock()
+	if !cfg.Exports {
+		_, err := m.readExportsWithGateLocked(rt, cfg, true)
+		return err
+	}
 	if !rt.exportAccepted {
 		return nil
 	}
@@ -1122,6 +1141,13 @@ func (m *ServiceManager) readExportsWithGateLocked(rt *serviceRuntime, cfg Servi
 	path := filepath.Join(serviceRuntimePath(m.root, cfg.ID), "export.json")
 	if !pathWithinResolved(filepath.Join(m.root, ".pua"), path) {
 		return ServiceExportFile{}, m.rejectExportLocked(rt, errors.New("service export path escapes the workspace control directory"), nil, fromLog)
+	}
+	if !cfg.Exports {
+		empty := ServiceExportFile{SchemaVersion: serviceExportSchema, Variables: map[string]string{}}
+		if err := scrubAndRemoveServiceExportPath(path); err != nil {
+			return empty, fmt.Errorf("scrub disabled service export hand-off: %w", err)
+		}
+		return empty, nil
 	}
 	handoff, err := openServiceExportHandoffWithOpen(path, m.exportOpenFile)
 	if os.IsNotExist(err) {
@@ -1377,6 +1403,43 @@ func defaultServiceExportHandoffOperations() serviceExportHandoffOperations {
 		link:   os.Link,
 		remove: os.Remove,
 	}
+}
+
+// scrubAndRemoveServiceExportPath atomically moves the current pathname out of
+// the service-visible location before destroying its contents. The quarantine
+// descriptor checks in scrubAndRemoveQuarantinedServiceExport ensure that a
+// concurrently replaced pathname is never followed or overwritten.
+func scrubAndRemoveServiceExportPath(path string) error {
+	if _, err := os.Lstat(path); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	operations := defaultServiceExportHandoffOperations()
+	temp, err := os.CreateTemp(filepath.Dir(path), ".export-handoff-*")
+	if err != nil {
+		return err
+	}
+	quarantinePath := temp.Name()
+	if err := temp.Close(); err != nil {
+		_ = operations.remove(quarantinePath)
+		return err
+	}
+	if err := operations.rename(path, quarantinePath); err != nil {
+		_ = operations.remove(quarantinePath)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	quarantineInfo, err := os.Lstat(quarantinePath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return scrubAndRemoveQuarantinedServiceExport(quarantinePath, quarantineInfo, operations)
 }
 
 // removeVerifiedServiceExportHandoff removes only the inode already held by

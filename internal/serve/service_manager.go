@@ -1835,13 +1835,10 @@ func (m *ServiceManager) runReadinessLocked(ctx context.Context, rt *serviceRunt
 	if !pathWithinResolved(m.root, dir) {
 		return errors.New("readiness cwd escapes the workspace")
 	}
-	var output bytes.Buffer
-	redactor := security.NewRedactor(rt.secretValues...)
-	stream := redactor.NewStream(&output)
-	defer stream.Close()
-	err := runServiceGroupCommand(checkCtx, command, dir, rt.environment, stream)
+	var output serviceCommandOutput
+	err := runServiceGroupCommand(checkCtx, command, dir, rt.environment, &output)
 	if err != nil {
-		text := strings.TrimSpace(redactor.RedactString(output.String()))
+		text := output.diagnostic(security.NewRedactor(rt.secretValues...))
 		if text != "" {
 			return fmt.Errorf("readiness failed: %w: %s", err, text)
 		}
@@ -2090,11 +2087,8 @@ func (m *ServiceManager) runCleanupLocked(ctx context.Context, rt *serviceRuntim
 			rt.status.Cleanup.LastError = last.Error()
 			continue
 		}
-		var output bytes.Buffer
-		redactor := security.NewRedactor(rt.secretValues...)
-		stream := redactor.NewStream(&output)
-		err := runServiceGroupCommand(checkCtx, cleanup.Command, dir, rt.environment, stream)
-		_ = stream.Close()
+		var output serviceCommandOutput
+		err := runServiceGroupCommand(checkCtx, cleanup.Command, dir, rt.environment, &output)
 		cancel()
 		rt.status.Cleanup.Attempts++
 		rt.status.Cleanup.LastRun = m.now().Format(time.RFC3339Nano)
@@ -2103,7 +2097,7 @@ func (m *ServiceManager) runCleanupLocked(ctx context.Context, rt *serviceRuntim
 			rt.status.Cleanup.LastError = ""
 			return nil
 		}
-		message := strings.TrimSpace(redactor.RedactString(output.String()))
+		message := output.diagnostic(security.NewRedactor(rt.secretValues...))
 		if message != "" {
 			last = fmt.Errorf("cleanup failed: %w: %s", err, message)
 		} else {

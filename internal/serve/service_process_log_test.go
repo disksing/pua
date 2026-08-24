@@ -1,12 +1,82 @@
 package serve
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/disksing/pua/internal/security"
 )
+
+func TestServiceCommandOutputRetainsExactLimitAndRedactsAfterWrites(t *testing.T) {
+	const secret = "late-registered-hook-secret"
+	output := &serviceCommandOutput{}
+	prefix := strings.Repeat("x", serviceCommandDiagnosticLimitBytes-len(secret)-1)
+	for _, chunk := range []string{prefix, "\nlate-registered-", "hook-secret"} {
+		n, err := output.Write([]byte(chunk))
+		if n != len(chunk) || err != nil {
+			t.Fatalf("Write(%d bytes) = (%d, %v)", len(chunk), n, err)
+		}
+	}
+	if output.truncated {
+		t.Fatal("output at the exact diagnostic limit was truncated")
+	}
+	if len(output.data) != serviceCommandDiagnosticLimitBytes || cap(output.data) != serviceCommandDiagnosticLimitBytes {
+		t.Fatalf("retained output = len %d cap %d, want exact %d-byte bound", len(output.data), cap(output.data), serviceCommandDiagnosticLimitBytes)
+	}
+	diagnostic := output.diagnostic(security.NewRedactor(secret))
+	if strings.Contains(diagnostic, secret) || !strings.Contains(diagnostic, "<redacted>") {
+		t.Fatalf("diagnostic did not redact a secret split across writes: %q", diagnostic)
+	}
+}
+
+func TestServiceCommandOutputDropsPartialContentBeyondLimit(t *testing.T) {
+	output := &serviceCommandOutput{}
+	chunks := [][]byte{
+		[]byte(strings.Repeat("x", serviceCommandDiagnosticLimitBytes-1)),
+		[]byte("secret-prefix"),
+		[]byte(strings.Repeat("y", 4096)),
+	}
+	wantReceived := 0
+	for _, chunk := range chunks {
+		wantReceived += len(chunk)
+		n, err := output.Write(chunk)
+		if n != len(chunk) || err != nil {
+			t.Fatalf("Write(%d bytes) = (%d, %v)", len(chunk), n, err)
+		}
+	}
+	if !output.truncated || len(output.data) != 0 || cap(output.data) != 0 {
+		t.Fatalf("truncated output retained data: truncated=%t len=%d cap=%d", output.truncated, len(output.data), cap(output.data))
+	}
+	diagnostic := output.diagnostic(security.NewRedactor("secret-prefix-and-hidden-suffix"))
+	if !strings.Contains(diagnostic, "output omitted") || !strings.Contains(diagnostic, "received "+strconv.Itoa(wantReceived)+" bytes") {
+		t.Fatalf("truncation diagnostic = %q", diagnostic)
+	}
+	if strings.Contains(diagnostic, "secret-prefix") {
+		t.Fatalf("truncation diagnostic retained a possible secret fragment: %q", diagnostic)
+	}
+}
+
+func TestRunServiceGroupCommandDrainsMultiMegabyteOutput(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	output := &serviceCommandOutput{}
+	err := runServiceGroupCommand(ctx, []string{"/bin/sh", "-c", "dd if=/dev/zero bs=1048576 count=3 2>/dev/null; exit 23"}, t.TempDir(), os.Environ(), output)
+	if err == nil || !strings.Contains(err.Error(), "exit status 23") {
+		t.Fatalf("hook error = %v, want exit status 23", err)
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("noisy hook did not finish while its output was drained: %v", ctx.Err())
+	}
+	if output.received != 3<<20 || !output.truncated || len(output.data) != 0 {
+		t.Fatalf("capture = received %d truncated=%t retained=%d", output.received, output.truncated, len(output.data))
+	}
+}
 
 func TestServiceLogSinkReportsRotationRemoveFailure(t *testing.T) {
 	root := t.TempDir()

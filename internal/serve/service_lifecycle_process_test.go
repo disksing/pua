@@ -1503,6 +1503,110 @@ func TestServiceManagerCleanupTimeoutReapsBackgroundOutputHolder(t *testing.T) {
 	}
 }
 
+func TestServiceManagerBoundsNoisyReadinessDiagnostic(t *testing.T) {
+	const hookSecret = "readiness-hook-diagnostic-secret"
+	root := t.TempDir()
+	writeTestService(t, root, ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "worker",
+		Enabled:       true,
+		Command:       []string{"/bin/sh", "-c", "exec sleep 30"},
+		Environment: map[string]ServiceEnvironment{
+			"HOOK_SECRET": {SecretName: "hook-secret"},
+		},
+		Readiness: &ServiceReadinessConfig{
+			Command: []string{"/bin/sh", "-c",
+				"dd if=/dev/zero bs=1048576 count=3 2>/dev/null; printf '%s' \"$HOOK_SECRET\" >&2; exit 23"},
+			Interval: time.Second,
+			Timeout:  5 * time.Second,
+		},
+		Restart: ServiceRestartConfig{InitialDelay: time.Second, Multiplier: 2, MaxDelay: time.Second},
+	})
+
+	manager, err := NewServiceManager(root, ServiceManagerOptions{
+		Resolver: EnvironmentSecretResolver{Values: map[string]string{"hook-secret": hookSecret}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopProcessTestManager(t, &manager)
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	status, err := manager.Show("worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	diagnostic := status.Readiness.LastError
+	if !strings.Contains(diagnostic, "exit status 23") || !strings.Contains(diagnostic, "output omitted") || !strings.Contains(diagnostic, "received 3145760 bytes") {
+		t.Fatalf("readiness diagnostic = %q", diagnostic)
+	}
+	if len(diagnostic) > 512 || strings.Contains(diagnostic, hookSecret) {
+		t.Fatalf("readiness diagnostic was unbounded or exposed a secret: %q", diagnostic)
+	}
+	assertServiceRuntimeOmitsValue(t, root, "worker", hookSecret)
+}
+
+func TestServiceManagerBoundsNoisyCleanupDiagnostic(t *testing.T) {
+	const hookSecret = "cleanup-hook-diagnostic-secret"
+	root := t.TempDir()
+	writeTestService(t, root, ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "worker",
+		Enabled:       true,
+		Command:       []string{"/bin/sh", "-c", "exec sleep 30"},
+		Environment: map[string]ServiceEnvironment{
+			"HOOK_SECRET": {SecretName: "hook-secret"},
+		},
+		Cleanup: &ServiceCleanupConfig{
+			Command: []string{"/bin/sh", "-c",
+				"dd if=/dev/zero bs=1048576 count=3 2>/dev/null; printf '%s' \"$HOOK_SECRET\" >&2; exit 29"},
+			Timeout: 5 * time.Second,
+		},
+	})
+
+	manager, err := NewServiceManager(root, ServiceManagerOptions{
+		Resolver: EnvironmentSecretResolver{Values: map[string]string{"hook-secret": hookSecret}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	err = manager.StopService(context.Background(), "worker")
+	if err == nil || !strings.Contains(err.Error(), "exit status 29") || !strings.Contains(err.Error(), "output omitted") || !strings.Contains(err.Error(), "received 3145758 bytes") {
+		t.Fatalf("cleanup error = %v", err)
+	}
+	status := readPersistedServiceStatus(t, root, "worker")
+	diagnostic := status.Cleanup.LastError
+	if !strings.Contains(diagnostic, "exit status 29") || !strings.Contains(diagnostic, "output omitted") || !strings.Contains(diagnostic, "received 3145758 bytes") {
+		t.Fatalf("cleanup diagnostic = %q", diagnostic)
+	}
+	if len(diagnostic) > 512 || strings.Contains(diagnostic, hookSecret) {
+		t.Fatalf("cleanup diagnostic was unbounded or exposed a secret: %q", diagnostic)
+	}
+	assertServiceRuntimeOmitsValue(t, root, "worker", hookSecret)
+	manager = nil
+}
+
+func assertServiceRuntimeOmitsValue(t *testing.T, root, id, forbidden string) {
+	t.Helper()
+	status, err := os.ReadFile(filepath.Join(serviceRuntimePath(root, id), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := os.ReadFile(filepath.Join(serviceRuntimePath(root, id), "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range map[string][]byte{"state.json": status, "events.jsonl": events} {
+		if strings.Contains(string(data), forbidden) {
+			t.Fatalf("%s persisted hook secret %q: %s", name, forbidden, data)
+		}
+	}
+}
+
 func TestServiceManagerPersistsBackoffAcrossReconstruction(t *testing.T) {
 	root := t.TempDir()
 	launchPath := filepath.Join(root, "launches")

@@ -18,6 +18,13 @@ import (
 
 const serviceStartupLogBufferBytes = 1 << 20
 
+// Supervisor hook output is diagnostic-only. Keep the complete output while
+// it remains small enough to redact after the hook finishes, but discard all
+// retained content once the limit is crossed. Discarding the prefix avoids
+// publishing a partial secret when readiness discovers a new hand-off secret
+// only after the hook has written its output.
+const serviceCommandDiagnosticLimitBytes = 64 << 10
+
 const serviceCommandWaitDelay = 250 * time.Millisecond
 
 const (
@@ -34,6 +41,49 @@ type serviceProcessGroupIdentity struct {
 	markerPath      string
 	ownership       serviceProcessOwnership
 	processPlatform *serviceProcessPlatform
+}
+
+// serviceCommandOutput accepts every byte written by a supervisor hook while
+// bounding the memory retained for a later diagnostic. Once truncated, the
+// content is deliberately dropped and only a byte count remains.
+type serviceCommandOutput struct {
+	data      []byte
+	received  uint64
+	truncated bool
+}
+
+func (o *serviceCommandOutput) Write(data []byte) (int, error) {
+	if o == nil {
+		return 0, io.ErrClosedPipe
+	}
+	o.received += uint64(len(data))
+	if len(data) == 0 || o.truncated {
+		return len(data), nil
+	}
+	if len(data) > serviceCommandDiagnosticLimitBytes-len(o.data) {
+		o.data = nil
+		o.truncated = true
+		return len(data), nil
+	}
+	if o.data == nil {
+		o.data = make([]byte, 0, serviceCommandDiagnosticLimitBytes)
+	}
+	o.data = append(o.data, data...)
+	return len(data), nil
+}
+
+func (o *serviceCommandOutput) diagnostic(redactor *security.Redactor) string {
+	if o == nil || o.received == 0 {
+		return ""
+	}
+	if o.truncated {
+		return fmt.Sprintf("command output omitted after exceeding %d-byte diagnostic limit (received %d bytes)", serviceCommandDiagnosticLimitBytes, o.received)
+	}
+	output := string(o.data)
+	if redactor != nil {
+		output = redactor.RedactString(output)
+	}
+	return strings.TrimSpace(output)
 }
 
 // serviceProcessOwnership records whether ownership comes from the current

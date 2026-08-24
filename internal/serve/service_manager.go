@@ -221,13 +221,14 @@ type ServiceManager struct {
 	now      func() time.Time
 	// processTerminationGrace is fixed in production and shortened only by
 	// real-process tests that exercise graceful escalation deterministically.
-	processTerminationGrace time.Duration
-	processPlatform         *serviceProcessPlatform
-	definitionStore         serviceDefinitionStore
-	runtimeStateStore       serviceRuntimeStateStore
-	exportOpenFile          func(string, int, os.FileMode) (*os.File, error)
-	stopping                bool
-	started                 bool
+	processTerminationGrace    time.Duration
+	processPlatform            *serviceProcessPlatform
+	definitionStore            serviceDefinitionStore
+	definitionTransactionStore serviceDefinitionTransactionStore
+	runtimeStateStore          serviceRuntimeStateStore
+	exportOpenFile             func(string, int, os.FileMode) (*os.File, error)
+	stopping                   bool
+	started                    bool
 }
 
 // NewServiceManager loads versioned service definitions for root. A missing
@@ -251,7 +252,7 @@ func newServiceManager(root string, options ServiceManagerOptions, runtimeStateS
 	if runtimeStateStore.writeJSON == nil {
 		runtimeStateStore.writeJSON = defaults.writeJSON
 	}
-	m := &ServiceManager{root: filepath.Clean(root), configs: map[string]ServiceConfig{}, graph: serviceDependencyGraph{}, runtimes: map[string]*serviceRuntime{}, resolver: options.Resolver, now: options.Now, processTerminationGrace: defaultServiceProcessTerminationGrace, processPlatform: nativeServiceProcessPlatform(), definitionStore: defaultServiceDefinitionStore(), runtimeStateStore: runtimeStateStore}
+	m := &ServiceManager{root: filepath.Clean(root), configs: map[string]ServiceConfig{}, graph: serviceDependencyGraph{}, runtimes: map[string]*serviceRuntime{}, resolver: options.Resolver, now: options.Now, processTerminationGrace: defaultServiceProcessTerminationGrace, processPlatform: nativeServiceProcessPlatform(), definitionStore: defaultServiceDefinitionStore(), definitionTransactionStore: defaultServiceDefinitionTransactionStore(), runtimeStateStore: runtimeStateStore}
 	if m.now == nil {
 		m.now = time.Now
 	}
@@ -276,42 +277,12 @@ func (m *ServiceManager) Root() string {
 }
 
 func (m *ServiceManager) loadLocked() error {
-	dir := filepath.Join(m.root, ".pua", serviceConfigDir)
-	entries, err := os.ReadDir(dir)
-	if os.IsNotExist(err) {
-		return nil
+	if err := m.recoverServiceDefinitionTransactionLocked(); err != nil {
+		return err
 	}
+	configs, err := m.readServiceDefinitionsLocked()
 	if err != nil {
-		return fmt.Errorf("read service directory: %w", err)
-	}
-	if !pathWithinResolved(filepath.Join(m.root, ".pua"), dir) {
-		return errors.New("service directory must remain inside the workspace control directory")
-	}
-	configs := make(map[string]ServiceConfig)
-	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" || entry.Name() == serviceBindingsFile {
-			continue
-		}
-		id := strings.TrimSuffix(entry.Name(), ".json")
-		servicePath := filepath.Join(dir, entry.Name())
-		if !pathWithinResolved(dir, servicePath) {
-			return fmt.Errorf("service %s path escapes the workspace control directory", id)
-		}
-		data, err := os.ReadFile(servicePath)
-		if err != nil {
-			return fmt.Errorf("read service %s: %w", id, err)
-		}
-		var cfg ServiceConfig
-		if err := decodeStrictServiceJSON(bytes.NewReader(data), &cfg); err != nil {
-			return fmt.Errorf("decode service %s: %w", id, err)
-		}
-		if cfg.ID == "" {
-			cfg.ID = id
-		}
-		if cfg.ID != id {
-			return fmt.Errorf("service %s has mismatched id %q", id, cfg.ID)
-		}
-		configs[id] = defaultServiceConfig(cfg)
+		return err
 	}
 	graph, err := validatedServiceDependencyGraph(m.root, configs)
 	if err != nil {
@@ -341,6 +312,47 @@ func (m *ServiceManager) loadLocked() error {
 		return err
 	}
 	return nil
+}
+
+func (m *ServiceManager) readServiceDefinitionsLocked() (map[string]ServiceConfig, error) {
+	dir := filepath.Join(m.root, ".pua", serviceConfigDir)
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return map[string]ServiceConfig{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read service directory: %w", err)
+	}
+	if !pathWithinResolved(filepath.Join(m.root, ".pua"), dir) {
+		return nil, errors.New("service directory must remain inside the workspace control directory")
+	}
+	configs := make(map[string]ServiceConfig)
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" || entry.Name() == serviceBindingsFile {
+			continue
+		}
+		id := strings.TrimSuffix(entry.Name(), ".json")
+		servicePath := filepath.Join(dir, entry.Name())
+		if !pathWithinResolved(dir, servicePath) {
+			return nil, fmt.Errorf("service %s path escapes the workspace control directory", id)
+		}
+		data, err := os.ReadFile(servicePath)
+		if err != nil {
+			return nil, fmt.Errorf("read service %s: %w", id, err)
+		}
+		var cfg ServiceConfig
+		if err := decodeStrictServiceJSON(bytes.NewReader(data), &cfg); err != nil {
+			return nil, fmt.Errorf("decode service %s: %w", id, err)
+		}
+		if cfg.ID == "" {
+			cfg.ID = id
+		}
+		if cfg.ID != id {
+			return nil, fmt.Errorf("service %s has mismatched id %q", id, cfg.ID)
+		}
+		configs[id] = defaultServiceConfig(cfg)
+	}
+	return configs, nil
 }
 
 // loadBindingsLocked is the single persistence boundary for Workspace binding
@@ -2978,17 +2990,28 @@ func (m *ServiceManager) applyAllLocked(configs []ServiceConfig, rollbackLifecyc
 		}
 	}
 
+	useDefinitionTransaction := rollbackLifecycle
 	rollback := func(cause error) error {
 		if !rollbackLifecycle {
 			return cause
 		}
-		rollbackErr := m.rollbackAppliedServicesLocked(transactionIDs, newStopOrder, oldOrder, oldConfigs, oldGraph, runtimeSnapshots, definitionSnapshots, stateSnapshots, eventSnapshots)
-		return errors.Join(cause, rollbackErr)
+		definitionRollbackErr := m.beginServiceDefinitionTransactionLocked(oldConfigs, changed, definitionSnapshots)
+		rollbackErr := m.rollbackAppliedServicesLocked(transactionIDs, newStopOrder, oldOrder, oldConfigs, oldGraph, runtimeSnapshots, stateSnapshots, eventSnapshots)
+		if definitionRollbackErr == nil && rollbackErr == nil {
+			definitionRollbackErr = m.finishServiceDefinitionTransactionLocked()
+		}
+		return errors.Join(cause, definitionRollbackErr, rollbackErr)
 	}
-	for _, id := range changed {
-		cfg := requested[id]
-		if err := m.persistDefinitionLocked(cfg); err != nil {
-			return rollback(serviceDefinitionOperationError(m.runtimes[id], err))
+	if useDefinitionTransaction {
+		if err := m.beginServiceDefinitionTransactionLocked(next, changed, nil); err != nil {
+			return rollback(serviceDefinitionOperationError(nil, err))
+		}
+	} else {
+		for _, id := range changed {
+			cfg := requested[id]
+			if err := m.persistDefinitionLocked(cfg); err != nil {
+				return rollback(serviceDefinitionOperationError(m.runtimes[id], err))
+			}
 		}
 	}
 
@@ -3044,6 +3067,11 @@ func (m *ServiceManager) applyAllLocked(configs []ServiceConfig, rollbackLifecyc
 	}
 	if m.started && !m.stopping {
 		if err := m.reconcileLocked(context.Background()); err != nil {
+			return rollback(err)
+		}
+	}
+	if useDefinitionTransaction {
+		if err := m.finishServiceDefinitionTransactionLocked(); err != nil {
 			return rollback(err)
 		}
 	}
@@ -3279,7 +3307,7 @@ func restoreServiceFile(snapshot serviceFileSnapshot) error {
 	return writeServiceDataAtomic(snapshot.path, snapshot.data, snapshot.mode, os.Rename)
 }
 
-func (m *ServiceManager) rollbackAppliedServicesLocked(ids, stopOrder, restartOrder []string, configs map[string]ServiceConfig, graph serviceDependencyGraph, runtimes map[string]serviceRuntimeConfigSnapshot, definitions, states, events map[string]serviceFileSnapshot) error {
+func (m *ServiceManager) rollbackAppliedServicesLocked(ids, stopOrder, restartOrder []string, configs map[string]ServiceConfig, graph serviceDependencyGraph, runtimes map[string]serviceRuntimeConfigSnapshot, states, events map[string]serviceFileSnapshot) error {
 	var result error
 	for _, id := range stopOrder {
 		rt := m.runtimes[id]
@@ -3315,7 +3343,7 @@ func (m *ServiceManager) rollbackAppliedServicesLocked(ids, stopOrder, restartOr
 			restart[id] = struct{}{}
 		}
 	}
-	for _, snapshots := range []map[string]serviceFileSnapshot{definitions, states, events} {
+	for _, snapshots := range []map[string]serviceFileSnapshot{states, events} {
 		for index := len(ids) - 1; index >= 0; index-- {
 			result = errors.Join(result, restoreServiceFile(snapshots[ids[index]]))
 		}

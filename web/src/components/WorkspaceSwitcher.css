@@ -133,7 +133,7 @@
   display: grid;
   place-items: center;
   border-radius: 4px;
-  background: var(--blue);
+  background: transparent;
   color: var(--panel);
   font-size: calc(10px * var(--sidebar-font-scale, 1));
   font-weight: 700;
@@ -146,7 +146,7 @@
   height: 100%;
   display: block;
   border-radius: inherit;
-  object-fit: cover;
+  object-fit: contain;
 }
 
 :where([data-component-owner="workspace-switcher"]) .workspace-avatar .workspace-runtime-status {

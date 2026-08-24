@@ -64,6 +64,18 @@ function dragEvent(type: string, clientY = 0): Event {
 }
 
 describe("AppShell", () => {
+  it("uses the transparent yellow umbrella for the PUA brand and default workspace icon", async () => {
+    const target = document.body.appendChild(document.createElement("div"));
+    const component = mount(AppShell, { target, props: { channel: createModelChannel(model({
+      workspaces: [{ id: "workspace-a", name: "Workspace A", path: "/tmp/a", iconSrc: "" }],
+    })) } });
+    cleanups.push(() => unmount(component));
+    await tick();
+
+    expect(target.querySelector<HTMLImageElement>(".brand-mark img")?.getAttribute("src")).toBe("/workspace-icons/pua-yellow.png");
+    expect(target.querySelector<HTMLImageElement>("#workspaceAvatar img")?.getAttribute("src")).toBe("/workspace-icons/pua-yellow.png");
+  });
+
   it("shows Doctor issues from the brand reminder and refreshes the report", async () => {
     const onRefreshDoctor = vi.fn(async () => undefined);
     const initial = model({

@@ -390,6 +390,20 @@ describe("CSS ownership", () => {
     expect(row).toContain("min-width: 0;");
   });
 
+  it("keeps PUA and workspace icons on transparent containers", () => {
+    const brand = read("src/components/AppShell.css");
+    const switcher = read("src/components/WorkspaceSwitcher.css");
+    const settings = read("src/components/WorkspaceSettingsPanel.css");
+    const body = (css: string, selector: string) => {
+      const start = css.indexOf(selector);
+      expect(start, selector).toBeGreaterThanOrEqual(0);
+      return css.slice(css.indexOf("{", start), css.indexOf("}", start) + 1);
+    };
+    expect(body(brand, ':where([data-component-owner="app-shell"]) .brand-mark')).toContain("background: transparent;");
+    expect(body(switcher, ':where([data-component-owner="workspace-switcher"]) .workspace-avatar')).toContain("background: transparent;");
+    expect(body(settings, ':where([data-component-owner="workspace-settings-panel"]) .settings-workspace-mark')).toContain("background: transparent;");
+  });
+
   it("keeps the chat composer send button inside very narrow viewports", () => {
     const body = (path: string, selector: string) => {
       const css = read(path);

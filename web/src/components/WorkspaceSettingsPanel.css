@@ -128,7 +128,7 @@
   display: grid;
   place-items: center;
   border-radius: 6px;
-  background: var(--ink);
+  background: transparent;
   color: var(--panel);
   overflow: hidden;
 }
@@ -138,7 +138,7 @@
   height: 100%;
   display: block;
   border-radius: inherit;
-  object-fit: cover;
+  object-fit: contain;
 }
 
 :where([data-component-owner="workspace-settings-panel"]) .settings-row-actions {
@@ -190,7 +190,8 @@
   height: 22px;
   flex: 0 0 auto;
   border-radius: 4px;
-  object-fit: cover;
+  background: transparent;
+  object-fit: contain;
 }
 
 :where([data-component-owner="workspace-settings-panel"]) .settings-workspace-icon-button span {
@@ -246,7 +247,8 @@
   width: 42px;
   height: 42px;
   border-radius: 6px;
-  object-fit: cover;
+  background: transparent;
+  object-fit: contain;
 }
 
 :where([data-component-owner="workspace-settings-panel"]) .settings-workspace-icon-picker span {

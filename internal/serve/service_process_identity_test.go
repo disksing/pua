@@ -75,6 +75,152 @@ func TestCurrentManagerProcessGroupUsesContinuityWithoutIdentityInspection(t *te
 	}
 }
 
+func TestLeaderlessCurrentManagerProcessGroupVerifiesResidualOwnership(t *testing.T) {
+	tests := []struct {
+		name                string
+		inspectionAvailable bool
+		inspectionFailures  int
+		memberMatches       bool
+		allowLeaderExit     bool
+		signal              syscall.Signal
+		wantErr             string
+	}{
+		{
+			name:                "matching residual member",
+			inspectionAvailable: true,
+			memberMatches:       true,
+			allowLeaderExit:     true,
+			signal:              syscall.SIGKILL,
+		},
+		{
+			name:                "matching residual member after transient inspection failures",
+			inspectionAvailable: true,
+			inspectionFailures:  2,
+			memberMatches:       true,
+			allowLeaderExit:     true,
+			signal:              syscall.SIGKILL,
+		},
+		{
+			name:                "mismatched residual member before graceful signal",
+			inspectionAvailable: true,
+			signal:              syscall.SIGTERM,
+			wantErr:             "residual member 99 ownership is unresolved",
+		},
+		{
+			name:                "mismatched residual member before force signal",
+			inspectionAvailable: true,
+			allowLeaderExit:     true,
+			signal:              syscall.SIGKILL,
+			wantErr:             "residual member 99 ownership is unresolved",
+		},
+		{
+			name:            "inspection unavailable",
+			allowLeaderExit: true,
+			signal:          syscall.SIGKILL,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var signals []syscall.Signal
+			inspectionAttempts := 0
+			platform := &serviceProcessPlatform{
+				identityInspectionAvailable: test.inspectionAvailable,
+				processGroupPresent:         func(int) (bool, error) { return true, nil },
+				processPresent:              func(int) (bool, error) { return false, nil },
+				readProcessIdentity: func(int) (serviceProcessIdentity, error) {
+					t.Fatal("leaderless group must not read leader identity")
+					return serviceProcessIdentity{}, nil
+				},
+				readProcessGroupMembers: func(int) ([]serviceProcessIdentity, error) {
+					inspectionAttempts++
+					if inspectionAttempts <= test.inspectionFailures {
+						return nil, errProcessIdentityUnavailable
+					}
+					return []serviceProcessIdentity{{pid: 99, processGroup: 41, command: "child"}}, nil
+				},
+				processGroupMemberMatches: func(serviceProcessIdentity, string, string) (bool, error) {
+					return test.memberMatches, nil
+				},
+				signalProcessGroup: func(_ int, signal syscall.Signal) error {
+					signals = append(signals, signal)
+					return nil
+				},
+			}
+
+			present, err := signalOwnedServiceProcessGroup(serviceProcessGroupIdentity{
+				leaderPID:       41,
+				processGroup:    41,
+				instanceToken:   "instance-token",
+				ownership:       serviceProcessOwnershipCurrentManager,
+				processPlatform: platform,
+			}, test.allowLeaderExit, test.signal)
+			if !present {
+				t.Fatal("leaderless process group reported absent")
+			}
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("ownership error = %v, want %q", err, test.wantErr)
+				}
+				if len(signals) != 0 {
+					t.Fatalf("mismatched residual ownership sent signals: %v", signals)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(signals) != 1 || signals[0] != test.signal {
+				t.Fatalf("verified leaderless group signals = %v, want [%s]", signals, test.signal)
+			}
+		})
+	}
+}
+
+func TestLeaderExitDuringIdentityReadVerifiesResidualOwnership(t *testing.T) {
+	var signals []syscall.Signal
+	leaderProbes := 0
+	platform := &serviceProcessPlatform{
+		identityInspectionAvailable: true,
+		processGroupPresent:         func(int) (bool, error) { return true, nil },
+		processPresent: func(int) (bool, error) {
+			leaderProbes++
+			return leaderProbes == 1, nil
+		},
+		readProcessIdentity: func(int) (serviceProcessIdentity, error) {
+			return serviceProcessIdentity{}, errProcessIdentityUnavailable
+		},
+		readProcessGroupMembers: func(int) ([]serviceProcessIdentity, error) {
+			return []serviceProcessIdentity{{pid: 99, processGroup: 41, command: "child"}}, nil
+		},
+		processGroupMemberMatches: func(serviceProcessIdentity, string, string) (bool, error) {
+			return false, nil
+		},
+		signalProcessGroup: func(_ int, signal syscall.Signal) error {
+			signals = append(signals, signal)
+			return nil
+		},
+	}
+
+	present, err := signalOwnedServiceProcessGroup(serviceProcessGroupIdentity{
+		leaderPID:       41,
+		processGroup:    41,
+		startID:         "persisted-start",
+		instanceToken:   "instance-token",
+		commandDigest:   "command-digest",
+		ownership:       serviceProcessOwnershipCurrentManager,
+		processPlatform: platform,
+	}, true, syscall.SIGKILL)
+	if !present {
+		t.Fatal("leaderless process group reported absent")
+	}
+	if err == nil || !strings.Contains(err.Error(), "residual member 99 ownership is unresolved") {
+		t.Fatalf("ownership error = %v", err)
+	}
+	if len(signals) != 0 {
+		t.Fatalf("mismatched residual ownership sent signals: %v", signals)
+	}
+}
+
 func TestReconstructedDeadServiceProcessGroupNeedsNoIdentityProof(t *testing.T) {
 	var signals []syscall.Signal
 	platform := unsupportedTestServiceProcessPlatform(false, &signals)

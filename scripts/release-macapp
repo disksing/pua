@@ -10,13 +10,17 @@ output_dir=${2:-dist/macapp-$version}
 if ! printf '%s\n' "$version" | awk -F. 'NF == 3 { for (i = 1; i <= 3; i++) if ($i !~ /^(0|[1-9][0-9]*)$/) exit 1; found=1 } END { exit !found }'; then
 	die "stable version must be major.minor.patch without leading zeroes"
 fi
+release_version=$(tr -d '[:space:]' <"$root/versions/release")
+component_version=$(tr -d '[:space:]' <"$root/versions/macapp")
+[ "$version" = "$release_version" ] || die "version $version does not match versions/release ($release_version)"
+[ "$version" = "$component_version" ] || die "macapp does not participate in release $release_version"
 [ "$(uname -s)" = Darwin ] || die "mac app releases must run on macOS"
 for name in go git npm codesign security xcrun hdiutil lipo install_name_tool ditto plutil shasum curl tar; do require "$name"; done
 [ -n "${SPARKLE_PUBLIC_KEY:-}" ] || die "SPARKLE_PUBLIC_KEY is required"
 [ -n "${SPARKLE_PRIVATE_KEY:-}${SPARKLE_KEY_ACCOUNT:-}" ] || die "SPARKLE_PRIVATE_KEY or SPARKLE_KEY_ACCOUNT is required"
 [ -n "${COMPONENT_UPDATE_PUBLIC_KEY:-}" ] || die "COMPONENT_UPDATE_PUBLIC_KEY is required"
 [ -n "${COMPONENT_MANIFEST_URL:-}" ] || die "COMPONENT_MANIFEST_URL is required"
-feed_url=${SPARKLE_FEED_URL:-https://disksing.github.io/pua/appcast.xml}
+feed_url=${SPARKLE_FEED_URL:-https://disksing.github.io/pua/updates/appcast.xml}
 case "$output_dir" in /*) output=$output_dir ;; *) output=$root/$output_dir ;; esac
 [ ! -e "$output" ] || die "output already exists: $output"
 [ -z "$(git -C "$root" status --porcelain)" ] || die "refusing to release a dirty worktree"
@@ -90,8 +94,8 @@ ln -s /Applications "$dmg_stage/Applications"
 dmg=$output/PUA-$version.dmg
 hdiutil create -fs HFS+ -volname "PUA $version" -srcfolder "$dmg_stage" -format UDZO "$dmg"
 codesign --force --sign "$identity" --timestamp "$dmg"
-xcrun notarytool submit --keychain-profile "$profile" --keychain "$keychain" --wait --output-format json "$dmg" >"$output/notarization.json"
-[ "$(plutil -extract status raw -o - "$output/notarization.json")" = Accepted ] || die "notarization was not accepted"
+xcrun notarytool submit --keychain-profile "$profile" --keychain "$keychain" --wait --output-format json "$dmg" >"$output/macapp-notarization.json"
+[ "$(plutil -extract status raw -o - "$output/macapp-notarization.json")" = Accepted ] || die "notarization was not accepted"
 xcrun stapler staple "$dmg"
 xcrun stapler validate "$dmg"
 hdiutil verify "$dmg"
@@ -100,10 +104,10 @@ appcast_stage=$stage/appcast
 mkdir -p "$appcast_stage"
 cp "$dmg" "$appcast_stage/"
 if [ -n "${SPARKLE_PRIVATE_KEY:-}" ]; then
-	printf '%s' "$SPARKLE_PRIVATE_KEY" | "$sparkle/bin/generate_appcast" --ed-key-file - --download-url-prefix "${MACAPP_RELEASE_URL_BASE:-https://github.com/${GITHUB_REPOSITORY:-disksing/pua}/releases/download/macapp-v$version}/" "$appcast_stage"
+	printf '%s' "$SPARKLE_PRIVATE_KEY" | "$sparkle/bin/generate_appcast" --ed-key-file - --download-url-prefix "${MACAPP_RELEASE_URL_BASE:-https://github.com/${GITHUB_REPOSITORY:-disksing/pua}/releases/download/v$version}/" "$appcast_stage"
 elif [ -n "${SPARKLE_KEY_ACCOUNT:-}" ]; then
-	"$sparkle/bin/generate_appcast" --account "$SPARKLE_KEY_ACCOUNT" --download-url-prefix "${MACAPP_RELEASE_URL_BASE:-https://github.com/${GITHUB_REPOSITORY:-disksing/pua}/releases/download/macapp-v$version}/" "$appcast_stage"
+	"$sparkle/bin/generate_appcast" --account "$SPARKLE_KEY_ACCOUNT" --download-url-prefix "${MACAPP_RELEASE_URL_BASE:-https://github.com/${GITHUB_REPOSITORY:-disksing/pua}/releases/download/v$version}/" "$appcast_stage"
 fi
-cp "$appcast_stage/appcast.xml" "$output/appcast.xml"
-(cd "$output" && shasum -a 256 "PUA-$version.dmg" >SHA256SUMS)
+cp "$appcast_stage/appcast.xml" "$output/macapp-appcast.xml"
+(cd "$output" && shasum -a 256 "PUA-$version.dmg" >macapp-SHA256SUMS)
 printf '%s\n' "mac app release written to $output"

@@ -3,19 +3,29 @@ name: Release
 on:
   push:
     tags:
-      - "pua-v*"
-      - "agenthub-v*"
-      - "macapp-v*"
+      - "v*"
 
 permissions:
   contents: read
 
 jobs:
-  component:
-    if: startsWith(github.ref_name, 'pua-v') || startsWith(github.ref_name, 'agenthub-v')
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.plan.outputs.release }}
+      pua: ${{ steps.plan.outputs.pua }}
+      agenthub: ${{ steps.plan.outputs.agenthub }}
+      macapp: ${{ steps.plan.outputs.macapp }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: plan
+        name: Validate tag and component selection
+        run: scripts/release-plan "$GITHUB_REF_NAME" >>"$GITHUB_OUTPUT"
+
+  components:
+    needs: prepare
+    if: ${{ needs.prepare.outputs.pua == 'true' || needs.prepare.outputs.agenthub == 'true' }}
     runs-on: macos-15
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v5
         with: { fetch-depth: 0 }
@@ -31,29 +41,36 @@ jobs:
           CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
           CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
         run: scripts/ci-import-certificate
-      - name: Build, sign and notarize component
+      - name: Build, sign and notarize selected components
         env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.release }}
+          RELEASE_PUA: ${{ needs.prepare.outputs.pua }}
+          RELEASE_AGENTHUB: ${{ needs.prepare.outputs.agenthub }}
           NOTARYTOOL_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           NOTARYTOOL_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           NOTARYTOOL_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
           CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
         run: |
-          component=${GITHUB_REF_NAME%%-v*}
-          version=${GITHUB_REF_NAME#*-v}
           scripts/ci-configure-notary
-          scripts/release-component "$component" "$version" "dist/$component-$version"
-      - name: Publish GitHub Release
-        env: { GH_TOKEN: "${{ github.token }}" }
-        run: |
-          component=${GITHUB_REF_NAME%%-v*}
-          version=${GITHUB_REF_NAME#*-v}
-          gh release create "$GITHUB_REF_NAME" "dist/$component-$version/"* --verify-tag --generate-notes
+          mkdir -p dist/components dist/release-assets
+          if [ "$RELEASE_PUA" = true ]; then
+            scripts/release-component pua "$RELEASE_VERSION" dist/components/pua
+          fi
+          if [ "$RELEASE_AGENTHUB" = true ]; then
+            scripts/release-component agenthub "$RELEASE_VERSION" dist/components/agenthub
+          fi
+          cp dist/components/*/* dist/release-assets/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-components
+          path: dist/release-assets/*
+          if-no-files-found: error
+          retention-days: 7
 
   macapp:
-    if: startsWith(github.ref_name, 'macapp-v')
+    needs: prepare
+    if: ${{ needs.prepare.outputs.macapp == 'true' }}
     runs-on: macos-15
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v5
         with: { fetch-depth: 0 }
@@ -71,6 +88,7 @@ jobs:
         run: scripts/ci-import-certificate
       - name: Build Universal DMG
         env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.release }}
           NOTARYTOOL_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           NOTARYTOOL_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           NOTARYTOOL_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
@@ -79,58 +97,46 @@ jobs:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
           SPARKLE_KEY_ACCOUNT: ${{ secrets.SPARKLE_KEY_ACCOUNT }}
           COMPONENT_UPDATE_PUBLIC_KEY: ${{ secrets.COMPONENT_UPDATE_PUBLIC_KEY }}
-          COMPONENT_MANIFEST_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/channel-v1.json
-          SPARKLE_FEED_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/appcast.xml
+          COMPONENT_MANIFEST_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/updates/channel-v1.json
+          SPARKLE_FEED_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/updates/appcast.xml
         run: |
-          version=${GITHUB_REF_NAME#macapp-v}
           scripts/ci-configure-notary
-          scripts/release-macapp "$version" "dist/macapp-$version"
-      - name: Publish GitHub Release
-        env: { GH_TOKEN: "${{ github.token }}" }
-        run: |
-          version=${GITHUB_REF_NAME#macapp-v}
-          gh release create "$GITHUB_REF_NAME" "dist/macapp-$version/"* --verify-tag --generate-notes
+          scripts/release-macapp "$RELEASE_VERSION" dist/macapp
+          mkdir -p dist/release-assets
+          cp dist/macapp/* dist/release-assets/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macapp
+          path: dist/release-assets/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [prepare, components, macapp]
+    if: >-
+      ${{ always() && needs.prepare.result == 'success' &&
+          (needs.components.result == 'success' || needs.components.result == 'skipped') &&
+          (needs.macapp.result == 'success' || needs.macapp.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+      - name: Publish one GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release create "$RELEASE_TAG" release-assets/* --verify-tag --generate-notes
 
   pages:
-    if: always() && !cancelled()
-    needs: [component, macapp]
-    runs-on: ubuntu-latest
+    needs: publish
+    uses: ./.github/workflows/pages.yml
     permissions:
       contents: read
       pages: write
       id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
-        with: { go-version-file: go.mod, cache: true }
-      - id: prepare
-        name: Rebuild latest stable feeds
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PUA_COMPONENT_MANIFEST_PRIVATE_KEY: ${{ secrets.COMPONENT_MANIFEST_PRIVATE_KEY }}
-        run: |
-          mkdir -p site descriptors
-          releases=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,publishedAt,isDraft,isPrerelease)
-          pua_tag=$(printf '%s' "$releases" | jq -r 'map(select(.isDraft == false and .isPrerelease == false and (.tagName|startswith("pua-v")))) | sort_by(.publishedAt) | reverse | .[0].tagName // empty')
-          hub_tag=$(printf '%s' "$releases" | jq -r 'map(select(.isDraft == false and .isPrerelease == false and (.tagName|startswith("agenthub-v")))) | sort_by(.publishedAt) | reverse | .[0].tagName // empty')
-          app_tag=$(printf '%s' "$releases" | jq -r 'map(select(.isDraft == false and .isPrerelease == false and (.tagName|startswith("macapp-v")))) | sort_by(.publishedAt) | reverse | .[0].tagName // empty')
-          if [ -z "$pua_tag" ] || [ -z "$hub_tag" ]; then
-            echo "ready=false" >>"$GITHUB_OUTPUT"
-            exit 0
-          fi
-          gh release download "$pua_tag" --repo "$GITHUB_REPOSITORY" --pattern release.json --dir descriptors/pua
-          gh release download "$hub_tag" --repo "$GITHUB_REPOSITORY" --pattern release.json --dir descriptors/agenthub
-          go run ./cmd/component-manifest -pua descriptors/pua/release.json -agenthub descriptors/agenthub/release.json -output site/channel-v1.json
-          if [ -n "$app_tag" ]; then gh release download "$app_tag" --repo "$GITHUB_REPOSITORY" --pattern appcast.xml --dir site; fi
-          echo "ready=true" >>"$GITHUB_OUTPUT"
-      - if: steps.prepare.outputs.ready == 'true'
-        uses: actions/configure-pages@v5
-      - if: steps.prepare.outputs.ready == 'true'
-        uses: actions/upload-pages-artifact@v4
-        with: { path: site }
-      - if: steps.prepare.outputs.ready == 'true'
-        id: deployment
-        uses: actions/deploy-pages@v4
+    secrets: inherit

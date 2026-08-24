@@ -1,0 +1,116 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+test_root=$(mktemp -d "${TMPDIR:-/tmp}/pua-release-site-test.XXXXXX")
+cleanup() {
+	rm -rf -- "$test_root"
+}
+trap cleanup EXIT HUP INT TERM
+
+assets=$test_root/assets
+mkdir -p "$test_root/bin" "$assets/v0.1.0" "$assets/v0.2.0" "$assets/v0.3.0"
+
+cat >"$assets/v0.2.0/pua-release.json" <<'EOF'
+{
+  "component": "pua",
+  "version": "0.2.0",
+  "commit": "2222222222222222222222222222222222222222",
+  "minDesktopManagerProtocol": 1,
+  "apiMajor": "1",
+  "minAgentHubVersion": "0.1.0",
+  "assets": [{
+    "os": "darwin",
+    "arch": "arm64",
+    "url": "https://example.test/v0.2.0/pua",
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "size": 123,
+    "codeIdentity": "Developer ID Application: Test"
+  }]
+}
+EOF
+
+cat >"$assets/v0.3.0/agenthub-release.json" <<'EOF'
+{
+  "component": "agenthub",
+  "version": "0.3.0",
+  "commit": "3333333333333333333333333333333333333333",
+  "minDesktopManagerProtocol": 1,
+  "apiMajor": "1",
+  "assets": [{
+    "os": "darwin",
+    "arch": "arm64",
+    "url": "https://example.test/v0.3.0/agenthub",
+    "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "size": 456,
+    "codeIdentity": "Developer ID Application: Test"
+  }]
+}
+EOF
+
+printf '<appcast>v0.1.0</appcast>\n' >"$assets/v0.1.0/macapp-appcast.xml"
+printf '<appcast>v0.3.0</appcast>\n' >"$assets/v0.3.0/macapp-appcast.xml"
+
+cat >"$test_root/bin/gh" <<'EOF'
+#!/bin/sh
+set -eu
+command=$1
+shift
+case "$command" in
+release)
+	subcommand=$1
+	shift
+	case "$subcommand" in
+	list)
+		cat <<'JSON'
+[
+  {"tagName":"v0.1.0","publishedAt":"2026-01-01T00:00:00Z","isDraft":false,"isPrerelease":false},
+  {"tagName":"v0.3.0","publishedAt":"2026-03-01T00:00:00Z","isDraft":false,"isPrerelease":false},
+  {"tagName":"v0.2.0","publishedAt":"2026-02-01T00:00:00Z","isDraft":false,"isPrerelease":false},
+  {"tagName":"pua-v9.0.0","publishedAt":"2026-04-01T00:00:00Z","isDraft":false,"isPrerelease":false}
+]
+JSON
+		;;
+	view)
+		tag=$1
+		find "$PUA_RELEASE_TEST_ASSETS/$tag" -maxdepth 1 -type f -exec basename {} \; 2>/dev/null || true
+		;;
+	download)
+		tag=$1
+		shift
+		pattern=
+		destination=
+		while [ "$#" -gt 0 ]; do
+			case "$1" in
+			--pattern) pattern=$2; shift 2 ;;
+			--dir) destination=$2; shift 2 ;;
+			*) shift ;;
+			esac
+		done
+		mkdir -p "$destination"
+		cp "$PUA_RELEASE_TEST_ASSETS/$tag/$pattern" "$destination/"
+		;;
+	*) echo "unexpected gh release command: $subcommand" >&2; exit 1 ;;
+	esac
+	;;
+*) echo "unexpected gh command: $command" >&2; exit 1 ;;
+esac
+EOF
+chmod +x "$test_root/bin/gh"
+
+keys=$(go -C "$root" run ./cmd/component-manifest -generate-key)
+private_key=$(printf '%s' "$keys" | jq -r .privateKey)
+output=$test_root/site
+PATH="$test_root/bin:$PATH" \
+	GH_REPO=disksing/pua \
+	PUA_RELEASE_TEST_ASSETS="$assets" \
+	PUA_COMPONENT_MANIFEST_PRIVATE_KEY="$private_key" \
+	"$root/scripts/build-release-site" "$output" >/dev/null
+
+[ -f "$output/index.html" ] || { echo "website was not copied" >&2; exit 1; }
+[ -f "$output/updates/channel-v1.json.sig" ] || { echo "component feed was not signed" >&2; exit 1; }
+[ "$(jq -r .pua.version "$output/updates/channel-v1.json")" = 0.2.0 ] || { echo "wrong PUA descriptor selected" >&2; exit 1; }
+[ "$(jq -r .agentHub.version "$output/updates/channel-v1.json")" = 0.3.0 ] || { echo "wrong AgentHub descriptor selected" >&2; exit 1; }
+grep -Fq v0.3.0 "$output/updates/appcast.xml" || { echo "wrong macOS appcast selected" >&2; exit 1; }
+
+echo "release site tests passed"

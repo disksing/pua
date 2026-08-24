@@ -13,6 +13,10 @@ case "$component" in pua|agenthub) ;; *) die "component must be pua or agenthub"
 if ! printf '%s\n' "$version" | awk -F. 'NF == 3 { for (i = 1; i <= 3; i++) if ($i !~ /^(0|[1-9][0-9]*)$/) exit 1; found=1 } END { exit !found }'; then
 	die "stable version must be major.minor.patch without leading zeroes"
 fi
+release_version=$(tr -d '[:space:]' <"$root/versions/release")
+component_version=$(tr -d '[:space:]' <"$root/versions/$component")
+[ "$version" = "$release_version" ] || die "version $version does not match versions/release ($release_version)"
+[ "$version" = "$component_version" ] || die "$component does not participate in release $release_version"
 [ "$(uname -s)" = Darwin ] || die "component releases must run on macOS"
 for command in go git npm codesign security xcrun ditto plutil shasum jq; do require "$command"; done
 case "$output_dir" in /*) output=$output_dir ;; *) output=$root/$output_dir ;; esac
@@ -62,11 +66,11 @@ for target in darwin:arm64 darwin:amd64 linux:arm64 linux:amd64; do
 done
 
 ditto -c -k --norsrc --noextattr --noqtn --noacl "$stage" "$notary_zip"
-xcrun notarytool submit --keychain-profile "$profile" --keychain "$keychain" --wait --output-format json "$notary_zip" >"$output/notarization.json"
-[ "$(plutil -extract status raw -o - "$output/notarization.json")" = Accepted ] || die "notarization was not accepted"
+xcrun notarytool submit --keychain-profile "$profile" --keychain "$keychain" --wait --output-format json "$notary_zip" >"$output/$component-notarization.json"
+[ "$(plutil -extract status raw -o - "$output/$component-notarization.json")" = Accepted ] || die "notarization was not accepted"
 for arch in arm64 amd64; do codesign -vvvv -R=notarized --check-notarization "$output/$component-$version-darwin-$arch"; done
 
-release_url_base=${RELEASE_URL_BASE:-https://github.com/${GITHUB_REPOSITORY:-disksing/pua}/releases/download/$component-v$version}
+release_url_base=${RELEASE_URL_BASE:-https://github.com/${GITHUB_REPOSITORY:-disksing/pua}/releases/download/v$version}
 assets_json='[]'
 for target in darwin:arm64 darwin:amd64 linux:arm64 linux:amd64; do
 	os=${target%:*}; arch=${target#*:}; name=$component-$version-$os-$arch
@@ -79,10 +83,10 @@ done
 api_major=1
 if [ "$component" = pua ]; then
 	jq -n --arg component "$component" --arg version "$version" --arg commit "$sha" --arg api "$api_major" --arg min "$minimum_agenthub" --argjson assets "$assets_json" \
-		--argjson manager "$minimum_manager" '{component:$component,version:$version,commit:$commit,minDesktopManagerProtocol:$manager,apiMajor:$api,minAgentHubVersion:$min,assets:$assets}' >"$output/release.json"
+		--argjson manager "$minimum_manager" '{component:$component,version:$version,commit:$commit,minDesktopManagerProtocol:$manager,apiMajor:$api,minAgentHubVersion:$min,assets:$assets}' >"$output/$component-release.json"
 else
 	jq -n --arg component "$component" --arg version "$version" --arg commit "$sha" --arg api "$api_major" --argjson assets "$assets_json" \
-		--argjson manager "$minimum_manager" '{component:$component,version:$version,commit:$commit,minDesktopManagerProtocol:$manager,apiMajor:$api,assets:$assets}' >"$output/release.json"
+		--argjson manager "$minimum_manager" '{component:$component,version:$version,commit:$commit,minDesktopManagerProtocol:$manager,apiMajor:$api,assets:$assets}' >"$output/$component-release.json"
 fi
-(cd "$output" && shasum -a 256 "$component-$version-"* >SHA256SUMS)
+(cd "$output" && shasum -a 256 "$component-$version-"* >"$component-SHA256SUMS")
 printf '%s\n' "component release written to $output"

@@ -1,0 +1,45 @@
+name: Pages
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - "website/**"
+      - "scripts/build-release-site"
+      - "cmd/component-manifest/**"
+      - "internal/update/**"
+      - "go.mod"
+      - "go.sum"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with: { go-version-file: go.mod, cache: true }
+      - name: Build website and stable update feeds
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PUA_COMPONENT_MANIFEST_PRIVATE_KEY: ${{ secrets.COMPONENT_MANIFEST_PRIVATE_KEY }}
+        run: scripts/build-release-site site
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v4
+        with: { path: site }
+      - id: deployment
+        uses: actions/deploy-pages@v4

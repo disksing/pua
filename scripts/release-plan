@@ -1,0 +1,63 @@
+#!/bin/sh
+set -eu
+
+die() {
+	printf '%s\n' "release-plan: $*" >&2
+	exit 1
+}
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+tag=${1:-}
+
+read_version() {
+	file=$1
+	[ -f "$root/versions/$file" ] || die "missing versions/$file"
+	value=$(tr -d '[:space:]' <"$root/versions/$file")
+	if ! printf '%s\n' "$value" | awk -F. '
+		NF != 3 { exit 1 }
+		{
+			for (i = 1; i <= 3; i++) {
+				if ($i !~ /^(0|[1-9][0-9]*)$/) exit 1
+			}
+		}
+	'; then
+		die "versions/$file must contain a stable major.minor.patch version without leading zeroes"
+	fi
+	printf '%s\n' "$value"
+}
+
+compare_versions() {
+	awk -v left="$1" -v right="$2" 'BEGIN {
+		split(left, a, "."); split(right, b, ".")
+		for (i = 1; i <= 3; i++) {
+			if (length(a[i]) < length(b[i])) { print -1; exit }
+			if (length(a[i]) > length(b[i])) { print 1; exit }
+			if (("x" a[i]) < ("x" b[i])) { print -1; exit }
+			if (("x" a[i]) > ("x" b[i])) { print 1; exit }
+		}
+		print 0
+	}'
+}
+
+release=$(read_version release)
+if [ -n "$tag" ] && [ "$tag" != "v$release" ]; then
+	die "tag $tag does not match versions/release ($release)"
+fi
+
+selected=0
+printf 'release=%s\n' "$release"
+for component in pua agenthub macapp; do
+	version=$(read_version "$component")
+	if [ "$(compare_versions "$version" "$release")" -gt 0 ]; then
+		die "versions/$component ($version) is newer than versions/release ($release)"
+	fi
+	include=false
+	if [ "$version" = "$release" ]; then
+		include=true
+		selected=$((selected + 1))
+	fi
+	printf '%s=%s\n' "$component" "$include"
+	printf '%s_version=%s\n' "$component" "$version"
+done
+
+[ "$selected" -gt 0 ] || die "no component participates in release $release"

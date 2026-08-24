@@ -4,141 +4,110 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 test_root=$(mktemp -d "${TMPDIR:-/tmp}/pua-release-test.XXXXXX")
 cleanup() {
-	rm -rf "$test_root"
+	rm -rf -- "$test_root"
 }
 trap cleanup EXIT HUP INT TERM
 
-fake_bin=$test_root/bin
-log=$test_root/commands.log
-output=$test_root/output
-mkdir -p "$fake_bin"
+fixture=$test_root/repository
+mkdir -p "$fixture/scripts" "$fixture/versions" "$test_root/bin"
+cp "$root/scripts/release-plan" "$root/scripts/release-local" "$root/scripts/version" "$fixture/scripts/"
+cp "$root/versions/"* "$fixture/versions/"
 
-cat >"$fake_bin/uname" <<'EOF'
-#!/bin/sh
-echo Darwin
-EOF
-
-cat >"$fake_bin/git" <<'EOF'
+cat >"$test_root/bin/git" <<'EOF'
 #!/bin/sh
 case "$*" in
-*"status --porcelain") exit 0 ;;
-*"rev-parse --abbrev-ref HEAD") echo master ;;
-*"rev-parse HEAD") echo 0123456789abcdef0123456789abcdef01234567 ;;
+*"rev-parse --short=12 HEAD"*) echo 0123456789ab ;;
+*"rev-list --count HEAD"*) echo 42 ;;
+*"status --porcelain"*) exit 0 ;;
 *) echo "unexpected git arguments: $*" >&2; exit 1 ;;
 esac
 EOF
 
-cat >"$fake_bin/npm" <<'EOF'
+cat >"$fixture/scripts/release-component" <<'EOF'
 #!/bin/sh
-echo "npm:$*" >>"$PUA_RELEASE_TEST_LOG"
+set -eu
+mkdir -p "$3"
+printf '%s %s\n' "$1" "$2" >>"$PUA_RELEASE_TEST_LOG"
+printf 'artifact\n' >"$3/$1-artifact"
 EOF
 
-cat >"$fake_bin/go" <<'EOF'
+cat >"$fixture/scripts/release-macapp" <<'EOF'
 #!/bin/sh
-output=
-previous=
-for argument in "$@"; do
-	if [ "$previous" = -o ]; then output=$argument; fi
-	previous=$argument
+set -eu
+mkdir -p "$2"
+printf 'macapp %s\n' "$1" >>"$PUA_RELEASE_TEST_LOG"
+printf 'artifact\n' >"$2/macapp-artifact"
+EOF
+chmod +x "$test_root/bin/git" "$fixture/scripts/"*
+
+assert_line() {
+	text=$1
+	expected=$2
+	printf '%s\n' "$text" | grep -Fxq "$expected" || {
+		printf 'missing expected line: %s\n%s\n' "$expected" "$text" >&2
+		exit 1
+	}
+}
+
+plan=$($fixture/scripts/release-plan v0.1.0)
+assert_line "$plan" release=0.1.0
+assert_line "$plan" pua=true
+assert_line "$plan" agenthub=true
+assert_line "$plan" macapp=true
+
+printf '0.2.0\n' >"$fixture/versions/release"
+printf '0.2.0\n' >"$fixture/versions/pua"
+plan=$($fixture/scripts/release-plan v0.2.0)
+assert_line "$plan" pua=true
+assert_line "$plan" agenthub=false
+assert_line "$plan" macapp=false
+
+if "$fixture/scripts/release-plan" 0.2.0 >/dev/null 2>&1; then
+	echo "tag without v prefix unexpectedly succeeded" >&2
+	exit 1
+fi
+if "$fixture/scripts/release-plan" pua-v0.2.0 >/dev/null 2>&1; then
+	echo "component-prefixed tag unexpectedly succeeded" >&2
+	exit 1
+fi
+
+for component in pua agenthub macapp; do
+	version=$(PATH="$test_root/bin:$PATH" "$fixture/scripts/version" "$component")
+	case "$version" in
+	0.2.0-dev.42+g0123456789ab) ;;
+	*) echo "unexpected $component development version: $version" >&2; exit 1 ;;
+	esac
 done
-[ -n "$output" ] || { echo "missing go output" >&2; exit 1; }
-mkdir -p "$(dirname -- "$output")"
-printf 'fake %s/%s binary\n' "$GOOS" "$GOARCH" >"$output"
-chmod +x "$output"
-echo "go:$GOOS/$GOARCH:$output" >>"$PUA_RELEASE_TEST_LOG"
-EOF
+[ "$(PATH="$test_root/bin:$PATH" "$fixture/scripts/version" pua stable)" = 0.2.0 ]
+[ "$(PATH="$test_root/bin:$PATH" "$fixture/scripts/version" agenthub stable)" = 0.1.0 ]
 
-cat >"$fake_bin/security" <<'EOF'
-#!/bin/sh
-case "$1" in
-default-keychain) echo '"/tmp/release-test.keychain-db"' ;;
-find-identity) cat <<'OUT'
-  1) ABCDEF "Developer ID Application: Release Test (TEAMID1234)"
-     1 valid identities found
-OUT
-;;
-*) echo "unexpected security arguments: $*" >&2; exit 1 ;;
-esac
-EOF
+log=$test_root/release.log
+PATH="$test_root/bin:$PATH" PUA_RELEASE_TEST_LOG="$log" "$fixture/scripts/release-local" "$test_root/pua-only" >/dev/null
+[ "$(cat "$log")" = "pua 0.2.0" ] || { echo "local release selected the wrong components" >&2; exit 1; }
 
-cat >"$fake_bin/codesign" <<'EOF'
-#!/bin/sh
-echo "codesign:$*" >>"$PUA_RELEASE_TEST_LOG"
-EOF
+printf '0.2.0\n' >"$fixture/versions/agenthub"
+printf '0.2.0\n' >"$fixture/versions/macapp"
+: >"$log"
+PATH="$test_root/bin:$PATH" PUA_RELEASE_TEST_LOG="$log" "$fixture/scripts/release-local" "$test_root/all" >/dev/null
+[ "$(wc -l <"$log" | tr -d ' ')" -eq 3 ] || { echo "local release did not select all components" >&2; exit 1; }
 
-cat >"$fake_bin/xcrun" <<'EOF'
-#!/bin/sh
-echo "xcrun:$*" >>"$PUA_RELEASE_TEST_LOG"
-case "$1:$2" in
-notarytool:submit)
-	printf '{"id":"11111111-2222-3333-4444-555555555555","status":"%s"}\n' \
-		"${PUA_RELEASE_TEST_NOTARY_STATUS:-Accepted}"
-	;;
-notarytool:log)
-	for argument in "$@"; do last=$argument; done
-	printf '{"statusSummary":"Ready for distribution","issues":null}\n' >"$last"
-	;;
-*) echo "unexpected xcrun arguments: $*" >&2; exit 1 ;;
-esac
-EOF
-
-cat >"$fake_bin/plutil" <<'EOF'
-#!/bin/sh
-case "$2" in
-id) echo 11111111-2222-3333-4444-555555555555 ;;
-status) echo "${PUA_RELEASE_TEST_NOTARY_STATUS:-Accepted}" ;;
-issues) echo 0 ;;
-*) exit 1 ;;
-esac
-EOF
-
-cat >"$fake_bin/ditto" <<'EOF'
-#!/bin/sh
-for argument in "$@"; do last=$argument; done
-printf 'fake zip\n' >"$last"
-echo "ditto:$*" >>"$PUA_RELEASE_TEST_LOG"
-EOF
-
-chmod +x "$fake_bin"/*
-
-PATH="$fake_bin:$PATH" PUA_RELEASE_TEST_LOG="$log" PUA_RELEASE_TEST_NOTARY_STATUS=Accepted \
-	"$root/scripts/release-local" 1.2.3 "$output"
-
-for artifact in \
-	pua-1.2.3-darwin-arm64.zip \
-	pua-1.2.3-darwin-amd64.zip \
-	pua-1.2.3-linux-arm64.zip \
-	pua-1.2.3-linux-amd64.zip \
-	SHA256SUMS notarization-submit.json notarization-log.json; do
-	[ -f "$output/$artifact" ] || { echo "missing artifact: $artifact" >&2; exit 1; }
-done
-
-[ "$(grep -c '^go:' "$log")" -eq 8 ] || { echo "expected eight Go builds" >&2; exit 1; }
-[ "$(grep -c '^codesign:--force' "$log")" -eq 4 ] || { echo "expected four signatures" >&2; exit 1; }
-[ "$(grep -c '^codesign:-vvvv -R=notarized --check-notarization' "$log")" -eq 4 ] || { echo "expected four notarization checks" >&2; exit 1; }
-[ "$(grep -c '^xcrun:notarytool submit' "$log")" -eq 1 ] || { echo "expected one notarization submission" >&2; exit 1; }
-[ "$(wc -l <"$output/SHA256SUMS" | tr -d ' ')" -eq 4 ] || { echo "expected four checksums" >&2; exit 1; }
-
-if PATH="$fake_bin:$PATH" PUA_RELEASE_TEST_LOG="$log" \
-	"$root/scripts/release-local" '../invalid' "$test_root/invalid" >/dev/null 2>&1; then
-	echo "invalid version unexpectedly succeeded" >&2
+printf '0.3.0\n' >"$fixture/versions/agenthub"
+if "$fixture/scripts/release-plan" v0.2.0 >/dev/null 2>&1; then
+	echo "component newer than the release unexpectedly succeeded" >&2
 	exit 1
 fi
 
-if PATH="$fake_bin:$PATH" PUA_RELEASE_TEST_LOG="$log" \
-	"$root/scripts/release-local" 1.2.3 "$output" >/dev/null 2>&1; then
-	echo "existing output path unexpectedly succeeded" >&2
+printf '0.3.0\n' >"$fixture/versions/release"
+printf '0.2.0\n' >"$fixture/versions/agenthub"
+if "$fixture/scripts/release-plan" v0.3.0 >/dev/null 2>&1; then
+	echo "release without a selected component unexpectedly succeeded" >&2
 	exit 1
 fi
 
-failed_output=$test_root/failed-output
-if PATH="$fake_bin:$PATH" PUA_RELEASE_TEST_LOG="$log" PUA_RELEASE_TEST_NOTARY_STATUS=Invalid \
-	"$root/scripts/release-local" 2.0.0 "$failed_output" >/dev/null 2>&1; then
-	echo "invalid notarization unexpectedly succeeded" >&2
+printf '01.3.0\n' >"$fixture/versions/release"
+if "$fixture/scripts/release-plan" v01.3.0 >/dev/null 2>&1; then
+	echo "version with a leading zero unexpectedly succeeded" >&2
 	exit 1
 fi
-[ -f "$failed_output/notarization-submit.json" ] || { echo "missing failed submission diagnostics" >&2; exit 1; }
-[ -f "$failed_output/notarization-log.json" ] || { echo "missing failed notarization log" >&2; exit 1; }
-[ ! -f "$failed_output/SHA256SUMS" ] || { echo "failed release produced distributable checksums" >&2; exit 1; }
 
-echo "release-local tests passed"
+echo "release planning tests passed"

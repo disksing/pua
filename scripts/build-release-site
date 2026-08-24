@@ -1,0 +1,76 @@
+#!/bin/sh
+set -eu
+
+die() {
+	printf '%s\n' "build-release-site: $*" >&2
+	exit 1
+}
+
+require() {
+	command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
+}
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+destination=${1:-site}
+repository=${GH_REPO:-${GITHUB_REPOSITORY:-}}
+[ -n "$repository" ] || die "GH_REPO or GITHUB_REPOSITORY is required"
+for command in gh go jq; do require "$command"; done
+
+case "$destination" in
+/*) output=$destination ;;
+*) output=$root/$destination ;;
+esac
+[ ! -e "$output" ] || die "output already exists: $output"
+[ -d "$root/website" ] || die "website source directory is missing"
+
+stage=$(mktemp -d "${TMPDIR:-/tmp}/pua-release-site.XXXXXX")
+cleanup() {
+	rm -rf -- "$stage"
+}
+trap cleanup EXIT HUP INT TERM
+
+mkdir -p "$output/updates"
+cp -R "$root/website/." "$output/"
+
+releases=$(gh release list --repo "$repository" --limit 100 --json tagName,publishedAt,isDraft,isPrerelease)
+tags=$(printf '%s' "$releases" | jq -r '
+	map(select(.isDraft == false and .isPrerelease == false and (.tagName | test("^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"))))
+	| sort_by(.publishedAt) | reverse | .[].tagName
+')
+
+find_release_with_asset() {
+	asset_name=$1
+	for release_tag in $tags; do
+		if gh release view "$release_tag" --repo "$repository" --json assets --jq '.assets[].name' | grep -Fxq "$asset_name"; then
+			printf '%s\n' "$release_tag"
+			return 0
+		fi
+	done
+	return 1
+}
+
+pua_tag=$(find_release_with_asset pua-release.json || true)
+agenthub_tag=$(find_release_with_asset agenthub-release.json || true)
+macapp_tag=$(find_release_with_asset macapp-appcast.xml || true)
+
+if [ -n "$pua_tag" ] && [ -n "$agenthub_tag" ]; then
+	[ -n "${PUA_COMPONENT_MANIFEST_PRIVATE_KEY:-}" ] || die "PUA_COMPONENT_MANIFEST_PRIVATE_KEY is required to build component feeds"
+	mkdir -p "$stage/pua" "$stage/agenthub"
+	gh release download "$pua_tag" --repo "$repository" --pattern pua-release.json --dir "$stage/pua"
+	gh release download "$agenthub_tag" --repo "$repository" --pattern agenthub-release.json --dir "$stage/agenthub"
+	go -C "$root" run ./cmd/component-manifest \
+		-pua "$stage/pua/pua-release.json" \
+		-agenthub "$stage/agenthub/agenthub-release.json" \
+		-output "$output/updates/channel-v1.json" \
+		-signature "$output/updates/channel-v1.json.sig"
+else
+	printf '%s\n' "component feed skipped until stable PUA and AgentHub descriptors both exist" >&2
+fi
+
+if [ -n "$macapp_tag" ]; then
+	mkdir -p "$stage/macapp"
+	gh release download "$macapp_tag" --repo "$repository" --pattern macapp-appcast.xml --dir "$stage/macapp"
+	cp "$stage/macapp/macapp-appcast.xml" "$output/updates/appcast.xml"
+fi
+
+printf '%s\n' "release site written to $output"

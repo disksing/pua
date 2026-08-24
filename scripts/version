@@ -10,10 +10,18 @@ macapp|pua|agenthub) ;;
 *) printf '%s\n' "usage: scripts/version macapp|pua|agenthub [dev|stable]" >&2; exit 2 ;;
 esac
 
-target=$(tr -d '[:space:]' <"$root/versions/$component")
-case "$target" in
-''|*[!0-9.]*) printf '%s\n' "invalid target version in versions/$component: $target" >&2; exit 1 ;;
-esac
+version_file=$component
+if [ "$mode" = dev ]; then
+	version_file=release
+fi
+target=$(tr -d '[:space:]' <"$root/versions/$version_file")
+if ! printf '%s\n' "$target" | awk -F. '
+	NF != 3 { exit 1 }
+	{ for (i = 1; i <= 3; i++) if ($i !~ /^(0|[1-9][0-9]*)$/) exit 1 }
+'; then
+	printf '%s\n' "invalid target version in versions/$version_file: $target" >&2
+	exit 1
+fi
 
 if [ "$mode" = stable ]; then
 	printf '%s\n' "$target"

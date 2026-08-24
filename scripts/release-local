@@ -1,201 +1,34 @@
 #!/bin/sh
 set -eu
 
-usage() {
-	cat >&2 <<'EOF'
-usage: scripts/release-local VERSION [OUTPUT_DIR]
-
-Build pua and agenthub for macOS and Linux on arm64 and amd64. The macOS
-binaries are signed with Developer ID, submitted together for notarization,
-and then packaged as separate ZIP archives. OUTPUT_DIR defaults to
-dist/VERSION.
-
-Environment:
-  CODESIGN_IDENTITY              Developer ID Application identity. Required
-                                 only when more than one identity is installed.
-  NOTARYTOOL_KEYCHAIN_PROFILE    notarytool credential profile (default:
-                                 pua-notary).
-  NOTARYTOOL_KEYCHAIN            keychain file containing that profile
-                                 (default: the user's default keychain).
-EOF
-}
-
 die() {
-	echo "release-local: $*" >&2
+	printf '%s\n' "release-local: $*" >&2
 	exit 1
 }
 
-require_command() {
-	command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
-}
-
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-version=${1:-}
-output_dir=${2:-dist/$version}
+plan=$($root/scripts/release-plan)
+release=$(printf '%s\n' "$plan" | sed -n 's/^release=//p')
+pua=$(printf '%s\n' "$plan" | sed -n 's/^pua=//p')
+agenthub=$(printf '%s\n' "$plan" | sed -n 's/^agenthub=//p')
+macapp=$(printf '%s\n' "$plan" | sed -n 's/^macapp=//p')
+[ -n "$release" ] || die "release plan did not return a version"
 
-if [ -z "$version" ]; then
-	usage
-	exit 2
-fi
-case "$version" in
-*[!A-Za-z0-9._-]*) die "VERSION may contain only letters, numbers, '.', '_' and '-'" ;;
-esac
-
-if [ "$(uname -s)" != Darwin ]; then
-	die "this release workflow must run on macOS"
-fi
-
-for command_name in git npm go codesign security xcrun ditto plutil shasum; do
-	require_command "$command_name"
-done
-
+output_dir=${1:-dist/v$release}
 case "$output_dir" in
-/*) output_path=$output_dir ;;
-*) output_path=$root/$output_dir ;;
+/*) output=$output_dir ;;
+*) output=$root/$output_dir ;;
 esac
-if [ -e "$output_path" ]; then
-	die "output path already exists: $output_path"
+[ ! -e "$output" ] || die "output already exists: $output"
+
+if [ "$pua" = true ]; then
+	"$root/scripts/release-component" pua "$release" "$output/pua"
+fi
+if [ "$agenthub" = true ]; then
+	"$root/scripts/release-component" agenthub "$release" "$output/agenthub"
+fi
+if [ "$macapp" = true ]; then
+	"$root/scripts/release-macapp" "$release" "$output/macapp"
 fi
 
-if [ -n "$(git -C "$root" status --porcelain)" ]; then
-	die "refusing to release from a dirty worktree"
-fi
-
-branch=$(git -C "$root" rev-parse --abbrev-ref HEAD 2>/dev/null || printf unknown)
-if [ "$branch" = HEAD ] || [ -z "$branch" ]; then
-	branch=unknown
-fi
-sha=$(git -C "$root" rev-parse HEAD 2>/dev/null || printf unknown)
-if [ -z "$sha" ]; then
-	sha=unknown
-fi
-ldflags="-X github.com/disksing/pua/internal/buildinfo.Branch=$branch -X github.com/disksing/pua/internal/buildinfo.SHA=$sha"
-
-identity=${CODESIGN_IDENTITY:-}
-if [ -z "$identity" ]; then
-	identities=$(security find-identity -v -p codesigning 2>/dev/null |
-		sed -n 's/^.*"\(Developer ID Application:.*\)"$/\1/p')
-	identity_count=$(printf '%s\n' "$identities" | sed '/^$/d' | wc -l | tr -d ' ')
-	case "$identity_count" in
-	1) identity=$identities ;;
-	0) die "no valid Developer ID Application identity found" ;;
-	*) die "multiple Developer ID Application identities found; set CODESIGN_IDENTITY" ;;
-	esac
-fi
-security find-identity -v -p codesigning 2>/dev/null |
-	grep -F "\"$identity\"" >/dev/null ||
-	die "code-signing identity is not valid: $identity"
-
-notary_profile=${NOTARYTOOL_KEYCHAIN_PROFILE:-pua-notary}
-notary_keychain=${NOTARYTOOL_KEYCHAIN:-}
-if [ -z "$notary_keychain" ]; then
-	notary_keychain=$(security default-keychain -d user | tr -d '"[:space:]')
-fi
-[ -n "$notary_keychain" ] || die "could not resolve the default user keychain"
-temp_root=$(mktemp -d "${TMPDIR:-/tmp}/pua-release.XXXXXX")
-cleanup() {
-	rm -rf "$temp_root"
-}
-trap cleanup EXIT HUP INT TERM
-
-stage_root=$temp_root/stage
-mkdir -p "$stage_root" "$output_path"
-
-echo "Building frontends..."
-npm --prefix "$root/web" ci
-npm --prefix "$root/web" run check
-npm --prefix "$root/web" run build
-
-build_target() {
-	os=$1
-	arch=$2
-	package_name=pua-$version-$os-$arch
-	package_dir=$stage_root/$package_name
-	mkdir -p "$package_dir"
-	cp "$root/LICENSE" "$package_dir/LICENSE"
-	cp "$root/README.md" "$package_dir/README.md"
-	CGO_ENABLED=0 GOOS=$os GOARCH=$arch go -C "$root" build -trimpath -tags embed_frontend \
-		-ldflags "$ldflags" -o "$package_dir/pua" ./cli/cmd/pua
-	CGO_ENABLED=0 GOOS=$os GOARCH=$arch go -C "$root" build -trimpath -tags embed_frontend \
-		-ldflags "$ldflags" -o "$package_dir/agenthub" ./agenthub/cmd/agenthub
-}
-
-for target in darwin:arm64 darwin:amd64 linux:arm64 linux:amd64; do
-	os=${target%:*}
-	arch=${target#*:}
-	echo "Building $os/$arch..."
-	build_target "$os" "$arch"
-done
-
-sign_binary() {
-	identifier=$1
-	binary=$2
-	codesign --force --sign "$identity" --identifier "$identifier" \
-		--options runtime --timestamp "$binary"
-	codesign --verify --strict --verbose=4 "$binary"
-}
-
-for arch in arm64 amd64; do
-	package_dir=$stage_root/pua-$version-darwin-$arch
-	echo "Signing darwin/$arch..."
-	sign_binary com.disksing.pua "$package_dir/pua"
-	sign_binary com.disksing.agenthub "$package_dir/agenthub"
-done
-
-notary_stage=$temp_root/pua-$version-macos-notarization
-mkdir -p "$notary_stage"
-cp -R "$stage_root/pua-$version-darwin-arm64" "$notary_stage/"
-cp -R "$stage_root/pua-$version-darwin-amd64" "$notary_stage/"
-notary_archive=$temp_root/pua-$version-macos-notarization.zip
-ditto -c -k --norsrc --noextattr --noqtn --noacl --keepParent \
-	"$notary_stage" "$notary_archive"
-
-submit_result=$output_path/notarization-submit.json
-echo "Submitting macOS binaries for notarization..."
-submit_ok=true
-if ! xcrun notarytool submit --keychain-profile "$notary_profile" --keychain "$notary_keychain" \
-	--wait --output-format json "$notary_archive" >"$submit_result"; then
-	submit_ok=false
-fi
-
-submission_id=$(plutil -extract id raw -o - "$submit_result" 2>/dev/null || true)
-submission_status=$(plutil -extract status raw -o - "$submit_result" 2>/dev/null || true)
-log_ok=true
-if [ -n "$submission_id" ]; then
-	if ! xcrun notarytool log --keychain-profile "$notary_profile" --keychain "$notary_keychain" \
-		"$submission_id" "$output_path/notarization-log.json"; then
-		log_ok=false
-	fi
-fi
-if [ "$submit_ok" != true ] || [ "$submission_status" != Accepted ]; then
-	die "notarization failed with status ${submission_status:-unknown}; see $submit_result"
-fi
-if [ -z "$submission_id" ] || [ "$log_ok" != true ]; then
-	die "notarization was accepted but its complete log could not be saved"
-fi
-issue_count=$(plutil -extract issues raw -o - "$output_path/notarization-log.json" 2>/dev/null || printf 0)
-if [ "$issue_count" != 0 ]; then
-	die "notarization completed with $issue_count issue(s); see $output_path/notarization-log.json"
-fi
-
-for arch in arm64 amd64; do
-	package_dir=$stage_root/pua-$version-darwin-$arch
-	codesign -vvvv -R="notarized" --check-notarization "$package_dir/pua"
-	codesign -vvvv -R="notarized" --check-notarization "$package_dir/agenthub"
-done
-
-echo "Creating release archives..."
-for target in darwin:arm64 darwin:amd64 linux:arm64 linux:amd64; do
-	os=${target%:*}
-	arch=${target#*:}
-	package_name=pua-$version-$os-$arch
-	ditto -c -k --norsrc --noextattr --noqtn --noacl --keepParent \
-		"$stage_root/$package_name" "$output_path/$package_name.zip"
-done
-
-(
-	cd "$output_path"
-	shasum -a 256 pua-"$version"-*.zip >SHA256SUMS
-)
-
-echo "Release artifacts written to $output_path"
+printf '%s\n' "local release v$release written to $output"

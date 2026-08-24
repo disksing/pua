@@ -69,12 +69,15 @@ another output directory to `scripts/build` if needed.
 
 ### Local releases
 
-The macOS release workflow builds `pua` and `agenthub` for macOS and Linux on
-both arm64 and amd64. macOS binaries are signed with a Developer ID Application
-identity, submitted together to Apple's notary service, checked against the
-resulting online notarization tickets, and then packaged separately. Linux
-binaries are unsigned. All ZIP archives and notarization diagnostics are
-written to a new output directory, along with `SHA256SUMS`.
+PUA Server, AgentHub, and the macOS App share one release train and use a single
+`vX.Y.Z` tag and GitHub Release. Each train may publish any non-empty subset of
+the components. Set `versions/release` to `X.Y.Z`, set the version file for each
+participating component to the same value, and leave skipped components at their
+previous version. Validate the selection with:
+
+```bash
+scripts/release-plan v0.1.0
+```
 
 Before the first release, install a valid Developer ID Application identity and
 save notarization credentials in the login Keychain:
@@ -90,29 +93,21 @@ xcrun notarytool store-credentials pua-notary \
 saving. Never put the password, certificate private key, or exported `.p12`
 file in the repository.
 
-Run the release from a clean macOS checkout and provide an explicit version:
+Rehearse all components selected by the version files from a clean macOS
+checkout:
 
 ```bash
-scripts/release-local 0.1.0
+scripts/release-local
 ```
 
-By default the command creates `dist/0.1.0/` containing:
+By default the command writes component-specific assets under `dist/v0.1.0/`.
+Pass one output directory argument to use another location. It refuses to
+overwrite an existing path or release a dirty worktree.
 
-```text
-pua-0.1.0-darwin-arm64.zip
-pua-0.1.0-darwin-amd64.zip
-pua-0.1.0-linux-arm64.zip
-pua-0.1.0-linux-amd64.zip
-SHA256SUMS
-notarization-submit.json
-notarization-log.json
-```
-
-Pass a second argument to choose another output directory. The command refuses
-to overwrite an existing path or release a dirty worktree. If more than one
-Developer ID Application identity is installed, select one explicitly with
-`CODESIGN_IDENTITY`. Set `NOTARYTOOL_KEYCHAIN_PROFILE` when the credentials use
-a profile name other than `pua-notary`, or `NOTARYTOOL_KEYCHAIN` when they are
+If more than one Developer ID Application identity is installed, select one
+explicitly with `CODESIGN_IDENTITY`. Set `NOTARYTOOL_KEYCHAIN_PROFILE` when the
+credentials use a profile name other than `pua-notary`, or
+`NOTARYTOOL_KEYCHAIN` when they are
 stored in a keychain other than the user's default keychain.
 
 Apple creates online notarization tickets for the standalone Mach-O binaries,

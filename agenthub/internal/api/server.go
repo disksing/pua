@@ -783,7 +783,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		if created || value.State == session.StateReady || value.State == session.StateStarting {
 			started, err := s.runtime.Start(value.ID)
 			if err != nil {
-				writeAPIError(w, http.StatusBadGateway, "provider_start_failed", err.Error(), map[string]any{"sessionId": value.ID})
+				s.writeProviderStartError(w, value.ID, err)
 				return
 			}
 			value = started
@@ -1050,6 +1050,10 @@ func (s *Server) resumeSession(w http.ResponseWriter, r *http.Request, id string
 	}
 	value, err := s.runtime.Start(id)
 	if err != nil {
+		if current, getErr := s.store.Get(id); getErr == nil && current.State == session.StateStopped && current.StopReason == session.StopReasonStartupError {
+			s.writeProviderStartError(w, id, err)
+			return
+		}
 		s.writeRuntimeError(w, err)
 		return
 	}
@@ -1176,6 +1180,10 @@ func (s *Server) writeRuntimeError(w http.ResponseWriter, err error) {
 		return
 	}
 	writeAPIError(w, http.StatusConflict, "runtime_operation_failed", err.Error(), nil)
+}
+
+func (s *Server) writeProviderStartError(w http.ResponseWriter, sessionID string, err error) {
+	writeAPIError(w, http.StatusBadGateway, "provider_start_failed", err.Error(), map[string]any{"sessionId": sessionID})
 }
 
 func (s *Server) getSession(w http.ResponseWriter, _ *http.Request, id string) {

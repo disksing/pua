@@ -1717,8 +1717,9 @@ func TestResumeSessionAcceptsOptionalLaunchEnvironment(t *testing.T) {
 	}
 
 	// The test provider binary does not exist, so a resume that passes
-	// request validation reaches the runtime and fails there with a
-	// conflict; anything else means the request was rejected earlier.
+	// request validation reaches the runtime and fails there with the
+	// structured provider startup error; anything else means the request was
+	// rejected earlier.
 	postResume := func(body *string) (int, string) {
 		t.Helper()
 		var reader *strings.Reader
@@ -1752,8 +1753,8 @@ func TestResumeSessionAcceptsOptionalLaunchEnvironment(t *testing.T) {
 		"empty object": stringPointer(`{}`),
 	} {
 		status, code := postResume(body)
-		if status != http.StatusConflict || code != "runtime_operation_failed" {
-			t.Fatalf("%s: status/code = %d/%q, want 409/runtime_operation_failed", name, status, code)
+		if status != http.StatusBadGateway || code != "provider_start_failed" {
+			t.Fatalf("%s: status/code = %d/%q, want 502/provider_start_failed", name, status, code)
 		}
 		value, err := store.Get(created.ID)
 		if err != nil {
@@ -1767,8 +1768,8 @@ func TestResumeSessionAcceptsOptionalLaunchEnvironment(t *testing.T) {
 	// A valid overlay is persisted before the provider start fails, and
 	// keeps keys the overlay did not mention.
 	status, code := postResume(stringPointer(`{"launchEnvironment":{"SESSION_CONTEXT_ID":"context-new","EXTRA":"x"}}`))
-	if status != http.StatusConflict || code != "runtime_operation_failed" {
-		t.Fatalf("overlay resume: status/code = %d/%q, want 409/runtime_operation_failed", status, code)
+	if status != http.StatusBadGateway || code != "provider_start_failed" {
+		t.Fatalf("overlay resume: status/code = %d/%q, want 502/provider_start_failed", status, code)
 	}
 	value, err := store.Get(created.ID)
 	if err != nil {
@@ -2049,6 +2050,34 @@ func TestCreateSessionProviderFailureSurfacesError(t *testing.T) {
 	value := getSession(t, server, parsed.Error.Details.SessionID)
 	if value.State != session.StateStopped || value.StopReason != session.StopReasonStartupError {
 		t.Fatalf("unexpected session terminal state: %+v", value)
+	}
+
+	resume, err := http.NewRequest(http.MethodPost, server.URL+"/v1/sessions/"+value.ID+"/resume", bytes.NewReader([]byte("{}")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resume.Header.Set("Content-Type", "application/json")
+	resumeResponse, err := http.DefaultClient.Do(resume)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resumeResponse.Body.Close()
+	if resumeResponse.StatusCode != http.StatusBadGateway {
+		t.Fatalf("unexpected Resume status: %s", resumeResponse.Status)
+	}
+	var resumeError struct {
+		Error struct {
+			Code    string `json:"code"`
+			Details struct {
+				SessionID string `json:"sessionId"`
+			} `json:"details"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resumeResponse.Body).Decode(&resumeError); err != nil {
+		t.Fatal(err)
+	}
+	if resumeError.Error.Code != "provider_start_failed" || resumeError.Error.Details.SessionID != value.ID {
+		t.Fatalf("unexpected Resume error: %+v", resumeError.Error)
 	}
 }
 

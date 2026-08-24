@@ -1061,8 +1061,10 @@ restarts. Safe to call when the provider is already running.
   unknown fields), `404 session_not_found`,
   `422 invalid_launch_environment` (an empty variable name, `=` or NUL in a
   name, or NUL in a value), `409 session_archived`, `409 session_stopping`,
-  `409 runtime_operation_failed` (the provider could not start, for example
-  because the recorded agent no longer exists),
+  `409 runtime_operation_failed` (another runtime operation failed),
+  `502 provider_start_failed` (the provider handshake failed; the response
+  `details.sessionId` names the session retained in `stopped` state with
+  `stopReason: "startup_error"`),
   `503 runtime_unavailable`.
 
 ```bash

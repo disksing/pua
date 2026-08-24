@@ -1728,9 +1728,15 @@ function renderChatPanel(_options: RenderOptions = {}): void {
 	renderChatComposer();
 	const resourceId = selectedAgentResourceId();
 	const status = controllerState.messageStatusKey === `${controllerState.activeWorkspaceId}:${resourceId}` ? controllerState.messageStatus : null;
-	const configured = (controllerState.config?.agents || []).find((agent) => agent.id === status?.resolvedAgent);
-	const agent = configured || selectedAgentConfig();
 	const runtime = findResource(resourceId)?.runtime;
+	const configuredAgents = controllerState.config?.agents || [];
+	const targetAgentId = String(status?.resolvedAgent || "").trim();
+	const currentAgentId = String(status?.generation?.agentName || runtime?.agentName || targetAgentId).trim();
+	const currentAgent = configuredAgents.find((agent) => agent.id === currentAgentId) || (currentAgentId ? null : selectedAgentConfig());
+	const targetAgent = configuredAgents.find((agent) => agent.id === targetAgentId);
+	const currentAgentName = currentAgent ? agentDisplayName(currentAgent) : currentAgentId || "Agent";
+	const targetAgentName = targetAgent ? agentDisplayName(targetAgent) : targetAgentId;
+	const nextAgentName = currentAgentId && targetAgentId && currentAgentId.toLowerCase() !== targetAgentId.toLowerCase() ? targetAgentName : "";
 	const submitting = agentOperations.isSending(resourceMutationKey(controllerState.activeWorkspaceId, resourceId));
 	publisher.renderAgentPanelHeader({
 		identity: `${controllerState.activeWorkspaceId}:${resourceId}`,
@@ -1738,8 +1744,11 @@ function renderChatPanel(_options: RenderOptions = {}): void {
 		resourceId,
 		status,
 		submitting,
-		agentName: agentDisplayName(agent),
-		modelSummary: agentConfigSummary(agent),
+		agentName: currentAgentName,
+		nextAgentName,
+		errorText: String(status?.lastError || status?.generation?.resumeLastError || status?.configError || "").trim(),
+		retryAt: String(status?.generation?.resumeRetryAt || ""),
+		modelSummary: agentConfigSummary(currentAgent),
 		turnNumber: Number(status?.generation?.turnNumber) || Number(runtime?.turnNumber) || 0,
 		turnStartedAt: String(runtime?.turnStartedAt || "")
 	});
@@ -1749,7 +1758,7 @@ function renderChatPanel(_options: RenderOptions = {}): void {
 		resourceId,
 		status,
 		submitting,
-		agentName: agentDisplayName(agent),
+		agentName: currentAgentName,
 		resolveResourceTitle,
 		onNavigate: (targetResourceId: string) => selectResource(targetResourceId).catch((err) => toast(errorMessage(err))),
 		project: projectConversationEvents,

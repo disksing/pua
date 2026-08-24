@@ -511,6 +511,14 @@ func TestStoppedSessionResumeFailurePersistsBackoff(t *testing.T) {
 	if retryAt, parseErr := time.Parse(time.RFC3339Nano, current.ResumeRetryAt); parseErr != nil || !retryAt.Equal(now.Add(resumeRetryBase)) {
 		t.Fatalf("first retry boundary = %q, parseErr=%v", current.ResumeRetryAt, parseErr)
 	}
+	status, err := manager.resourceStatus(context.Background(), workspace, record.ResourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Generation == nil || status.Generation.AgentName != record.AgentHubAgentName || status.Generation.ResumeFailureCount != 1 ||
+		status.Generation.ResumeRetryAt != current.ResumeRetryAt || status.Generation.ResumeLastError != current.ResumeLastError {
+		t.Fatalf("Resume diagnostics were not exposed: %#v", status.Generation)
+	}
 	fake.mu.Lock()
 	resumeCount := len(fake.resumeEnvironments)
 	stoppedSession := fake.sessions[record.AgentHubSessionID]
@@ -566,6 +574,130 @@ func TestStoppedSessionResumeFailurePersistsBackoff(t *testing.T) {
 	fake.mu.Unlock()
 	if resumeCount != 2 {
 		t.Fatalf("Resume attempts after backoff = %d, want 2", resumeCount)
+	}
+}
+
+func TestTaskProviderStartupFailureExhaustsRecoveryBudget(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	fake.createStartupError = true
+	hub := httptest.NewServer(fake)
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := puaWorkspace.SetTaskState("project1.task1", app.TaskStateInProgress, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	message, err := manager.acceptResourceMessage(context.Background(), workspace, "project1.task1", resourceMessageRequest{
+		Text: "continue the task", Mode: resourceMessageModeEnqueue,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lastMessage resourceMailboxMessage
+	var lastDetail app.ResourceDetailView
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		stored, found, loadErr := mailboxMessageByID(workspace.Path, message.ID)
+		if loadErr != nil || !found {
+			continue
+		}
+		lastMessage = stored
+		detail, detailErr := puaWorkspace.Resource("project1.task1")
+		if detailErr == nil {
+			lastDetail = detail
+		}
+		if stored.Status == resourceMessageUndeliverable && detailErr == nil && detail.State == app.TaskStateError {
+			break
+		}
+	}
+	if lastMessage.Status != resourceMessageUndeliverable || lastDetail.State != app.TaskStateError {
+		current, currentFound, currentErr := currentResourceGeneration(workspace.Path, "project1.task1")
+		t.Fatalf("startup recovery did not exhaust: message=%#v task=%#v current=%#v found=%v err=%v", lastMessage, lastDetail, current, currentFound, currentErr)
+	}
+
+	stored, found, err := mailboxMessageByID(workspace.Path, message.ID)
+	if err != nil || !found || stored.LastErrorCode != "task_state_retry_exhausted" || !strings.Contains(stored.LastError, "failed to start") {
+		t.Fatalf("startup failure receipt = %#v, found=%v err=%v", stored, found, err)
+	}
+	fake.mu.Lock()
+	resumeAttempts := len(fake.resumeEnvironments)
+	createdSessions := fake.nextSession
+	fake.mu.Unlock()
+	if resumeAttempts != 0 {
+		t.Fatalf("startup_error Session was resumed %d times", resumeAttempts)
+	}
+	if createdSessions != maxTaskStateRecoveryAttempts {
+		t.Fatalf("created Sessions = %d, want recovery budget %d", createdSessions, maxTaskStateRecoveryAttempts)
+	}
+	status, err := manager.resourceStatus(context.Background(), workspace, "project1.task1")
+	if err != nil || status.SessionState != "unavailable" || status.LastErrorCode != "task_state_retry_exhausted" {
+		t.Fatalf("exhausted Task status = %#v, err=%v", status, err)
+	}
+}
+
+func TestProviderStartFailureIsTerminalForResume(t *testing.T) {
+	err := &agentHubAPIError{StatusCode: http.StatusBadGateway, Code: "provider_start_failed", Message: "provider executable not found"}
+	if !isTerminalResumeError(err) {
+		t.Fatal("provider_start_failed was treated as a transient Resume error")
+	}
+	if isTerminalResumeError(&agentHubAPIError{StatusCode: http.StatusConflict, Code: "runtime_operation_failed", Message: "temporary provider error", Retryable: true}) {
+		t.Fatal("retryable runtime failure was treated as terminal")
+	}
+}
+
+func TestLegacyResumeRuntimeErrorObservesStartupFailure(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	hub := httptest.NewServer(fake)
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+	record := idleTestGeneration(workspace, "project1.task1", "gen-legacy-startup-error", "ses-legacy-startup-error", time.Now())
+	record.Status = "stopped"
+	record.IdleSinceAt = ""
+	record.IdleDeadlineAt = ""
+	seedIdleTestGeneration(t, fake, workspace, record, "stopped")
+	fake.mu.Lock()
+	fake.failNextResume = true
+	fake.resumeErrorStatus = http.StatusConflict
+	fake.resumeErrorCode = "runtime_operation_failed"
+	fake.resumeErrorMessage = "provider executable not found"
+	fake.resumeFailureReason = "startup_error"
+	fake.mu.Unlock()
+
+	message, err := manager.acceptResourceMessage(context.Background(), workspace, record.ResourceID, resourceMessageRequest{
+		Text: "continue after replacement", Mode: resourceMessageModeEnqueue,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lastStored resourceMailboxMessage
+	var lastCurrent generationRecord
+	var lastCurrentFound bool
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		stored, found, loadErr := mailboxMessageByID(workspace.Path, message.ID)
+		current, currentFound, currentErr := currentResourceGeneration(workspace.Path, record.ResourceID)
+		if loadErr == nil && found {
+			lastStored = stored
+		}
+		if currentErr == nil {
+			lastCurrent = current
+			lastCurrentFound = currentFound
+		}
+		if loadErr == nil && found && stored.Status == resourceMessageDelivered &&
+			currentErr == nil && currentFound && current.Generation > record.Generation {
+			break
+		}
+	}
+	if lastStored.Status != resourceMessageDelivered || !lastCurrentFound || lastCurrent.Generation <= record.Generation {
+		t.Fatalf("legacy startup recovery did not replace and deliver: message=%#v current=%#v found=%v", lastStored, lastCurrent, lastCurrentFound)
+	}
+	fake.mu.Lock()
+	resumeAttempts := len(fake.resumeEnvironments)
+	fake.mu.Unlock()
+	if resumeAttempts != 1 {
+		t.Fatalf("legacy Resume attempts = %d, want 1 before replacement", resumeAttempts)
 	}
 }
 

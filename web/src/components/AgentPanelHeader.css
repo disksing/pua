@@ -11,9 +11,21 @@ the details header via --pane-header-height (option A). */
   padding: 0 14px;
   border-bottom: 1px solid var(--line);
   background: var(--panel);
+  container-type: inline-size;
 }
 
 :where([data-component-owner="agent-panel-header"]) .agent-header-left {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  gap: 2px;
+}
+
+:where([data-component-owner="agent-panel-header"]) .agent-header-identity,
+:where([data-component-owner="agent-panel-header"]) .agent-header-diagnostic {
   min-width: 0;
   display: flex;
   align-items: center;
@@ -38,16 +50,38 @@ the details header via --pane-header-height (option A). */
   animation: agent-header-pulse 1.1s ease-in-out infinite;
 }
 
+:where([data-component-owner="agent-panel-header"])[data-state="switching"] .agent-status-dot,
+:where([data-component-owner="agent-panel-header"])[data-state="continuing"] .agent-status-dot {
+  background: var(--blue);
+  animation: agent-header-pulse 1.6s ease-in-out infinite;
+}
+
+:where([data-component-owner="agent-panel-header"])[data-state="retrying"] .agent-status-dot {
+  background: var(--red);
+}
+
 :where([data-component-owner="agent-panel-header"])[data-state="attention_required"] .agent-status-dot {
   background: var(--amber);
 }
 
 :where([data-component-owner="agent-panel-header"]) .agent-header-name {
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: calc(14px * var(--chat-font-scale, 1));
   font-weight: 600;
+}
+
+:where([data-component-owner="agent-panel-header"]) .agent-header-next {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--blue);
+  font-size: calc(12px * var(--chat-font-scale, 1));
 }
 
 :where([data-component-owner="agent-panel-header"]) .agent-header-state {
@@ -59,6 +93,17 @@ the details header via --pane-header-height (option A). */
 :where([data-component-owner="agent-panel-header"]) .agent-header-queued {
   flex: 0 0 auto;
   color: var(--blue);
+  font-size: calc(11px * var(--chat-font-scale, 1));
+}
+
+:where([data-component-owner="agent-panel-header"]) .agent-header-error {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--red-deep);
   font-size: calc(11px * var(--chat-font-scale, 1));
 }
 
@@ -97,11 +142,30 @@ the details header via --pane-header-height (option A). */
   :where([data-component-owner="agent-panel-header"])[data-state="submitting"] .agent-status-dot {
     animation: none;
   }
+
+  :where([data-component-owner="agent-panel-header"])[data-state="switching"] .agent-status-dot,
+  :where([data-component-owner="agent-panel-header"])[data-state="continuing"] .agent-status-dot {
+    animation: none;
+  }
 }
 
-/* Narrow chat column: drop the model summary first to avoid overflow. */
-@media (max-width: 1200px) {
+/* Narrow chat column: drop secondary right-hand detail before diagnostics. */
+@container (max-width: 560px) {
   :where([data-component-owner="agent-panel-header"]) .agent-header-model {
     display: none;
+  }
+
+  :where([data-component-owner="agent-panel-header"]) .agent-header-error {
+    max-width: 160px;
+  }
+}
+
+@container (max-width: 400px) {
+  :where([data-component-owner="agent-panel-header"]) .agent-header-right {
+    display: none;
+  }
+
+  :where([data-component-owner="agent-panel-header"]) .agent-header-error {
+    max-width: none;
   }
 }

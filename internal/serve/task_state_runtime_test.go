@@ -363,3 +363,24 @@ func TestTaskStartFailureExhaustionIsDurable(t *testing.T) {
 		t.Fatalf("task state after start failures = %#v, %v", detail, err)
 	}
 }
+
+func TestNonTaskStartFailureExhaustionIsDurable(t *testing.T) {
+	manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+	message, err := acceptMailboxMessage(workspace.Path, "project1", resourceMessageRequest{Text: "start", Role: "user", Mode: resourceMessageModeEnqueue})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 1; attempt <= maxTaskStateRecoveryAttempts; attempt++ {
+		exhausted, err := manager.recordTaskStartFailure(workspace, message, &resourceAPIError{Code: "provider_start_failed", Message: "provider unavailable"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if exhausted != (attempt == maxTaskStateRecoveryAttempts) {
+			t.Fatalf("attempt %d exhausted = %v", attempt, exhausted)
+		}
+	}
+	stored, found, err := mailboxMessageByID(workspace.Path, message.ID)
+	if err != nil || !found || stored.Status != resourceMessageUndeliverable || stored.LastErrorCode != "generation_start_retry_exhausted" {
+		t.Fatalf("stored Project start failure = %#v, found=%v err=%v", stored, found, err)
+	}
+}

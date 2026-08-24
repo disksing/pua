@@ -963,7 +963,7 @@ function statusGeneration(context: ResourceChatContext): ResourceHistoryGenerati
     status: generation.status,
     createdAt: "",
     updatedAt: "",
-    agentName: context.status?.resolvedAgent,
+    agentName: generation.agentName || context.status?.resolvedAgent,
     resolvedProfile: context.status?.resolvedProfile,
     replacementPending: generation.replacementPending,
   };

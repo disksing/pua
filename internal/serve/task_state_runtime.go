@@ -53,9 +53,10 @@ func taskDetail(workspacePath, resourceID string) (app.ResourceDetailView, bool,
 }
 
 func (m *agentManager) recordTaskStartFailure(workspace serveWorkspace, message resourceMailboxMessage, cause error) (bool, error) {
-	if cause == nil || !strings.Contains(normalizedResourceID(message.ResourceID), ".task") || message.GenerationID != "" {
+	if cause == nil || message.GenerationID != "" {
 		return false, nil
 	}
+	isTask := strings.Contains(normalizedResourceID(message.ResourceID), ".task")
 	updated, err := updateMailboxMessage(workspace.Path, message.ID, func(current *resourceMailboxMessage) {
 		current.TaskStartFailureCount++
 		if current.TaskStartFailureCount < maxTaskStateRecoveryAttempts {
@@ -65,11 +66,17 @@ func (m *agentManager) recordTaskStartFailure(workspace serveWorkspace, message 
 		current.Status = resourceMessageUndeliverable
 		current.TerminalAt = now
 		current.UpdatedAt = now
-		current.LastErrorCode = "task_state_retry_exhausted"
+		current.LastErrorCode = "generation_start_retry_exhausted"
+		if isTask {
+			current.LastErrorCode = "task_state_retry_exhausted"
+		}
 		current.LastError = cause.Error()
 	})
 	if err != nil || updated.TaskStartFailureCount < maxTaskStateRecoveryAttempts {
 		return false, err
+	}
+	if !isTask {
+		return true, nil
 	}
 	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
 	if err != nil {

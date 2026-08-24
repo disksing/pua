@@ -15,16 +15,24 @@
     model = next;
   }));
 
-  const stateKey = $derived(!model.resourceId ? "empty" : model.submitting ? "submitting" : model.status?.sessionState || "loading");
+  const queuedCount = $derived(model.status?.waitingMessages?.length || 0);
+  const stateKey = $derived(!model.resourceId ? "empty"
+    : model.submitting ? "submitting"
+    : model.status?.generation?.replacementPending ? "switching"
+    : Number(model.status?.generation?.resumeFailureCount || 0) > 0 ? "retrying"
+    : model.status?.sessionState === "idle" && queuedCount > 0 ? "continuing"
+    : model.status?.sessionState || "loading");
   const stateLabel = $derived(stateKey === "submitting" ? "Submitting"
     : stateKey === "working" ? "Working"
+    : stateKey === "switching" ? "Switching agent"
+    : stateKey === "retrying" ? "Retrying"
+    : stateKey === "continuing" ? "Continuing"
     : stateKey === "idle" ? "Idle"
     : stateKey === "attention_required" ? "Attention required"
     : stateKey === "unavailable" ? "Unavailable"
     : stateKey === "archived" ? "Archived"
     : stateKey === "loading" ? "Loading"
     : "No resource selected");
-  const queuedCount = $derived(model.status?.waitingMessages?.length || 0);
   const turnStart = $derived(Date.parse(model.turnStartedAt || ""));
   const timerActive = $derived(stateKey === "working" && Number.isFinite(turnStart));
 
@@ -59,9 +67,16 @@
     }
   }
 
+  function retryLabel(value: string): string {
+    const time = Date.parse(value);
+    if (!Number.isFinite(time)) return "Retry pending";
+    return `Next retry ${new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(time)}`;
+  }
+
   const turnText = $derived.by(() => {
     const turn = model.turnNumber;
     if (stateKey === "submitting") return "Message pending";
+    if (stateKey === "retrying") return retryLabel(model.retryAt);
     if (stateKey === "idle") {
       if (turn <= 0) return "";
       const state = String(model.status?.generation?.completionState || "").trim().toLowerCase();
@@ -80,10 +95,16 @@
 
 <header class="agent-panel-header" data-component-owner="agent-panel-header" data-state={stateKey}>
   <div class="agent-header-left">
-    <span class="agent-status-dot" aria-hidden="true"></span>
-    <span class="agent-header-name">{model.agentName}</span>
-    <span class="agent-header-state">{stateLabel}</span>
-    {#if queuedCount > 0}<span class="agent-header-queued">· {queuedCount} queued</span>{/if}
+    <div class="agent-header-identity">
+      <span class="agent-status-dot" aria-hidden="true"></span>
+      <span class="agent-header-name">{model.agentName}</span>
+      {#if model.nextAgentName}<span class="agent-header-next">→ {model.nextAgentName}</span>{/if}
+    </div>
+    <div class="agent-header-diagnostic">
+      <span class="agent-header-state">{stateLabel}</span>
+      {#if queuedCount > 0}<span class="agent-header-queued">· {queuedCount} queued</span>{/if}
+      {#if model.errorText}<span class="agent-header-error" title={model.errorText}>{model.errorText}</span>{/if}
+    </div>
   </div>
   <div class="agent-header-right">
     {#if model.modelSummary}<span class="agent-header-model">{model.modelSummary}</span>{/if}

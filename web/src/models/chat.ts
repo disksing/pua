@@ -60,6 +60,7 @@ export interface ResourceMessageStatus {
   resolvedProfile?: string;
   configError?: string;
   lastError?: string;
+  lastErrorCode?: string;
   generation?: ResourceGenerationStatus;
   session?: ResourceSessionStatus;
   waitingMessages: WaitingMessage[];
@@ -75,6 +76,7 @@ export interface ComposerContext {
 export interface ResourceGenerationStatus {
   generation: number;
   generationId: string;
+  agentName?: string;
   status: string;
   completionState?: string;
   completionHasFinalReply?: boolean;
@@ -83,12 +85,16 @@ export interface ResourceGenerationStatus {
   resumable?: boolean;
   idleSuspended?: boolean;
   resumeUnavailable?: boolean;
+  resumeFailureCount?: number;
+  resumeRetryAt?: string;
+  resumeLastError?: string;
   agentHubSessionId?: string;
 }
 
 export interface ResourceSessionStatus {
   id?: string;
   state?: string;
+  stopReason?: string;
   currentTurnId?: string;
   inputCapabilities?: { prompt?: boolean; steer?: boolean };
 }
@@ -296,6 +302,12 @@ export interface AgentPanelHeaderModel {
   /** True while a user-initiated message submission is in flight. */
   submitting: boolean;
   agentName: string;
+  /** Target Agent for the next Turn when it differs from the current generation. */
+  nextAgentName: string;
+  /** Durable delivery or recovery error, empty when healthy. */
+  errorText: string;
+  /** ISO timestamp for the next durable Resume attempt. */
+  retryAt: string;
   /** "Provider · model" summary of the resolved agent, may be empty. */
   modelSummary: string;
   turnNumber: number;

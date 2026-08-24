@@ -27,6 +27,7 @@ type runtimeFakeAgentHub struct {
 	turns                map[string]map[string]agentHubTurn
 	nextSession          int
 	abortNextCreate      bool
+	createStartupError   bool
 	rejectIdempotencyKey string
 	duplicateSource      bool
 	gapAfter             int64
@@ -40,6 +41,7 @@ type runtimeFakeAgentHub struct {
 	resumeErrorStatus    int
 	resumeErrorCode      string
 	resumeErrorMessage   string
+	resumeFailureReason  string
 	resumeUpdatesAt      bool
 	failNextMessage      bool
 	enforceMessageIDs    bool
@@ -293,6 +295,11 @@ func (f *runtimeFakeAgentHub) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 					session := f.sessions[id]
 					session.State = "ready"
 					f.sessions[id] = session
+				} else if f.resumeFailureReason != "" {
+					session := f.sessions[id]
+					session.State = "stopped"
+					session.StopReason = f.resumeFailureReason
+					f.sessions[id] = session
 				}
 				f.mu.Unlock()
 				if status == 0 {
@@ -425,10 +432,14 @@ func (f *runtimeFakeAgentHub) create(w http.ResponseWriter, r *http.Request) {
 		LaunchEnvironment: request.LaunchEnvironment, Source: request.Source, Provider: "fake",
 		State: "ready", CreatedAt: time.Now().Format(time.RFC3339), UpdatedAt: time.Now().Format(time.RFC3339),
 	}
+	if f.createStartupError {
+		session.State = "stopped"
+		session.StopReason = "startup_error"
+	}
 	f.sessions[id] = session
 	f.appendLocked(id, "session.created", session)
-	f.appendLocked(id, "session.state", map[string]any{"state": "ready"})
-	if request.InitialMessage != nil {
+	f.appendLocked(id, "session.state", map[string]any{"state": session.State, "reason": session.StopReason})
+	if request.InitialMessage != nil && !f.createStartupError {
 		f.appendLocked(id, "message.input", fakeMessageInputData(*request.InitialMessage))
 		f.appendLocked(id, "turn.started", map[string]any{"text": request.InitialMessage.Text})
 		session.State = "running"

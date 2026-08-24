@@ -190,6 +190,7 @@ type resourceMailboxCounts struct {
 type resourceGenerationStatus struct {
 	Generation              int    `json:"generation"`
 	GenerationID            string `json:"generationId"`
+	AgentName               string `json:"agentName,omitempty"`
 	Status                  string `json:"status"`
 	CompletionState         string `json:"completionState,omitempty"`
 	CompletionHasFinalReply bool   `json:"completionHasFinalReply"`
@@ -200,6 +201,9 @@ type resourceGenerationStatus struct {
 	IdleSinceAt             string `json:"idleSinceAt,omitempty"`
 	IdleDeadlineAt          string `json:"idleDeadlineAt,omitempty"`
 	IdleSleepRequested      bool   `json:"idleSleepRequested,omitempty"`
+	ResumeFailureCount      int    `json:"resumeFailureCount,omitempty"`
+	ResumeRetryAt           string `json:"resumeRetryAt,omitempty"`
+	ResumeLastError         string `json:"resumeLastError,omitempty"`
 	TurnNumber              int    `json:"turnNumber,omitempty"`
 	AgentHubSessionID       string `json:"agentHubSessionId,omitempty"`
 }
@@ -207,6 +211,7 @@ type resourceGenerationStatus struct {
 type resourceSessionStatus struct {
 	ID                string                    `json:"id,omitempty"`
 	State             string                    `json:"state,omitempty"`
+	StopReason        string                    `json:"stopReason,omitempty"`
 	CurrentTurnID     string                    `json:"currentTurnId,omitempty"`
 	InputCapabilities agentHubInputCapabilities `json:"inputCapabilities"`
 }
@@ -687,6 +692,14 @@ func publicSessionState(archived bool, unavailableReason string, generation *res
 	return "idle"
 }
 
+func terminalMailboxRuntimeError(code, message string) string {
+	switch strings.ToLower(strings.TrimSpace(code)) {
+	case "task_state_retry_exhausted", "generation_start_retry_exhausted":
+		return strings.TrimSpace(message)
+	}
+	return ""
+}
+
 func (m *agentManager) resourceStatus(ctx context.Context, workspace serveWorkspace, resourceID string) (resourceStatusResponse, error) {
 	resourceID = normalizedResourceID(resourceID)
 	exists, archived, binding, err := resourceExistsAndArchived(workspace.Path, resourceID)
@@ -699,6 +712,7 @@ func (m *agentManager) resourceStatus(ctx context.Context, workspace serveWorksp
 		return resourceStatusResponse{}, err
 	}
 	status.Messages, status.LastError, status.LastErrorCode = mailboxCounts(mailbox, resourceID)
+	terminalRuntimeError := terminalMailboxRuntimeError(status.LastErrorCode, status.LastError)
 	status.WaitingMessages = waitingMailboxMessages(mailbox, resourceID)
 	cfg, client, cfgErr := m.agentHubRuntimeConfig()
 	unavailableReason := ""
@@ -722,22 +736,26 @@ func (m *agentManager) resourceStatus(ctx context.Context, workspace serveWorksp
 		return resourceStatusResponse{}, loadErr
 	}
 	if !found {
-		status.SessionState = publicSessionState(archived, unavailableReason, nil, nil, "")
+		status.SessionState = publicSessionState(archived, unavailableReason, nil, nil, terminalRuntimeError)
 		return status, nil
 	}
 	status.Generation = &resourceGenerationStatus{
 		Generation: record.Generation, GenerationID: record.GenerationID,
-		Status: record.Status, ReplacementPending: record.ReplacementPending,
+		AgentName: record.AgentHubAgentName,
+		Status:    record.Status, ReplacementPending: record.ReplacementPending,
 		CompletionState: record.CompletionState, CompletionHasFinalReply: record.CompletionHasFinalReply,
 		IdleSuspended:     record.Status == "idle-suspended" || (record.IdleSleepStopRequested && record.Status == "stopped"),
 		ResumeUnavailable: record.SessionResumeUnavailable,
 		IdleSinceAt:       record.IdleSinceAt, IdleDeadlineAt: record.IdleDeadlineAt,
 		IdleSleepRequested: record.IdleSleepStopRequested,
+		ResumeFailureCount: record.ResumeFailureCount,
+		ResumeRetryAt:      record.ResumeRetryAt,
+		ResumeLastError:    record.ResumeLastError,
 		TurnNumber:         record.TurnNumber,
 		AgentHubSessionID:  record.AgentHubSessionID,
 	}
 	if strings.TrimSpace(record.AgentHubSessionID) == "" || cfgErr != nil {
-		status.SessionState = publicSessionState(archived, unavailableReason, status.Generation, nil, "")
+		status.SessionState = publicSessionState(archived, unavailableReason, status.Generation, nil, terminalRuntimeError)
 		return status, nil
 	}
 	session, sessionErr := client.GetSession(ctx, record.AgentHubSessionID)
@@ -749,12 +767,12 @@ func (m *agentManager) resourceStatus(ctx context.Context, workspace serveWorksp
 		return status, nil
 	}
 	status.Session = &resourceSessionStatus{
-		ID: session.ID, State: session.State, CurrentTurnID: session.CurrentTurnID,
+		ID: session.ID, State: session.State, StopReason: session.StopReason, CurrentTurnID: session.CurrentTurnID,
 		InputCapabilities: session.InputCapabilities,
 	}
 	status.Generation.Resumable = session.State == "stopped" && !record.SessionResumeUnavailable && !record.ReplacementPending && !record.ArchivedTaskStopRequested
 	status.CanSteerWaiting = !archived && !record.ReplacementPending && (session.State == "running" || session.State == "waiting_approval") && session.InputCapabilities.Steer
-	status.SessionState = publicSessionState(archived, unavailableReason, status.Generation, status.Session, "")
+	status.SessionState = publicSessionState(archived, unavailableReason, status.Generation, status.Session, terminalRuntimeError)
 	return status, nil
 }
 
@@ -1253,8 +1271,16 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 		case GenerationOperationResumeSession:
 			resumed, terminal, resumeErr := m.resumeStoppedGenerationLocked(ctx, workspace, record, rt, client, lifecyclePlan)
 			if terminal {
+				recordMailboxFailure(workspace.Path, message.ID, resumeErr)
+				exhausted, stateErr := m.recordTaskStartFailure(workspace, message, resumeErr)
+				if stateErr != nil {
+					return stateErr
+				}
 				if retireErr := m.retireUnresumableGenerationLocked(ctx, rt, client, resumeErr); retireErr != nil {
 					return retireErr
+				}
+				if exhausted {
+					return nil
 				}
 				continue
 			}

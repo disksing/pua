@@ -982,6 +982,11 @@ func recordMailboxFailure(workspacePath, messageID string, err error) {
 		return
 	}
 	code := resourceDeliveryErrorCode(err)
+	// Ownership loss is a handoff boundary, not a delivery failure. A stale
+	// controller must not annotate the mailbox after another Server can own it.
+	if code == "workspace_not_owned" {
+		return
+	}
 	if current, found, loadErr := mailboxMessageByID(workspacePath, messageID); loadErr == nil && found &&
 		current.LastError == err.Error() && current.LastErrorCode == code {
 		return
@@ -1143,6 +1148,18 @@ func (m *agentManager) promoteWaitingMessageLocked(ctx context.Context, workspac
 }
 
 func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, workspace serveWorkspace, resourceID string) error {
+	// Reconciliation runs inside a resource controller, but Workspace removal
+	// uses only the Scheduler controller. An ordinary resource job—or a
+	// Scheduler follow-up queued behind removal—can therefore start after this
+	// Server has released its advisory lock. Revalidate before even the
+	// Scheduler legacy-tick cleanup so the stale owner cannot mutate mailbox or
+	// generation state or contact AgentHub across the handoff. Isolated direct
+	// managers without a Server retain their intentionally storage-only use.
+	if m.server != nil {
+		if err := m.server.requireWorkspaceOwnership(workspace.Path); err != nil {
+			return &resourceAPIError{Code: "workspace_not_owned", Message: err.Error()}
+		}
+	}
 	resourceID = normalizedResourceID(resourceID)
 	if resourceID == app.SchedulerResourceID {
 		if err := newNativeScheduler(m, workspace).cancelLegacyTicks(ctx); err != nil {

@@ -102,6 +102,10 @@ var errServiceBindingsPathEscape = errors.New("service bindings path escapes the
 
 const defaultServiceProcessTerminationGrace = 5 * time.Second
 
+const serviceExportIdentityCheckAttempts = 4
+
+var errServiceExportIdentityChanged = errors.New("service export hand-off changed during identity check")
+
 type serviceProcessExit struct {
 	err  error
 	code int
@@ -133,6 +137,7 @@ type serviceRuntime struct {
 	exportMu              sync.Mutex
 	exportAccepted        bool
 	exportViolation       string
+	exportCleanupFailure  string
 	rejectedExportSecrets []string
 	// pendingExportKeys is manager-mutex state. It records public export
 	// names whose accepted values moved after this generation became ready.
@@ -165,6 +170,7 @@ type serviceRuntimeConfigSnapshot struct {
 	exportSecrets         map[string]string
 	exportAccepted        bool
 	exportViolation       string
+	exportCleanupFailure  string
 	rejectedExportSecrets []string
 	pendingExportKeys     map[string]struct{}
 	exportKeysCommitted   bool
@@ -227,6 +233,7 @@ type ServiceManager struct {
 	definitionTransactionStore serviceDefinitionTransactionStore
 	runtimeStateStore          serviceRuntimeStateStore
 	exportOpenFile             func(string, int, os.FileMode) (*os.File, error)
+	exportScrubPath            func(string) error
 	stopping                   bool
 	started                    bool
 }
@@ -508,9 +515,16 @@ func (m *ServiceManager) Stop(ctx context.Context) error {
 		cleanupErr := error(nil)
 		if rt.process != nil || rt.status.ProcessGroup > 0 {
 			cleanupErr = m.stopProcessLocked(ctx, rt, false)
-			if cleanupErr != nil && first == nil {
-				first = cleanupErr
+		} else {
+			cleanupErr = m.scrubActiveServiceExport(rt, rt.config, "scrub service export while stopping manager")
+			if cleanupErr != nil {
+				cleanupErr = errors.Join(exportProtocolViolationError(rt), cleanupErr)
+			} else {
+				cleanupErr = exportCleanupError(rt)
 			}
+		}
+		if cleanupErr != nil && first == nil {
+			first = cleanupErr
 		}
 		if cleanupErr != nil {
 			rt.status.AttentionRequired = true
@@ -845,10 +859,10 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 	if err := os.MkdirAll(serviceRuntimePath(m.root, cfg.ID), 0o700); err != nil {
 		return m.failStartLocked(ctx, rt, err)
 	}
-	exportPath := filepath.Join(serviceRuntimePath(m.root, cfg.ID), "export.json")
-	if err := scrubAndRemoveServiceExportPath(exportPath); err != nil {
-		return m.failStartLocked(ctx, rt, fmt.Errorf("clear previous service export: %w", err))
+	if err := m.scrubActiveServiceExport(rt, cfg, "clear previous service export"); err != nil {
+		return m.failStartLocked(ctx, rt, err)
 	}
+	rt.exportCleanupFailure = ""
 	command := append(append([]string{}, cfg.Command...), cfg.Args...)
 	cmd := exec.Command(command[0], command[1:]...)
 	cwd := cfg.CWD
@@ -903,6 +917,7 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 	rt.exportSecrets = map[string]string{}
 	rt.exportAccepted = false
 	rt.exportViolation = ""
+	rt.exportCleanupFailure = ""
 	rt.rejectedExportSecrets = nil
 	rt.redactor = redactor
 	rt.exports = exports
@@ -989,7 +1004,7 @@ func (m *ServiceManager) failStartLocked(ctx context.Context, rt *serviceRuntime
 	message := security.NewRedactor(rt.secretValues...).RedactString(cause.Error())
 	transitionAt := m.now()
 	_ = m.appendEventLocked(rt, map[string]any{"type": "start_failed", "error": message, "time": transitionAt.Format(time.RFC3339Nano)})
-	requireAttention := false
+	requireAttention := rt.exportCleanupFailure != ""
 	if cleanupErr := m.runCleanupLocked(ctx, rt); cleanupErr != nil {
 		cleanupMessage := security.NewRedactor(rt.secretValues...).RedactString(cleanupErr.Error())
 		message += "; " + cleanupMessage
@@ -1249,8 +1264,9 @@ func (m *ServiceManager) readExportsLocked(rt *serviceRuntime) (ServiceExportFil
 		return m.readExportsWithGateLocked(rt, cfg, false)
 	}
 	m.promoteRejectedExportSecretsLocked(rt)
-	if rt.exportViolation != "" {
-		return ServiceExportFile{}, errors.New(rt.exportViolation)
+	if failure := exportFailureLocked(rt); failure != nil {
+		cleanupErr := m.scrubActiveServiceExportLocked(rt, cfg, "scrub service export after protocol violation")
+		return ServiceExportFile{}, errors.Join(failure, cleanupErr)
 	}
 	return m.readExportsWithGateLocked(rt, cfg, false)
 }
@@ -1270,8 +1286,9 @@ func (m *ServiceManager) guardServiceLogExportForConfig(rt *serviceRuntime, cfg 
 	if !rt.exportAccepted {
 		return nil
 	}
-	if rt.exportViolation != "" {
-		return errors.New(rt.exportViolation)
+	if failure := exportFailureLocked(rt); failure != nil {
+		cleanupErr := m.scrubActiveServiceExportLocked(rt, cfg, "scrub service export after protocol violation")
+		return errors.Join(failure, cleanupErr)
 	}
 	_, err := m.readExportsWithGateLocked(rt, cfg, true)
 	return err
@@ -1289,7 +1306,17 @@ func (m *ServiceManager) readExportsWithGateLocked(rt *serviceRuntime, cfg Servi
 		}
 		return empty, nil
 	}
-	handoff, err := openServiceExportHandoffWithOpen(path, m.exportOpenFile)
+	var handoff *serviceExportHandoff
+	var err error
+	for attempt := 0; attempt < serviceExportIdentityCheckAttempts; attempt++ {
+		handoff, err = openServiceExportHandoffWithOpen(path, m.exportOpenFile)
+		if !errors.Is(err, errServiceExportIdentityChanged) {
+			break
+		}
+	}
+	if errors.Is(err, errServiceExportIdentityChanged) {
+		err = errors.New("service export hand-off changed repeatedly during identity checks")
+	}
 	if os.IsNotExist(err) {
 		if requiresInitialExport(cfg) {
 			message := "service has not written its initial export"
@@ -1336,11 +1363,18 @@ func openServiceExportHandoffWithOpen(path string, openFile func(string, int, os
 	pathInfo, err := os.Lstat(path)
 	if err != nil {
 		_ = readFile.Close()
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("%w: path disappeared after opening", errServiceExportIdentityChanged)
+		}
 		return nil, err
 	}
-	if !readInfo.Mode().IsRegular() || !pathInfo.Mode().IsRegular() || !os.SameFile(readInfo, pathInfo) {
+	if !readInfo.Mode().IsRegular() || !pathInfo.Mode().IsRegular() {
 		_ = readFile.Close()
 		return nil, errors.New("service export hand-off must be a regular file")
+	}
+	if !os.SameFile(readInfo, pathInfo) {
+		_ = readFile.Close()
+		return nil, errServiceExportIdentityChanged
 	}
 	data, err := io.ReadAll(readFile)
 	if err != nil {
@@ -1366,6 +1400,9 @@ func openServiceExportHandoffWithOpen(path string, openFile func(string, int, os
 	if err != nil {
 		cleanupErr := removeVerifiedServiceExportHandoff(path, readFile)
 		_ = readFile.Close()
+		if os.IsNotExist(err) && cleanupErr == nil {
+			return nil, fmt.Errorf("%w: path disappeared before writable open", errServiceExportIdentityChanged)
+		}
 		if cleanupErr != nil {
 			return nil, fmt.Errorf("open service export hand-off for scrubbing: %v; remove hand-off: %w", err, cleanupErr)
 		}
@@ -1385,7 +1422,7 @@ func openServiceExportHandoffWithOpen(path string, openFile func(string, int, os
 		if cleanupErr != nil {
 			return nil, fmt.Errorf("service export hand-off changed while opening for scrubbing; remove hand-off: %w", cleanupErr)
 		}
-		return nil, errors.New("service export hand-off changed while opening for scrubbing")
+		return nil, errServiceExportIdentityChanged
 	}
 	_ = readFile.Close()
 	return &serviceExportHandoff{path: path, file: writeFile, data: data}, nil
@@ -1543,7 +1580,87 @@ func (m *ServiceManager) rejectExportLocked(rt *serviceRuntime, cause error, sec
 	if rt.exportViolation == "" {
 		rt.exportViolation = message
 	}
+	return exportFailureLocked(rt)
+}
+
+func exportFailureLocked(rt *serviceRuntime) error {
+	if rt == nil {
+		return nil
+	}
+	var result error
+	if rt.exportViolation != "" {
+		result = errors.New(rt.exportViolation)
+	}
+	if rt.exportCleanupFailure != "" {
+		result = errors.Join(result, errors.New(rt.exportCleanupFailure))
+	}
+	return result
+}
+
+// scrubActiveServiceExportLocked is called with rt.exportMu held. It destroys
+// the exact inode moved out of the active pathname, including the contents of
+// any hard links, without following a symlink or touching a newer replacement.
+// Cleanup failures have their own latch so an earlier protocol violation can
+// never hide the durable-secret cleanup failure.
+func (m *ServiceManager) scrubActiveServiceExportLocked(rt *serviceRuntime, cfg ServiceConfig, context string) error {
+	path := filepath.Join(serviceRuntimePath(m.root, cfg.ID), "export.json")
+	if !pathWithinResolved(filepath.Join(m.root, ".pua"), path) {
+		return latchExportCleanupFailureLocked(rt, errors.New("service export cleanup path escapes the workspace control directory"))
+	}
+	scrubPath := m.exportScrubPath
+	if scrubPath == nil {
+		scrubPath = scrubAndRemoveServiceExportPath
+	}
+	if err := scrubPath(path); err != nil {
+		return latchExportCleanupFailureLocked(rt, fmt.Errorf("%s: %w", context, err))
+	}
+	return nil
+}
+
+func (m *ServiceManager) scrubActiveServiceExport(rt *serviceRuntime, cfg ServiceConfig, context string) error {
+	rt.exportMu.Lock()
+	defer rt.exportMu.Unlock()
+	return m.scrubActiveServiceExportLocked(rt, cfg, context)
+}
+
+func exportCleanupError(rt *serviceRuntime) error {
+	if rt == nil {
+		return nil
+	}
+	rt.exportMu.Lock()
+	defer rt.exportMu.Unlock()
+	if rt.exportCleanupFailure == "" {
+		return nil
+	}
+	return errors.New(rt.exportCleanupFailure)
+}
+
+func exportProtocolViolationError(rt *serviceRuntime) error {
+	if rt == nil {
+		return nil
+	}
+	rt.exportMu.Lock()
+	defer rt.exportMu.Unlock()
+	if rt.exportViolation == "" {
+		return nil
+	}
 	return errors.New(rt.exportViolation)
+}
+
+func latchExportCleanupFailureLocked(rt *serviceRuntime, cause error) error {
+	if rt == nil || cause == nil {
+		return cause
+	}
+	message := cause.Error()
+	if rt.exportCleanupFailure == "" {
+		rt.exportCleanupFailure = message
+		return cause
+	} else if !strings.Contains(rt.exportCleanupFailure, message) {
+		previous := rt.exportCleanupFailure
+		rt.exportCleanupFailure += "; " + message
+		return errors.Join(errors.New(previous), cause)
+	}
+	return cause
 }
 
 func (m *ServiceManager) promoteRejectedExportSecretsLocked(rt *serviceRuntime) {
@@ -1559,10 +1676,7 @@ func (m *ServiceManager) exportProtocolErrorLocked(rt *serviceRuntime) error {
 	rt.exportMu.Lock()
 	defer rt.exportMu.Unlock()
 	m.promoteRejectedExportSecretsLocked(rt)
-	if rt.exportViolation == "" {
-		return nil
-	}
-	return errors.New(rt.exportViolation)
+	return exportFailureLocked(rt)
 }
 
 func scrubRejectedExport(handoff *serviceExportHandoff, schemaVersion int, cause error) error {
@@ -1919,13 +2033,29 @@ func (m *ServiceManager) handleProcessExitLocked(ctx context.Context, rt *servic
 		return m.failOrphanRecoveryLocked(rt, groupErr)
 	}
 	rt.status.PID, rt.status.ProcessGroup = 0, 0
+	exportConfig := rt.config
+	if rt.processConfig != nil {
+		exportConfig = *rt.processConfig
+	}
+	exportCleanupErr := m.scrubActiveServiceExport(rt, exportConfig, "scrub service export after process exit")
+	if exportCleanupErr != nil {
+		exportCleanupErr = errors.Join(exportProtocolViolationError(rt), exportCleanupErr)
+	} else {
+		exportCleanupErr = exportCleanupError(rt)
+	}
 	if rt.status.ManualStop || m.stopping || !rt.config.Enabled {
+		if exportCleanupErr != nil {
+			rt.status.LastError = security.NewRedactor(rt.secretValues...).RedactString(exportCleanupErr.Error())
+			rt.status.AttentionRequired = true
+			rt.status.State = ServiceStateAttentionRequired
+			return errors.Join(exportCleanupErr, m.persistStatusLocked(rt))
+		}
 		rt.status.State = ServiceStateStopped
 		return m.persistStatusLocked(rt)
 	}
 	transitionAt := m.now()
 	_ = m.appendEventLocked(rt, map[string]any{"type": "exited", "code": exit.code, "error": rt.status.ExitError, "time": rt.status.ExitedAt})
-	cleanupErr := m.runCleanupLocked(ctx, rt)
+	cleanupErr := errors.Join(exportCleanupErr, m.runCleanupLocked(ctx, rt))
 	rt.processConfig = nil
 	rt.processCommandDigest = ""
 	lastError := rt.status.ExitError
@@ -1980,13 +2110,23 @@ func (m *ServiceManager) stopProcessLocked(ctx context.Context, rt *serviceRunti
 		}
 	}
 	recoveredTermination := rt.terminationPending || rt.process == nil
-	if rt.processConfig != nil && requiresInitialExport(*rt.processConfig) {
+	exportConfig := rt.config
+	if rt.processConfig != nil {
+		exportConfig = *rt.processConfig
+	}
+	if requiresInitialExport(exportConfig) {
 		_, _ = m.readExportsLocked(rt)
 	}
 	for _, writer := range rt.logWriters {
 		_ = writer.Close()
 	}
 	_ = m.exportProtocolErrorLocked(rt)
+	exportCleanupErr := m.scrubActiveServiceExport(rt, exportConfig, "scrub service export after process termination")
+	if exportCleanupErr != nil {
+		exportCleanupErr = errors.Join(exportProtocolViolationError(rt), exportCleanupErr)
+	} else {
+		exportCleanupErr = exportCleanupError(rt)
+	}
 	rt.process = nil
 	rt.exit = nil
 	rt.logWriters = nil
@@ -2007,7 +2147,8 @@ func (m *ServiceManager) stopProcessLocked(ctx context.Context, rt *serviceRunti
 	}
 	rt.processConfig = nil
 	rt.processCommandDigest = ""
-	if cleanupErr != nil {
+	if cleanupErr != nil || exportCleanupErr != nil {
+		cleanupErr = errors.Join(exportCleanupErr, cleanupErr)
 		rt.status.LastError = security.NewRedactor(rt.secretValues...).RedactString(cleanupErr.Error())
 		rt.status.Cleanup.LastError = rt.status.LastError
 		rt.status.State = ServiceStateAttentionRequired
@@ -3208,6 +3349,7 @@ func snapshotServiceRuntimeConfig(rt *serviceRuntime) serviceRuntimeConfigSnapsh
 		exportSecrets:         cloneStringMap(rt.exportSecrets),
 		exportAccepted:        rt.exportAccepted,
 		exportViolation:       rt.exportViolation,
+		exportCleanupFailure:  rt.exportCleanupFailure,
 		rejectedExportSecrets: append([]string(nil), rt.rejectedExportSecrets...),
 		pendingExportKeys:     cloneStringSet(rt.pendingExportKeys),
 		exportKeysCommitted:   rt.exportKeysCommitted,
@@ -3270,6 +3412,7 @@ func restoreServiceRuntimeConfig(rt *serviceRuntime, snapshot serviceRuntimeConf
 	rt.exportSecrets = cloneStringMap(snapshot.exportSecrets)
 	rt.exportAccepted = snapshot.exportAccepted
 	rt.exportViolation = snapshot.exportViolation
+	rt.exportCleanupFailure = snapshot.exportCleanupFailure
 	rt.rejectedExportSecrets = append([]string(nil), snapshot.rejectedExportSecrets...)
 	rt.pendingExportKeys = cloneStringSet(snapshot.pendingExportKeys)
 	rt.exportKeysCommitted = snapshot.exportKeysCommitted
@@ -3403,6 +3546,19 @@ func (m *ServiceManager) Remove(ctx context.Context, id string) error {
 	if rt.process != nil || rt.status.ProcessGroup > 0 {
 		if err := m.stopProcessLocked(ctx, rt, false); err != nil {
 			return err
+		}
+	} else {
+		exportCleanupErr := m.scrubActiveServiceExport(rt, rt.config, "scrub service export while removing service")
+		if exportCleanupErr != nil {
+			exportCleanupErr = errors.Join(exportProtocolViolationError(rt), exportCleanupErr)
+		} else {
+			exportCleanupErr = exportCleanupError(rt)
+		}
+		if err := exportCleanupErr; err != nil {
+			rt.status.LastError = security.NewRedactor(rt.secretValues...).RedactString(err.Error())
+			rt.status.AttentionRequired = true
+			rt.status.State = ServiceStateAttentionRequired
+			return errors.Join(err, m.persistStatusLocked(rt))
 		}
 	}
 	// The disabled definition still exists until removeDefinitionLocked
@@ -3553,6 +3709,18 @@ func (m *ServiceManager) StopService(ctx context.Context, id string) error {
 	}
 	if err := m.stopServiceDependencyChainLocked(ctx, id, true); err != nil {
 		return err
+	}
+	exportCleanupErr := m.scrubActiveServiceExport(rt, rt.config, "scrub service export while stopping service")
+	if exportCleanupErr != nil {
+		exportCleanupErr = errors.Join(exportProtocolViolationError(rt), exportCleanupErr)
+	} else {
+		exportCleanupErr = exportCleanupError(rt)
+	}
+	if err := exportCleanupErr; err != nil {
+		rt.status.LastError = security.NewRedactor(rt.secretValues...).RedactString(err.Error())
+		rt.status.AttentionRequired = true
+		rt.status.State = ServiceStateAttentionRequired
+		return errors.Join(err, m.persistStatusLocked(rt))
 	}
 	rt.status.State = ServiceStateStopped
 	return m.persistStatusLocked(rt)

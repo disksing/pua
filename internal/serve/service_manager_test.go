@@ -949,6 +949,293 @@ func TestServiceManagerWriteOpenFailurePreservesReplacementHandoff(t *testing.T)
 	}
 }
 
+func TestServiceManagerRetriesExportReplacedDuringIdentityCheck(t *testing.T) {
+	const secret = "identity-replacement-secret"
+	root := t.TempDir()
+	path := filepath.Join(serviceRuntimePath(root, "exporter"), "export.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeExport := func(public string) {
+		t.Helper()
+		if err := writeServiceJSON(path, ServiceExportFile{
+			SchemaVersion: serviceExportSchema,
+			Variables:     map[string]string{"PUBLIC": public},
+			Secrets:       map[string]string{"TOKEN": secret},
+		}, 0o400); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeExport("accepted")
+	manager := &ServiceManager{root: root, now: time.Now}
+	runtime := &serviceRuntime{
+		config:        ServiceConfig{SchemaVersion: serviceSchemaVersion, ID: "exporter", Exports: true},
+		secretNames:   map[string]ServiceSecretMetadata{},
+		exportSecrets: map[string]string{},
+		redactor:      security.NewRedactor(),
+	}
+	if _, err := manager.readExportsLocked(runtime); err != nil {
+		t.Fatal(err)
+	}
+
+	writeExport("raced")
+	hardlink := filepath.Join(filepath.Dir(path), "export-hardlink.json")
+	readOpens := 0
+	manager.exportOpenFile = func(openPath string, flag int, perm os.FileMode) (*os.File, error) {
+		file, err := os.OpenFile(openPath, flag, perm)
+		if err != nil {
+			return nil, err
+		}
+		if flag&os.O_RDWR == 0 && readOpens == 0 {
+			readOpens++
+			temporary := path + ".replacement"
+			if err := writeServiceJSON(temporary, ServiceExportFile{
+				SchemaVersion: serviceExportSchema,
+				Variables:     map[string]string{"PUBLIC": "latest"},
+				Secrets:       map[string]string{"TOKEN": secret},
+			}, 0o400); err != nil {
+				_ = file.Close()
+				return nil, err
+			}
+			if err := os.Rename(temporary, path); err != nil {
+				_ = file.Close()
+				return nil, err
+			}
+			if err := os.Link(path, hardlink); err != nil {
+				_ = file.Close()
+				return nil, err
+			}
+		}
+		return file, nil
+	}
+
+	export, err := manager.readExportsLocked(runtime)
+	if err != nil {
+		t.Fatalf("verified replacement was not retried: %v", err)
+	}
+	if export.Variables["PUBLIC"] != "latest" {
+		t.Fatalf("accepted export = %#v, want latest replacement", export)
+	}
+	if runtime.exportViolation != "" {
+		t.Fatalf("normal atomic replacement latched violation %q", runtime.exportViolation)
+	}
+	if readOpens != 1 {
+		t.Fatalf("injected read replacements = %d, want 1", readOpens)
+	}
+	for _, candidate := range []string{path, hardlink} {
+		data, err := os.ReadFile(candidate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(data, []byte(secret)) {
+			t.Fatalf("verified replacement retained secret in %s: %s", candidate, data)
+		}
+	}
+}
+
+func TestServiceManagerBoundsRepeatedExportIdentityChanges(t *testing.T) {
+	const secret = "repeated-identity-change-secret"
+	root := t.TempDir()
+	path := filepath.Join(serviceRuntimePath(root, "exporter"), "export.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeExport := func(public string) error {
+		return writeServiceJSON(path, ServiceExportFile{
+			SchemaVersion: serviceExportSchema,
+			Variables:     map[string]string{"PUBLIC": public},
+			Secrets:       map[string]string{"TOKEN": secret},
+		}, 0o400)
+	}
+	if err := writeExport("accepted"); err != nil {
+		t.Fatal(err)
+	}
+	manager := &ServiceManager{root: root, now: time.Now}
+	runtime := &serviceRuntime{
+		config:        ServiceConfig{SchemaVersion: serviceSchemaVersion, ID: "exporter", Exports: true},
+		secretNames:   map[string]ServiceSecretMetadata{},
+		exportSecrets: map[string]string{},
+		redactor:      security.NewRedactor(),
+	}
+	if _, err := manager.readExportsLocked(runtime); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeExport("raced"); err != nil {
+		t.Fatal(err)
+	}
+
+	hardlink := filepath.Join(filepath.Dir(path), "latest-hardlink.json")
+	readOpens := 0
+	manager.exportOpenFile = func(openPath string, flag int, perm os.FileMode) (*os.File, error) {
+		file, err := os.OpenFile(openPath, flag, perm)
+		if err != nil {
+			return nil, err
+		}
+		if flag&os.O_RDWR != 0 {
+			return file, nil
+		}
+		readOpens++
+		temporary := path + ".replacement"
+		if err := writeServiceJSON(temporary, ServiceExportFile{
+			SchemaVersion: serviceExportSchema,
+			Variables:     map[string]string{"PUBLIC": fmt.Sprintf("replacement-%d", readOpens)},
+			Secrets:       map[string]string{"TOKEN": secret},
+		}, 0o400); err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+		if err := os.Rename(temporary, path); err != nil {
+			_ = file.Close()
+			return nil, err
+		}
+		if readOpens == serviceExportIdentityCheckAttempts {
+			if err := os.Link(path, hardlink); err != nil {
+				_ = file.Close()
+				return nil, err
+			}
+		}
+		return file, nil
+	}
+
+	if _, err := manager.readExportsLocked(runtime); err == nil || !strings.Contains(err.Error(), "changed repeatedly") {
+		t.Fatalf("repeated identity changes error = %v", err)
+	}
+	if readOpens != serviceExportIdentityCheckAttempts {
+		t.Fatalf("identity attempts = %d, want %d", readOpens, serviceExportIdentityCheckAttempts)
+	}
+	manager.exportOpenFile = nil
+	if _, err := manager.readExportsLocked(runtime); err == nil || !strings.Contains(err.Error(), "changed repeatedly") {
+		t.Fatalf("latched identity violation error = %v", err)
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("violating pathname remains after fail-closed read: %v", err)
+	}
+	data, err := os.ReadFile(hardlink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(data, []byte(secret)) || len(data) != 0 {
+		t.Fatalf("violating hand-off hardlink retained secret: %q", data)
+	}
+}
+
+func TestServiceManagerStopScrubsNewHandoffAfterViolation(t *testing.T) {
+	const (
+		acceptedSecret = "accepted-before-violation-secret"
+		newSecret      = "new-after-violation-secret"
+	)
+	root := t.TempDir()
+	cfg := ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "exporter",
+		Enabled:       true,
+		Exports:       true,
+		Command:       []string{"/usr/bin/true"},
+	}
+	writeTestService(t, root, cfg)
+	manager, err := NewServiceManager(root, ServiceManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := manager.runtimes[cfg.ID]
+	runtime.secretNames = map[string]ServiceSecretMetadata{}
+	runtime.exportSecrets = map[string]string{}
+	runtime.redactor = security.NewRedactor()
+	path := filepath.Join(serviceRuntimePath(root, cfg.ID), "export.json")
+	if err := writeServiceJSON(path, ServiceExportFile{
+		SchemaVersion: serviceExportSchema,
+		Secrets:       map[string]string{"TOKEN": acceptedSecret},
+	}, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.readExportsLocked(runtime); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"schemaVersion":99,"secrets":{"TOKEN":"rejected"}}`), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.readExportsLocked(runtime); err == nil {
+		t.Fatal("invalid replacement did not latch a protocol violation")
+	}
+	if err := writeServiceJSON(path, ServiceExportFile{
+		SchemaVersion: serviceExportSchema,
+		Secrets:       map[string]string{"TOKEN": newSecret},
+	}, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	hardlink := filepath.Join(filepath.Dir(path), "stopped-hardlink.json")
+	if err := os.Link(path, hardlink); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := manager.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("violating pathname remains after stop: %v", err)
+	}
+	data, err := os.ReadFile(hardlink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(data, []byte(newSecret)) || len(data) != 0 {
+		t.Fatalf("stopped hand-off hardlink retained secret: %q", data)
+	}
+	if _, err := NewServiceManager(root, ServiceManagerOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	data, err = os.ReadFile(hardlink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) != 0 {
+		t.Fatalf("manager restart restored scrubbed secret bytes: %q", data)
+	}
+}
+
+func TestServiceManagerStopReportsExportScrubFailureAfterViolation(t *testing.T) {
+	const secret = "unscrubbed-stop-secret"
+	root := t.TempDir()
+	cfg := ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "exporter",
+		Enabled:       true,
+		Exports:       true,
+		Command:       []string{"/usr/bin/true"},
+	}
+	writeTestService(t, root, cfg)
+	manager, err := NewServiceManager(root, ServiceManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := manager.runtimes[cfg.ID]
+	runtime.exportViolation = "existing export protocol violation"
+	path := filepath.Join(serviceRuntimePath(root, cfg.ID), "export.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(secret), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	scrubFailure := errors.New("injected export scrub failure")
+	manager.exportScrubPath = func(string) error { return scrubFailure }
+
+	err = manager.Stop(context.Background())
+	if err == nil || !errors.Is(err, scrubFailure) || !strings.Contains(err.Error(), "existing export protocol violation") {
+		t.Fatalf("stop error = %v, want protocol and scrub failures", err)
+	}
+	if runtime.status.State != ServiceStateAttentionRequired || !runtime.status.AttentionRequired {
+		t.Fatalf("status after scrub failure = %#v", runtime.status)
+	}
+	data, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Contains(data, []byte(secret)) {
+		t.Fatalf("injected failure did not preserve the regression fixture: %q", data)
+	}
+}
+
 func TestRemoveVerifiedServiceExportHandoffScrubsUnrestoredReplacement(t *testing.T) {
 	const quarantinedSecret = "quarantined-replacement-secret"
 	root := t.TempDir()
@@ -1211,7 +1498,7 @@ func TestServiceManagerRejectedExportDoesNotReachDurableOutputs(t *testing.T) {
 	}
 	for _, name := range []string{"export.json", "stdout.log", "stderr.log", "state.json", "events.jsonl"} {
 		data, err := os.ReadFile(filepath.Join(serviceRuntimePath(root, "exporter"), name))
-		if err != nil && os.IsNotExist(err) && (name == "stdout.log" || name == "stderr.log") {
+		if err != nil && os.IsNotExist(err) && (name == "export.json" || name == "stdout.log" || name == "stderr.log") {
 			continue
 		}
 		if err != nil {
@@ -1465,7 +1752,7 @@ func TestServiceManagerRejectsSecretRotationBeforePersistingLaterLogs(t *testing
 	}
 	for _, name := range []string{"stdout.log", "stderr.log", "state.json", "events.jsonl", "export.json"} {
 		data, err := os.ReadFile(filepath.Join(runtimeDir, name))
-		if err != nil && os.IsNotExist(err) && name == "stderr.log" {
+		if err != nil && os.IsNotExist(err) && (name == "stderr.log" || name == "export.json") {
 			continue
 		}
 		if err != nil {

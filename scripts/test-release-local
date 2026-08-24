@@ -53,7 +53,7 @@ plan=$($fixture/scripts/release-plan v0.1.0)
 assert_line "$plan" release=0.1.0
 assert_line "$plan" pua=true
 assert_line "$plan" agenthub=true
-assert_line "$plan" macapp=true
+assert_line "$plan" macapp=false
 
 printf '0.2.0\n' >"$fixture/versions/release"
 printf '0.2.0\n' >"$fixture/versions/pua"

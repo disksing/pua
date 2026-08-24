@@ -8,12 +8,19 @@ Release. A release may contain any non-empty subset of the three components.
 `versions/pua`, `versions/agenthub`, and `versions/macapp` contain the most recent
 train each component joined. A component joins the current release only when its
 version file equals `versions/release`; skipped components retain their previous
-version and may jump over global versions later.
+version and may jump over global versions later. Before a component has joined
+its first release, its version file contains `0.0.0`.
 
 Run `scripts/release-plan vX.Y.Z` before tagging. It rejects malformed versions,
 tags without the required `v` prefix, tags that do not match `versions/release`,
 component versions ahead of the train, and releases with no selected component.
 The release workflow performs the same check before it builds anything.
+
+After configuring or rotating release secrets, manually run the **Release
+credentials preflight** workflow before creating an immutable release tag. It
+imports the Developer ID identity into an isolated keychain and validates the
+notarization and component manifest keypairs without building or publishing a
+release.
 
 ## Artifacts and update feeds
 

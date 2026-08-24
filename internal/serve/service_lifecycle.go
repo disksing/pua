@@ -3,7 +3,9 @@ package serve
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
+	"sort"
 	"sync"
 )
 
@@ -12,6 +14,7 @@ var (
 	errWorkspaceRemovalLifecycleUnavailable = errors.New("workspace could not be removed because service lifecycle ownership is unavailable; retry after the current operation completes")
 	errWorkspaceServiceRemovalInProgress    = errors.New("workspace service removal is in progress")
 	errWorkspaceAdditionRetained            = errors.New("workspace remains configured and owned; retry service supervision")
+	errServiceLifecycleClosing              = errors.New("workspace service lifecycle is shutting down")
 )
 
 type serviceWorkspaceKey struct {
@@ -40,6 +43,65 @@ type serviceManagerLease struct {
 	releaseOnce sync.Once
 }
 
+// serviceLifecycleMutation admits a Workspace membership change before its
+// filesystem and configuration preparation begins. Shutdown closes admission
+// and waits for every admitted mutation, including additions that have not yet
+// installed their per-Workspace lookup reservation.
+type serviceLifecycleMutation struct {
+	server      *server
+	releaseOnce sync.Once
+}
+
+func (mutation *serviceLifecycleMutation) Release() {
+	if mutation == nil || mutation.server == nil {
+		return
+	}
+	mutation.releaseOnce.Do(func() {
+		s := mutation.server
+		s.serviceMu.Lock()
+		if s.serviceMutations > 0 {
+			s.serviceMutations--
+			s.notifyServiceLifecycleChangedLocked()
+		}
+		s.serviceMu.Unlock()
+	})
+}
+
+func (s *server) notifyServiceLifecycleChangedLocked() {
+	if s.serviceChanged == nil {
+		return
+	}
+	close(s.serviceChanged)
+	s.serviceChanged = nil
+}
+
+func (s *server) serviceLifecycleChangedLocked() <-chan struct{} {
+	if s.serviceChanged == nil {
+		s.serviceChanged = make(chan struct{})
+	}
+	return s.serviceChanged
+}
+
+func (s *server) beginServiceLifecycleMutation() (*serviceLifecycleMutation, error) {
+	s.serviceMu.Lock()
+	defer s.serviceMu.Unlock()
+	if s.serviceClosing {
+		return nil, errServiceLifecycleClosing
+	}
+	s.serviceMutations++
+	s.notifyServiceLifecycleChangedLocked()
+	return &serviceLifecycleMutation{server: s}, nil
+}
+
+func (s *server) beginServiceLifecycleShutdown() {
+	s.serviceMu.Lock()
+	if !s.serviceClosing {
+		s.serviceClosing = true
+		s.notifyServiceLifecycleChangedLocked()
+	}
+	s.serviceMu.Unlock()
+}
+
 func (lease *serviceManagerLease) Release() {
 	if lease == nil || lease.server == nil {
 		return
@@ -54,6 +116,7 @@ func (s *server) newServiceManagerLeaseLocked(workspace serveWorkspace, manager 
 		s.serviceLeases = make(map[string]int)
 	}
 	s.serviceLeases[workspace.ID]++
+	s.notifyServiceLifecycleChangedLocked()
 	return &serviceManagerLease{
 		server:      s,
 		workspaceID: workspace.ID,
@@ -71,9 +134,11 @@ func (s *server) releaseServiceManagerLease(workspaceID string) {
 		if removal := s.serviceRemovals[workspaceID]; removal != nil {
 			close(removal.leasesDone)
 		}
+		s.notifyServiceLifecycleChangedLocked()
 		return
 	}
 	s.serviceLeases[workspaceID] = count - 1
+	s.notifyServiceLifecycleChangedLocked()
 }
 
 // serviceManagerLookup reserves one Workspace lifecycle generation while a
@@ -127,6 +192,9 @@ func (s *server) registeredServiceManagerForResolutionLocked(workspace serveWork
 }
 
 func (s *server) ensureServiceManagerLocked(workspace serveWorkspace) (*ServiceManager, bool, error) {
+	if s.serviceClosing {
+		return nil, false, errServiceLifecycleClosing
+	}
 	if s.serviceRemovals[workspace.ID] != nil {
 		return nil, false, errWorkspaceServiceRemovalInProgress
 	}
@@ -164,6 +232,7 @@ func (s *server) finishServiceManagerLookupLocked(id string, lookup *serviceMana
 	}
 	delete(s.serviceLookups, id)
 	close(lookup.done)
+	s.notifyServiceLifecycleChangedLocked()
 }
 
 func (s *server) configuredWorkspaceLocked(id string) (serveWorkspace, error) {
@@ -187,7 +256,10 @@ func (s *server) configuredWorkspaceLocked(id string) (serveWorkspace, error) {
 // lifecycle ownership at the same transaction boundary used by additions and
 // removal commits. Concurrent callers share the same completion instead of
 // stopping, detaching, or releasing the authoritative manager more than once.
-func (s *server) beginWorkspaceServiceManagerRemoval(id string) (*serviceManagerRemoval, bool, error) {
+func (s *server) beginWorkspaceServiceManagerRemoval(id string, mutation *serviceLifecycleMutation) (*serviceManagerRemoval, bool, error) {
+	if mutation == nil || mutation.server != s {
+		return nil, false, errWorkspaceRemovalLifecycleUnavailable
+	}
 	s.lockServiceLifecycleAfterLookup(id)
 	defer s.serviceMu.Unlock()
 	if removal := s.serviceRemovals[id]; removal != nil {
@@ -222,6 +294,7 @@ func (s *server) beginWorkspaceServiceManagerRemoval(id string) (*serviceManager
 		done:        make(chan struct{}),
 	}
 	s.serviceRemovals[workspace.ID] = removal
+	s.notifyServiceLifecycleChangedLocked()
 	if s.serviceLeases[workspace.ID] == 0 {
 		close(removal.leasesDone)
 	}
@@ -289,23 +362,9 @@ func (s *server) finishServiceManagerRemoval(removal *serviceManagerRemoval, res
 		removal.result = result
 		delete(s.serviceRemovals, removal.workspaceID)
 		close(removal.done)
+		s.notifyServiceLifecycleChangedLocked()
 	}
 	s.serviceMu.Unlock()
-}
-
-func (s *server) serviceManagerLeasesLocked() []*serviceManagerLease {
-	leases := make([]*serviceManagerLease, 0, len(s.services))
-	for key, manager := range s.services {
-		if s.serviceLookups[key.workspaceID] != nil {
-			continue
-		}
-		if removal := s.serviceRemovals[key.workspaceID]; removal != nil && removal.manager == manager {
-			continue
-		}
-		workspace := serveWorkspace{ID: key.workspaceID, Path: key.root}
-		leases = append(leases, s.newServiceManagerLeaseLocked(workspace, manager))
-	}
-	return leases
 }
 
 func (s *server) serviceManagerCandidatesLocked() []serviceManagerCandidate {
@@ -322,30 +381,11 @@ func (s *server) serviceManagerCandidatesLocked() []serviceManagerCandidate {
 func (s *server) acquireServiceManagerCandidate(candidate serviceManagerCandidate) *serviceManagerLease {
 	s.serviceMu.Lock()
 	defer s.serviceMu.Unlock()
-	if candidate.manager == nil || s.services[candidate.key] != candidate.manager || s.serviceRemovals[candidate.key.workspaceID] != nil {
+	if s.serviceClosing || candidate.manager == nil || s.services[candidate.key] != candidate.manager || s.serviceRemovals[candidate.key.workspaceID] != nil {
 		return nil
 	}
 	workspace := serveWorkspace{ID: candidate.key.workspaceID, Path: candidate.key.root}
 	return s.newServiceManagerLeaseLocked(workspace, candidate.manager)
-}
-
-func (s *server) serviceManagerLeasesAfterLookups() []*serviceManagerLease {
-	for {
-		s.serviceMu.Lock()
-		if len(s.serviceLookups) == 0 {
-			leases := s.serviceManagerLeasesLocked()
-			s.serviceMu.Unlock()
-			return leases
-		}
-		lookups := make([]<-chan struct{}, 0, len(s.serviceLookups))
-		for _, lookup := range s.serviceLookups {
-			lookups = append(lookups, lookup.done)
-		}
-		s.serviceMu.Unlock()
-		for _, done := range lookups {
-			<-done
-		}
-	}
 }
 
 func (s *server) initializeServiceManagers() error {
@@ -358,6 +398,10 @@ func (s *server) initializeServiceManagers() error {
 	}
 	for _, workspace := range cfg.Workspaces {
 		s.lockServiceLifecycleAfterLookup(workspace.ID)
+		if s.serviceClosing {
+			s.serviceMu.Unlock()
+			return errServiceLifecycleClosing
+		}
 		if _, _, err := s.ensureServiceManagerLocked(workspace); err != nil {
 			s.serviceMu.Unlock()
 			return err
@@ -376,6 +420,10 @@ func (s *server) acquireServiceManagerLeaseAtLookupBoundary(id string, lookupPre
 		lookupPrepared()
 	}
 	s.lockServiceLifecycleAfterLookup(id)
+	if s.serviceClosing {
+		s.serviceMu.Unlock()
+		return nil, errServiceLifecycleClosing
+	}
 	workspace, err := s.configuredWorkspaceLocked(id)
 	if err != nil {
 		s.serviceMu.Unlock()
@@ -400,6 +448,7 @@ func (s *server) acquireServiceManagerLeaseAtLookupBoundary(id string, lookupPre
 		s.serviceLookups = make(map[string]*serviceManagerLookup)
 	}
 	s.serviceLookups[id] = lookup
+	s.notifyServiceLifecycleChangedLocked()
 	factory := s.serviceFactory
 	if factory == nil {
 		factory = NewServiceManager
@@ -474,6 +523,10 @@ func (s *server) acquireServiceManagerLeaseAtLookupBoundary(id string, lookupPre
 
 func (s *server) startServices(ctx context.Context) {
 	s.serviceMu.Lock()
+	if s.serviceClosing {
+		s.serviceMu.Unlock()
+		return
+	}
 	candidates := s.serviceManagerCandidatesLocked()
 	s.serviceMu.Unlock()
 	for _, candidate := range candidates {
@@ -490,6 +543,10 @@ func (s *server) startServices(ctx context.Context) {
 
 func (s *server) reconcileServices(ctx context.Context) error {
 	s.serviceMu.Lock()
+	if s.serviceClosing {
+		s.serviceMu.Unlock()
+		return errServiceLifecycleClosing
+	}
 	candidates := s.serviceManagerCandidatesLocked()
 	s.serviceMu.Unlock()
 	for _, candidate := range candidates {
@@ -506,18 +563,48 @@ func (s *server) reconcileServices(ctx context.Context) error {
 }
 
 func (s *server) stopServices(ctx context.Context) error {
-	// A lookup starts its manager outside serviceMu while its Workspace
-	// reservation prevents removal or replacement. Preserve the old shutdown
-	// guarantee by waiting for those starts before taking the stop snapshot.
-	leases := s.serviceManagerLeasesAfterLookups()
-	var first error
-	for _, lease := range leases {
-		if err := lease.manager.Stop(ctx); err != nil && first == nil {
-			first = err
-		}
-		lease.Release()
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	return first
+	s.beginServiceLifecycleShutdown()
+
+	var managers []*ServiceManager
+	for {
+		s.serviceMu.Lock()
+		if len(s.serviceLeases) == 0 && len(s.serviceLookups) == 0 &&
+			len(s.serviceRemovals) == 0 && s.serviceMutations == 0 {
+			managers = make([]*ServiceManager, 0, len(s.services))
+			for _, manager := range s.services {
+				managers = append(managers, manager)
+			}
+			s.serviceMu.Unlock()
+			break
+		}
+		changed := s.serviceLifecycleChangedLocked()
+		s.serviceMu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-changed:
+		}
+	}
+	sort.Slice(managers, func(i, j int) bool {
+		return managers[i].Root() < managers[j].Root()
+	})
+
+	stopper := s.serviceShutdownStopper
+	if stopper == nil {
+		stopper = func(manager *ServiceManager, ctx context.Context) error {
+			return manager.Stop(ctx)
+		}
+	}
+	var result error
+	for _, manager := range managers {
+		if err := stopper(manager, ctx); err != nil {
+			result = errors.Join(result, fmt.Errorf("stop workspace services in %s: %w", manager.Root(), err))
+		}
+	}
+	return result
 }
 
 func (s *server) serviceEnvironment(workspace serveWorkspace) (map[string]string, map[string]string, error) {

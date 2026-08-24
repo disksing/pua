@@ -181,23 +181,27 @@ type uiState struct {
 }
 
 type server struct {
-	addr             string
-	config           string
-	agentHubMode     string
-	agentHubEndpoint string
-	agents           *agentManager
-	doctor           *doctorMonitor
-	locks            *workspaceLockManager
-	serviceMu        sync.Mutex
-	services         map[serviceWorkspaceKey]*ServiceManager
-	serviceLookups   map[string]*serviceManagerLookup
-	serviceLeases    map[string]int
-	serviceRemovals  map[string]*serviceManagerRemoval
-	serviceContext   context.Context
-	serviceFactory   func(string, ServiceManagerOptions) (*ServiceManager, error)
-	serviceStarter   func(*ServiceManager, context.Context) error
-	serviceStopper   func(*ServiceManager, context.Context) error
-	uiStateMu        sync.Mutex
+	addr                   string
+	config                 string
+	agentHubMode           string
+	agentHubEndpoint       string
+	agents                 *agentManager
+	doctor                 *doctorMonitor
+	locks                  *workspaceLockManager
+	serviceMu              sync.Mutex
+	services               map[serviceWorkspaceKey]*ServiceManager
+	serviceLookups         map[string]*serviceManagerLookup
+	serviceLeases          map[string]int
+	serviceRemovals        map[string]*serviceManagerRemoval
+	serviceClosing         bool
+	serviceMutations       int
+	serviceChanged         chan struct{}
+	serviceContext         context.Context
+	serviceFactory         func(string, ServiceManagerOptions) (*ServiceManager, error)
+	serviceStarter         func(*ServiceManager, context.Context) error
+	serviceStopper         func(*ServiceManager, context.Context) error
+	serviceShutdownStopper func(*ServiceManager, context.Context) error
+	uiStateMu              sync.Mutex
 }
 
 const (
@@ -395,13 +399,29 @@ func Main(args []string) error {
 	defer func() {
 		ready.ready.Store(false)
 		cancelLifecycle()
-		shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancelShutdown()
-		if err := s.stopServices(shutdownContext); err != nil {
+		httpShutdownContext, cancelHTTPShutdown := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancelHTTPShutdown()
+		serviceShutdownContext, cancelServiceShutdown := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancelServiceShutdown()
+		// Close service lifecycle admission before the HTTP server begins its
+		// drain. Existing handlers may finish their admitted service operation,
+		// while new handlers converge on a stable shutdown error and cannot launch
+		// a process after the final service snapshot.
+		s.beginServiceLifecycleShutdown()
+		shutdownDone := make(chan error, 1)
+		go func() {
+			err := httpServer.Shutdown(httpShutdownContext)
+			if err != nil {
+				// Shutdown does not interrupt active handlers when its deadline
+				// expires. Close cancels them so their service leases can drain
+				// within the independent final-stop budget.
+				_ = httpServer.Close()
+			}
+			shutdownDone <- err
+		}()
+		if err := s.stopServices(serviceShutdownContext); err != nil {
 			log.Printf("stop workspace services: %v", err)
 		}
-		shutdownDone := make(chan error, 1)
-		go func() { shutdownDone <- httpServer.Shutdown(shutdownContext) }()
 		done := make(chan struct{})
 		go func() {
 			s.agents.waitBackground()
@@ -414,9 +434,7 @@ func Main(args []string) error {
 		if agentHubService != nil {
 			_ = agentHubService.Close()
 		}
-		if err := <-shutdownDone; err != nil {
-			_ = httpServer.Close()
-		}
+		<-shutdownDone
 	}()
 	s.serviceMu.Lock()
 	s.serviceContext = lifecycleContext
@@ -492,6 +510,10 @@ func (s *server) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
 		}
 		workspace, err := s.addWorkspaceWithOptions(r.Context(), body.Path, body.Create, body.Language, body.InitialUserName)
 		if err != nil {
+			if errors.Is(err, errServiceLifecycleClosing) {
+				writeError(w, err, http.StatusServiceUnavailable)
+				return
+			}
 			var conflict *workspaceLockConflictError
 			if errors.As(err, &conflict) {
 				writeError(w, err, http.StatusConflict)
@@ -554,7 +576,9 @@ func (s *server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := s.removeWorkspace(id); err != nil {
 			status := http.StatusNotFound
-			if errors.Is(err, errWorkspaceRemovalServicesActive) ||
+			if errors.Is(err, errServiceLifecycleClosing) {
+				status = http.StatusServiceUnavailable
+			} else if errors.Is(err, errWorkspaceRemovalServicesActive) ||
 				errors.Is(err, errWorkspaceRemovalLifecycleUnavailable) {
 				status = http.StatusConflict
 			}
@@ -1634,6 +1658,12 @@ func (s *server) addWorkspace(ctx context.Context, path string) (serveWorkspace,
 }
 
 func (s *server) addWorkspaceWithOptions(ctx context.Context, path string, create bool, language, initialUserName string) (workspace serveWorkspace, err error) {
+	mutation, err := s.beginServiceLifecycleMutation()
+	if err != nil {
+		return serveWorkspace{}, err
+	}
+	defer mutation.Release()
+
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return serveWorkspace{}, errors.New("workspace path is required")
@@ -1728,7 +1758,7 @@ func (s *server) addWorkspaceWithOptions(ctx context.Context, path string, creat
 		}
 		locked = true
 	}
-	workspace, retainLock, err := s.commitWorkspaceAddition(workspace)
+	workspace, retainLock, err := s.commitWorkspaceAddition(workspace, mutation)
 	if retainLock {
 		// A failed manager rollback remains authoritative so its processes can
 		// still be recovered or stopped. Keep the Workspace ownership lock with
@@ -1752,7 +1782,10 @@ func (s *server) addWorkspaceWithOptions(ctx context.Context, path string, creat
 //
 // The boolean result asks the caller to retain its Workspace lock when a
 // post-commit failure could not safely roll the durable membership back.
-func (s *server) commitWorkspaceAddition(workspace serveWorkspace) (serveWorkspace, bool, error) {
+func (s *server) commitWorkspaceAddition(workspace serveWorkspace, mutation *serviceLifecycleMutation) (serveWorkspace, bool, error) {
+	if mutation == nil || mutation.server != s {
+		return serveWorkspace{}, false, errServiceLifecycleClosing
+	}
 	s.lockServiceLifecycleAfterLookup(workspace.ID)
 	if s.serviceRemovals[workspace.ID] != nil {
 		s.serviceMu.Unlock()
@@ -1802,6 +1835,7 @@ func (s *server) commitWorkspaceAddition(workspace serveWorkspace) (serveWorkspa
 		s.serviceLookups = make(map[string]*serviceManagerLookup)
 	}
 	s.serviceLookups[workspace.ID] = lookup
+	s.notifyServiceLifecycleChangedLocked()
 	factory := s.serviceFactory
 	if factory == nil {
 		factory = NewServiceManager
@@ -2049,7 +2083,13 @@ func (s *server) updateWorkspaceName(id, name string) (serveWorkspace, error) {
 }
 
 func (s *server) removeWorkspace(id string) error {
-	removal, owner, err := s.beginWorkspaceServiceManagerRemoval(id)
+	mutation, err := s.beginServiceLifecycleMutation()
+	if err != nil {
+		return err
+	}
+	defer mutation.Release()
+
+	removal, owner, err := s.beginWorkspaceServiceManagerRemoval(id, mutation)
 	if err != nil {
 		return err
 	}

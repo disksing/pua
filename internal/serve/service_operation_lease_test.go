@@ -99,7 +99,12 @@ func TestWorkspaceRemovalWaitsForAdmittedServiceAction(t *testing.T) {
 func TestWorkspaceRemovalFenceRejectsNewServiceOperation(t *testing.T) {
 	workspace := serveWorkspace{ID: "workspace-one", Path: t.TempDir()}
 	s := newServiceLifecycleTestServer(t, workspace)
-	removal, owner, err := s.beginWorkspaceServiceManagerRemoval(workspace.ID)
+	mutation, err := s.beginServiceLifecycleMutation()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(mutation.Release)
+	removal, owner, err := s.beginWorkspaceServiceManagerRemoval(workspace.ID, mutation)
 	if err != nil {
 		t.Fatal(err)
 	}

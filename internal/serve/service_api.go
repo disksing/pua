@@ -11,7 +11,7 @@ import (
 func (s *server) handleWorkspaceServices(w http.ResponseWriter, r *http.Request, workspaceID string, parts []string) {
 	lease, err := s.acquireServiceManagerLease(workspaceID)
 	if err != nil {
-		writeError(w, err, http.StatusNotFound)
+		writeError(w, err, statusForServiceLifecycleError(err, http.StatusNotFound))
 		return
 	}
 	defer lease.Release()
@@ -202,6 +202,13 @@ func statusForServiceError(err error) int {
 	return http.StatusBadRequest
 }
 
+func statusForServiceLifecycleError(err error, fallback int) int {
+	if errors.Is(err, errServiceLifecycleClosing) {
+		return http.StatusServiceUnavailable
+	}
+	return fallback
+}
+
 func serviceActionAPIError(err error) error {
 	if errors.Is(err, errServiceDisabled) {
 		return &resourceAPIError{Code: "service_disabled", Message: err.Error()}
@@ -212,7 +219,7 @@ func serviceActionAPIError(err error) error {
 func (s *server) handleServiceBindings(w http.ResponseWriter, r *http.Request, workspaceID string) {
 	lease, err := s.acquireServiceManagerLease(workspaceID)
 	if err != nil {
-		writeError(w, err, http.StatusNotFound)
+		writeError(w, err, statusForServiceLifecycleError(err, http.StatusNotFound))
 		return
 	}
 	defer lease.Release()

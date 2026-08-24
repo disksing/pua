@@ -1673,6 +1673,86 @@ func TestServiceManagerRejectedExportDoesNotReachDurableOutputs(t *testing.T) {
 	}
 }
 
+func TestServiceManagerSuppressesHookOutputAfterIncompleteExportInspection(t *testing.T) {
+	const secret = "late-oversized-export-secret"
+	root := t.TempDir()
+	runtimeDir := serviceRuntimePath(root, "exporter")
+	writeTestService(t, root, ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "exporter",
+		Enabled:       true,
+		Exports:       true,
+		Command: []string{"/bin/sh", "-c", fmt.Sprintf(`
+			tmp="$PUA_SERVICE_EXPORT_PATH.tmp"
+			printf '%%s' '{"schemaVersion":1,"variables":{"PUBLIC":"' > "$tmp"
+			dd if=/dev/zero bs=%d count=1 2>/dev/null | tr '\000' 'x' >> "$tmp"
+			printf '%%s' '"},"secrets":{"TOKEN":"%s"}}' >> "$tmp"
+			mv "$tmp" "$PUA_SERVICE_EXPORT_PATH"
+			exec sleep 30
+		`, serviceExportMaxBytes, secret)},
+		Cleanup: &ServiceCleanupConfig{
+			Command: []string{"/bin/sh", "-c", "printf '%s\\n' '" + secret + "'; printf '%s\\n' '" + secret + "' >&2; exit 23"},
+			Timeout: time.Second,
+		},
+		Restart: ServiceRestartConfig{InitialDelay: time.Second, Multiplier: 2, MaxDelay: time.Second},
+	})
+	manager, err := NewServiceManager(root, ServiceManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopProcessTestManager(t, &manager)
+	startErr := manager.Start(context.Background())
+	if startErr != nil && strings.Contains(startErr.Error(), secret) {
+		t.Fatalf("start error disclosed late export secret: %v", startErr)
+	}
+
+	status, err := manager.Show("exporter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != ServiceStateBackoff && status.State != ServiceStateAttentionRequired {
+		t.Fatalf("state = %q, want oversized export failure", status.State)
+	}
+	if !strings.Contains(status.LastError, "exceeds 1 MiB") {
+		t.Fatalf("last error = %q, want stable oversized export error", status.LastError)
+	}
+	if !strings.Contains(status.Cleanup.LastError, "cleanup failed") {
+		t.Fatalf("cleanup last error = %q, want output-free cleanup failure", status.Cleanup.LastError)
+	}
+
+	projection, err := json.Marshal(status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(projection, []byte(secret)) {
+		t.Fatalf("API status disclosed late export secret: %s", projection)
+	}
+	var persisted persistedServiceRuntimeState
+	for _, name := range []string{"state.json", "events.jsonl", "export.json"} {
+		data, err := os.ReadFile(filepath.Join(runtimeDir, name))
+		if err != nil && os.IsNotExist(err) && name == "export.json" {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(data, []byte(secret)) {
+			t.Fatalf("late export secret reached %s: %s", name, data)
+		}
+		if name == "state.json" {
+			if err := json.Unmarshal(data, &persisted); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if name == "events.jsonl" && !bytes.Contains(data, []byte(`"type":"readiness_failed"`)) {
+			t.Fatalf("events did not retain the output-free readiness failure: %s", data)
+		}
+	}
+	if !persisted.SuppressHookDiagnostics {
+		t.Fatal("runtime state did not preserve generation diagnostic suppression")
+	}
+}
+
 func TestServiceManagerBuffersReadinessLogsUntilExportSecretsAreKnown(t *testing.T) {
 	root := t.TempDir()
 	startedPath := filepath.Join(root, "exporter-started")

@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -142,6 +143,11 @@ type serviceRuntime struct {
 	exportViolation       string
 	exportCleanupFailure  string
 	rejectedExportSecrets []string
+	// suppressHookDiagnostics is latched for this process generation whenever
+	// an export candidate cannot be inspected completely. Readiness and cleanup
+	// hooks still run, but their untrusted output must not enter durable state or
+	// events because it may contain an undiscovered value from the hand-off.
+	suppressHookDiagnostics atomic.Bool
 	// pendingExportKeys is manager-mutex state. It records public export
 	// names whose accepted values moved after this generation became ready.
 	// The committed bit prevents a dependent process from being stopped before
@@ -158,32 +164,33 @@ type serviceRuntime struct {
 }
 
 type serviceRuntimeConfigSnapshot struct {
-	runtime               *serviceRuntime
-	config                ServiceConfig
-	processConfig         *ServiceConfig
-	processCommandDigest  string
-	status                ServiceStatus
-	process               *exec.Cmd
-	exit                  <-chan serviceProcessExit
-	started               time.Time
-	stableSince           time.Time
-	environment           []string
-	secretValues          []string
-	secretNames           map[string]ServiceSecretMetadata
-	exportSecrets         map[string]string
-	exportAccepted        bool
-	exportViolation       string
-	exportCleanupFailure  string
-	rejectedExportSecrets []string
-	pendingExportKeys     map[string]struct{}
-	exportKeysCommitted   bool
-	redactor              *security.Redactor
-	exports               ServiceExportFile
-	logWriters            []*serviceLogWriter
-	terminationPending    bool
-	orphanRecoveryPending bool
-	orphanCleanupComplete bool
-	processOwnership      serviceProcessOwnership
+	runtime                 *serviceRuntime
+	config                  ServiceConfig
+	processConfig           *ServiceConfig
+	processCommandDigest    string
+	status                  ServiceStatus
+	process                 *exec.Cmd
+	exit                    <-chan serviceProcessExit
+	started                 time.Time
+	stableSince             time.Time
+	environment             []string
+	secretValues            []string
+	secretNames             map[string]ServiceSecretMetadata
+	exportSecrets           map[string]string
+	exportAccepted          bool
+	exportViolation         string
+	exportCleanupFailure    string
+	rejectedExportSecrets   []string
+	suppressHookDiagnostics bool
+	pendingExportKeys       map[string]struct{}
+	exportKeysCommitted     bool
+	redactor                *security.Redactor
+	exports                 ServiceExportFile
+	logWriters              []*serviceLogWriter
+	terminationPending      bool
+	orphanRecoveryPending   bool
+	orphanCleanupComplete   bool
+	processOwnership        serviceProcessOwnership
 }
 
 // persistedServiceRuntimeState keeps process cleanup provenance and unfinished
@@ -199,6 +206,9 @@ type persistedServiceRuntimeState struct {
 	// invalidation without retaining another copy of public values or any
 	// exported secret.
 	PendingExportChanges []string `json:"pendingExportChanges,omitempty"`
+	// SuppressHookDiagnostics preserves the fail-closed generation boundary
+	// across manager reconstruction without retaining any hand-off bytes.
+	SuppressHookDiagnostics bool `json:"suppressHookDiagnostics,omitempty"`
 }
 
 type persistedServiceProcessConfig struct {
@@ -427,6 +437,7 @@ func (m *ServiceManager) loadStatusLocked(rt *serviceRuntime) error {
 		status.Exports.Variables = map[string]string{}
 	}
 	rt.orphanRecoveryPending = persisted.OrphanRecoveryPending || status.PID > 0 || status.ProcessGroup > 0
+	rt.suppressHookDiagnostics.Store(persisted.SuppressHookDiagnostics)
 	rt.orphanCleanupComplete = false
 	if persisted.ProcessConfig != nil {
 		if persisted.ProcessConfig.SchemaVersion != serviceSchemaVersion {
@@ -847,6 +858,7 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 	rt.exportAccepted = false
 	rt.exportViolation = ""
 	rt.rejectedExportSecrets = nil
+	rt.suppressHookDiagnostics.Store(false)
 	rt.pendingExportKeys = nil
 	rt.exportKeysCommitted = false
 	rt.redactor = nil
@@ -1331,6 +1343,11 @@ func (m *ServiceManager) readExportsWithGateLocked(rt *serviceRuntime, cfg Servi
 		return ServiceExportFile{SchemaVersion: serviceExportSchema, Variables: map[string]string{}}, nil
 	}
 	if err != nil {
+		// No later hook output is safe to publish when an existing hand-off
+		// changed too often or could not be opened and read through the verified
+		// descriptor. Its uninspected bytes may include a value printed by the
+		// readiness or cleanup command.
+		rt.suppressHookDiagnostics.Store(true)
 		return ServiceExportFile{}, m.rejectExportLocked(rt, err, nil, fromLog)
 	}
 	defer handoff.file.Close()
@@ -1441,6 +1458,7 @@ func readBoundedServiceExport(reader io.Reader) ([]byte, error) {
 
 func (m *ServiceManager) readExportHandoffWithGateLocked(rt *serviceRuntime, handoff *serviceExportHandoff, fromLog bool) (ServiceExportFile, error) {
 	if len(handoff.data) > serviceExportMaxBytes {
+		rt.suppressHookDiagnostics.Store(true)
 		candidateSecrets := bestEffortJSONStrings(handoff.data)
 		registerServiceExportCandidates(rt, candidateSecrets)
 		cause := errors.New("service export exceeds 1 MiB")
@@ -1449,6 +1467,7 @@ func (m *ServiceManager) readExportHandoffWithGateLocked(rt *serviceRuntime, han
 	}
 	var export ServiceExportFile
 	if err := decodeStrictServiceJSON(bytes.NewReader(handoff.data), &export); err != nil {
+		rt.suppressHookDiagnostics.Store(true)
 		candidateSecrets := bestEffortJSONStrings(handoff.data)
 		registerServiceExportCandidates(rt, candidateSecrets)
 		cause := scrubRejectedExport(handoff, serviceExportSchema, errors.New("decode export: invalid JSON hand-off"))
@@ -1978,7 +1997,7 @@ func (m *ServiceManager) runReadinessLocked(ctx context.Context, rt *serviceRunt
 	var output serviceCommandOutput
 	err := runServiceGroupCommand(checkCtx, command, dir, rt.environment, &output)
 	if err != nil {
-		text := output.diagnostic(security.NewRedactor(rt.secretValues...))
+		text := serviceHookDiagnostic(rt, &output)
 		if text != "" {
 			return fmt.Errorf("readiness failed: %w: %s", err, text)
 		}
@@ -2264,7 +2283,7 @@ func (m *ServiceManager) runCleanupLocked(ctx context.Context, rt *serviceRuntim
 			rt.status.Cleanup.LastError = ""
 			return nil
 		}
-		message := output.diagnostic(security.NewRedactor(rt.secretValues...))
+		message := serviceHookDiagnostic(rt, &output)
 		if message != "" {
 			last = fmt.Errorf("cleanup failed: %w: %s", err, message)
 		} else {
@@ -2274,6 +2293,13 @@ func (m *ServiceManager) runCleanupLocked(ctx context.Context, rt *serviceRuntim
 	}
 	rt.status.Cleanup.Succeeded = false
 	return last
+}
+
+func serviceHookDiagnostic(rt *serviceRuntime, output *serviceCommandOutput) string {
+	if rt != nil && rt.suppressHookDiagnostics.Load() {
+		return ""
+	}
+	return output.diagnostic(security.NewRedactor(rt.secretValues...))
 }
 
 func (m *ServiceManager) resolveEnvironmentLocked(cfg ServiceConfig) ([]string, []string, map[string]ServiceSecretMetadata, ServiceExportFile, error) {
@@ -2573,9 +2599,10 @@ func (m *ServiceManager) persistStatusLocked(rt *serviceRuntime) error {
 		writeJSON = writeServiceJSON
 	}
 	persisted := persistedServiceRuntimeState{
-		ServiceStatus:         cloneServiceStatus(rt.status),
-		OrphanRecoveryPending: rt.orphanRecoveryPending,
-		PendingExportChanges:  sortedStringSet(rt.pendingExportKeys),
+		ServiceStatus:           cloneServiceStatus(rt.status),
+		OrphanRecoveryPending:   rt.orphanRecoveryPending,
+		PendingExportChanges:    sortedStringSet(rt.pendingExportKeys),
+		SuppressHookDiagnostics: rt.suppressHookDiagnostics.Load(),
 	}
 	if (rt.status.PID > 0 || rt.status.ProcessGroup > 0 || rt.orphanRecoveryPending) && rt.processConfig != nil {
 		persisted.ProcessConfig = newPersistedServiceProcessConfig(rt)
@@ -3345,32 +3372,33 @@ func (m *ServiceManager) stopRuntimeForDependencyChangeLocked(ctx context.Contex
 
 func snapshotServiceRuntimeConfig(rt *serviceRuntime) serviceRuntimeConfigSnapshot {
 	return serviceRuntimeConfigSnapshot{
-		runtime:               rt,
-		config:                cloneServiceConfig(rt.config),
-		processConfig:         cloneOptionalServiceConfig(rt.processConfig),
-		processCommandDigest:  rt.processCommandDigest,
-		status:                cloneServiceStatus(rt.status),
-		process:               rt.process,
-		exit:                  rt.exit,
-		started:               rt.started,
-		stableSince:           rt.stableSince,
-		environment:           append([]string(nil), rt.environment...),
-		secretValues:          append([]string(nil), rt.secretValues...),
-		secretNames:           cloneServiceSecretMetadataMap(rt.secretNames),
-		exportSecrets:         cloneStringMap(rt.exportSecrets),
-		exportAccepted:        rt.exportAccepted,
-		exportViolation:       rt.exportViolation,
-		exportCleanupFailure:  rt.exportCleanupFailure,
-		rejectedExportSecrets: append([]string(nil), rt.rejectedExportSecrets...),
-		pendingExportKeys:     cloneStringSet(rt.pendingExportKeys),
-		exportKeysCommitted:   rt.exportKeysCommitted,
-		redactor:              rt.redactor,
-		exports:               cloneServiceExportFile(rt.exports),
-		logWriters:            append([]*serviceLogWriter(nil), rt.logWriters...),
-		terminationPending:    rt.terminationPending,
-		orphanRecoveryPending: rt.orphanRecoveryPending,
-		orphanCleanupComplete: rt.orphanCleanupComplete,
-		processOwnership:      rt.processOwnership,
+		runtime:                 rt,
+		config:                  cloneServiceConfig(rt.config),
+		processConfig:           cloneOptionalServiceConfig(rt.processConfig),
+		processCommandDigest:    rt.processCommandDigest,
+		status:                  cloneServiceStatus(rt.status),
+		process:                 rt.process,
+		exit:                    rt.exit,
+		started:                 rt.started,
+		stableSince:             rt.stableSince,
+		environment:             append([]string(nil), rt.environment...),
+		secretValues:            append([]string(nil), rt.secretValues...),
+		secretNames:             cloneServiceSecretMetadataMap(rt.secretNames),
+		exportSecrets:           cloneStringMap(rt.exportSecrets),
+		exportAccepted:          rt.exportAccepted,
+		exportViolation:         rt.exportViolation,
+		exportCleanupFailure:    rt.exportCleanupFailure,
+		rejectedExportSecrets:   append([]string(nil), rt.rejectedExportSecrets...),
+		suppressHookDiagnostics: rt.suppressHookDiagnostics.Load(),
+		pendingExportKeys:       cloneStringSet(rt.pendingExportKeys),
+		exportKeysCommitted:     rt.exportKeysCommitted,
+		redactor:                rt.redactor,
+		exports:                 cloneServiceExportFile(rt.exports),
+		logWriters:              append([]*serviceLogWriter(nil), rt.logWriters...),
+		terminationPending:      rt.terminationPending,
+		orphanRecoveryPending:   rt.orphanRecoveryPending,
+		orphanCleanupComplete:   rt.orphanCleanupComplete,
+		processOwnership:        rt.processOwnership,
 	}
 }
 
@@ -3425,6 +3453,7 @@ func restoreServiceRuntimeConfig(rt *serviceRuntime, snapshot serviceRuntimeConf
 	rt.exportViolation = snapshot.exportViolation
 	rt.exportCleanupFailure = snapshot.exportCleanupFailure
 	rt.rejectedExportSecrets = append([]string(nil), snapshot.rejectedExportSecrets...)
+	rt.suppressHookDiagnostics.Store(snapshot.suppressHookDiagnostics)
 	rt.pendingExportKeys = cloneStringSet(snapshot.pendingExportKeys)
 	rt.exportKeysCommitted = snapshot.exportKeysCommitted
 	rt.redactor = snapshot.redactor

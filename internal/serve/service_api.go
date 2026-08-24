@@ -144,11 +144,20 @@ func (s *server) handleWorkspaceServices(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		defer reader.Close()
+		var destination io.Writer = w
+		if follow {
+			flusher, ok := w.(http.Flusher)
+			if !ok {
+				writeError(w, errors.New("streaming is not supported"), http.StatusInternalServerError)
+				return
+			}
+			destination = flushingServiceLogWriter{writer: w, flusher: flusher}
+		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		if follow {
 			w.Header().Set("Cache-Control", "no-cache")
 		}
-		_, _ = io.Copy(w, reader)
+		_, _ = io.Copy(destination, reader)
 	case "exports":
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -163,6 +172,19 @@ func (s *server) handleWorkspaceServices(w http.ResponseWriter, r *http.Request,
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+type flushingServiceLogWriter struct {
+	writer  io.Writer
+	flusher http.Flusher
+}
+
+func (w flushingServiceLogWriter) Write(data []byte) (int, error) {
+	written, err := w.writer.Write(data)
+	if written > 0 {
+		w.flusher.Flush()
+	}
+	return written, err
 }
 
 func statusForServiceError(err error) int {

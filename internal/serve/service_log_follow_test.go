@@ -1,15 +1,153 @@
 package serve
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestWorkspaceServiceFollowLogsStreamsBeforeRequestEnds(t *testing.T) {
+	root := t.TempDir()
+	writeTestService(t, root, ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "worker",
+		Command:       []string{"true"},
+	})
+	logPath := filepath.Join(serviceRuntimePath(root, "worker"), "stdout.log")
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	workspace := serveWorkspace{ID: "workspace-one", Path: root}
+	server := newServiceLifecycleTestServer(t, workspace)
+	requestStarted := make(chan struct{})
+	handlerDone := make(chan struct{})
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(requestStarted)
+		defer close(handlerDone)
+		server.handleWorkspace(w, r)
+	}))
+	t.Cleanup(httpServer.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		httpServer.URL+"/api/workspaces/workspace-one/services/worker/logs?follow=true", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type responseResult struct {
+		response *http.Response
+		err      error
+	}
+	responseDone := make(chan responseResult, 1)
+	go func() {
+		response, requestErr := http.DefaultClient.Do(request)
+		responseDone <- responseResult{response: response, err: requestErr}
+	}()
+
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("follow request did not reach the server")
+	}
+	logFile, err := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := logFile.WriteString("small line\n"); err != nil {
+		_ = logFile.Close()
+		t.Fatal(err)
+	}
+	if err := logFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var response *http.Response
+	select {
+	case result := <-responseDone:
+		if result.err != nil {
+			t.Fatalf("start followed log request: %v", result.err)
+		}
+		response = result.response
+	case <-time.After(time.Second):
+		cancel()
+		<-handlerDone
+		t.Fatal("small followed log chunk was not flushed before the request ended")
+	}
+	t.Cleanup(func() { _ = response.Body.Close() })
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("followed log status = %d", response.StatusCode)
+	}
+
+	type lineResult struct {
+		line string
+		err  error
+	}
+	lineDone := make(chan lineResult, 1)
+	go func() {
+		line, readErr := bufio.NewReader(response.Body).ReadString('\n')
+		lineDone <- lineResult{line: line, err: readErr}
+	}()
+	select {
+	case result := <-lineDone:
+		if result.err != nil || result.line != "small line\n" {
+			t.Fatalf("followed log chunk = (%q, %v), want (%q, nil)", result.line, result.err, "small line\n")
+		}
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("timed out reading flushed followed log chunk")
+	}
+
+	cancel()
+	select {
+	case <-handlerDone:
+	case <-time.After(time.Second):
+		t.Fatal("follow handler did not stop after request cancellation")
+	}
+}
+
+func TestWorkspaceServiceFollowLogsRejectsWriterWithoutFlusher(t *testing.T) {
+	root := t.TempDir()
+	writeTestService(t, root, ServiceConfig{
+		SchemaVersion: serviceSchemaVersion,
+		ID:            "worker",
+		Command:       []string{"true"},
+	})
+	logPath := filepath.Join(serviceRuntimePath(root, "worker"), "stdout.log")
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, []byte("small line\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	workspace := serveWorkspace{ID: "workspace-one", Path: root}
+	server := newServiceLifecycleTestServer(t, workspace)
+	recorder := httptest.NewRecorder()
+	writer := struct{ http.ResponseWriter }{ResponseWriter: recorder}
+	request := httptest.NewRequest(http.MethodGet,
+		"/api/workspaces/workspace-one/services/worker/logs?follow=true", nil)
+	server.handleWorkspace(writer, request)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("followed log status without flusher = %d, want %d", recorder.Code, http.StatusInternalServerError)
+	}
+	if !strings.Contains(recorder.Body.String(), "streaming is not supported") {
+		t.Fatalf("followed log error without flusher = %q", recorder.Body.String())
+	}
+}
 
 func TestServiceManagerFollowLogsAcrossRotationAndTruncation(t *testing.T) {
 	manager, path := newFollowLogTestManager(t, "first\n")

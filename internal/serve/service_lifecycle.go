@@ -81,18 +81,33 @@ func (s *server) ensureServiceManagerLocked(workspace serveWorkspace) (*ServiceM
 	return manager, true, nil
 }
 
-// beginServiceManagerRemoval claims lifecycle ownership for one Workspace.
-// Concurrent callers share the same completion instead of stopping, detaching,
-// or releasing the authoritative manager more than once.
-func (s *server) beginServiceManagerRemoval(workspace serveWorkspace) (*serviceManagerRemoval, bool, error) {
+// beginWorkspaceServiceManagerRemoval resolves the Workspace and claims its
+// lifecycle ownership at the same transaction boundary used by additions and
+// removal commits. Concurrent callers share the same completion instead of
+// stopping, detaching, or releasing the authoritative manager more than once.
+func (s *server) beginWorkspaceServiceManagerRemoval(id string) (*serviceManagerRemoval, bool, error) {
 	s.serviceMu.Lock()
 	defer s.serviceMu.Unlock()
-	if removal := s.serviceRemovals[workspace.ID]; removal != nil {
+	if removal := s.serviceRemovals[id]; removal != nil {
 		return removal, false, nil
+	}
+	cfg, err := s.loadConfig()
+	if err != nil {
+		return nil, false, err
+	}
+	var workspace serveWorkspace
+	for _, candidate := range cfg.Workspaces {
+		if candidate.ID == id {
+			workspace = candidate
+			break
+		}
+	}
+	if workspace.ID == "" {
+		return nil, false, errors.New("workspace not found: " + id)
 	}
 	key, manager, err := s.registeredServiceManagerLocked(workspace)
 	if err != nil {
-		return nil, false, err
+		return nil, false, errWorkspaceRemovalLifecycleUnavailable
 	}
 	if s.serviceRemovals == nil {
 		s.serviceRemovals = make(map[string]*serviceManagerRemoval)
@@ -115,23 +130,49 @@ func waitForServiceManagerRemoval(removal *serviceManagerRemoval) error {
 	return removal.result
 }
 
-// detachServiceManagerRemoval removes only the exact manager claimed by the
-// removal transaction. The manager remains registered throughout Stop, so a
-// failed or partial shutdown continues to be authoritative and lookup-able.
-func (s *server) detachServiceManagerRemoval(removal *serviceManagerRemoval) error {
+// commitWorkspaceServiceManagerRemoval patches only the claimed Workspace out
+// of the latest durable config and detaches its exact manager as one serialized
+// transaction. The potentially long Stop happens before this boundary, so
+// unrelated Workspace supervision remains available while shutdown runs.
+func (s *server) commitWorkspaceServiceManagerRemoval(removal *serviceManagerRemoval) (serveWorkspace, error) {
 	s.serviceMu.Lock()
 	defer s.serviceMu.Unlock()
 	if removal == nil || s.serviceRemovals[removal.workspaceID] != removal {
-		return errWorkspaceRemovalLifecycleUnavailable
+		return serveWorkspace{}, errWorkspaceRemovalLifecycleUnavailable
 	}
-	if removal.manager == nil {
-		return nil
+	if removal.manager != nil && s.services[removal.key] != removal.manager {
+		return serveWorkspace{}, errWorkspaceRemovalLifecycleUnavailable
 	}
-	if s.services[removal.key] != removal.manager {
-		return errWorkspaceRemovalLifecycleUnavailable
+	cfg, err := s.loadConfig()
+	if err != nil {
+		return serveWorkspace{}, err
 	}
-	delete(s.services, removal.key)
-	return nil
+	next := make([]serveWorkspace, 0, len(cfg.Workspaces))
+	var removed serveWorkspace
+	for _, workspace := range cfg.Workspaces {
+		if workspace.ID == removal.workspaceID {
+			removed = workspace
+			continue
+		}
+		next = append(next, workspace)
+	}
+	if removed.ID == "" {
+		return serveWorkspace{}, errWorkspaceRemovalLifecycleUnavailable
+	}
+	cfg.Workspaces = next
+	if cfg.ActiveID == removal.workspaceID {
+		cfg.ActiveID = ""
+		if len(cfg.Workspaces) > 0 {
+			cfg.ActiveID = cfg.Workspaces[0].ID
+		}
+	}
+	if err := s.saveConfig(cfg); err != nil {
+		return serveWorkspace{}, err
+	}
+	if removal.manager != nil {
+		delete(s.services, removal.key)
+	}
+	return removed, nil
 }
 
 func (s *server) finishServiceManagerRemoval(removal *serviceManagerRemoval, result error) {

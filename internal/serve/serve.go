@@ -70,6 +70,10 @@ type workspacesResponse struct {
 }
 
 var workspaceIconFiles = map[string]string{
+	"pua-red":                 "pua-red.png",
+	"pua-green":               "pua-green.png",
+	"pua-blue":                "pua-blue.png",
+	"pua-purple":              "pua-purple.png",
 	"home-base":               "01-home-base.png",
 	"personal-tasks":          "02-personal-tasks.png",
 	"product-roadmap":         "03-product-roadmap.png",

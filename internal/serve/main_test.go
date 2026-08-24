@@ -52,6 +52,16 @@ func TestFaviconIsLinkedAndEmbedded(t *testing.T) {
 	if icon.XMLName.Local != "svg" {
 		t.Fatalf("favicon root element is %q, want svg", icon.XMLName.Local)
 	}
+
+	for _, name := range []string{"pua-yellow", "pua-red", "pua-green", "pua-blue", "pua-purple"} {
+		data, err := staticFiles.ReadFile("static/workspace-icons/" + name + ".png")
+		if err != nil {
+			t.Fatalf("workspace icon %s is not embedded: %v", name, err)
+		}
+		if len(data) == 0 {
+			t.Fatalf("workspace icon %s is empty", name)
+		}
+	}
 }
 
 func TestCanonicalFrontendAssetsAndHistoryFallback(t *testing.T) {
@@ -117,16 +127,19 @@ func TestWorkspaceIconCanBeUpdatedAndReset(t *testing.T) {
 		return rec
 	}
 
-	rec := update(`{"icon":"software-engineering"}`)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("workspace icon update returned %d: %s", rec.Code, rec.Body.String())
-	}
-	var workspace serveWorkspace
-	if err := json.Unmarshal(rec.Body.Bytes(), &workspace); err != nil {
-		t.Fatal(err)
-	}
-	if workspace.Icon != "software-engineering" {
-		t.Fatalf("updated workspace icon is %q", workspace.Icon)
+	var rec *httptest.ResponseRecorder
+	for _, icon := range []string{"pua-red", "pua-green", "pua-blue", "pua-purple", "software-engineering"} {
+		rec = update(`{"icon":"` + icon + `"}`)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("workspace icon %s update returned %d: %s", icon, rec.Code, rec.Body.String())
+		}
+		var workspace serveWorkspace
+		if err := json.Unmarshal(rec.Body.Bytes(), &workspace); err != nil {
+			t.Fatal(err)
+		}
+		if workspace.Icon != icon {
+			t.Fatalf("updated workspace icon is %q, want %q", workspace.Icon, icon)
+		}
 	}
 	cfg, err := s.loadConfig()
 	if err != nil {

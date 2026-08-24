@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -5641,6 +5642,250 @@ func waitForSchedulerControllerQueue(t *testing.T, controller *resourceControlle
 			t.Fatalf("Scheduler controller queued jobs = %d, want at least %d", queued, want)
 		}
 		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestSchedulerControllerJobCancellationBoundaries(t *testing.T) {
+	t.Run("cancelled before start", func(t *testing.T) {
+		manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+		_ = manager.takeReconcileRequests()
+		select {
+		case <-manager.reconcileWake:
+		default:
+		}
+		controller, release := holdSchedulerController(t, manager, workspace)
+		ctx, cancel := context.WithCancel(context.Background())
+		var started atomic.Bool
+		done := make(chan error, 1)
+		go func() {
+			_, err := runSchedulerControllerJob(ctx, manager.server, workspace, func() schedulerControllerJobOutcome[string] {
+				started.Store(true)
+				return schedulerControllerJobOutcome[string]{Value: "persisted", Material: true}
+			}, func(string) {
+				manager.requestReconcile(reconcileScheduler)
+			})
+			done <- err
+		}()
+		waitForSchedulerControllerQueue(t, controller, 1)
+		cancel()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled controller caller = %v", err)
+		}
+		release()
+		if err := manager.withResourceController(context.Background(), workspace, app.SchedulerResourceID, func() error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+		if started.Load() {
+			t.Fatal("cancelled queued Scheduler mutation started")
+		}
+		if request := manager.takeReconcileRequests(); request&reconcileScheduler != 0 {
+			t.Fatalf("cancelled queued mutation requested Scheduler reconciliation: %08b", request)
+		}
+		select {
+		case <-manager.reconcileWake:
+			t.Fatal("cancelled queued mutation woke the reconcile loop")
+		default:
+		}
+	})
+
+	t.Run("cancelled after start", func(t *testing.T) {
+		manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+		_ = manager.takeReconcileRequests()
+		select {
+		case <-manager.reconcileWake:
+		default:
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		started := make(chan struct{})
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		releaseMutation := func() { releaseOnce.Do(func() { close(release) }) }
+		defer releaseMutation()
+		var followups atomic.Int32
+		done := make(chan error, 1)
+		go func() {
+			_, err := runSchedulerControllerJob(ctx, manager.server, workspace, func() schedulerControllerJobOutcome[app.ResourceAgentDefaults] {
+				close(started)
+				<-release
+				puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+				if err != nil {
+					return schedulerControllerJobOutcome[app.ResourceAgentDefaults]{Err: err}
+				}
+				updated, err := puaWorkspace.SetResourceAgentDefaults(app.ResourceAgentDefaults{
+					Project: app.AgentBinding{Kind: "agent", Name: "replacement"},
+					Task:    app.AgentBinding{Kind: "profile", Name: "default"},
+				})
+				return schedulerControllerJobOutcome[app.ResourceAgentDefaults]{Value: updated, Material: err == nil, Err: err}
+			}, func(app.ResourceAgentDefaults) {
+				followups.Add(1)
+				manager.requestReconcile(reconcileScheduler)
+			})
+			done <- err
+		}()
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("Scheduler defaults mutation did not start")
+		}
+		cancel()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled running controller caller = %v", err)
+		}
+		releaseMutation()
+		if err := manager.withResourceController(context.Background(), workspace, app.SchedulerResourceID, func() error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+		if got := followups.Load(); got != 1 {
+			t.Fatalf("durable mutation follow-ups = %d, want 1", got)
+		}
+		puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		runtimeConfig, err := puaWorkspace.RuntimeConfig()
+		if err != nil || runtimeConfig.ResourceDefaults.Project != (app.AgentBinding{Kind: "agent", Name: "replacement"}) {
+			t.Fatalf("cancelled caller durable defaults = %#v, %v", runtimeConfig.ResourceDefaults, err)
+		}
+		if request := manager.takeReconcileRequests(); request&reconcileScheduler == 0 {
+			t.Fatalf("completed running mutation reconcile request = %08b, want Scheduler", request)
+		}
+		select {
+		case <-manager.reconcileWake:
+		default:
+			t.Fatal("completed running mutation did not wake the reconcile loop")
+		}
+	})
+
+	t.Run("natural acceptance after caller cancellation", func(t *testing.T) {
+		manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+		ctx, cancel := context.WithCancel(context.Background())
+		started := make(chan struct{})
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		releaseAcceptance := func() { releaseOnce.Do(func() { close(release) }) }
+		defer releaseAcceptance()
+		done := make(chan error, 1)
+		go func() {
+			_, err := runSchedulerControllerJob(ctx, manager.server, workspace, func() schedulerControllerJobOutcome[resourceMailboxMessage] {
+				close(started)
+				<-release
+				message, acceptErr := manager.acceptResourceMessageDurable(context.Background(), workspace, app.SchedulerResourceID, resourceMessageRequest{
+					Text: "compile after cancellation", Mode: resourceMessageModeEnqueue, Role: "user",
+				})
+				return schedulerControllerJobOutcome[resourceMailboxMessage]{Value: message, Material: acceptErr == nil, Err: acceptErr}
+			}, func(message resourceMailboxMessage) {
+				manager.server.enqueueSchedulerMailboxReconcile(workspace, message)
+			})
+			done <- err
+		}()
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("Scheduler natural-language acceptance did not start")
+		}
+		cancel()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled natural-language caller = %v", err)
+		}
+		releaseAcceptance()
+		if err := manager.withResourceController(context.Background(), workspace, app.SchedulerResourceID, func() error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+		if err := manager.withResourceController(context.Background(), workspace, app.SchedulerResourceID, func() error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+		mailbox, err := loadResourceMailboxForResource(workspace.Path, app.SchedulerResourceID)
+		if err != nil || len(mailbox.Messages) != 1 || mailbox.Messages[0].Text != "compile after cancellation" {
+			t.Fatalf("cancelled caller Scheduler acceptances = %#v, %v", mailbox.Messages, err)
+		}
+	})
+
+	for _, test := range []struct {
+		name     string
+		outcome  schedulerControllerJobOutcome[string]
+		loseLock bool
+		wantErr  bool
+	}{
+		{name: "normalized no-op", outcome: schedulerControllerJobOutcome[string]{Value: "unchanged"}},
+		{name: "validation or write failure", outcome: schedulerControllerJobOutcome[string]{Material: true, Err: errors.New("write failed")}, wantErr: true},
+		{name: "ownership lost", outcome: schedulerControllerJobOutcome[string]{Value: "persisted", Material: true}, loseLock: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+			if test.loseLock {
+				manager.server.locks = newWorkspaceLockManager("127.0.0.1:4936", manager.server.config)
+				t.Cleanup(manager.server.locks.closeAll)
+			}
+			_ = manager.takeReconcileRequests()
+			select {
+			case <-manager.reconcileWake:
+			default:
+			}
+			var followups atomic.Int32
+			_, err := runSchedulerControllerJob(context.Background(), manager.server, workspace, func() schedulerControllerJobOutcome[string] {
+				return test.outcome
+			}, func(string) {
+				followups.Add(1)
+				manager.requestReconcile(reconcileScheduler)
+			})
+			if (err != nil) != test.wantErr {
+				t.Fatalf("controller result error = %v, wantErr %v", err, test.wantErr)
+			}
+			if got := followups.Load(); got != 0 {
+				t.Fatalf("rejected mutation follow-ups = %d, want 0", got)
+			}
+			if request := manager.takeReconcileRequests(); request&reconcileScheduler != 0 {
+				t.Fatalf("rejected mutation reconcile request = %08b", request)
+			}
+			select {
+			case <-manager.reconcileWake:
+				t.Fatal("rejected mutation woke the reconcile loop")
+			default:
+			}
+		})
+	}
+}
+
+func TestSchedulerIdempotentLifecycleChangeDoesNotWakeReconcile(t *testing.T) {
+	manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Pause once", Condition: "every minute", Target: "workspace",
+		Trigger: &app.ScheduleTrigger{
+			Type: app.ScheduleTriggerInterval, EverySeconds: 60,
+			AnchorAt: time.Now().UTC().Add(time.Minute).Format(time.RFC3339Nano),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := func() *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		manager.server.handleWorkspace(recorder, httptest.NewRequest(http.MethodPost,
+			"/api/workspaces/"+workspace.ID+"/scheduler/"+created.ID+"/pause", nil))
+		return recorder
+	}
+	if recorder := request(); recorder.Code != http.StatusOK {
+		t.Fatalf("initial pause = %d %s", recorder.Code, recorder.Body.String())
+	}
+	_ = manager.takeReconcileRequests()
+	select {
+	case <-manager.reconcileWake:
+	default:
+	}
+	if recorder := request(); recorder.Code != http.StatusOK {
+		t.Fatalf("idempotent pause = %d %s", recorder.Code, recorder.Body.String())
+	}
+	if request := manager.takeReconcileRequests(); request&reconcileScheduler != 0 {
+		t.Fatalf("idempotent pause reconcile request = %08b", request)
+	}
+	select {
+	case <-manager.reconcileWake:
+		t.Fatal("idempotent pause woke the reconcile loop")
+	default:
 	}
 }
 

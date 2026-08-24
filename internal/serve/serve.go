@@ -809,10 +809,10 @@ func (s *server) updateWorkspaceDefaults(w http.ResponseWriter, r *http.Request,
 
 // setWorkspaceDefaults serializes fallback changes with native Scheduler
 // reconciliation. An attention-held occurrence has no deadline, so a durable
-// material change requests a prompt pass after the Scheduler controller is
-// released. Cancelled, stale, failed, and normalized no-op requests do not
-// disturb the reconcile loop.
-func (s *server) setWorkspaceDefaults(ctx context.Context, workspace serveWorkspace, defaults app.ResourceAgentDefaults) (updated app.ResourceAgentDefaults, err error) {
+// material change requests a prompt pass from the controller job which made
+// the change. Cancelled-before-start, stale, failed, and normalized no-op
+// requests do not disturb the reconcile loop.
+func (s *server) setWorkspaceDefaults(ctx context.Context, workspace serveWorkspace, defaults app.ResourceAgentDefaults) (app.ResourceAgentDefaults, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -830,30 +830,28 @@ func (s *server) setWorkspaceDefaults(ctx context.Context, workspace serveWorksp
 		return puaWorkspace.SetResourceAgentDefaults(defaults)
 	}
 
-	changed := false
-	err = s.agents.withResourceController(ctx, workspace, app.SchedulerResourceID, func() error {
+	return runSchedulerControllerJob(ctx, s, workspace, func() schedulerControllerJobOutcome[app.ResourceAgentDefaults] {
 		if err := s.requireWorkspaceOwnership(workspace.Path); err != nil {
-			return err
+			return schedulerControllerJobOutcome[app.ResourceAgentDefaults]{Err: err}
 		}
 		puaWorkspace, err := app.OpenWorkspace(workspace.Path)
 		if err != nil {
-			return err
+			return schedulerControllerJobOutcome[app.ResourceAgentDefaults]{Err: err}
 		}
 		previous, err := puaWorkspace.RuntimeConfig()
 		if err != nil {
-			return err
+			return schedulerControllerJobOutcome[app.ResourceAgentDefaults]{Err: err}
 		}
-		updated, err = puaWorkspace.SetResourceAgentDefaults(defaults)
+		updated, err := puaWorkspace.SetResourceAgentDefaults(defaults)
 		if err != nil {
-			return err
+			return schedulerControllerJobOutcome[app.ResourceAgentDefaults]{Err: err}
 		}
-		changed = previous.ResourceDefaults != updated
-		return nil
-	})
-	if err == nil && changed && ctx.Err() == nil && s.ownsWorkspace(workspace.Path) {
+		return schedulerControllerJobOutcome[app.ResourceAgentDefaults]{
+			Value: updated, Material: previous.ResourceDefaults != updated,
+		}
+	}, func(app.ResourceAgentDefaults) {
 		s.agents.requestReconcile(reconcileScheduler)
-	}
-	return updated, err
+	})
 }
 
 func (s *server) updateWorkspaceGenerationPolicy(w http.ResponseWriter, r *http.Request, workspaceID string) {
@@ -2053,12 +2051,11 @@ func (s *server) resource(ctx context.Context, id string, resourceID string) (ap
 		return app.ResourceDetailView{}, err
 	}
 	if normalizedResourceID(resourceID) == app.SchedulerResourceID && s.agents != nil {
-		var snapshot app.SchedulerSnapshot
-		err = s.agents.withResourceController(ctx, workspace, app.SchedulerResourceID, func() error {
-			var snapshotErr error
-			snapshot, snapshotErr = newNativeScheduler(s.agents, workspace).Snapshot(s.agents.now())
-			return snapshotErr
-		})
+		snapshot, snapshotErr := runSchedulerControllerJob(ctx, s, workspace, func() schedulerControllerJobOutcome[app.SchedulerSnapshot] {
+			value, readErr := newNativeScheduler(s.agents, workspace).Snapshot(s.agents.now())
+			return schedulerControllerJobOutcome[app.SchedulerSnapshot]{Value: value, Err: readErr}
+		}, nil)
+		err = snapshotErr
 		if err != nil {
 			return app.ResourceDetailView{}, err
 		}

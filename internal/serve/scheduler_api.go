@@ -51,6 +51,42 @@ type schedulerResourceDetail struct {
 	Scheduler *schedulerapi.Snapshot `json:"scheduler,omitempty"`
 }
 
+// schedulerControllerJobOutcome keeps controller-owned results independent of
+// an HTTP request's lifetime. withResourceController may return as soon as the
+// caller is cancelled even though a job which already started must still
+// finish its durable boundary.
+type schedulerControllerJobOutcome[T any] struct {
+	Value    T
+	Material bool
+	Err      error
+}
+
+func runSchedulerControllerJob[T any](
+	ctx context.Context,
+	s *server,
+	workspace serveWorkspace,
+	job func() schedulerControllerJobOutcome[T],
+	afterMaterial func(T),
+) (T, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	result := make(chan schedulerControllerJobOutcome[T], 1)
+	err := s.agents.withResourceController(ctx, workspace, app.SchedulerResourceID, func() error {
+		outcome := job()
+		if outcome.Err == nil && outcome.Material && s.ownsWorkspace(workspace.Path) && afterMaterial != nil {
+			afterMaterial(outcome.Value)
+		}
+		result <- outcome
+		return outcome.Err
+	})
+	if err != nil {
+		var zero T
+		return zero, err
+	}
+	return (<-result).Value, nil
+}
+
 func schedulerResourceDetailAPIResponse(detail app.ResourceDetailView) schedulerResourceDetail {
 	response := schedulerResourceDetail{ResourceDetailView: detail}
 	if detail.Scheduler != nil {
@@ -75,12 +111,10 @@ func (s *server) handleScheduler(w http.ResponseWriter, r *http.Request, workspa
 	if len(parts) == 0 {
 		switch r.Method {
 		case http.MethodGet:
-			var snapshot app.SchedulerSnapshot
-			readErr := s.agents.withResourceController(r.Context(), workspace, app.SchedulerResourceID, func() error {
-				var err error
-				snapshot, err = native.Snapshot(s.agents.now())
-				return err
-			})
+			snapshot, readErr := runSchedulerControllerJob(r.Context(), s, workspace, func() schedulerControllerJobOutcome[app.SchedulerSnapshot] {
+				value, snapshotErr := native.Snapshot(s.agents.now())
+				return schedulerControllerJobOutcome[app.SchedulerSnapshot]{Value: value, Err: snapshotErr}
+			}, nil)
 			if readErr != nil {
 				writeError(w, readErr, http.StatusBadRequest)
 				return
@@ -109,17 +143,11 @@ func (s *server) handleScheduler(w http.ResponseWriter, r *http.Request, workspa
 			writeError(w, err, http.StatusBadRequest)
 			return
 		}
-		var changed app.Schedule
-		changeErr := s.agents.withResourceController(r.Context(), workspace, app.SchedulerResourceID, func() error {
-			var err error
-			changed, err = native.Change(r.Context(), change)
-			return err
-		})
+		changed, changeErr := s.changeNativeSchedule(r.Context(), workspace, native, change)
 		if changeErr != nil {
 			writeSchedulerChangeError(w, changeErr)
 			return
 		}
-		s.agents.requestReconcile(reconcileScheduler)
 		writeJSON(w, schedulerapi.FromSchedule(changed))
 		return
 	}
@@ -189,18 +217,61 @@ func schedulerNativeChange(body schedulerChangeRequest) (NativeSchedulerChange, 
 
 func (s *server) applyDirectScheduleChange(w http.ResponseWriter, r *http.Request, workspace serveWorkspace, change NativeSchedulerChange) {
 	native := newNativeScheduler(s.agents, workspace)
-	var changed app.Schedule
-	err := s.agents.withResourceController(r.Context(), workspace, app.SchedulerResourceID, func() error {
-		var err error
-		changed, err = native.Change(r.Context(), change)
-		return err
-	})
+	changed, err := s.changeNativeSchedule(r.Context(), workspace, native, change)
 	if err != nil {
 		writeSchedulerChangeError(w, err)
 		return
 	}
-	s.agents.requestReconcile(reconcileScheduler)
 	writeJSON(w, schedulerapi.FromSchedule(changed))
+}
+
+func (s *server) changeNativeSchedule(ctx context.Context, workspace serveWorkspace, native *NativeScheduler, change NativeSchedulerChange) (app.Schedule, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	jobCtx := context.WithoutCancel(ctx)
+	return runSchedulerControllerJob(ctx, s, workspace, func() schedulerControllerJobOutcome[app.Schedule] {
+		if err := s.requireWorkspaceOwnership(workspace.Path); err != nil {
+			return schedulerControllerJobOutcome[app.Schedule]{Err: err}
+		}
+		material, err := nativeScheduleChangeIsMaterial(workspace, change)
+		if err != nil {
+			return schedulerControllerJobOutcome[app.Schedule]{Err: err}
+		}
+		changed, err := native.Change(jobCtx, change)
+		return schedulerControllerJobOutcome[app.Schedule]{Value: changed, Material: material, Err: err}
+	}, func(app.Schedule) {
+		s.agents.requestReconcile(reconcileScheduler)
+	})
+}
+
+func nativeScheduleChangeIsMaterial(workspace serveWorkspace, change NativeSchedulerChange) (bool, error) {
+	desiredState := ""
+	switch change.Operation {
+	case app.ScheduleChangePause:
+		desiredState = app.ScheduleStatePaused
+	case app.ScheduleChangeResume:
+		desiredState = app.ScheduleStateActive
+	default:
+		// Successful create, update, and remove operations always rewrite the
+		// portable definition. Validation and write failures are filtered by
+		// the job outcome before its follow-up runs.
+		return true, nil
+	}
+	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+	if err != nil {
+		return false, err
+	}
+	config, err := puaWorkspace.Scheduler()
+	if err != nil {
+		return false, err
+	}
+	for _, schedule := range config.Schedules {
+		if schedule.ID == change.ID {
+			return schedule.State != desiredState, nil
+		}
+	}
+	return false, nil
 }
 
 func writeSchedulerChangeError(w http.ResponseWriter, err error) {
@@ -300,19 +371,27 @@ func (s *server) handleNaturalLanguageScheduleRequest(w http.ResponseWriter, r *
 		"Target":              target,
 	}), "\n")
 	role, sender := agentHubMessageProvenance(userName)
-	var message resourceMailboxMessage
-	acceptErr := s.agents.withResourceController(r.Context(), workspace, app.SchedulerResourceID, func() error {
-		var err error
-		message, err = s.agents.acceptResourceMessageDurable(r.Context(), workspace, app.SchedulerResourceID, resourceMessageRequest{
+	message, acceptErr := runSchedulerControllerJob(r.Context(), s, workspace, func() schedulerControllerJobOutcome[resourceMailboxMessage] {
+		accepted, acceptErr := s.agents.acceptResourceMessageDurable(context.WithoutCancel(r.Context()), workspace, app.SchedulerResourceID, resourceMessageRequest{
 			Text: text, Mode: resourceMessageModeEnqueue, Role: role, Sender: sender,
 		})
-		return err
+		return schedulerControllerJobOutcome[resourceMailboxMessage]{Value: accepted, Material: acceptErr == nil, Err: acceptErr}
+	}, func(accepted resourceMailboxMessage) {
+		s.enqueueSchedulerMailboxReconcile(workspace, accepted)
 	})
 	if acceptErr != nil {
 		writeError(w, acceptErr, resourceErrorStatus(acceptErr))
 		return
 	}
 	s.markResourceReadOnUserMessage(workspace.Path, app.SchedulerResourceID, userName)
+	response := mailboxMessageResponse(message)
+	response.Reference = fmt.Sprintf("/api/workspaces/%s/messages/%s", workspace.ID, message.ID)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(response)
+}
+
+func (s *server) enqueueSchedulerMailboxReconcile(workspace serveWorkspace, message resourceMailboxMessage) {
 	if wakeErr := s.agents.enqueueResourceController(workspace, app.SchedulerResourceID, func() error {
 		if err := s.agents.reconcileResourceMailboxLocked(context.Background(), workspace, app.SchedulerResourceID); err != nil {
 			recordMailboxFailure(workspace.Path, message.ID, err)
@@ -323,9 +402,4 @@ func (s *server) handleNaturalLanguageScheduleRequest(w http.ResponseWriter, r *
 		recordMailboxFailure(workspace.Path, message.ID, wakeErr)
 		s.agents.requestReconcile(reconcileNotifications)
 	}
-	response := mailboxMessageResponse(message)
-	response.Reference = fmt.Sprintf("/api/workspaces/%s/messages/%s", workspace.ID, message.ID)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusAccepted)
-	_ = json.NewEncoder(w).Encode(response)
 }

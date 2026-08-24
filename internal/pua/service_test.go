@@ -39,3 +39,28 @@ func TestServiceExportsPlainOutputIsDeterministic(t *testing.T) {
 		}
 	})
 }
+
+func TestServiceStartSurfacesDisabledServiceConflict(t *testing.T) {
+	withTempCwd(t, func(_ string) {
+		run(t, "init")
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/services/worker/start") {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"code":"service_disabled","error":"start service \"worker\": service is disabled; enable it first"}`))
+		}))
+		defer server.Close()
+
+		output, err := runErr(t, "service", "start", "worker", "--server="+server.URL)
+		if output != "" {
+			t.Fatalf("service start output = %q, want empty", output)
+		}
+		want := `PUA Server service_disabled: start service "worker": service is disabled; enable it first`
+		if err == nil || err.Error() != want {
+			t.Fatalf("service start error = %v, want %q", err, want)
+		}
+	})
+}

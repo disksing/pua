@@ -57,7 +57,7 @@
     }
   }
 
-  async function action(row: ServiceRow, name: "start" | "stop" | "restart"): Promise<void> {
+  async function action(row: ServiceRow, name: "enable" | "disable" | "start" | "stop" | "restart"): Promise<void> {
     const requestWorkspaceId = row.workspaceId;
     if (!isCurrentWorkspace(requestWorkspaceId) || !rows.includes(row) || pending) return;
     const version = ++actionVersion;
@@ -125,7 +125,7 @@
     {#each rows as row (`${row.workspaceId}:${row.service.id}`)}
       {@const service = row.service}
       <section class="service-card" class:attention={service.attentionRequired}>
-        <header><div><h3>{service.id}</h3><span class="service-state">{service.state}</span></div><div class="service-actions"><button type="button" class="secondary-button" disabled={Boolean(pending)} onclick={() => void action(row, "start")}><Icon name="play" /><span>Start</span></button><button type="button" class="secondary-button" disabled={Boolean(pending)} onclick={() => void action(row, "restart")}><Icon name="rotate-ccw" /><span>Restart</span></button><button type="button" class="secondary-button" disabled={Boolean(pending)} onclick={() => void action(row, "stop")}><Icon name="square" /><span>Stop</span></button><button type="button" class="secondary-button" onclick={() => void showLogs(row)}><Icon name="scroll-text" /><span>Logs</span></button></div></header>
+        <header><div><h3>{service.id}</h3><span class="service-state">{service.state}</span></div><div class="service-actions">{#if service.enabled}<button type="button" class="secondary-button" disabled={Boolean(pending)} onclick={() => void action(row, "start")}><Icon name="play" /><span>Start</span></button><button type="button" class="secondary-button" disabled={Boolean(pending)} onclick={() => void action(row, "restart")}><Icon name="rotate-ccw" /><span>Restart</span></button><button type="button" class="secondary-button" disabled={Boolean(pending)} onclick={() => void action(row, "stop")}><Icon name="square" /><span>Stop</span></button><button type="button" class="secondary-button" disabled={Boolean(pending)} onclick={() => void action(row, "disable")}><Icon name="power" /><span>Disable</span></button>{:else}<button type="button" class="secondary-button" disabled={Boolean(pending)} onclick={() => void action(row, "enable")}><Icon name="power" /><span>Enable</span></button>{/if}<button type="button" class="secondary-button" onclick={() => void showLogs(row)}><Icon name="scroll-text" /><span>Logs</span></button></div></header>
         <dl><div><dt>Dependencies</dt><dd>{service.dependencies?.join(", ") || "None"}</dd></div><div><dt>Readiness</dt><dd>{service.readiness.ready ? "Ready" : service.readiness.configured ? (service.readiness.lastError || "Waiting") : "Not configured"}</dd></div><div><dt>Cleanup</dt><dd>{service.cleanup.configured ? (service.cleanup.succeeded ? "Succeeded" : service.cleanup.lastError || "Pending") : "Not configured"}</dd></div>{#if service.nextRetryAt}<div><dt>Next retry</dt><dd>{service.nextRetryAt}</dd></div>{/if}</dl>
         {#if service.lastError}<p class="service-error">{service.lastError}</p>{/if}
         {#if service.exports.secrets?.length}<p class="service-secrets">Secrets: {service.exports.secrets.map((secret) => secret.name).join(", ")}</p>{/if}

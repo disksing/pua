@@ -24,6 +24,15 @@ function service(id: string): ServiceStatus {
   };
 }
 
+function disabledService(id: string): ServiceStatus {
+  return {
+    ...service(id),
+    enabled: false,
+    state: "disabled",
+    readiness: { configured: true, ready: false },
+  };
+}
+
 function serviceResponse(...services: ServiceStatus[]): Response {
   return new Response(JSON.stringify({ services }), {
     headers: { "content-type": "application/json" },
@@ -37,6 +46,14 @@ function serviceButton(target: HTMLElement, serviceId: string, label: string): H
     .find((candidate) => candidate.textContent?.trim() === label);
   if (!button) throw new Error(`Missing ${label} button for ${serviceId}`);
   return button;
+}
+
+function serviceActionLabels(target: HTMLElement, serviceId: string): string[] {
+  const card = Array.from(target.querySelectorAll<HTMLElement>(".service-card"))
+    .find((candidate) => candidate.querySelector("h3")?.textContent === serviceId);
+  if (!card) throw new Error(`Missing service card for ${serviceId}`);
+  return Array.from(card.querySelectorAll<HTMLButtonElement>("button"))
+    .map((button) => button.textContent?.trim() || "");
 }
 
 async function flushResponses(): Promise<void> {
@@ -150,6 +167,50 @@ describe("ServicesPanel Workspace identity", () => {
     expect(bLists).toBe(1);
     expect(target.textContent).toContain("b-service");
     expect(target.textContent).not.toContain("a-service");
+    expect(onToast).not.toHaveBeenCalled();
+  });
+});
+
+describe("ServicesPanel service actions", () => {
+  it("offers Enable alone for a disabled service and restores enabled actions after enabling", async () => {
+    const enableResponse = deferred<Response>();
+    let lists = 0;
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
+      if (url === "/api/workspaces/workspace-a/services" && !init?.method) {
+        lists += 1;
+        return Promise.resolve(serviceResponse(lists === 1 ? disabledService("worker") : service("worker")));
+      }
+      if (url === "/api/workspaces/workspace-a/services/worker/enable" && init?.method === "POST") {
+        return enableResponse.promise;
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const onToast = vi.fn();
+    const target = document.createElement("section");
+    document.body.append(target);
+    const component = mount(ServicesPanelHarness, {
+      target,
+      props: { initialWorkspaceId: "workspace-a", onToast },
+    });
+    mounted.push(component);
+
+    await vi.waitFor(() => expect(serviceActionLabels(target, "worker")).toEqual(["Enable", "Logs"]));
+    const enable = serviceButton(target, "worker", "Enable");
+    enable.click();
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      "/api/workspaces/workspace-a/services/worker/enable",
+      expect.objectContaining({ method: "POST" }),
+    ));
+    expect(enable.disabled).toBe(true);
+
+    enableResponse.resolve(new Response(JSON.stringify(service("worker")), {
+      headers: { "content-type": "application/json" },
+    }));
+    await vi.waitFor(() => expect(serviceActionLabels(target, "worker"))
+      .toEqual(["Start", "Restart", "Stop", "Disable", "Logs"]));
+    expect(lists).toBe(2);
     expect(onToast).not.toHaveBeenCalled();
   });
 });

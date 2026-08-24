@@ -101,7 +101,7 @@ func (s *server) handleWorkspaceServices(w http.ResponseWriter, r *http.Request,
 			operationErr = manager.RestartService(r.Context(), id)
 		}
 		if operationErr != nil {
-			writeError(w, operationErr, statusForServiceError(operationErr))
+			writeError(w, serviceActionAPIError(operationErr), statusForServiceError(operationErr))
 			return
 		}
 		status, _ := manager.Show(id)
@@ -191,7 +191,17 @@ func statusForServiceError(err error) int {
 	if errors.Is(err, os.ErrNotExist) {
 		return http.StatusNotFound
 	}
+	if errors.Is(err, errServiceDisabled) {
+		return http.StatusConflict
+	}
 	return http.StatusBadRequest
+}
+
+func serviceActionAPIError(err error) error {
+	if errors.Is(err, errServiceDisabled) {
+		return &resourceAPIError{Code: "service_disabled", Message: err.Error()}
+	}
+	return err
 }
 
 func (s *server) handleServiceBindings(w http.ResponseWriter, r *http.Request, workspaceID string) {

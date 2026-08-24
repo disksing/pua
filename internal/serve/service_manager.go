@@ -27,6 +27,8 @@ type ServiceSecretResolver interface {
 	ResolveSecret(name string) (value string, source string, err error)
 }
 
+var errServiceDisabled = errors.New("service is disabled; enable it first")
+
 type ServiceSecretResolverFunc func(string) (string, string, error)
 
 func (f ServiceSecretResolverFunc) ResolveSecret(name string) (string, string, error) {
@@ -3239,6 +3241,9 @@ func (m *ServiceManager) StartService(ctx context.Context, id string) error {
 	if rt == nil {
 		return os.ErrNotExist
 	}
+	if !rt.config.Enabled {
+		return fmt.Errorf("start service %q: %w", id, errServiceDisabled)
+	}
 	if serviceRuntimeNeedsOrphanRecovery(rt) {
 		rt.status.State = ServiceStateAttentionRequired
 		rt.status.AttentionRequired = true
@@ -3330,6 +3335,9 @@ func (m *ServiceManager) RestartService(ctx context.Context, id string) error {
 	rt := m.runtimes[id]
 	if rt == nil {
 		return os.ErrNotExist
+	}
+	if !rt.config.Enabled {
+		return fmt.Errorf("restart service %q: %w", id, errServiceDisabled)
 	}
 	changed := map[string]struct{}{id: {}}
 	impacted := serviceDependencyChangeSet(m.graph, m.graph, changed)

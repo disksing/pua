@@ -331,6 +331,9 @@ func Main(args []string) error {
 	if err := s.acquireConfiguredWorkspaceLocks(); err != nil {
 		return err
 	}
+	if err := s.backfillConfiguredWorkspaceInstanceIDs(); err != nil {
+		return fmt.Errorf("backfill configured Workspace instance ids: %w", err)
+	}
 	if err := s.ensureConfiguredResourceRuntimes(); err != nil {
 		return err
 	}
@@ -1769,18 +1772,108 @@ func (s *server) ensureConfiguredResourceRuntimes() error {
 		if !s.ownsWorkspace(workspace.Path) {
 			continue
 		}
+		// Startup backfill leaves the identity empty only when a legacy
+		// Workspace is already missing or unreadable. Keep serving so the
+		// stale entry can be removed; all Workspace writes still require a
+		// readable runtime identity and the held advisory lock.
+		configuredInstanceID := strings.TrimSpace(workspace.InstanceID)
+		if configuredInstanceID == "" {
+			continue
+		}
 		puaWorkspace, err := app.OpenWorkspace(workspace.Path)
 		if err != nil {
 			return fmt.Errorf("open Workspace %s for resource runtime: %w", workspace.ID, err)
 		}
-		if _, err := puaWorkspace.EnsureResourceRuntime(); err != nil {
+		runtime, err := puaWorkspace.EnsureResourceRuntime()
+		if err != nil {
 			return fmt.Errorf("initialize Workspace %s resource runtime: %w", workspace.ID, err)
+		}
+		if strings.TrimSpace(runtime.InstanceID) != configuredInstanceID {
+			return fmt.Errorf("Workspace %s instance changed after serve configuration was persisted", workspace.ID)
 		}
 		if _, err := puaWorkspace.EnsureScheduler(); err != nil {
 			return fmt.Errorf("initialize Workspace %s Scheduler: %w", workspace.ID, err)
 		}
 	}
 	return nil
+}
+
+type configuredWorkspaceInstanceBackfillKey struct {
+	id   string
+	path string
+}
+
+func (s *server) backfillConfiguredWorkspaceInstanceIDs() error {
+	return s.backfillConfiguredWorkspaceInstanceIDsWithSave(s.saveConfig)
+}
+
+// backfillConfiguredWorkspaceInstanceIDsWithSave upgrades fixed-base serve
+// configurations before recovery can enqueue any Workspace work. Resolvable
+// IDs are committed together; entries that are already stale remain blank and
+// use the collision-free path removal controller.
+func (s *server) backfillConfiguredWorkspaceInstanceIDsWithSave(save func(config) error) error {
+	cfg, err := s.loadConfig()
+	if err != nil {
+		return err
+	}
+	resolved := make(map[configuredWorkspaceInstanceBackfillKey]string)
+	for _, workspace := range cfg.Workspaces {
+		if strings.TrimSpace(workspace.InstanceID) != "" || !s.ownsWorkspace(workspace.Path) {
+			continue
+		}
+		puaWorkspace, openErr := app.OpenWorkspace(workspace.Path)
+		if openErr != nil {
+			continue
+		}
+		runtime, runtimeErr := puaWorkspace.EnsureResourceRuntime()
+		if runtimeErr != nil || strings.TrimSpace(runtime.InstanceID) == "" {
+			continue
+		}
+		canonical, canonicalErr := canonicalWorkspacePath(workspace.Path)
+		if canonicalErr != nil {
+			continue
+		}
+		resolved[configuredWorkspaceInstanceBackfillKey{id: workspace.ID, path: canonical}] = strings.TrimSpace(runtime.InstanceID)
+	}
+	if len(resolved) == 0 {
+		return nil
+	}
+
+	// Reload before saving so an in-process settings mutation cannot be
+	// overwritten. Each candidate's path and live identity are revalidated at
+	// the commit boundary; a changed entry is left untouched for the next pass.
+	current, err := s.loadConfig()
+	if err != nil {
+		return err
+	}
+	changed := false
+	for index := range current.Workspaces {
+		workspace := &current.Workspaces[index]
+		if strings.TrimSpace(workspace.InstanceID) != "" {
+			continue
+		}
+		canonical, canonicalErr := canonicalWorkspacePath(workspace.Path)
+		if canonicalErr != nil {
+			continue
+		}
+		candidate, ok := resolved[configuredWorkspaceInstanceBackfillKey{id: workspace.ID, path: canonical}]
+		if !ok {
+			continue
+		}
+		liveInstanceID, liveErr := workspaceInstanceID(workspace.Path)
+		if liveErr != nil || strings.TrimSpace(liveInstanceID) != candidate {
+			continue
+		}
+		workspace.InstanceID = candidate
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	if save == nil {
+		return errors.New("serve configuration backfill writer is nil")
+	}
+	return save(current)
 }
 
 func (s *server) updateWorkspaceIcon(id, icon string) (serveWorkspace, error) {
@@ -1853,30 +1946,35 @@ func (s *server) removeWorkspace(id string) error {
 		return err
 	}
 	controllerInstanceID := strings.TrimSpace(removing.InstanceID)
-	if s.agents == nil {
-		return s.removeWorkspaceLocked(id, expectedPath, controllerInstanceID, false)
-	}
 	legacyInstanceLookup := controllerInstanceID == ""
+	staleLegacyRemoval := false
 	if legacyInstanceLookup {
 		controllerInstanceID, err = workspaceInstanceID(removing.Path)
 		if err != nil {
-			return fmt.Errorf("resolve legacy Workspace %s instance id: %w", id, err)
+			controllerInstanceID = ""
+			staleLegacyRemoval = true
 		}
 		controllerInstanceID = strings.TrimSpace(controllerInstanceID)
-		if controllerInstanceID == "" {
-			return fmt.Errorf("resolve legacy Workspace %s instance id: Workspace runtime instance id is empty", id)
+		if controllerInstanceID == "" && !staleLegacyRemoval {
+			staleLegacyRemoval = true
 		}
 	}
 	remove := func() error {
-		return s.removeWorkspaceLocked(id, expectedPath, controllerInstanceID, legacyInstanceLookup)
+		return s.removeWorkspaceLocked(id, expectedPath, controllerInstanceID, legacyInstanceLookup, staleLegacyRemoval)
+	}
+	if s.agents == nil {
+		return remove()
 	}
 	// Ownership release is a Scheduler-controller operation. Jobs that were
 	// already queued finish while this Server still owns the Workspace; jobs
 	// behind removal revalidate ownership and fail before a durable write.
+	if staleLegacyRemoval {
+		return s.agents.withStaleWorkspacePathController(context.Background(), expectedPath, app.SchedulerResourceID, remove)
+	}
 	return s.agents.withResourceControllerInstanceID(context.Background(), controllerInstanceID, app.SchedulerResourceID, remove)
 }
 
-func (s *server) removeWorkspaceLocked(id, expectedPath, controllerInstanceID string, legacyInstanceLookup bool) error {
+func (s *server) removeWorkspaceLocked(id, expectedPath, controllerInstanceID string, legacyInstanceLookup, staleLegacyRemoval bool) error {
 	if err := s.requireWorkspaceOwnership(expectedPath); err != nil {
 		return err
 	}
@@ -1893,14 +1991,30 @@ func (s *server) removeWorkspaceLocked(id, expectedPath, controllerInstanceID st
 				return fmt.Errorf("workspace %s changed while removal was waiting", id)
 			}
 			configuredInstanceID := strings.TrimSpace(workspace.InstanceID)
-			if configuredInstanceID == "" && legacyInstanceLookup {
+			if staleLegacyRemoval {
+				if configuredInstanceID != "" {
+					return fmt.Errorf("workspace %s instance changed while stale removal was waiting", id)
+				}
+				if liveInstanceID, liveErr := workspaceInstanceID(workspace.Path); liveErr == nil && strings.TrimSpace(liveInstanceID) != "" {
+					return fmt.Errorf("workspace %s became available while stale removal was waiting", id)
+				}
+			} else if configuredInstanceID == "" && legacyInstanceLookup {
 				liveInstanceID, liveErr := workspaceInstanceID(workspace.Path)
 				if liveErr != nil {
 					return fmt.Errorf("verify legacy Workspace %s instance id: %w", id, liveErr)
 				}
 				configuredInstanceID = strings.TrimSpace(liveInstanceID)
+			} else if configuredInstanceID != "" {
+				// An unavailable persisted Workspace is removable, but a newly
+				// readable Workspace at the same path must still be the same
+				// instance. Otherwise this callback belongs to the old controller
+				// and must not release ownership underneath the replacement.
+				liveInstanceID, liveErr := workspaceInstanceID(workspace.Path)
+				if liveErr == nil && strings.TrimSpace(liveInstanceID) != configuredInstanceID {
+					return fmt.Errorf("workspace %s live instance changed while removal was waiting", id)
+				}
 			}
-			if configuredInstanceID != controllerInstanceID {
+			if !staleLegacyRemoval && configuredInstanceID != controllerInstanceID {
 				return fmt.Errorf("workspace %s instance changed while removal was waiting", id)
 			}
 			removed = true

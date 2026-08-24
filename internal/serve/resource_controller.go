@@ -88,11 +88,8 @@ func (c *resourceController) doWithStart(ctx context.Context, fn func() error, s
 
 type resourceControllerKey struct {
 	workspaceInstanceID string
+	staleWorkspacePath  string
 	resourceID          string
-}
-
-func (key resourceControllerKey) string() string {
-	return key.workspaceInstanceID + "\x00" + key.resourceID
 }
 
 func resourceControllerKeyForInstanceID(instanceID, resourceID string) (resourceControllerKey, error) {
@@ -101,6 +98,18 @@ func resourceControllerKeyForInstanceID(instanceID, resourceID string) (resource
 		return resourceControllerKey{}, errors.New("Workspace runtime instance id is empty")
 	}
 	return resourceControllerKey{workspaceInstanceID: instanceID, resourceID: normalizedResourceID(resourceID)}, nil
+}
+
+// resourceControllerKeyForStaleWorkspacePath addresses removal of a legacy
+// serve-config entry whose Workspace identity can no longer be read. The
+// distinct key field is a separate namespace, not a fabricated instance ID,
+// so it cannot alias a healthy Workspace controller.
+func resourceControllerKeyForStaleWorkspacePath(workspacePath, resourceID string) (resourceControllerKey, error) {
+	canonical, err := canonicalWorkspacePath(workspacePath)
+	if err != nil {
+		return resourceControllerKey{}, err
+	}
+	return resourceControllerKey{staleWorkspacePath: canonical, resourceID: normalizedResourceID(resourceID)}, nil
 }
 
 func (m *agentManager) resourceControllerKey(workspace serveWorkspace, resourceID string) (resourceControllerKey, error) {
@@ -112,15 +121,22 @@ func (m *agentManager) resourceControllerKey(workspace serveWorkspace, resourceI
 }
 
 func (m *agentManager) controllerForResourceKey(key resourceControllerKey) *resourceController {
-	keyString := key.string()
 	m.resourceControllersMu.Lock()
 	defer m.resourceControllersMu.Unlock()
-	controller := m.resourceControllers[keyString]
+	controller := m.resourceControllers[key]
 	if controller == nil {
 		controller = &resourceController{}
-		m.resourceControllers[keyString] = controller
+		m.resourceControllers[key] = controller
 	}
 	return controller
+}
+
+func (m *agentManager) controllerForStaleWorkspacePath(workspacePath, resourceID string) (*resourceController, error) {
+	key, err := resourceControllerKeyForStaleWorkspacePath(workspacePath, resourceID)
+	if err != nil {
+		return nil, err
+	}
+	return m.controllerForResourceKey(key), nil
 }
 
 func (m *agentManager) controllerForResourceInstanceID(instanceID, resourceID string) (*resourceController, error) {
@@ -141,6 +157,14 @@ func (m *agentManager) controllerForResource(workspace serveWorkspace, resourceI
 
 func (m *agentManager) withResourceControllerInstanceID(ctx context.Context, instanceID, resourceID string, fn func() error) error {
 	controller, err := m.controllerForResourceInstanceID(instanceID, resourceID)
+	if err != nil {
+		return err
+	}
+	return controller.doWithStart(ctx, fn, m.runBackground)
+}
+
+func (m *agentManager) withStaleWorkspacePathController(ctx context.Context, workspacePath, resourceID string, fn func() error) error {
+	controller, err := m.controllerForStaleWorkspacePath(workspacePath, resourceID)
 	if err != nil {
 		return err
 	}

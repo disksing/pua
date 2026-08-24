@@ -830,7 +830,7 @@ function updateWorkspaceFavicon(workspace: { icon?: string } | null | undefined)
 		document.head.appendChild(link);
 	}
 	link.type = "type" in option ? String(option.type || "image/png") : "image/png";
-	link.href = option.src;
+	link.href = option.faviconSrc || option.src;
 }
 function renderWorkspaceSelect() {
 	const active = controllerState.config?.workspaces?.find((workspace) => workspace.id === controllerState.activeWorkspaceId);

@@ -2,6 +2,7 @@ export interface WorkspaceIconOption {
 	id: string;
 	label: string;
 	src: string;
+	faviconSrc?: string;
 	type?: string;
 }
 
@@ -9,15 +10,16 @@ export const DEFAULT_WORKSPACE_ICON: WorkspaceIconOption = {
 	id: "",
 	label: "PUA default",
 	src: "/workspace-icons/pua-yellow.png",
+	faviconSrc: "/workspace-icons/pua-yellow-opaque.png",
 	type: "image/png",
 };
 
 export const WORKSPACE_ICONS: WorkspaceIconOption[] = [
 	DEFAULT_WORKSPACE_ICON,
-	{ id: "pua-red", label: "PUA red", src: "/workspace-icons/pua-red.png" },
-	{ id: "pua-green", label: "PUA green", src: "/workspace-icons/pua-green.png" },
-	{ id: "pua-blue", label: "PUA blue", src: "/workspace-icons/pua-blue.png" },
-	{ id: "pua-purple", label: "PUA purple", src: "/workspace-icons/pua-purple.png" },
+	{ id: "pua-red", label: "PUA red", src: "/workspace-icons/pua-red.png", faviconSrc: "/workspace-icons/pua-red-opaque.png" },
+	{ id: "pua-green", label: "PUA green", src: "/workspace-icons/pua-green.png", faviconSrc: "/workspace-icons/pua-green-opaque.png" },
+	{ id: "pua-blue", label: "PUA blue", src: "/workspace-icons/pua-blue.png", faviconSrc: "/workspace-icons/pua-blue-opaque.png" },
+	{ id: "pua-purple", label: "PUA purple", src: "/workspace-icons/pua-purple.png", faviconSrc: "/workspace-icons/pua-purple-opaque.png" },
 	{ id: "home-base", label: "Home base", src: "/workspace-icons/01-home-base.png" },
 	{ id: "personal-tasks", label: "Personal tasks", src: "/workspace-icons/02-personal-tasks.png" },
 	{ id: "product-roadmap", label: "Product roadmap", src: "/workspace-icons/03-product-roadmap.png" },

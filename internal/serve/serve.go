@@ -1652,6 +1652,10 @@ func (s *server) addWorkspace(ctx context.Context, path string) (serveWorkspace,
 }
 
 func (s *server) addWorkspaceWithOptions(ctx context.Context, path string, create bool, language, initialUserName string) (workspace serveWorkspace, err error) {
+	return s.addWorkspaceWithOptionsAndSave(ctx, path, create, language, initialUserName, s.saveConfig)
+}
+
+func (s *server) addWorkspaceWithOptionsAndSave(ctx context.Context, path string, create bool, language, initialUserName string, save func(config) error) (workspace serveWorkspace, err error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return serveWorkspace{}, errors.New("workspace path is required")
@@ -1735,11 +1739,13 @@ func (s *server) addWorkspaceWithOptions(ctx context.Context, path string, creat
 			return serveWorkspace{}, baselineErr
 		}
 	}
-	if runtime, runtimeErr := puaWorkspace.RuntimeConfig(); runtimeErr == nil {
-		workspace.InstanceID = runtime.InstanceID
-	}
-	if _, err := puaWorkspace.EnsureResourceRuntime(); err != nil {
+	runtime, err := puaWorkspace.EnsureResourceRuntime()
+	if err != nil {
 		return serveWorkspace{}, err
+	}
+	workspace.InstanceID = strings.TrimSpace(runtime.InstanceID)
+	if workspace.InstanceID == "" {
+		return serveWorkspace{}, errors.New("Workspace resource runtime has no instance id")
 	}
 	replaced := false
 	for i := range cfg.Workspaces {
@@ -1754,7 +1760,10 @@ func (s *server) addWorkspaceWithOptions(ctx context.Context, path string, creat
 		cfg.Workspaces = append(cfg.Workspaces, workspace)
 	}
 	cfg.ActiveID = workspace.ID
-	if err := s.saveConfig(cfg); err != nil {
+	if save == nil {
+		return serveWorkspace{}, errors.New("serve configuration writer is nil")
+	}
+	if err := save(cfg); err != nil {
 		return serveWorkspace{}, err
 	}
 	if s.doctor != nil {

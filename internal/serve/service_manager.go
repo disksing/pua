@@ -129,6 +129,12 @@ type serviceRuntime struct {
 	exportAccepted        bool
 	exportViolation       string
 	rejectedExportSecrets []string
+	// pendingExportKeys is manager-mutex state. It records public export
+	// names whose accepted values moved after this generation became ready.
+	// The committed bit prevents a dependent process from being stopped before
+	// the producer's matching public status has been durably written.
+	pendingExportKeys     map[string]struct{}
+	exportKeysCommitted   bool
 	redactor              *security.Redactor
 	exports               ServiceExportFile
 	logWriters            []*serviceLogWriter
@@ -155,6 +161,8 @@ type serviceRuntimeConfigSnapshot struct {
 	exportAccepted        bool
 	exportViolation       string
 	rejectedExportSecrets []string
+	pendingExportKeys     map[string]struct{}
+	exportKeysCommitted   bool
 	redactor              *security.Redactor
 	exports               ServiceExportFile
 	logWriters            []*serviceLogWriter
@@ -164,15 +172,19 @@ type serviceRuntimeConfigSnapshot struct {
 	processOwnership      serviceProcessOwnership
 }
 
-// persistedServiceRuntimeState keeps process cleanup provenance beside the
-// public status without exposing it through ServiceStatus. The snapshot holds
-// only cleanup-relevant declarations: secret references may be present, but
-// the primary command, resolved secret values, and child environment remain
-// out of runtime state.
+// persistedServiceRuntimeState keeps process cleanup provenance and unfinished
+// lifecycle intent beside the public status without exposing either through
+// ServiceStatus. Secret references may be present, but the primary command,
+// resolved secret values, and child environment remain out of runtime state.
 type persistedServiceRuntimeState struct {
 	ServiceStatus
 	ProcessConfig         *persistedServiceProcessConfig `json:"processConfig,omitempty"`
 	OrphanRecoveryPending bool                           `json:"orphanRecoveryPending,omitempty"`
+	// PendingExportChanges contains public variable names only. Persisting the
+	// names with the accepted status lets reconstruction preserve an unfinished
+	// invalidation without retaining another copy of public values or any
+	// exported secret.
+	PendingExportChanges []string `json:"pendingExportChanges,omitempty"`
 }
 
 type persistedServiceProcessConfig struct {
@@ -416,6 +428,16 @@ func (m *ServiceManager) loadStatusLocked(rt *serviceRuntime) error {
 	}
 	rt.status = status
 	rt.exports = ServiceExportFile{SchemaVersion: serviceExportSchema, Variables: cloneStringMap(status.Exports.Variables)}
+	if len(persisted.PendingExportChanges) > 0 {
+		rt.pendingExportKeys = make(map[string]struct{}, len(persisted.PendingExportChanges))
+		for _, name := range persisted.PendingExportChanges {
+			if !environmentNamePattern.MatchString(name) {
+				return fmt.Errorf("invalid pending export variable name %q", name)
+			}
+			rt.pendingExportKeys[name] = struct{}{}
+		}
+		rt.exportKeysCommitted = len(rt.pendingExportKeys) > 0
+	}
 	rt.secretNames = make(map[string]ServiceSecretMetadata, len(status.Exports.Secrets))
 	for _, metadata := range status.Exports.Secrets {
 		if metadata.Name != "" {
@@ -666,6 +688,8 @@ func (m *ServiceManager) startProcessLocked(ctx context.Context, rt *serviceRunt
 	rt.exportAccepted = false
 	rt.exportViolation = ""
 	rt.rejectedExportSecrets = nil
+	rt.pendingExportKeys = nil
+	rt.exportKeysCommitted = false
 	rt.redactor = nil
 	env, secrets, names, exports, err := m.resolveEnvironmentLocked(cfg)
 	if err != nil {
@@ -841,6 +865,15 @@ func (m *ServiceManager) observeReadyLocked(ctx context.Context, rt *serviceRunt
 	if rt.process == nil {
 		return nil
 	}
+	// A prior pass may have committed an export update but failed partway
+	// through stopping its consumers. Finish that dependent-first invalidation
+	// before accepting another update or allowing the outer reconcile pass to
+	// start an already-stopped descendant.
+	if rt.exportKeysCommitted && len(rt.pendingExportKeys) > 0 {
+		if err := m.invalidateChangedExportDependentsLocked(ctx, rt); err != nil {
+			return err
+		}
+	}
 	if err := m.exportProtocolErrorLocked(rt); err != nil {
 		return m.readinessFailedLocked(ctx, rt, err)
 	}
@@ -853,6 +886,8 @@ func (m *ServiceManager) observeReadyLocked(ctx context.Context, rt *serviceRunt
 		rt.status.AttentionRequired = false
 	}
 	if rt.config.Readiness == nil {
+		wasReady := rt.status.State == ServiceStateReady && rt.status.Readiness.Ready
+		previousVariables := cloneStringMap(rt.exports.Variables)
 		exports, err := m.readExportsLocked(rt)
 		if err != nil && requiresInitialExport(rt.config) && strings.Contains(err.Error(), "initial export") {
 			exports, err = m.waitForInitialExportLocked(ctx, rt)
@@ -860,19 +895,21 @@ func (m *ServiceManager) observeReadyLocked(ctx context.Context, rt *serviceRunt
 		if err != nil {
 			return m.readinessFailedLocked(ctx, rt, err)
 		}
-		rt.exports = exports
+		m.acceptObservedExportsLocked(rt, previousVariables, exports, wasReady)
 		if err := m.releaseStartupLogsLocked(rt); err != nil {
 			return m.readinessFailedLocked(ctx, rt, err)
 		}
 		rt.status.State = ServiceStateReady
 		rt.status.Readiness.Ready = true
 		rt.status.Exports = publicExports(rt.exports, rt.secretNames)
-		return m.persistStatusLocked(rt)
+		return m.persistAndInvalidateChangedExportsLocked(ctx, rt)
 	}
 	last, _ := time.Parse(time.RFC3339Nano, rt.status.Readiness.LastCheck)
-	if !last.IsZero() && now.Sub(last) < rt.config.Readiness.Interval && rt.status.Readiness.Ready {
+	if !last.IsZero() && now.Sub(last) < rt.config.Readiness.Interval && rt.status.Readiness.Ready && len(rt.pendingExportKeys) == 0 {
 		return nil
 	}
+	wasReady := rt.status.State == ServiceStateReady && rt.status.Readiness.Ready
+	previousVariables := cloneStringMap(rt.exports.Variables)
 	exports, err := m.readExportsLocked(rt)
 	if err != nil && !rt.status.Readiness.Ready && strings.Contains(err.Error(), "initial export") {
 		exports, err = m.waitForInitialExportLocked(ctx, rt)
@@ -880,7 +917,7 @@ func (m *ServiceManager) observeReadyLocked(ctx context.Context, rt *serviceRunt
 	if err != nil {
 		return m.readinessFailedLocked(ctx, rt, err)
 	}
-	rt.exports = exports
+	m.acceptObservedExportsLocked(rt, previousVariables, exports, wasReady)
 	if err := m.runReadinessLocked(ctx, rt); err != nil {
 		return m.readinessFailedLocked(ctx, rt, err)
 	}
@@ -893,7 +930,116 @@ func (m *ServiceManager) observeReadyLocked(ctx context.Context, rt *serviceRunt
 	rt.status.Readiness.LastError = ""
 	rt.status.Exports = publicExports(rt.exports, rt.secretNames)
 	rt.status.UpdatedAt = now.Format(time.RFC3339Nano)
-	return m.persistStatusLocked(rt)
+	return m.persistAndInvalidateChangedExportsLocked(ctx, rt)
+}
+
+func (m *ServiceManager) acceptObservedExportsLocked(rt *serviceRuntime, previousVariables map[string]string, export ServiceExportFile, wasReady bool) {
+	rt.exports = export
+	if !wasReady || equalStringMap(previousVariables, export.Variables) {
+		return
+	}
+	if rt.pendingExportKeys == nil {
+		rt.pendingExportKeys = map[string]struct{}{}
+	}
+	for name := range changedStringMapKeys(previousVariables, export.Variables) {
+		rt.pendingExportKeys[name] = struct{}{}
+	}
+	rt.exportKeysCommitted = false
+}
+
+func (m *ServiceManager) persistAndInvalidateChangedExportsLocked(ctx context.Context, rt *serviceRuntime) error {
+	pending := len(rt.pendingExportKeys) > 0
+	if pending {
+		rt.exportKeysCommitted = true
+	}
+	if err := m.persistStatusLocked(rt); err != nil {
+		if pending {
+			rt.exportKeysCommitted = false
+		}
+		return err
+	}
+	if !pending {
+		return nil
+	}
+	return m.invalidateChangedExportDependentsLocked(ctx, rt)
+}
+
+// invalidateChangedExportDependentsLocked restarts only consumers whose
+// environment names a changed public export, plus their transitive consumers.
+// The producer itself and graph-only dependents that do not consume the
+// changed value keep their process generation. Pending changes are cleared
+// only after every running consumer has stopped successfully, so a later
+// reconcile retries a partial invalidation before starting descendants.
+func (m *ServiceManager) invalidateChangedExportDependentsLocked(ctx context.Context, producer *serviceRuntime) error {
+	if producer == nil || !producer.exportKeysCommitted || len(producer.pendingExportKeys) == 0 {
+		return nil
+	}
+	direct := make(map[string]struct{})
+	for id, cfg := range m.configs {
+		if id != producer.config.ID && serviceConfigReferencesChangedExports(cfg, producer.config.ID, producer.pendingExportKeys) {
+			direct[id] = struct{}{}
+		}
+	}
+	if len(direct) == 0 {
+		producer.pendingExportKeys = nil
+		producer.exportKeysCommitted = false
+		return nil
+	}
+	impacted := serviceDependencyChangeSet(m.graph, m.graph, direct)
+	stopOrder, err := serviceGraphSubsetStopOrder(m.graph, impacted)
+	if err != nil {
+		return err
+	}
+	for _, id := range stopOrder {
+		candidate := m.runtimes[id]
+		if candidate == nil || candidate.status.ManualStop || !candidate.config.Enabled || (candidate.process == nil && candidate.status.ProcessGroup <= 0) {
+			continue
+		}
+		retryingTermination := candidate.terminationPending
+		if err := m.stopRuntimeForDependencyChangeLocked(ctx, candidate); err != nil {
+			return fmt.Errorf("stop service %q after %q export change: %w", id, producer.config.ID, err)
+		}
+		if retryingTermination {
+			candidate.status.AttentionRequired = false
+			candidate.status.LastError = ""
+			candidate.status.State = ServiceStateStopped
+			if err := m.persistStatusLocked(candidate); err != nil {
+				return err
+			}
+		}
+	}
+	producer.pendingExportKeys = nil
+	producer.exportKeysCommitted = false
+	return nil
+}
+
+func changedStringMapKeys(left, right map[string]string) map[string]struct{} {
+	changed := make(map[string]struct{})
+	for key, value := range left {
+		if other, ok := right[key]; !ok || other != value {
+			changed[key] = struct{}{}
+		}
+	}
+	for key, value := range right {
+		if other, ok := left[key]; !ok || other != value {
+			changed[key] = struct{}{}
+		}
+	}
+	return changed
+}
+
+func serviceConfigReferencesChangedExports(cfg ServiceConfig, producerID string, changed map[string]struct{}) bool {
+	for _, entry := range cfg.Environment {
+		for _, match := range serviceTemplatePattern.FindAllStringSubmatch(entry.Template, -1) {
+			if len(match) != 3 || match[1] != producerID {
+				continue
+			}
+			if _, ok := changed[match[2]]; ok {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (m *ServiceManager) waitForInitialExportLocked(ctx context.Context, rt *serviceRuntime) (ServiceExportFile, error) {
@@ -2025,6 +2171,7 @@ func (m *ServiceManager) persistStatusLocked(rt *serviceRuntime) error {
 	persisted := persistedServiceRuntimeState{
 		ServiceStatus:         cloneServiceStatus(rt.status),
 		OrphanRecoveryPending: rt.orphanRecoveryPending,
+		PendingExportChanges:  sortedStringSet(rt.pendingExportKeys),
 	}
 	if (rt.status.PID > 0 || rt.status.ProcessGroup > 0 || rt.orphanRecoveryPending) && rt.processConfig != nil {
 		persisted.ProcessConfig = newPersistedServiceProcessConfig(rt)
@@ -2111,6 +2258,29 @@ func cloneStringMap(values map[string]string) map[string]string {
 	for key, value := range values {
 		result[key] = value
 	}
+	return result
+}
+
+func cloneStringSet(values map[string]struct{}) map[string]struct{} {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make(map[string]struct{}, len(values))
+	for value := range values {
+		result[value] = struct{}{}
+	}
+	return result
+}
+
+func sortedStringSet(values map[string]struct{}) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make([]string, 0, len(values))
+	for value := range values {
+		result = append(result, value)
+	}
+	sort.Strings(result)
 	return result
 }
 
@@ -2771,6 +2941,8 @@ func snapshotServiceRuntimeConfig(rt *serviceRuntime) serviceRuntimeConfigSnapsh
 		exportAccepted:        rt.exportAccepted,
 		exportViolation:       rt.exportViolation,
 		rejectedExportSecrets: append([]string(nil), rt.rejectedExportSecrets...),
+		pendingExportKeys:     cloneStringSet(rt.pendingExportKeys),
+		exportKeysCommitted:   rt.exportKeysCommitted,
 		redactor:              rt.redactor,
 		exports:               cloneServiceExportFile(rt.exports),
 		logWriters:            append([]*serviceLogWriter(nil), rt.logWriters...),
@@ -2831,6 +3003,8 @@ func restoreServiceRuntimeConfig(rt *serviceRuntime, snapshot serviceRuntimeConf
 	rt.exportAccepted = snapshot.exportAccepted
 	rt.exportViolation = snapshot.exportViolation
 	rt.rejectedExportSecrets = append([]string(nil), snapshot.rejectedExportSecrets...)
+	rt.pendingExportKeys = cloneStringSet(snapshot.pendingExportKeys)
+	rt.exportKeysCommitted = snapshot.exportKeysCommitted
 	rt.redactor = snapshot.redactor
 	rt.exports = cloneServiceExportFile(snapshot.exports)
 	rt.logWriters = append([]*serviceLogWriter(nil), snapshot.logWriters...)

@@ -540,30 +540,39 @@ func (m *ServiceManager) reconcileLocked(ctx context.Context) error {
 	if err := m.invalidateStaleServiceGenerationsLocked(ctx); err != nil {
 		return errors.Join(result, err)
 	}
-	if err := m.reconcileManualStopChainsLocked(ctx); err != nil {
-		// A live dependent still protects every dependency below it. Do not enter
-		// ordinary startup reconciliation until the persisted stop intent has
-		// converged, or a partially stopped chain could be relaunched.
-		return errors.Join(result, err)
-	}
+	manualStopBlocked, manualStopErr := m.reconcileManualStopChainsLocked(ctx)
 	ids := m.sortedIDsLocked()
 	for _, id := range ids {
 		rt := m.runtimes[id]
 		if rt == nil || rt.orphanRecoveryPending {
 			continue
 		}
+		if _, blocked := manualStopBlocked[id]; blocked {
+			continue
+		}
+		for _, dependency := range m.graph[id] {
+			if _, blocked := manualStopBlocked[dependency]; blocked {
+				manualStopBlocked[id] = struct{}{}
+				break
+			}
+		}
+		if _, blocked := manualStopBlocked[id]; blocked {
+			continue
+		}
 		if err := m.reconcileOneLocked(ctx, rt, m.graph[id]); err != nil {
 			result = errors.Join(result, err)
 		}
 	}
-	return result
+	return errors.Join(result, manualStopErr)
 }
 
 // reconcileManualStopChainsLocked resumes a StopService operation that
 // persisted its operator intent but failed before reaching the selected
 // service. All live manual-stop targets are combined into one reverse-
-// topological pass so overlapping chains are stopped once in stable order.
-func (m *ServiceManager) reconcileManualStopChainsLocked(ctx context.Context) error {
+// topological pass so overlapping chains are stopped once in stable order. A
+// failed chain returns its target/dependent closure so ordinary reconciliation
+// can continue for disconnected services without relaunching a partial stop.
+func (m *ServiceManager) reconcileManualStopChainsLocked(ctx context.Context) (map[string]struct{}, error) {
 	targets := make(map[string]struct{})
 	for id, rt := range m.runtimes {
 		if rt == nil || !rt.status.ManualStop || rt.orphanRecoveryPending || (rt.process == nil && rt.status.ProcessGroup <= 0) {
@@ -572,13 +581,32 @@ func (m *ServiceManager) reconcileManualStopChainsLocked(ctx context.Context) er
 		targets[id] = struct{}{}
 	}
 	if len(targets) == 0 {
-		return nil
+		return nil, nil
 	}
 
-	impacted := serviceDependencyChangeSet(m.graph, m.graph, targets)
+	targetImpacts := make(map[string]map[string]struct{}, len(targets))
+	impacted := make(map[string]struct{})
+	for target := range targets {
+		closure := serviceDependencyChangeSet(m.graph, m.graph, map[string]struct{}{target: {}})
+		targetImpacts[target] = closure
+		for id := range closure {
+			impacted[id] = struct{}{}
+		}
+	}
 	stopOrder, err := serviceGraphSubsetStopOrder(m.graph, impacted)
 	if err != nil {
-		return err
+		return impacted, err
+	}
+	blocked := make(map[string]struct{})
+	blockFailureAt := func(failedID string) {
+		for _, closure := range targetImpacts {
+			if _, affected := closure[failedID]; !affected {
+				continue
+			}
+			for id := range closure {
+				blocked[id] = struct{}{}
+			}
+		}
 	}
 	var result error
 	for _, id := range stopOrder {
@@ -618,6 +646,7 @@ func (m *ServiceManager) reconcileManualStopChainsLocked(ctx context.Context) er
 			}
 		}
 		if err != nil {
+			blockFailureAt(id)
 			result = errors.Join(result, fmt.Errorf("retry manual stop at service %q: %w", id, err))
 		}
 	}
@@ -628,11 +657,12 @@ func (m *ServiceManager) reconcileManualStopChainsLocked(ctx context.Context) er
 			}
 			rt := m.runtimes[id]
 			if rt != nil && (rt.process != nil || rt.status.ProcessGroup > 0) {
-				return fmt.Errorf("retry manual stop at service %q: live dependent still blocks shutdown", id)
+				blockFailureAt(id)
+				return blocked, fmt.Errorf("retry manual stop at service %q: live dependent still blocks shutdown", id)
 			}
 		}
 	}
-	return result
+	return blocked, result
 }
 
 func (m *ServiceManager) hasLiveServiceDependentLocked(id string) bool {

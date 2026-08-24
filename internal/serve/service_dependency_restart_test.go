@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func dependencyRestartNode(tracePath, id, dependency, version string) ServiceConfig {
@@ -604,6 +605,152 @@ func TestServiceManagerReconcileRetriesFailedManualStopChain(t *testing.T) {
 	}
 	if got := dependencyRestartTrace(t, tracePath, len(wantTrace)); !reflect.DeepEqual(got, wantTrace) {
 		t.Fatalf("explicit Start recovery trace = %v, want %v", got, wantTrace)
+	}
+}
+
+func TestServiceManagerManualStopFailuresDoNotBlockUnrelatedReconcile(t *testing.T) {
+	root := t.TempDir()
+	tracePath := filepath.Join(root, "dependency-manual-stop-isolation-trace")
+	configs := []ServiceConfig{
+		dependencyRestartNode(tracePath, "alpha", "", "one"),
+		dependencyRestartNode(tracePath, "bravo", "alpha", ""),
+		dependencyRestartNode(tracePath, "charlie", "bravo", ""),
+		dependencyRestartNode(tracePath, "delta", "", "stable"),
+		dependencyRestartNode(tracePath, "echo", "", "two"),
+		dependencyRestartNode(tracePath, "foxtrot", "echo", ""),
+		dependencyRestartNode(tracePath, "golf", "foxtrot", ""),
+	}
+	for _, cfg := range configs {
+		writeTestService(t, root, cfg)
+	}
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	manager, err := NewServiceManager(root, ServiceManagerOptions{Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopProcessTestManager(t, &manager)
+	if err := manager.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, cfg := range configs {
+		waitForServiceState(t, manager, cfg.ID, ServiceStateReady)
+	}
+	before := servicePIDs(t, manager, "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf")
+	bravoStatus, err := manager.Show("bravo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	foxtrotStatus, err := manager.Show("foxtrot")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deltaStatus, err := manager.Show("delta")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	injected := errors.New("injected persistent stop failure")
+	nativeSignal := manager.processPlatform.signalProcessGroup
+	manager.processPlatform.signalProcessGroup = func(group int, signal syscall.Signal) error {
+		if group == bravoStatus.ProcessGroup || group == foxtrotStatus.ProcessGroup {
+			return injected
+		}
+		return nativeSignal(group, signal)
+	}
+	t.Cleanup(func() { manager.processPlatform.signalProcessGroup = nativeSignal })
+	if stopErr := manager.StopService(context.Background(), "alpha"); stopErr == nil || !strings.Contains(stopErr.Error(), injected.Error()) {
+		t.Fatalf("StopService alpha error = %v, want injected failure", stopErr)
+	}
+	if stopErr := manager.StopService(context.Background(), "echo"); stopErr == nil || !strings.Contains(stopErr.Error(), injected.Error()) {
+		t.Fatalf("StopService echo error = %v, want injected failure", stopErr)
+	}
+	resetDependencyRestartTrace(t, tracePath)
+	if err := nativeSignal(deltaStatus.ProcessGroup, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		reconcileErr := manager.Reconcile(context.Background())
+		if reconcileErr == nil || !strings.Contains(reconcileErr.Error(), `service "bravo"`) || !strings.Contains(reconcileErr.Error(), `service "foxtrot"`) {
+			t.Fatalf("Reconcile error = %v, want both isolated stop failures", reconcileErr)
+		}
+		status, showErr := manager.Show("delta")
+		if showErr != nil {
+			t.Fatal(showErr)
+		}
+		if status.State == ServiceStateBackoff {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("unrelated delta did not observe its exit: %#v", status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	now = now.Add(2 * time.Second)
+	deadline = time.Now().Add(3 * time.Second)
+	for {
+		reconcileErr := manager.Reconcile(context.Background())
+		if reconcileErr == nil || !strings.Contains(reconcileErr.Error(), injected.Error()) {
+			t.Fatalf("Reconcile error during delta restart = %v, want isolated stop failures", reconcileErr)
+		}
+		status, showErr := manager.Show("delta")
+		if showErr != nil {
+			t.Fatal(showErr)
+		}
+		if status.State == ServiceStateReady && status.PID != before["delta"] {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("unrelated delta did not restart after backoff: %#v", status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for _, id := range []string{"alpha", "bravo", "echo", "foxtrot"} {
+		status, showErr := manager.Show(id)
+		if showErr != nil {
+			t.Fatal(showErr)
+		}
+		if status.PID != before[id] {
+			t.Fatalf("failed manual-stop chain relaunched %s: before PID %d, status %#v", id, before[id], status)
+		}
+	}
+	for _, id := range []string{"charlie", "golf"} {
+		status, showErr := manager.Show(id)
+		if showErr != nil {
+			t.Fatal(showErr)
+		}
+		if status.PID != 0 || status.ProcessGroup != 0 {
+			t.Fatalf("failed manual-stop chain relaunched stopped dependent %s: %#v", id, status)
+		}
+	}
+	if got := dependencyRestartTrace(t, tracePath, 1); !reflect.DeepEqual(got, []string{"start:delta:stable"}) {
+		t.Fatalf("isolated failed chains emitted lifecycle trace = %v, want only delta restart", got)
+	}
+
+	manager.processPlatform.signalProcessGroup = nativeSignal
+	if err := manager.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"alpha", "bravo", "charlie", "echo", "foxtrot", "golf"} {
+		status, showErr := manager.Show(id)
+		if showErr != nil {
+			t.Fatal(showErr)
+		}
+		if status.PID != 0 || status.ProcessGroup != 0 {
+			t.Fatalf("recovered manual-stop chain retained %s: %#v", id, status)
+		}
+		if got, want := status.ManualStop, id == "alpha" || id == "echo"; got != want {
+			t.Fatalf("%s ManualStop after convergence = %t, want %t", id, got, want)
+		}
+	}
+	deltaAfter, err := manager.Show("delta")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deltaAfter.State != ServiceStateReady || deltaAfter.PID == 0 || deltaAfter.PID == before["delta"] {
+		t.Fatalf("healthy component changed after manual-stop recovery: %#v", deltaAfter)
 	}
 }
 

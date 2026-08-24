@@ -186,7 +186,12 @@ type server struct {
 	agents           *agentManager
 	doctor           *doctorMonitor
 	locks            *workspaceLockManager
-	uiStateMu        sync.Mutex
+	// configMu serializes the commit boundary of every serve-config mutation.
+	// Workspace mutations acquire their handoff barrier before this mutex; no
+	// config transaction may enter a Workspace controller or perform remote
+	// AgentHub work while holding it.
+	configMu  sync.Mutex
+	uiStateMu sync.Mutex
 }
 
 const (
@@ -1739,7 +1744,7 @@ func (s *server) addWorkspace(ctx context.Context, path string) (serveWorkspace,
 }
 
 func (s *server) addWorkspaceWithOptions(ctx context.Context, path string, create bool, language, initialUserName string) (workspace serveWorkspace, err error) {
-	return s.addWorkspaceWithOptionsAndSave(ctx, path, create, language, initialUserName, s.saveConfig)
+	return s.addWorkspaceWithOptionsAndSave(ctx, path, create, language, initialUserName, s.saveConfigLocked)
 }
 
 func (s *server) addWorkspaceWithOptionsAndSave(ctx context.Context, path string, create bool, language, initialUserName string, save func(config) error) (workspace serveWorkspace, err error) {
@@ -1806,10 +1811,6 @@ func (s *server) addWorkspaceWithOptionsAndSave(ctx context.Context, path string
 		Name: workspaceName(tree.Root),
 		Path: tree.Root,
 	}
-	cfg, err := s.loadConfig()
-	if err != nil {
-		return serveWorkspace{}, err
-	}
 	puaWorkspace, err := app.OpenWorkspace(tree.Root)
 	if err != nil {
 		return serveWorkspace{}, err
@@ -1834,23 +1835,28 @@ func (s *server) addWorkspaceWithOptionsAndSave(ctx context.Context, path string
 	if workspace.InstanceID == "" {
 		return serveWorkspace{}, errors.New("Workspace resource runtime has no instance id")
 	}
-	replaced := false
-	for i := range cfg.Workspaces {
-		if cfg.Workspaces[i].ID == workspace.ID {
-			workspace.Icon = cfg.Workspaces[i].Icon
-			cfg.Workspaces[i] = workspace
-			replaced = true
-			break
+	_, _, err = s.mutateConfigWithSave(save, func(cfg *config) (bool, error) {
+		replaced := false
+		for i := range cfg.Workspaces {
+			if cfg.Workspaces[i].ID == workspace.ID {
+				// Refresh mutable on-disk metadata at the commit boundary. A
+				// concurrent name mutation writes the Workspace before entering
+				// this config transaction, so either this read observes it or its
+				// later transaction wins without a stale live add reverting it.
+				workspace.Name = workspaceName(tree.Root)
+				workspace.Icon = cfg.Workspaces[i].Icon
+				cfg.Workspaces[i] = workspace
+				replaced = true
+				break
+			}
 		}
-	}
-	if !replaced {
-		cfg.Workspaces = append(cfg.Workspaces, workspace)
-	}
-	cfg.ActiveID = workspace.ID
-	if save == nil {
-		return serveWorkspace{}, errors.New("serve configuration writer is nil")
-	}
-	if err := save(cfg); err != nil {
+		if !replaced {
+			cfg.Workspaces = append(cfg.Workspaces, workspace)
+		}
+		cfg.ActiveID = workspace.ID
+		return true, nil
+	})
+	if err != nil {
 		return serveWorkspace{}, err
 	}
 	if s.agents != nil {
@@ -1910,7 +1916,7 @@ type configuredWorkspaceInstanceBackfillKey struct {
 }
 
 func (s *server) backfillConfiguredWorkspaceInstanceIDs() error {
-	return s.backfillConfiguredWorkspaceInstanceIDsWithSave(s.saveConfig)
+	return s.backfillConfiguredWorkspaceInstanceIDsWithSave(s.saveConfigLocked)
 }
 
 // backfillConfiguredWorkspaceInstanceIDsWithSave upgrades fixed-base serve
@@ -1945,41 +1951,35 @@ func (s *server) backfillConfiguredWorkspaceInstanceIDsWithSave(save func(config
 		return nil
 	}
 
-	// Reload before saving so an in-process settings mutation cannot be
-	// overwritten. Each candidate's path and live identity are revalidated at
-	// the commit boundary; a changed entry is left untouched for the next pass.
-	current, err := s.loadConfig()
-	if err != nil {
-		return err
-	}
-	changed := false
-	for index := range current.Workspaces {
-		workspace := &current.Workspaces[index]
-		if strings.TrimSpace(workspace.InstanceID) != "" {
-			continue
+	// Reload inside the serialized commit boundary so settings and Workspace
+	// list mutations cannot be overwritten. Each candidate's path and live
+	// identity are revalidated before it is persisted; a changed entry is left
+	// untouched for the next pass.
+	_, _, err = s.mutateConfigWithSave(save, func(current *config) (bool, error) {
+		changed := false
+		for index := range current.Workspaces {
+			workspace := &current.Workspaces[index]
+			if strings.TrimSpace(workspace.InstanceID) != "" {
+				continue
+			}
+			canonical, canonicalErr := canonicalWorkspacePath(workspace.Path)
+			if canonicalErr != nil {
+				continue
+			}
+			candidate, ok := resolved[configuredWorkspaceInstanceBackfillKey{id: workspace.ID, path: canonical}]
+			if !ok {
+				continue
+			}
+			liveInstanceID, liveErr := workspaceInstanceID(workspace.Path)
+			if liveErr != nil || strings.TrimSpace(liveInstanceID) != candidate {
+				continue
+			}
+			workspace.InstanceID = candidate
+			changed = true
 		}
-		canonical, canonicalErr := canonicalWorkspacePath(workspace.Path)
-		if canonicalErr != nil {
-			continue
-		}
-		candidate, ok := resolved[configuredWorkspaceInstanceBackfillKey{id: workspace.ID, path: canonical}]
-		if !ok {
-			continue
-		}
-		liveInstanceID, liveErr := workspaceInstanceID(workspace.Path)
-		if liveErr != nil || strings.TrimSpace(liveInstanceID) != candidate {
-			continue
-		}
-		workspace.InstanceID = candidate
-		changed = true
-	}
-	if !changed {
-		return nil
-	}
-	if save == nil {
-		return errors.New("serve configuration backfill writer is nil")
-	}
-	return save(current)
+		return changed, nil
+	})
+	return err
 }
 
 func (s *server) updateWorkspaceIcon(id, icon string) (serveWorkspace, error) {
@@ -1995,22 +1995,18 @@ func (s *server) updateWorkspaceIcon(id, icon string) (serveWorkspace, error) {
 	}
 	var updated serveWorkspace
 	err = s.withWorkspaceMutation(context.Background(), workspace, "workspace", func(current serveWorkspace) error {
-		cfg, loadErr := s.loadConfig()
-		if loadErr != nil {
-			return loadErr
-		}
-		for i := range cfg.Workspaces {
-			if cfg.Workspaces[i].ID != current.ID {
-				continue
+		_, _, mutateErr := s.mutateConfig(func(cfg *config) (bool, error) {
+			for i := range cfg.Workspaces {
+				if cfg.Workspaces[i].ID != current.ID {
+					continue
+				}
+				cfg.Workspaces[i].Icon = icon
+				updated = cfg.Workspaces[i]
+				return true, nil
 			}
-			cfg.Workspaces[i].Icon = icon
-			if saveErr := s.saveConfig(cfg); saveErr != nil {
-				return saveErr
-			}
-			updated = cfg.Workspaces[i]
-			return nil
-		}
-		return fmt.Errorf("workspace not found: %s", id)
+			return false, fmt.Errorf("workspace not found: %s", id)
+		})
+		return mutateErr
 	})
 	return updated, err
 }
@@ -2022,30 +2018,26 @@ func (s *server) updateWorkspaceName(id, name string) (serveWorkspace, error) {
 	}
 	var updated serveWorkspace
 	err = s.withWorkspaceMutation(context.Background(), workspace, "workspace", func(current serveWorkspace) error {
-		cfg, loadErr := s.loadConfig()
-		if loadErr != nil {
-			return loadErr
+		puaWorkspace, openErr := app.OpenWorkspace(current.Path)
+		if openErr != nil {
+			return openErr
 		}
-		for i := range cfg.Workspaces {
-			if cfg.Workspaces[i].ID != current.ID {
-				continue
-			}
-			puaWorkspace, openErr := app.OpenWorkspace(current.Path)
-			if openErr != nil {
-				return openErr
-			}
-			resolved, setErr := puaWorkspace.SetName(name)
-			if setErr != nil {
-				return setErr
-			}
-			cfg.Workspaces[i].Name = resolved
-			if saveErr := s.saveConfig(cfg); saveErr != nil {
-				return saveErr
-			}
-			updated = cfg.Workspaces[i]
-			return nil
+		resolved, setErr := puaWorkspace.SetName(name)
+		if setErr != nil {
+			return setErr
 		}
-		return fmt.Errorf("workspace not found: %s", id)
+		_, _, mutateErr := s.mutateConfig(func(cfg *config) (bool, error) {
+			for i := range cfg.Workspaces {
+				if cfg.Workspaces[i].ID != current.ID {
+					continue
+				}
+				cfg.Workspaces[i].Name = resolved
+				updated = cfg.Workspaces[i]
+				return true, nil
+			}
+			return false, fmt.Errorf("workspace not found: %s", id)
+		})
+		return mutateErr
 	})
 	return updated, err
 }
@@ -2105,62 +2097,61 @@ func (s *server) removeWorkspaceLocked(id, expectedPath, controllerInstanceID st
 	if err := s.requireWorkspaceOwnership(expectedPath); err != nil {
 		return err
 	}
-	cfg, err := s.loadConfig()
-	if err != nil {
-		return err
-	}
-	next := cfg.Workspaces[:0]
-	removed := false
 	var removedPath string
-	for _, workspace := range cfg.Workspaces {
-		if workspace.ID == id {
-			if canonical, canonicalErr := canonicalWorkspacePath(workspace.Path); canonicalErr != nil || canonical != expectedPath {
-				return fmt.Errorf("workspace %s changed while removal was waiting", id)
+	_, _, err := s.mutateConfig(func(cfg *config) (bool, error) {
+		next := cfg.Workspaces[:0]
+		removed := false
+		for _, workspace := range cfg.Workspaces {
+			if workspace.ID == id {
+				if canonical, canonicalErr := canonicalWorkspacePath(workspace.Path); canonicalErr != nil || canonical != expectedPath {
+					return false, fmt.Errorf("workspace %s changed while removal was waiting", id)
+				}
+				configuredInstanceID := strings.TrimSpace(workspace.InstanceID)
+				if staleLegacyRemoval {
+					if configuredInstanceID != "" {
+						return false, fmt.Errorf("workspace %s instance changed while stale removal was waiting", id)
+					}
+					if liveInstanceID, liveErr := workspaceInstanceID(workspace.Path); liveErr == nil && strings.TrimSpace(liveInstanceID) != "" {
+						return false, fmt.Errorf("workspace %s became available while stale removal was waiting", id)
+					}
+				} else if configuredInstanceID == "" && legacyInstanceLookup {
+					liveInstanceID, liveErr := workspaceInstanceID(workspace.Path)
+					if liveErr != nil {
+						return false, fmt.Errorf("verify legacy Workspace %s instance id: %w", id, liveErr)
+					}
+					configuredInstanceID = strings.TrimSpace(liveInstanceID)
+				} else if configuredInstanceID != "" {
+					// An unavailable persisted Workspace is removable, but a newly
+					// readable Workspace at the same path must still be the same
+					// instance. Otherwise this callback belongs to the old controller
+					// and must not release ownership underneath the replacement.
+					liveInstanceID, liveErr := workspaceInstanceID(workspace.Path)
+					if liveErr == nil && strings.TrimSpace(liveInstanceID) != configuredInstanceID {
+						return false, fmt.Errorf("workspace %s live instance changed while removal was waiting", id)
+					}
+				}
+				if !staleLegacyRemoval && configuredInstanceID != controllerInstanceID {
+					return false, fmt.Errorf("workspace %s instance changed while removal was waiting", id)
+				}
+				removed = true
+				removedPath = workspace.Path
+				continue
 			}
-			configuredInstanceID := strings.TrimSpace(workspace.InstanceID)
-			if staleLegacyRemoval {
-				if configuredInstanceID != "" {
-					return fmt.Errorf("workspace %s instance changed while stale removal was waiting", id)
-				}
-				if liveInstanceID, liveErr := workspaceInstanceID(workspace.Path); liveErr == nil && strings.TrimSpace(liveInstanceID) != "" {
-					return fmt.Errorf("workspace %s became available while stale removal was waiting", id)
-				}
-			} else if configuredInstanceID == "" && legacyInstanceLookup {
-				liveInstanceID, liveErr := workspaceInstanceID(workspace.Path)
-				if liveErr != nil {
-					return fmt.Errorf("verify legacy Workspace %s instance id: %w", id, liveErr)
-				}
-				configuredInstanceID = strings.TrimSpace(liveInstanceID)
-			} else if configuredInstanceID != "" {
-				// An unavailable persisted Workspace is removable, but a newly
-				// readable Workspace at the same path must still be the same
-				// instance. Otherwise this callback belongs to the old controller
-				// and must not release ownership underneath the replacement.
-				liveInstanceID, liveErr := workspaceInstanceID(workspace.Path)
-				if liveErr == nil && strings.TrimSpace(liveInstanceID) != configuredInstanceID {
-					return fmt.Errorf("workspace %s live instance changed while removal was waiting", id)
-				}
-			}
-			if !staleLegacyRemoval && configuredInstanceID != controllerInstanceID {
-				return fmt.Errorf("workspace %s instance changed while removal was waiting", id)
-			}
-			removed = true
-			removedPath = workspace.Path
-			continue
+			next = append(next, workspace)
 		}
-		next = append(next, workspace)
-	}
-	if !removed {
-		return fmt.Errorf("workspace not found: %s", id)
-	}
-	cfg.Workspaces = next
-	if cfg.ActiveID == id {
-		cfg.ActiveID = ""
-		if len(cfg.Workspaces) > 0 {
-			cfg.ActiveID = cfg.Workspaces[0].ID
+		if !removed {
+			return false, fmt.Errorf("workspace not found: %s", id)
 		}
-	}
-	if err := s.saveConfig(cfg); err != nil {
+		cfg.Workspaces = next
+		if cfg.ActiveID == id {
+			cfg.ActiveID = ""
+			if len(cfg.Workspaces) > 0 {
+				cfg.ActiveID = cfg.Workspaces[0].ID
+			}
+		}
+		return true, nil
+	})
+	if err != nil {
 		return err
 	}
 	// Keep the persisted removal and advisory-lock handoff in the same
@@ -2451,6 +2442,14 @@ func (s *server) workspace(id string) (serveWorkspace, error) {
 }
 
 func (s *server) loadConfig() (config, error) {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
+	return s.loadConfigLocked()
+}
+
+// loadConfigLocked may upgrade the file and therefore always runs under
+// configMu, even when the caller only needs a snapshot.
+func (s *server) loadConfigLocked() (config, error) {
 	var cfg config
 	data, err := os.ReadFile(s.config)
 	if err != nil {
@@ -2494,7 +2493,7 @@ func (s *server) loadConfig() (config, error) {
 		needsUpgrade = true
 	}
 	if needsUpgrade {
-		if err := s.saveConfig(cfg); err != nil {
+		if err := s.saveConfigLocked(cfg); err != nil {
 			return config{}, err
 		}
 	}
@@ -2502,6 +2501,12 @@ func (s *server) loadConfig() (config, error) {
 }
 
 func (s *server) saveConfig(cfg config) error {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
+	return s.saveConfigLocked(cfg)
+}
+
+func (s *server) saveConfigLocked(cfg config) error {
 	if cfg.Version < agentHubConfigVersion {
 		return fmt.Errorf("unsupported PUA serve configuration version %d", cfg.Version)
 	}
@@ -2527,6 +2532,42 @@ func (s *server) saveConfig(cfg config) error {
 		return err
 	}
 	return atomicWriteConfig(s.config, append(data, '\n'))
+}
+
+// mutateConfig serializes an in-process read-modify-write transaction and
+// reloads the latest file at its commit boundary. Callers must complete slow
+// filesystem discovery, Workspace operations, and AgentHub requests first.
+// The callback must not enter a Workspace controller or call loadConfig or
+// saveConfig: Workspace mutations use the lock order handoff barrier ->
+// configMu.
+func (s *server) mutateConfig(mutate func(*config) (bool, error)) (config, bool, error) {
+	return s.mutateConfigWithSave(s.saveConfigLocked, mutate)
+}
+
+// mutateConfigWithSave is the injectable form used by failure-boundary tests.
+// The writer executes while configMu is held and must not call a locking
+// server config method.
+func (s *server) mutateConfigWithSave(save func(config) error, mutate func(*config) (bool, error)) (config, bool, error) {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
+	cfg, err := s.loadConfigLocked()
+	if err != nil {
+		return config{}, false, err
+	}
+	changed, err := mutate(&cfg)
+	if err != nil {
+		return config{}, false, err
+	}
+	if !changed {
+		return cfg, false, nil
+	}
+	if save == nil {
+		return config{}, false, errors.New("serve configuration writer is nil")
+	}
+	if err := save(cfg); err != nil {
+		return config{}, false, err
+	}
+	return cfg, true, nil
 }
 
 func defaultConfigPath() (string, error) {

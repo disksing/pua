@@ -259,7 +259,7 @@ func TestLiveAddSchedulerWakeSurvivesCancellationAfterSave(t *testing.T) {
 
 	clearLiveAddReconcileState(server.agents)
 	added, err := server.addWorkspaceWithOptionsAndSave(ctx, root, false, "", "", func(cfg config) error {
-		if err := server.saveConfig(cfg); err != nil {
+		if err := server.saveConfigLocked(cfg); err != nil {
 			return err
 		}
 		cancel()

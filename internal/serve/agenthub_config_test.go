@@ -23,12 +23,12 @@ func TestReadAgentHubConfigRejectsRemovedVersion(t *testing.T) {
 	}
 }
 
-func TestReadAgentHubConfigUpgradesVersionThreeDefaults(t *testing.T) {
+func TestLoadConfigUpgradesVersionThreeDefaults(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "serve.json")
 	if err := os.WriteFile(path, []byte(`{"version":3,"workspaces":[],"agentHubEndpoint":"http://127.0.0.1:4646","agentHubInstanceId":"pua-old"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := readAgentHubConfigFile(path)
+	cfg, err := (&server{config: path}).loadConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,13 +44,13 @@ func TestReadAgentHubConfigUpgradesVersionThreeDefaults(t *testing.T) {
 	}
 }
 
-func TestReadAgentHubConfigDropsRemovedResourceDefaults(t *testing.T) {
+func TestLoadConfigDropsRemovedResourceDefaults(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "serve.json")
 	legacy := `{"version":5,"workspaces":[],"agentHubEndpoint":"http://127.0.0.1:4646","agentHubInstanceId":"pua-old","resourceDefaults":{"workspace":"fast","project":"default","task":"reasoning"}}`
 	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := readAgentHubConfigFile(path)
+	cfg, err := (&server{config: path}).loadConfig()
 	if err != nil {
 		t.Fatal(err)
 	}

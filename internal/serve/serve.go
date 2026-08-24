@@ -1756,25 +1756,6 @@ func (s *server) commitWorkspaceAddition(workspace serveWorkspace) (serveWorkspa
 	if s.serviceRemovals[workspace.ID] != nil {
 		return serveWorkspace{}, false, errWorkspaceServiceRemovalInProgress
 	}
-	cfg, err := s.loadConfig()
-	if err != nil {
-		return serveWorkspace{}, false, err
-	}
-	replaced := false
-	for index := range cfg.Workspaces {
-		if cfg.Workspaces[index].ID != workspace.ID {
-			continue
-		}
-		workspace.Icon = cfg.Workspaces[index].Icon
-		cfg.Workspaces[index] = workspace
-		replaced = true
-		break
-	}
-	if !replaced {
-		cfg.Workspaces = append(cfg.Workspaces, workspace)
-	}
-	cfg.ActiveID = workspace.ID
-
 	key, manager, err := s.registeredServiceManagerLocked(workspace)
 	if err != nil {
 		return serveWorkspace{}, false, fmt.Errorf("resolve Workspace service supervision: %w", err)
@@ -1813,9 +1794,35 @@ func (s *server) commitWorkspaceAddition(workspace serveWorkspace) (serveWorkspa
 			)
 		}
 	}
-	if err := s.saveConfig(cfg); err != nil {
+	committed, err := s.transactConfigLocked(func(cfg *config) (bool, error) {
+		// Refresh the cached name at the commit seam so a concurrent name edit
+		// cannot be overwritten by an add that prepared an older snapshot.
+		workspace.Name = workspaceName(workspace.Path)
+		replaced := false
+		for index := range cfg.Workspaces {
+			if cfg.Workspaces[index].ID != workspace.ID {
+				continue
+			}
+			workspace.Icon = cfg.Workspaces[index].Icon
+			cfg.Workspaces[index] = workspace
+			replaced = true
+			break
+		}
+		if !replaced {
+			cfg.Workspaces = append(cfg.Workspaces, workspace)
+		}
+		cfg.ActiveID = workspace.ID
+		return true, nil
+	})
+	if err != nil {
 		rollbackErr := s.rollbackAddedServiceManagerLocked(key, manager, created, startAttempted)
 		return serveWorkspace{}, rollbackErr != nil, errors.Join(err, rollbackErr)
+	}
+	for _, candidate := range committed.Workspaces {
+		if candidate.ID == workspace.ID {
+			workspace = candidate
+			break
+		}
 	}
 	return workspace, false, nil
 }
@@ -1869,21 +1876,19 @@ func (s *server) updateWorkspaceIcon(id, icon string) (serveWorkspace, error) {
 			return serveWorkspace{}, fmt.Errorf("unknown workspace icon: %s", icon)
 		}
 	}
-	cfg, err := s.loadConfig()
-	if err != nil {
-		return serveWorkspace{}, err
-	}
-	for i := range cfg.Workspaces {
-		if cfg.Workspaces[i].ID != id {
-			continue
+	var updated serveWorkspace
+	_, err := s.transactConfig(func(cfg *config) (bool, error) {
+		for i := range cfg.Workspaces {
+			if cfg.Workspaces[i].ID != id {
+				continue
+			}
+			cfg.Workspaces[i].Icon = icon
+			updated = cfg.Workspaces[i]
+			return true, nil
 		}
-		cfg.Workspaces[i].Icon = icon
-		if err := s.saveConfig(cfg); err != nil {
-			return serveWorkspace{}, err
-		}
-		return cfg.Workspaces[i], nil
-	}
-	return serveWorkspace{}, fmt.Errorf("workspace not found: %s", id)
+		return false, fmt.Errorf("workspace not found: %s", id)
+	})
+	return updated, err
 }
 
 func (s *server) updateWorkspaceName(id, name string) (serveWorkspace, error) {
@@ -1903,11 +1908,19 @@ func (s *server) updateWorkspaceName(id, name string) (serveWorkspace, error) {
 		if err != nil {
 			return serveWorkspace{}, err
 		}
-		cfg.Workspaces[i].Name = resolved
-		if err := s.saveConfig(cfg); err != nil {
-			return serveWorkspace{}, err
-		}
-		return cfg.Workspaces[i], nil
+		var updated serveWorkspace
+		_, err = s.transactConfig(func(latest *config) (bool, error) {
+			for index := range latest.Workspaces {
+				if latest.Workspaces[index].ID != id {
+					continue
+				}
+				latest.Workspaces[index].Name = resolved
+				updated = latest.Workspaces[index]
+				return true, nil
+			}
+			return false, fmt.Errorf("workspace not found: %s", id)
+		})
+		return updated, err
 	}
 	return serveWorkspace{}, fmt.Errorf("workspace not found: %s", id)
 }
@@ -2227,8 +2240,21 @@ func (s *server) workspace(id string) (serveWorkspace, error) {
 }
 
 func (s *server) loadConfig() (config, error) {
+	cfg, needsUpgrade, err := readServeConfigFile(s.config)
+	if err != nil {
+		return config{}, err
+	}
+	if !needsUpgrade {
+		return cfg, nil
+	}
+	// Re-read under the shared transaction lock before persisting an upgrade;
+	// another writer may have committed a newer Workspace list meanwhile.
+	return s.transactConfig(nil)
+}
+
+func readServeConfigFile(path string) (config, bool, error) {
 	var cfg config
-	data, err := os.ReadFile(s.config)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			cfg = config{
@@ -2239,44 +2265,42 @@ func (s *server) loadConfig() (config, error) {
 			}
 			normalized, normalizeErr := normalizeConfigAgentProfileRoutes(cfg.AgentProfiles)
 			if normalizeErr != nil {
-				return config{}, normalizeErr
+				return config{}, false, normalizeErr
 			}
 			cfg.AgentProfiles = normalized
-			return cfg, nil
+			return cfg, false, nil
 		}
-		return config{}, err
+		return config{}, false, err
 	}
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return config{}, err
+		return config{}, false, err
 	}
 	if cfg.Workspaces == nil {
 		cfg.Workspaces = []serveWorkspace{}
 	}
 	if cfg.Version < 3 {
-		return config{}, fmt.Errorf("unsupported PUA serve configuration version %d; migrate the configuration before starting pua serve", cfg.Version)
+		return config{}, false, fmt.Errorf("unsupported PUA serve configuration version %d; migrate the configuration before starting pua serve", cfg.Version)
 	}
 	needsUpgrade := cfg.Version != agentHubConfigVersion
 	cfg.Version = agentHubConfigVersion
 	cfg.AgentHubEndpoint, err = normalizeAgentHubEndpoint(cfg.AgentHubEndpoint)
 	if err != nil {
-		return config{}, err
+		return config{}, false, err
 	}
 	normalizedProfiles, err := normalizeConfigAgentProfileRoutes(cfg.AgentProfiles)
 	if err != nil {
-		return config{}, err
+		return config{}, false, err
 	}
 	if !agentProfileRoutesEqual(cfg.AgentProfiles, normalizedProfiles) {
 		cfg.AgentProfiles = normalizedProfiles
 		needsUpgrade = true
 	}
-	if needsUpgrade {
-		if err := s.saveConfig(cfg); err != nil {
-			return config{}, err
-		}
-	}
-	return cfg, nil
+	return cfg, needsUpgrade, nil
 }
 
+// saveConfig is the low-level atomic writer used by the shared config
+// transaction and by startup/test fixture initialization before concurrency is
+// possible. Runtime read-modify-write callers must use transactConfig.
 func (s *server) saveConfig(cfg config) error {
 	if cfg.Version < agentHubConfigVersion {
 		return fmt.Errorf("unsupported PUA serve configuration version %d", cfg.Version)

@@ -91,7 +91,7 @@ func (s *server) beginWorkspaceServiceManagerRemoval(id string) (*serviceManager
 	if removal := s.serviceRemovals[id]; removal != nil {
 		return removal, false, nil
 	}
-	cfg, err := s.loadConfig()
+	cfg, _, err := readServeConfigFile(s.config)
 	if err != nil {
 		return nil, false, err
 	}
@@ -143,30 +143,29 @@ func (s *server) commitWorkspaceServiceManagerRemoval(removal *serviceManagerRem
 	if removal.manager != nil && s.services[removal.key] != removal.manager {
 		return serveWorkspace{}, errWorkspaceRemovalLifecycleUnavailable
 	}
-	cfg, err := s.loadConfig()
-	if err != nil {
-		return serveWorkspace{}, err
-	}
-	next := make([]serveWorkspace, 0, len(cfg.Workspaces))
 	var removed serveWorkspace
-	for _, workspace := range cfg.Workspaces {
-		if workspace.ID == removal.workspaceID {
-			removed = workspace
-			continue
+	_, err := s.transactConfigLocked(func(cfg *config) (bool, error) {
+		next := make([]serveWorkspace, 0, len(cfg.Workspaces))
+		for _, workspace := range cfg.Workspaces {
+			if workspace.ID == removal.workspaceID {
+				removed = workspace
+				continue
+			}
+			next = append(next, workspace)
 		}
-		next = append(next, workspace)
-	}
-	if removed.ID == "" {
-		return serveWorkspace{}, errWorkspaceRemovalLifecycleUnavailable
-	}
-	cfg.Workspaces = next
-	if cfg.ActiveID == removal.workspaceID {
-		cfg.ActiveID = ""
-		if len(cfg.Workspaces) > 0 {
-			cfg.ActiveID = cfg.Workspaces[0].ID
+		if removed.ID == "" {
+			return false, errWorkspaceRemovalLifecycleUnavailable
 		}
-	}
-	if err := s.saveConfig(cfg); err != nil {
+		cfg.Workspaces = next
+		if cfg.ActiveID == removal.workspaceID {
+			cfg.ActiveID = ""
+			if len(cfg.Workspaces) > 0 {
+				cfg.ActiveID = cfg.Workspaces[0].ID
+			}
+		}
+		return true, nil
+	})
+	if err != nil {
 		return serveWorkspace{}, err
 	}
 	if removal.manager != nil {

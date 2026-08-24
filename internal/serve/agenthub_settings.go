@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
-	"reflect"
 )
 
 type agentHubSettingsResponse struct {
@@ -64,24 +62,11 @@ func (s *server) handleAgentHubSettings(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *server) readAgentHubSettings(ctx context.Context) (agentHubSettingsResponse, error) {
-	cfg, err := readAgentHubConfigFile(s.config)
+	serveConfig, err := s.loadConfig()
 	if err != nil {
 		return agentHubSettingsResponse{}, err
 	}
-	structuralProfiles, err := normalizeAgentHubProfileRoutes(cfg.AgentProfiles, agentHubCatalog{})
-	if err != nil {
-		return agentHubSettingsResponse{}, err
-	}
-	if !reflect.DeepEqual(cfg.AgentProfiles, structuralProfiles) {
-		cfg.AgentProfiles = structuralProfiles
-		if _, statErr := os.Stat(s.config); statErr == nil {
-			if err := writeAgentHubConfigFile(s.config, cfg); err != nil {
-				return agentHubSettingsResponse{}, err
-			}
-		} else if !os.IsNotExist(statErr) {
-			return agentHubSettingsResponse{}, statErr
-		}
-	}
+	cfg := agentHubConfigFromServeConfig(serveConfig)
 	persistedConfig := cfg
 	configured := cfg.AgentHubEndpoint
 	if configured == "" {
@@ -131,25 +116,35 @@ func (s *server) readAgentHubSettings(ctx context.Context) (agentHubSettingsResp
 		return response, nil
 	}
 	response.AgentConfig = projectAgentHubSettingsConfig(configuredAgentHub)
-	cfg, err = normalizeAgentHubConfig(cfg, catalog)
+	committed, err := s.transactConfig(func(latest *config) (bool, error) {
+		latestAgentHub := agentHubConfigFromServeConfig(*latest)
+		// A concurrent settings writer owns its newer AgentHub fields. A
+		// catalog fetched for the older endpoint must never rewrite them.
+		if !sameAgentHubConfigFields(latestAgentHub, persistedConfig) {
+			return false, nil
+		}
+		candidate := latestAgentHub
+		if s.agentHubMode != "" {
+			candidate.AgentHubEndpoint = effective
+		}
+		normalized, err := normalizeAgentHubConfig(candidate, catalog)
+		if err != nil {
+			return false, err
+		}
+		changed := !sameAgentHubConfigFields(latestAgentHub, normalized)
+		applyAgentHubConfigFields(latest, normalized)
+		return changed, nil
+	})
 	if err != nil {
 		return agentHubSettingsResponse{}, err
 	}
-	if !reflect.DeepEqual(persistedConfig, cfg) {
-		if err := writeAgentHubConfigFile(s.config, cfg); err != nil {
-			return agentHubSettingsResponse{}, err
-		}
-	}
+	cfg = agentHubConfigFromServeConfig(committed)
 	response.Config = cfg
 	response.Revision = s.settingsRevisionOrEmpty()
 	return response, nil
 }
 
 func (s *server) saveAgentHubSettings(ctx context.Context, request updateAgentHubSettingsRequest) (agentHubSettingsResponse, error) {
-	cfg, err := readAgentHubConfigFile(s.config)
-	if err != nil {
-		return agentHubSettingsResponse{}, err
-	}
 	configured, err := normalizeAgentHubEndpoint(request.Endpoint)
 	if err != nil {
 		return agentHubSettingsResponse{}, err
@@ -193,15 +188,21 @@ func (s *server) saveAgentHubSettings(ctx context.Context, request updateAgentHu
 			return agentHubSettingsResponse{}, fmt.Errorf("save AgentHub config: %w", err)
 		}
 	}
-	cfg.AgentHubEndpoint = configured
-	cfg.AgentProfiles = request.AgentProfiles
-	cfg, err = normalizeAgentHubConfig(cfg, catalog)
+	committed, err := s.transactConfig(func(latest *config) (bool, error) {
+		candidate := agentHubConfigFromServeConfig(*latest)
+		candidate.AgentHubEndpoint = configured
+		candidate.AgentProfiles = request.AgentProfiles
+		candidate, err = normalizeAgentHubConfig(candidate, catalog)
+		if err != nil {
+			return false, err
+		}
+		applyAgentHubConfigFields(latest, candidate)
+		return true, nil
+	})
 	if err != nil {
 		return agentHubSettingsResponse{}, err
 	}
-	if err := writeAgentHubConfigFile(s.config, cfg); err != nil {
-		return agentHubSettingsResponse{}, err
-	}
+	cfg := agentHubConfigFromServeConfig(committed)
 	return agentHubSettingsResponse{
 		Mode:               s.agentHubMode,
 		Config:             cfg,
@@ -240,7 +241,7 @@ func (s *server) handleAgentHubProviderSettings(w http.ResponseWriter, r *http.R
 		writeError(w, err, http.StatusBadRequest)
 		return
 	}
-	cfg, err := readAgentHubConfigFile(s.config)
+	cfg, err := s.loadConfig()
 	if err != nil {
 		writeError(w, err, http.StatusInternalServerError)
 		return
@@ -289,53 +290,12 @@ func (s *server) settingsRevisionOrEmpty() string {
 	return revision
 }
 
-func writeAgentHubConfigFile(path string, cfg agentHubServeConfig) error {
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
-	}
-	return atomicWriteConfig(path, append(data, '\n'))
-}
-
-func readAgentHubConfigFile(path string) (agentHubServeConfig, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return agentHubServeConfig{
-				Version: agentHubConfigVersion, Workspaces: []serveWorkspace{},
-				AgentHubEndpoint: defaultAgentHubEndpoint,
-			}, nil
-		}
-		return agentHubServeConfig{}, err
-	}
-	var version struct {
-		Version int `json:"version"`
-	}
-	if err := json.Unmarshal(data, &version); err != nil {
-		return agentHubServeConfig{}, err
-	}
-	if version.Version < 3 {
-		return agentHubServeConfig{}, fmt.Errorf("unsupported PUA serve configuration version %d; migrate the configuration before starting pua serve", version.Version)
-	}
-	needsUpgrade := version.Version != agentHubConfigVersion
-	var cfg agentHubServeConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return agentHubServeConfig{}, err
-	}
-	cfg.Version = agentHubConfigVersion
-	if needsUpgrade {
-		if err := writeAgentHubConfigFile(path, cfg); err != nil {
-			return agentHubServeConfig{}, err
-		}
-	}
-	return cfg, nil
-}
-
 func (s *server) validatePersistedAgentHubConfig(ctx context.Context) (bool, error) {
-	cfg, err := readAgentHubConfigFile(s.config)
+	serveConfig, err := s.loadConfig()
 	if err != nil {
 		return false, err
 	}
+	cfg := agentHubConfigFromServeConfig(serveConfig)
 	if cfg.AgentHubInstanceID == "" {
 		return false, nil
 	}
@@ -358,14 +318,21 @@ func (s *server) validatePersistedAgentHubConfig(ctx context.Context) (bool, err
 	if err != nil {
 		return true, err
 	}
-	normalized, err := normalizeAgentHubConfig(cfg, catalog)
+	_, err = s.transactConfig(func(latest *config) (bool, error) {
+		latestAgentHub := agentHubConfigFromServeConfig(*latest)
+		if !sameAgentHubConfigFields(latestAgentHub, cfg) {
+			return false, nil
+		}
+		normalized, err := normalizeAgentHubConfig(latestAgentHub, catalog)
+		if err != nil {
+			return false, err
+		}
+		changed := !sameAgentHubConfigFields(latestAgentHub, normalized)
+		applyAgentHubConfigFields(latest, normalized)
+		return changed, nil
+	})
 	if err != nil {
 		return true, err
-	}
-	if !reflect.DeepEqual(cfg, normalized) {
-		if err := writeAgentHubConfigFile(s.config, normalized); err != nil {
-			return true, err
-		}
 	}
 	return true, nil
 }

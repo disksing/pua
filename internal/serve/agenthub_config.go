@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 )
 
@@ -37,6 +38,46 @@ type agentHubProfileRoute struct {
 	Key         string `json:"key"`
 	Description string `json:"description,omitempty"`
 	AgentName   string `json:"agentName"`
+}
+
+func agentHubConfigFromServeConfig(cfg config) agentHubServeConfig {
+	routes := make([]agentHubProfileRoute, 0, len(cfg.AgentProfiles))
+	for _, route := range cfg.AgentProfiles {
+		routes = append(routes, agentHubProfileRoute{
+			Key: route.Key, Description: route.Description, AgentName: route.AgentName,
+		})
+	}
+	return agentHubServeConfig{
+		Version: cfg.Version, ActiveID: cfg.ActiveID, Workspaces: cfg.Workspaces,
+		AgentHubEndpoint: cfg.AgentHubEndpoint, AgentHubInstanceID: cfg.AgentHubInstanceID,
+		AgentProfiles: routes,
+	}
+}
+
+func serveConfigFromAgentHubConfig(cfg agentHubServeConfig) config {
+	routes := make([]agentProfileRoute, 0, len(cfg.AgentProfiles))
+	for _, route := range cfg.AgentProfiles {
+		routes = append(routes, agentProfileRoute{
+			Key: route.Key, Description: route.Description, AgentName: route.AgentName,
+		})
+	}
+	return config{
+		Version: cfg.Version, ActiveID: cfg.ActiveID, Workspaces: cfg.Workspaces,
+		AgentHubEndpoint: cfg.AgentHubEndpoint, AgentHubInstanceID: cfg.AgentHubInstanceID,
+		AgentProfiles: routes,
+	}
+}
+
+func applyAgentHubConfigFields(cfg *config, agentHub agentHubServeConfig) {
+	cfg.AgentHubEndpoint = agentHub.AgentHubEndpoint
+	cfg.AgentHubInstanceID = agentHub.AgentHubInstanceID
+	cfg.AgentProfiles = serveConfigFromAgentHubConfig(agentHub).AgentProfiles
+}
+
+func sameAgentHubConfigFields(left, right agentHubServeConfig) bool {
+	return left.AgentHubEndpoint == right.AgentHubEndpoint &&
+		left.AgentHubInstanceID == right.AgentHubInstanceID &&
+		reflect.DeepEqual(left.AgentProfiles, right.AgentProfiles)
 }
 
 func effectiveAgentHubEndpoint(configured string) (string, error) {

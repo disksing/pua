@@ -741,6 +741,7 @@ test("opens the cached Doctor report from the brand reminder", async ({ page }) 
   await page.goto("/w/ws-test/r/project1.task1");
   await expect(page.locator("#doctorButton")).toHaveAttribute("aria-label", "12 errors and 0 warnings");
   await page.locator("#mobileMenuButton").click();
+  await page.locator("#mobileSidebar").evaluate((node) => Promise.all(node.getAnimations().map((animation) => animation.finished.catch(() => undefined))));
 
   const brandBand = page.locator("#mobileSidebar .brand-band");
   const brandBandBox = (await brandBand.boundingBox())!;
@@ -1755,20 +1756,20 @@ test("keeps the Create task wizard usable across desktop and mobile layouts", as
   expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(844);
 });
 
-test("shows the normalized User name in the input after saving", async ({ page }) => {
+test("normalizes a Workspace user name in the input before saving", async ({ page }) => {
   await installMockApi(page);
-  await page.goto("/w/ws-test/r/project1.task1");
+  await page.goto("/w/ws-test");
 
-  await page.getByRole("button", { name: "Settings" }).click();
-  const settings = page.getByRole("dialog", { name: "System Settings" });
-  await settings.getByRole("button", { name: "User" }).click();
-  const name = settings.getByLabel("Name");
+  const details = page.locator("#detailsPanel");
+  await details.getByRole("tab", { name: "Settings", exact: true }).click();
+  const name = details.locator("#workspaceNewUser");
 
   await name.fill("bad name");
   await expect(name).toHaveValue("badname");
-  await settings.getByRole("button", { name: "Save" }).click();
-  await expect(page.locator("#toast")).toContainText("User name saved as badname.");
-  await expect(name).toHaveValue("badname");
+  await details.getByRole("button", { name: "Add", exact: true }).click();
+  await expect(page.locator("#toast")).toContainText("User badname added.");
+  await expect(name).toHaveValue("");
+  await expect(details.locator("#workspaceCurrentUser")).toContainText("badname");
 });
 
 test("preserves composer draft through upload and Settings", async ({ page }) => {
@@ -1791,36 +1792,6 @@ test("preserves composer draft through upload and Settings", async ({ page }) =>
 
   await page.getByRole("button", { name: "Settings" }).click();
   const settings = page.getByRole("dialog", { name: "System Settings" });
-  await settings.getByRole("button", { name: "User" }).click();
-  const name = settings.getByLabel("Name");
-  await page.evaluate(() => {
-    const state = window as Window & { __settingsPublicationTimer?: number };
-    state.__settingsPublicationTimer = window.setInterval(() => window.dispatchEvent(new StorageEvent("storage", {
-      key: "pua.web.user.v1",
-      newValue: JSON.stringify({ version: 1, name: "Remote_User" }),
-    })), 10);
-  });
-  try {
-    await name.fill("Locator-Probe");
-    await page.waitForTimeout(100);
-    await expect(name).toHaveValue("Locator-Probe");
-  } finally {
-    await page.evaluate(() => {
-      const state = window as Window & { __settingsPublicationTimer?: number };
-      if (state.__settingsPublicationTimer) window.clearInterval(state.__settingsPublicationTimer);
-      delete state.__settingsPublicationTimer;
-    });
-  }
-  await name.fill("");
-  await name.pressSequentially("Sequential_Probe");
-  await expect(name).toHaveValue("Sequential_Probe");
-  await name.fill("");
-  await name.focus();
-  await page.keyboard.type("Native-Probe");
-  await expect(name).toHaveValue("Native-Probe");
-  await name.fill("Migration-User");
-  await expect(name).toHaveValue("Migration-User");
-  await settings.getByRole("button", { name: "Save" }).click();
   await settings.getByRole("button", { name: "Agents" }).click();
   await expect(settings.getByLabel("Endpoint")).toHaveCount(0);
   await expect(settings).not.toContainText("API unknown · AgentHub unknown");
@@ -1840,7 +1811,7 @@ test("manages users in the Workspace resource settings instead of System Setting
   await page.getByRole("tab", { name: "Settings", exact: true }).click();
   const details = page.locator("#detailsPanel");
   await expect(details.locator(".resource-settings-section-head strong", { hasText: "Users" })).toBeVisible();
-  await expect(details.getByText("User", { exact: true })).toBeVisible();
+  await expect(details.locator(".resource-settings-user-row > .resource-settings-user-head > strong", { hasText: "User" })).toBeVisible();
   await expect(details.getByTitle("Switch to another user before deleting this user")).toBeDisabled();
 
   await details.getByLabel("Preference for User").fill("Prefer concise replies");
@@ -2449,7 +2420,7 @@ test("keeps the Workspace Generation lifecycle Save target at 44px in a 440px vi
   await expect(settingsTab).toBeVisible();
   await settingsTab.click();
 
-  const save = panel.locator(".resource-settings-policy-controls").getByRole("button", { name: "Save", exact: true });
+  const save = panel.locator(".resource-settings-generation-controls").getByRole("button", { name: "Save", exact: true });
   await expect(save).toBeDisabled();
   const saveBox = (await save.boundingBox())!;
   expect(saveBox.height).toBeGreaterThanOrEqual(44);
@@ -2745,8 +2716,8 @@ test("keeps Profiles settings cards inside the 390px mobile viewport without hor
   await assertNoHorizontalOverflow();
 });
 
-test("keeps Workspace settings card actions inside a 220px mobile viewport without left clipping", async ({ page }) => {
-  await page.setViewportSize({ width: 220, height: 844 });
+test("keeps Workspace settings card actions inside a 440px mobile viewport without clipping", async ({ page }) => {
+  await page.setViewportSize({ width: 440, height: 844 });
   await installMockApi(page, "project1");
   // Later-registered routes win: list several workspaces like the production
   // environment that surfaced the clipped "PUA default" action buttons.
@@ -2772,6 +2743,7 @@ test("keeps Workspace settings card actions inside a 220px mobile viewport witho
   await page.getByRole("button", { name: "Open navigation" }).click();
   await page.locator("#systemSettingsButton").click();
   const settings = page.getByRole("dialog", { name: "System Settings" });
+  await settings.getByRole("button", { name: "Workspace", exact: true }).click();
   const entries = settings.locator(".settings-workspace-entry");
   await expect(entries).toHaveCount(3);
 

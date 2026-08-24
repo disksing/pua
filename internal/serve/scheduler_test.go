@@ -1207,6 +1207,20 @@ func scheduleOccurrenceMessages(t *testing.T, workspacePath, resourceID string) 
 	return result
 }
 
+func schedulerAgentHubInputCount(fake *runtimeFakeAgentHub) int {
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	count := 0
+	for _, events := range fake.events {
+		for _, event := range events {
+			if event.Type == "message.input" {
+				count++
+			}
+		}
+	}
+	return count
+}
+
 func TestNativeSchedulerCoalescesDowntimeAndUsesStableOccurrence(t *testing.T) {
 	fake := newRuntimeFakeAgentHub()
 	hub := httptest.NewServer(fake)
@@ -6159,6 +6173,255 @@ func TestNativeSchedulerTargetEditReplacesPreparedOccurrence(t *testing.T) {
 	runtime, err = native.schedulerRuntime(created.ID)
 	if err != nil || runtime.Revision != retargeted.Revision || runtime.Prepared != nil || runtime.EffectiveState != app.ScheduleStateCompleted || runtime.LastOutcome != schedulerOutcomeAccepted {
 		t.Fatalf("retargeted attention checkpoint = %#v, %v", runtime, err)
+	}
+}
+
+func newOneTimeRetargetFixture(t *testing.T, target string) (*runtimeFakeAgentHub, *agentManager, serveWorkspace, *app.Workspace, *NativeScheduler, app.Schedule, time.Time) {
+	t.Helper()
+	fake := newRuntimeFakeAgentHub()
+	hub := httptest.NewServer(fake)
+	t.Cleanup(hub.Close)
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2035, time.March, 14, 9, 26, 53, 123456789, time.UTC)
+	schedule, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Run exactly once", Condition: "at the fixed instant", Target: target,
+		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: at.Format(time.RFC3339Nano)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.now = func() time.Time { return at.Add(time.Second) }
+	return fake, manager, workspace, puaWorkspace, newNativeScheduler(manager, workspace), schedule, at
+}
+
+func seedOneTimePreparedRetarget(t *testing.T, native *NativeScheduler, schedule app.Schedule, at time.Time) schedulerPreparedOccurrence {
+	t.Helper()
+	prepared, err := native.prepareOccurrence(schedule, at, at, time.Time{}, 1, false, time.Time{}, schedulerOccurrenceReasonTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := initialScheduleRuntime(schedule, at.Add(-time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.Prepared = &prepared
+	if err := native.storeSchedulerRuntime(schedule.ID, runtime); err != nil {
+		t.Fatal(err)
+	}
+	return prepared
+}
+
+func TestNativeSchedulerCompletedOneTimeRetargetStaysTerminal(t *testing.T) {
+	fake, manager, workspace, puaWorkspace, native, schedule, at := newOneTimeRetargetFixture(t, "project1.task1")
+	if _, err := native.Reconcile(context.Background(), manager.now()); err != nil {
+		t.Fatal(err)
+	}
+	if got := schedulerAgentHubInputCount(fake); got != 1 {
+		t.Fatalf("initial external occurrence inputs = %d, want 1", got)
+	}
+	if messages := scheduleOccurrenceMessages(t, workspace.Path, schedule.Target); len(messages) != 1 {
+		t.Fatalf("initial one-time messages = %#v", messages)
+	}
+
+	newTarget := "workspace"
+	retargeted, err := puaWorkspace.UpdateSchedule(app.UpdateScheduleInput{
+		ID: schedule.ID, ExpectedRevision: schedule.Revision, Target: &newTarget,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeReconcile, err := native.Snapshot(manager.now())
+	if err != nil || len(beforeReconcile.Schedules) != 1 || beforeReconcile.Schedules[0].Revision != retargeted.Revision ||
+		beforeReconcile.Schedules[0].EffectiveState != app.ScheduleStateCompleted || beforeReconcile.Schedules[0].LastOutcome != schedulerOutcomeAccepted ||
+		beforeReconcile.Schedules[0].LastOccurrenceAt != at.Format(time.RFC3339Nano) || beforeReconcile.Schedules[0].NextRunAt != "" || beforeReconcile.NextWakeAt != "" {
+		t.Fatalf("retarget revision projection = %#v, %v", beforeReconcile, err)
+	}
+	if _, err := native.Reconcile(context.Background(), manager.now()); err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := native.schedulerRuntime(schedule.ID)
+	if err != nil || runtime.Revision != retargeted.Revision || runtime.Target != newTarget || runtime.Prepared != nil ||
+		runtime.EffectiveState != app.ScheduleStateCompleted || runtime.LastOutcome != schedulerOutcomeAccepted || runtime.LastOccurrenceAt != at.Format(time.RFC3339Nano) {
+		t.Fatalf("completed retarget checkpoint = %#v, %v", runtime, err)
+	}
+	if messages := scheduleOccurrenceMessages(t, workspace.Path, newTarget); len(messages) != 0 {
+		t.Fatalf("completed retarget delivered to the new target: %#v", messages)
+	}
+	if got := schedulerAgentHubInputCount(fake); got != 1 {
+		t.Fatalf("completed retarget external occurrence inputs = %d, want 1", got)
+	}
+}
+
+func TestNativeSchedulerAcceptedPreparedRetargetCommitsOldReceipt(t *testing.T) {
+	fake, manager, workspace, puaWorkspace, native, schedule, at := newOneTimeRetargetFixture(t, "project1.task1")
+	prepared := seedOneTimePreparedRetarget(t, native, schedule, at)
+	if _, err := acceptGeneratedMailboxMessage(workspace.Path, preparedOccurrenceMessage(prepared)); err != nil {
+		t.Fatal(err)
+	}
+	if got := schedulerAgentHubInputCount(fake); got != 0 {
+		t.Fatalf("mailbox acceptance caused %d external inputs, want 0", got)
+	}
+	newTarget := "workspace"
+	retargeted, err := puaWorkspace.UpdateSchedule(app.UpdateScheduleInput{
+		ID: schedule.ID, ExpectedRevision: schedule.Revision, Target: &newTarget,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Model a restart after the portable retarget committed, while the source
+	// checkpoint still contains the accepted old-revision Prepared payload.
+	restartedManager := newAgentManager(manager.server)
+	restartedManager.now = manager.now
+	manager.server.agents = restartedManager
+	restarted := newNativeScheduler(restartedManager, workspace)
+	if _, err := restarted.Reconcile(context.Background(), manager.now()); err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := restarted.schedulerRuntime(schedule.ID)
+	if err != nil || runtime.Revision != retargeted.Revision || runtime.Target != newTarget || runtime.Prepared != nil ||
+		runtime.EffectiveState != app.ScheduleStateCompleted || runtime.LastOutcome != schedulerOutcomeAccepted || runtime.LastOccurrenceAt != at.Format(time.RFC3339Nano) {
+		t.Fatalf("accepted retarget checkpoint = %#v, %v", runtime, err)
+	}
+	assertDeliveredPreparedOccurrence(t, scheduleOccurrenceMessages(t, workspace.Path, schedule.Target), prepared)
+	if messages := scheduleOccurrenceMessages(t, workspace.Path, newTarget); len(messages) != 0 {
+		t.Fatalf("accepted retarget duplicated work on the new target: %#v", messages)
+	}
+	if got := schedulerAgentHubInputCount(fake); got != 0 {
+		t.Fatalf("receipt reconciliation woke a target: external inputs = %d", got)
+	}
+
+	if err := restartedManager.withResourceController(context.Background(), workspace, schedule.Target, func() error {
+		return restartedManager.reconcileResourceMailboxLocked(context.Background(), workspace, schedule.Target)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := schedulerAgentHubInputCount(fake); got != 1 {
+		t.Fatalf("accepted old-target occurrence external inputs = %d, want 1", got)
+	}
+	secondManager := newAgentManager(manager.server)
+	secondManager.now = manager.now
+	manager.server.agents = secondManager
+	if _, err := newNativeScheduler(secondManager, workspace).Reconcile(context.Background(), manager.now()); err != nil {
+		t.Fatal(err)
+	}
+	if got := schedulerAgentHubInputCount(fake); got != 1 {
+		t.Fatalf("restart duplicated the accepted occurrence externally: inputs = %d", got)
+	}
+}
+
+func TestNativeSchedulerUnacceptedPreparedRetargetRedirects(t *testing.T) {
+	fake, manager, workspace, puaWorkspace, native, schedule, at := newOneTimeRetargetFixture(t, "project1.task1")
+	prepared := seedOneTimePreparedRetarget(t, native, schedule, at)
+	newTarget := "workspace"
+	retargeted, err := puaWorkspace.UpdateSchedule(app.UpdateScheduleInput{
+		ID: schedule.ID, ExpectedRevision: schedule.Revision, Target: &newTarget,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := native.Reconcile(context.Background(), manager.now()); err != nil {
+		t.Fatal(err)
+	}
+	if messages := scheduleOccurrenceMessages(t, workspace.Path, schedule.Target); len(messages) != 0 {
+		t.Fatalf("unaccepted old target received discarded work: %#v", messages)
+	}
+	messages := scheduleOccurrenceMessages(t, workspace.Path, newTarget)
+	if len(messages) != 1 || messages[0].ID == prepared.MessageID || messages[0].Causation == nil ||
+		messages[0].Causation.ScheduleRevision != retargeted.Revision || messages[0].Causation.ScheduledFor != at.Format(time.RFC3339Nano) {
+		t.Fatalf("redirected one-time occurrence = %#v", messages)
+	}
+	if got := schedulerAgentHubInputCount(fake); got != 1 {
+		t.Fatalf("redirected occurrence external inputs = %d, want 1", got)
+	}
+	runtime, err := native.schedulerRuntime(schedule.ID)
+	if err != nil || runtime.Revision != retargeted.Revision || runtime.Target != newTarget || runtime.Prepared != nil || runtime.EffectiveState != app.ScheduleStateCompleted {
+		t.Fatalf("redirected retarget checkpoint = %#v, %v", runtime, err)
+	}
+	restartedManager := newAgentManager(manager.server)
+	restartedManager.now = manager.now
+	manager.server.agents = restartedManager
+	if _, err := newNativeScheduler(restartedManager, workspace).Reconcile(context.Background(), manager.now()); err != nil {
+		t.Fatal(err)
+	}
+	if got := schedulerAgentHubInputCount(fake); got != 1 {
+		t.Fatalf("redirect restart duplicated external work: inputs = %d", got)
+	}
+}
+
+func TestNativeSchedulerCompletedRetargetSurvivesRestartBeforeCheckpointPromotion(t *testing.T) {
+	fake, manager, workspace, puaWorkspace, native, schedule, at := newOneTimeRetargetFixture(t, "project1.task1")
+	if _, err := native.Reconcile(context.Background(), manager.now()); err != nil {
+		t.Fatal(err)
+	}
+	newTarget := "workspace"
+	retargeted, err := puaWorkspace.UpdateSchedule(app.UpdateScheduleInput{
+		ID: schedule.ID, ExpectedRevision: schedule.Revision, Target: &newTarget,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	restartedManager := newAgentManager(manager.server)
+	restartedManager.now = manager.now
+	manager.server.agents = restartedManager
+	restarted := newNativeScheduler(restartedManager, workspace)
+	snapshot, err := restarted.Snapshot(manager.now())
+	if err != nil || len(snapshot.Schedules) != 1 || snapshot.Schedules[0].Revision != retargeted.Revision ||
+		snapshot.Schedules[0].EffectiveState != app.ScheduleStateCompleted || snapshot.Schedules[0].LastOccurrenceAt != at.Format(time.RFC3339Nano) || snapshot.NextWakeAt != "" {
+		t.Fatalf("restart retarget projection = %#v, %v", snapshot, err)
+	}
+	if _, err := restarted.Reconcile(context.Background(), manager.now()); err != nil {
+		t.Fatal(err)
+	}
+	if messages := scheduleOccurrenceMessages(t, workspace.Path, newTarget); len(messages) != 0 {
+		t.Fatalf("restart retarget delivered to the new target: %#v", messages)
+	}
+	if got := schedulerAgentHubInputCount(fake); got != 1 {
+		t.Fatalf("restart retarget external occurrence inputs = %d, want 1", got)
+	}
+}
+
+func TestNativeSchedulerOneTimeTriggerEditCreatesNewOccurrence(t *testing.T) {
+	fake, manager, workspace, puaWorkspace, native, schedule, at := newOneTimeRetargetFixture(t, "project1.task1")
+	if _, err := native.Reconcile(context.Background(), manager.now()); err != nil {
+		t.Fatal(err)
+	}
+	newAt := at.Add(time.Hour)
+	newTrigger := app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: newAt.Format(time.RFC3339Nano)}
+	updated, err := puaWorkspace.UpdateSchedule(app.UpdateScheduleInput{
+		ID: schedule.ID, ExpectedRevision: schedule.Revision, Trigger: &newTrigger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.now = func() time.Time { return newAt.Add(time.Second) }
+	if _, err := native.Reconcile(context.Background(), manager.now()); err != nil {
+		t.Fatal(err)
+	}
+	messages := scheduleOccurrenceMessages(t, workspace.Path, schedule.Target)
+	if len(messages) != 2 || messages[0].Causation == nil || messages[1].Causation == nil ||
+		messages[0].Causation.ScheduleRevision != schedule.Revision || messages[1].Causation.ScheduleRevision != updated.Revision ||
+		messages[0].Causation.ScheduledFor != at.Format(time.RFC3339Nano) || messages[1].Causation.ScheduledFor != newAt.Format(time.RFC3339Nano) || messages[0].ID == messages[1].ID {
+		t.Fatalf("trigger edit occurrences = %#v", messages)
+	}
+	runtime, err := native.schedulerRuntime(schedule.ID)
+	if err != nil || runtime.Revision != updated.Revision || runtime.EffectiveState != app.ScheduleStateCompleted ||
+		runtime.LastOccurrenceAt != newAt.Format(time.RFC3339Nano) || runtime.LastOutcome != schedulerOutcomeAccepted {
+		t.Fatalf("trigger edit checkpoint = %#v, %v", runtime, err)
+	}
+	beforeReplay := schedulerAgentHubInputCount(fake)
+	if _, err := native.Reconcile(context.Background(), manager.now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if got := scheduleOccurrenceMessages(t, workspace.Path, schedule.Target); len(got) != 2 {
+		t.Fatalf("trigger edit replay duplicated durable work: %#v", got)
+	}
+	if afterReplay := schedulerAgentHubInputCount(fake); afterReplay != beforeReplay {
+		t.Fatalf("trigger edit replay changed external input count: before=%d after=%d", beforeReplay, afterReplay)
 	}
 }
 

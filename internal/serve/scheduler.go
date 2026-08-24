@@ -143,7 +143,20 @@ func schedulerRuntimeCanProjectForward(runtime schedulerScheduleRuntime, schedul
 	if err != nil {
 		return false, err
 	}
-	if triggerDigest == "" || runtime.TriggerDigest != triggerDigest || !schedulerRuntimeTargetsSchedule(runtime, schedule.Target) {
+	if triggerDigest == "" || runtime.TriggerDigest != triggerDigest {
+		return false, nil
+	}
+	// A one-time trigger has one nominal occurrence independent of later
+	// metadata, including its target. Once that occurrence is terminal, a
+	// target-only revision must not make Snapshot advertise fresh due work while
+	// Reconcile catches the portable revision up.
+	if _, knownTarget := schedulerRuntimeKnownTarget(runtime); knownTarget && runtimeCompletesSameOneTimeOccurrence(runtime, schedule) {
+		switch schedule.State {
+		case app.ScheduleStateActive, app.ScheduleStatePaused, app.ScheduleStateCompleted:
+			return true, nil
+		}
+	}
+	if !schedulerRuntimeTargetsSchedule(runtime, schedule.Target) {
 		return false, nil
 	}
 	switch schedule.State {
@@ -403,7 +416,21 @@ func (n *NativeScheduler) reconcileSchedule(ctx context.Context, schedule app.Sc
 	triggerChanged := runtime.TriggerDigest != triggerDigest
 	if revisionChanged || triggerChanged {
 		sameKnownTrigger := runtime.TriggerDigest != "" && !triggerChanged
-		sameDefinition := revisionChanged && sameKnownTrigger && schedulerRuntimeTargetsSchedule(runtime, schedule.Target)
+		_, hadKnownTarget := schedulerRuntimeKnownTarget(runtime)
+		sameTarget := schedulerRuntimeTargetsSchedule(runtime, schedule.Target)
+		sameDefinition := revisionChanged && sameKnownTrigger && sameTarget
+		acceptedRetarget := false
+		if revisionChanged && sameKnownTrigger && !sameTarget && runtimeClaimsSameOneTimeOccurrence(runtime, schedule) && runtime.Prepared != nil {
+			accepted, err := n.preparedOccurrenceAccepted(runtime.Prepared)
+			if err != nil {
+				return err
+			}
+			if accepted {
+				commitAcceptedPreparedOccurrence(&runtime, schedule.State)
+				acceptedRetarget = true
+			}
+		}
+		terminalSameOneTime := revisionChanged && sameKnownTrigger && (acceptedRetarget || hadKnownTarget && runtimeCompletesSameOneTimeOccurrence(runtime, schedule))
 		resumingPaused := sameDefinition && runtime.EffectiveState == app.ScheduleStatePaused && schedule.State == app.ScheduleStateActive
 		enteringPaused := sameDefinition && runtime.EffectiveState != app.ScheduleStatePaused && schedule.State == app.ScheduleStatePaused
 		if resumingPaused {
@@ -413,9 +440,11 @@ func (n *NativeScheduler) reconcileSchedule(ctx context.Context, schedule app.Sc
 			}
 			completeExpiredOneTimeWhilePaused(&runtime, schedule.Trigger, resumeBoundary)
 		}
-		if sameDefinition && !enteringPaused && (!resumingPaused || runtimeCompletesSameOneTimeOccurrence(runtime, schedule)) {
+		if terminalSameOneTime || sameDefinition && !enteringPaused && (!resumingPaused || runtimeCompletesSameOneTimeOccurrence(runtime, schedule)) {
 			// Definition-only revisions promote the portable identity while the
-			// prepared payload and every delivery/cursor field remain frozen.
+			// prepared payload and every delivery/cursor field remain frozen. A
+			// terminal one-time occurrence also survives a retarget because the
+			// unchanged trigger instant is the identity of its only nominal work.
 			runtime.Revision = schedule.Revision
 			runtime.TriggerDigest = triggerDigest
 			runtime.Target = schedule.Target
@@ -483,6 +512,11 @@ func (n *NativeScheduler) reconcileSchedule(ctx context.Context, schedule app.Sc
 }
 
 func schedulerRuntimeTargetsSchedule(runtime schedulerScheduleRuntime, target string) bool {
+	knownTarget, known := schedulerRuntimeKnownTarget(runtime)
+	return known && knownTarget == target
+}
+
+func schedulerRuntimeKnownTarget(runtime schedulerScheduleRuntime) (string, bool) {
 	knownTarget := runtime.Target
 	preparedTarget := ""
 	if runtime.Prepared != nil {
@@ -493,11 +527,11 @@ func schedulerRuntimeTargetsSchedule(runtime schedulerScheduleRuntime, target st
 			continue
 		}
 		if knownTarget != "" && knownTarget != candidate {
-			return false
+			return "", false
 		}
 		knownTarget = candidate
 	}
-	return knownTarget != "" && knownTarget == target
+	return knownTarget, knownTarget != ""
 }
 
 func runtimeCompletesSameOneTimeOccurrence(runtime schedulerScheduleRuntime, schedule app.Schedule) bool {
@@ -519,6 +553,42 @@ func runtimeClaimsSameOneTimeOccurrence(runtime schedulerScheduleRuntime, schedu
 	preparedAt, preparedErr := time.Parse(time.RFC3339Nano, runtime.Prepared.ScheduledFor)
 	triggerAt, triggerErr := time.Parse(time.RFC3339Nano, schedule.Trigger.At)
 	return preparedErr == nil && triggerErr == nil && preparedAt.Equal(triggerAt)
+}
+
+func (n *NativeScheduler) preparedOccurrenceAccepted(prepared *schedulerPreparedOccurrence) (bool, error) {
+	if prepared == nil {
+		return false, nil
+	}
+	_, accepted, err := mailboxMessageByID(n.workspace.Path, prepared.MessageID)
+	if err == nil {
+		return accepted, nil
+	}
+	var apiErr *resourceAPIError
+	if errors.As(err, &apiErr) && apiErr.Code == "message_receipt_expired" {
+		// Expired receipts remain durable proof that this deterministic message
+		// ID crossed the target mailbox acceptance boundary.
+		return true, nil
+	}
+	return false, err
+}
+
+func commitAcceptedPreparedOccurrence(runtime *schedulerScheduleRuntime, portableState string) {
+	prepared := runtime.Prepared
+	if prepared == nil {
+		return
+	}
+	runtime.EffectiveState = portableState
+	runtime.AttentionTarget = ""
+	runtime.Prepared = nil
+	runtime.NextRunAt = prepared.NextRunAt
+	runtime.RetryAt = ""
+	runtime.RetryCount = 0
+	runtime.LastOccurrenceAt = prepared.CoalescedThrough
+	runtime.LastOutcome = schedulerOutcomeAccepted
+	runtime.LastError = ""
+	if prepared.NextRunAt == "" {
+		runtime.EffectiveState = app.ScheduleStateCompleted
+	}
 }
 
 func initialScheduleRuntime(schedule app.Schedule, now time.Time) (schedulerScheduleRuntime, error) {
@@ -759,19 +829,7 @@ func (n *NativeScheduler) deliverPrepared(ctx context.Context, schedule app.Sche
 				return err
 			}
 		}
-		runtime.EffectiveState = schedule.State
-		runtime.AttentionTarget = ""
-		runtime.Prepared = nil
-		runtime.NextRunAt = prepared.NextRunAt
-		runtime.RetryAt = ""
-		runtime.RetryCount = 0
-		runtime.LastOccurrenceAt = prepared.CoalescedThrough
-		runtime.LastOutcome = schedulerOutcomeAccepted
-		runtime.LastError = ""
-		runtime.AttentionTarget = ""
-		if prepared.NextRunAt == "" {
-			runtime.EffectiveState = app.ScheduleStateCompleted
-		}
+		commitAcceptedPreparedOccurrence(&runtime, schedule.State)
 		if err := n.storeSchedulerRuntime(schedule.ID, runtime); err != nil {
 			return err
 		}

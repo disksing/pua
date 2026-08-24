@@ -864,10 +864,42 @@ func (n *NativeScheduler) deliverPrepared(ctx context.Context, schedule app.Sche
 	}
 
 	deliver := func() error {
+		accepted, alreadyAccepted, err := mailboxMessageByID(n.workspace.Path, prepared.MessageID)
+		expiredAcceptance := false
+		if err != nil {
+			var apiErr *resourceAPIError
+			if !errors.As(err, &apiErr) || apiErr.Code != "message_receipt_expired" {
+				return err
+			}
+			// An expired receipt is still authoritative proof that the target
+			// accepted this deterministic message ID. Prepared pins keep that
+			// evidence until this source cursor commits the accepted outcome.
+			alreadyAccepted = true
+			expiredAcceptance = true
+		}
+		if alreadyAccepted {
+			// Mailbox acceptance is the Scheduler's durable handoff boundary. A
+			// crash can leave Prepared behind while the target is subsequently
+			// archived or removed, so commit this evidence before consulting the
+			// target's current portable state.
+			commitAcceptedPreparedOccurrence(&runtime, schedule.State)
+			if err := n.storeSchedulerRuntime(schedule.ID, runtime); err != nil {
+				return err
+			}
+			if !expiredAcceptance && (accepted.Status == resourceMessageQueued || accepted.Status == resourceMessageDelivering || accepted.Status == resourceMessageInterrupting) {
+				if err := n.manager.reconcileResourceMailboxLocked(ctx, n.workspace, prepared.Target); err != nil {
+					recordMailboxFailure(n.workspace.Path, accepted.ID, err)
+					n.manager.requestReconcile(reconcileMailboxes)
+				}
+			}
+			return nil
+		}
+
 		// This availability check and the acceptance/checkpoint transaction run
 		// under all Scheduler delivery controllers for the target. Task delivery
 		// includes its Project controller because Project archival moves the
-		// complete Task subtree while holding that stable resource address.
+		// complete Task subtree while holding that stable resource address. It is
+		// intentionally reached only when no durable acceptance evidence exists.
 		exists, archived, _, targetErr := resourceExistsAndArchived(n.workspace.Path, prepared.Target)
 		if targetErr != nil && !errors.Is(targetErr, app.ErrResourceNotFound) {
 			return targetErr
@@ -888,68 +920,51 @@ func (n *NativeScheduler) deliverPrepared(ctx context.Context, schedule app.Sche
 			runtime.AttentionTarget = prepared.Target
 			return n.storeSchedulerRuntime(schedule.ID, runtime)
 		}
-		accepted, alreadyAccepted, err := mailboxMessageByID(n.workspace.Path, prepared.MessageID)
-		expiredAcceptance := false
-		if err != nil {
-			var apiErr *resourceAPIError
-			if !errors.As(err, &apiErr) || apiErr.Code != "message_receipt_expired" {
-				return err
-			}
-			// An expired receipt is still authoritative proof that the target
-			// accepted this deterministic message ID. Prepared pins keep that
-			// evidence until this source cursor commits the accepted outcome.
-			alreadyAccepted = true
-			expiredAcceptance = true
-		}
-		if !alreadyAccepted {
-			if schedule.Trigger.Type != app.ScheduleTriggerAt {
-				busy, err := n.targetBusy(prepared.Target)
-				if err != nil {
-					return err
-				}
-				if busy {
-					runtime.Prepared = nil
-					runtime.NextRunAt = prepared.NextRunAt
-					runtime.RetryAt = ""
-					runtime.RetryCount = 0
-					runtime.LastOccurrenceAt = prepared.CoalescedThrough
-					runtime.LastOutcome = schedulerOutcomeBusy
-					runtime.LastError = ""
-					runtime.AttentionTarget = ""
-					if prepared.NextRunAt == "" {
-						runtime.EffectiveState = app.ScheduleStateCompleted
-					}
-					return n.storeSchedulerRuntime(schedule.ID, runtime)
-				}
-			}
-			if _, _, _, err := n.manager.resolveMailboxGenerationAgent(ctx, n.workspace, prepared.Target); err != nil {
-				var apiErr *resourceAPIError
-				if errors.As(err, &apiErr) && apiErr.Code == "binding_unavailable" {
-					runtime.NextRunAt = ""
-					runtime.RetryAt = ""
-					runtime.RetryCount = 0
-					runtime.EffectiveState = schedulerOutcomeAttention
-					runtime.LastOutcome = schedulerOutcomeAttention
-					runtime.LastError = err.Error()
-					runtime.AttentionTarget = prepared.Target
-					return n.storeSchedulerRuntime(schedule.ID, runtime)
-				}
-				runtime.EffectiveState = schedule.State
-				runtime.AttentionTarget = ""
-				return err
-			}
-		}
-		if !expiredAcceptance {
-			message := resourceMailboxMessage{
-				ID: prepared.MessageID, ResourceID: prepared.Target, Text: prepared.Text,
-				RequestedMode: resourceMessageModeEnqueue, ActualMode: resourceMessageModeEnqueue, ModeFrozen: true,
-				Type: resourceMessageTypeScheduleOccurrence, Causation: cloneMailboxCausation(prepared.Causation),
-				SenderWorkspaceInstanceID: prepared.Causation.SourceWorkspaceInstanceID,
-			}
-			accepted, err = acceptGeneratedMailboxMessage(n.workspace.Path, message)
+		if schedule.Trigger.Type != app.ScheduleTriggerAt {
+			busy, err := n.targetBusy(prepared.Target)
 			if err != nil {
 				return err
 			}
+			if busy {
+				runtime.Prepared = nil
+				runtime.NextRunAt = prepared.NextRunAt
+				runtime.RetryAt = ""
+				runtime.RetryCount = 0
+				runtime.LastOccurrenceAt = prepared.CoalescedThrough
+				runtime.LastOutcome = schedulerOutcomeBusy
+				runtime.LastError = ""
+				runtime.AttentionTarget = ""
+				if prepared.NextRunAt == "" {
+					runtime.EffectiveState = app.ScheduleStateCompleted
+				}
+				return n.storeSchedulerRuntime(schedule.ID, runtime)
+			}
+		}
+		if _, _, _, err := n.manager.resolveMailboxGenerationAgent(ctx, n.workspace, prepared.Target); err != nil {
+			var apiErr *resourceAPIError
+			if errors.As(err, &apiErr) && apiErr.Code == "binding_unavailable" {
+				runtime.NextRunAt = ""
+				runtime.RetryAt = ""
+				runtime.RetryCount = 0
+				runtime.EffectiveState = schedulerOutcomeAttention
+				runtime.LastOutcome = schedulerOutcomeAttention
+				runtime.LastError = err.Error()
+				runtime.AttentionTarget = prepared.Target
+				return n.storeSchedulerRuntime(schedule.ID, runtime)
+			}
+			runtime.EffectiveState = schedule.State
+			runtime.AttentionTarget = ""
+			return err
+		}
+		message := resourceMailboxMessage{
+			ID: prepared.MessageID, ResourceID: prepared.Target, Text: prepared.Text,
+			RequestedMode: resourceMessageModeEnqueue, ActualMode: resourceMessageModeEnqueue, ModeFrozen: true,
+			Type: resourceMessageTypeScheduleOccurrence, Causation: cloneMailboxCausation(prepared.Causation),
+			SenderWorkspaceInstanceID: prepared.Causation.SourceWorkspaceInstanceID,
+		}
+		accepted, err = acceptGeneratedMailboxMessage(n.workspace.Path, message)
+		if err != nil {
+			return err
 		}
 		commitAcceptedPreparedOccurrence(&runtime, schedule.State)
 		if err := n.storeSchedulerRuntime(schedule.ID, runtime); err != nil {

@@ -2032,6 +2032,110 @@ func TestNativeSchedulerExpiredPreparedReceiptReplaysAccepted(t *testing.T) {
 	}
 }
 
+func TestNativeSchedulerAcceptedPreparedReplayPrecedesTargetAvailability(t *testing.T) {
+	for _, targetState := range []string{"archived", "missing"} {
+		for _, evidence := range []string{"accepted message", "expired receipt"} {
+			t.Run(targetState+"/"+evidence, func(t *testing.T) {
+				fake, manager, workspace, puaWorkspace, native, schedule, at := newOneTimeRetargetFixture(t, "project1.task1")
+				prepared := seedOneTimePreparedRetarget(t, native, schedule, at)
+				switch evidence {
+				case "accepted message":
+					if _, err := acceptGeneratedMailboxMessage(workspace.Path, preparedOccurrenceMessage(prepared)); err != nil {
+						t.Fatal(err)
+					}
+				case "expired receipt":
+					if _, err := mutateResourceMailboxStoreForResource(workspace.Path, prepared.Target, func(store *resourceMailboxStore) error {
+						store.Receipts.Expired = append(store.Receipts.Expired, resourceMailboxExpiredEntry{
+							ID: prepared.MessageID, ExpiredAt: time.Now().Format(time.RFC3339Nano),
+						})
+						return nil
+					}); err != nil {
+						t.Fatal(err)
+					}
+				default:
+					t.Fatalf("unknown evidence %q", evidence)
+				}
+
+				target, err := puaWorkspace.ResourceValue(prepared.Target)
+				if err != nil || target.Path == "" {
+					t.Fatalf("prepared target = %#v, %v", target, err)
+				}
+				switch targetState {
+				case "archived":
+					if _, err := puaWorkspace.ArchiveResource(prepared.Target); err != nil {
+						t.Fatal(err)
+					}
+				case "missing":
+					if err := os.Rename(filepath.Join(workspace.Path, filepath.FromSlash(target.Path)), filepath.Join(t.TempDir(), "removed-target")); err != nil {
+						t.Fatal(err)
+					}
+				default:
+					t.Fatalf("unknown target state %q", targetState)
+				}
+
+				// Model a daemon restart after mailbox acceptance but before the
+				// Scheduler source checkpoint committed. The portable target is no
+				// longer deliverable, but that cannot revoke the durable handoff.
+				restartedManager := newAgentManager(manager.server)
+				restartedManager.now = manager.now
+				manager.server.agents = restartedManager
+				restarted := newNativeScheduler(restartedManager, workspace)
+				deadline, err := restarted.Reconcile(context.Background(), manager.now())
+				if err != nil || !deadline.IsZero() {
+					t.Fatalf("accepted replay deadline = %s, %v", deadline, err)
+				}
+				persisted, err := restarted.schedulerRuntime(schedule.ID)
+				if err != nil || persisted.Prepared != nil || persisted.EffectiveState != app.ScheduleStateCompleted ||
+					persisted.LastOutcome != schedulerOutcomeAccepted || persisted.LastOccurrenceAt != at.Format(time.RFC3339Nano) ||
+					persisted.LastError != "" || persisted.AttentionTarget != "" || persisted.NextRunAt != "" || persisted.RetryAt != "" {
+					t.Fatalf("accepted unavailable-target checkpoint = %#v, %v", persisted, err)
+				}
+				if got := schedulerAgentHubInputCount(fake); got != 0 {
+					t.Fatalf("accepted unavailable-target replay external inputs = %d, want 0", got)
+				}
+
+				store, err := loadResourceMailboxStoreForRead(workspace.Path, prepared.Target)
+				if err != nil {
+					t.Fatal(err)
+				}
+				copies := 0
+				for _, message := range store.Mailbox.Messages {
+					if !message.receipt && message.ID == prepared.MessageID {
+						copies++
+					}
+				}
+				for _, receipt := range store.Receipts.Receipts {
+					if receipt.ID == prepared.MessageID {
+						copies++
+					}
+				}
+				for _, expired := range store.Receipts.Expired {
+					if expired.ID == prepared.MessageID {
+						copies++
+					}
+				}
+				if copies != 1 {
+					t.Fatalf("accepted unavailable-target evidence copies = %d, want 1", copies)
+				}
+
+				secondManager := newAgentManager(manager.server)
+				secondManager.now = manager.now
+				manager.server.agents = secondManager
+				if deadline, err := newNativeScheduler(secondManager, workspace).Reconcile(context.Background(), manager.now()); err != nil || !deadline.IsZero() {
+					t.Fatalf("second accepted replay deadline = %s, %v", deadline, err)
+				}
+				second, err := newNativeScheduler(secondManager, workspace).schedulerRuntime(schedule.ID)
+				if err != nil || second.Prepared != nil || second.EffectiveState != app.ScheduleStateCompleted || second.LastOutcome != schedulerOutcomeAccepted {
+					t.Fatalf("second accepted unavailable-target checkpoint = %#v, %v", second, err)
+				}
+				if got := schedulerAgentHubInputCount(fake); got != 0 {
+					t.Fatalf("second accepted unavailable-target replay external inputs = %d, want 0", got)
+				}
+			})
+		}
+	}
+}
+
 func TestNativeSchedulerHonorsPersistedDeliveryBackoff(t *testing.T) {
 	fake := newRuntimeFakeAgentHub()
 	hub := httptest.NewServer(fake)

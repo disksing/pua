@@ -20,25 +20,31 @@ type Config struct {
 const (
 	DefaultGenerationMaxTurns                  = 20
 	DefaultGenerationMaxAccumulatedTurnMinutes = 120
+	DefaultGenerationMaxInactivityMinutes      = 1440
 	DefaultStallWatchdogTimeoutMinutes         = 30
 )
 
 // GenerationPolicyConfig is the optional on-disk representation. Pointers
-// distinguish an omitted field in an older workspace.json from an explicit
-// zero, which disables one budget dimension.
+// distinguish omitted fields during migration. Enabled is the legacy switch:
+// when either independent switch is absent, its value inherits Enabled.
 type GenerationPolicyConfig struct {
 	Enabled                   *bool `json:"enabled,omitempty"`
+	BudgetEnabled             *bool `json:"budgetEnabled,omitempty"`
 	MaxTurns                  *int  `json:"maxTurns,omitempty"`
 	MaxAccumulatedTurnMinutes *int  `json:"maxAccumulatedTurnMinutes,omitempty"`
+	InactivityEnabled         *bool `json:"inactivityEnabled,omitempty"`
+	MaxInactivityMinutes      *int  `json:"maxInactivityMinutes,omitempty"`
 }
 
 // GenerationPolicy is the fully resolved Workspace policy exposed to the
 // Server and UI. Existing Workspaces with no persisted policy use the
 // conservative enabled defaults.
 type GenerationPolicy struct {
-	Enabled                   bool `json:"enabled"`
+	BudgetEnabled             bool `json:"budgetEnabled"`
 	MaxTurns                  int  `json:"maxTurns"`
 	MaxAccumulatedTurnMinutes int  `json:"maxAccumulatedTurnMinutes"`
+	InactivityEnabled         bool `json:"inactivityEnabled"`
+	MaxInactivityMinutes      int  `json:"maxInactivityMinutes"`
 }
 
 // StallWatchdogPolicyConfig is the optional on-disk representation. Pointers

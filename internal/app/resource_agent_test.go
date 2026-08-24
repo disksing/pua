@@ -2,6 +2,7 @@ package app_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -88,14 +89,18 @@ func TestGenerationPolicyDefaultsAndPersistsWorkspaceOverride(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantDefault := app.GenerationPolicy{
-		Enabled: true, MaxTurns: app.DefaultGenerationMaxTurns,
+		BudgetEnabled: true, MaxTurns: app.DefaultGenerationMaxTurns,
 		MaxAccumulatedTurnMinutes: app.DefaultGenerationMaxAccumulatedTurnMinutes,
+		InactivityEnabled:         true, MaxInactivityMinutes: app.DefaultGenerationMaxInactivityMinutes,
 	}
 	if runtime.GenerationPolicy != wantDefault {
 		t.Fatalf("default generation policy = %#v, want %#v", runtime.GenerationPolicy, wantDefault)
 	}
 
-	wantDisabled := app.GenerationPolicy{Enabled: false, MaxTurns: 30, MaxAccumulatedTurnMinutes: 180}
+	wantDisabled := app.GenerationPolicy{
+		BudgetEnabled: false, MaxTurns: 30, MaxAccumulatedTurnMinutes: 180,
+		InactivityEnabled: false, MaxInactivityMinutes: 2880,
+	}
 	if saved, err := workspace.SetGenerationPolicy(wantDisabled); err != nil || saved != wantDisabled {
 		t.Fatalf("save generation policy = %#v, %v", saved, err)
 	}
@@ -108,8 +113,67 @@ func TestGenerationPolicyDefaultsAndPersistsWorkspaceOverride(t *testing.T) {
 		t.Fatalf("reopened generation policy = %#v, %v", runtime.GenerationPolicy, err)
 	}
 
-	if _, err := workspace.SetGenerationPolicy(app.GenerationPolicy{Enabled: true}); err == nil {
+	if _, err := workspace.SetGenerationPolicy(app.GenerationPolicy{BudgetEnabled: true, MaxInactivityMinutes: 1440}); err == nil {
 		t.Fatal("enabled generation policy accepted two disabled budget dimensions")
+	}
+	if _, err := workspace.SetGenerationPolicy(app.GenerationPolicy{MaxInactivityMinutes: 0}); err == nil {
+		t.Fatal("generation policy accepted an invalid retained inactivity limit")
+	}
+}
+
+func TestGenerationPolicyMigratesLegacyEnabledToBothIndependentSwitches(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("enabled=%v", enabled), func(t *testing.T) {
+			workspace, err := app.Initialize(t.TempDir(), "en")
+			if err != nil {
+				t.Fatal(err)
+			}
+			configPath := filepath.Join(workspace.Root(), "workspace.json")
+			data, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var config map[string]json.RawMessage
+			if err := json.Unmarshal(data, &config); err != nil {
+				t.Fatal(err)
+			}
+			config["generationPolicy"] = json.RawMessage(fmt.Sprintf(`{"enabled":%v,"maxTurns":25,"maxAccumulatedTurnMinutes":150}`, enabled))
+			data, err = json.MarshalIndent(config, "", "  ")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(configPath, append(data, '\n'), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			runtime, err := workspace.EnsureResourceRuntime()
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := app.GenerationPolicy{
+				BudgetEnabled: enabled, MaxTurns: 25, MaxAccumulatedTurnMinutes: 150,
+				InactivityEnabled: enabled, MaxInactivityMinutes: app.DefaultGenerationMaxInactivityMinutes,
+			}
+			if runtime.GenerationPolicy != want {
+				t.Fatalf("migrated policy = %#v, want %#v", runtime.GenerationPolicy, want)
+			}
+			persisted, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var persistedConfig struct {
+				GenerationPolicy map[string]json.RawMessage `json:"generationPolicy"`
+			}
+			if err := json.Unmarshal(persisted, &persistedConfig); err != nil {
+				t.Fatal(err)
+			}
+			_, hasLegacyEnabled := persistedConfig.GenerationPolicy["enabled"]
+			_, hasBudgetEnabled := persistedConfig.GenerationPolicy["budgetEnabled"]
+			_, hasInactivityEnabled := persistedConfig.GenerationPolicy["inactivityEnabled"]
+			if hasLegacyEnabled || !hasBudgetEnabled || !hasInactivityEnabled {
+				t.Fatalf("legacy policy was not rewritten: %s", persisted)
+			}
+		})
 	}
 }
 

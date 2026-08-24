@@ -39,7 +39,7 @@ function model(overrides: Partial<DetailPanelModel> = {}): DetailPanelModel {
     workspaceDefaults: { project: { kind: "profile", name: "default" }, task: { kind: "profile", name: "default" } },
     workspaceUsers: [],
     currentUserName: "User",
-    generationPolicy: { enabled: true, maxTurns: 20, maxAccumulatedTurnMinutes: 120 },
+    generationPolicy: { budgetEnabled: true, maxTurns: 20, maxAccumulatedTurnMinutes: 120, inactivityEnabled: true, maxInactivityMinutes: 1440 },
     stallWatchdogPolicy: { enabled: true, timeoutMinutes: 30 },
     agentBinding: { kind: "profile", name: "default" },
     agentProfiles: [{ key: "default", description: "Default", agentName: "fake-agent" }],
@@ -113,7 +113,7 @@ describe("ResourceSettingsPanel", () => {
     cleanups.push(() => unmount(component));
     await tick();
 
-    const save = target.querySelector<HTMLButtonElement>(".resource-settings-policy-controls .secondary-button")!;
+    const save = target.querySelector<HTMLButtonElement>(".resource-settings-generation-controls .secondary-button")!;
     expect(save.textContent).toContain("Save");
     expect(save.disabled).toBe(true);
     expect(save.hasAttribute("disabled")).toBe(true);
@@ -123,6 +123,37 @@ describe("ResourceSettingsPanel", () => {
     maxTurns.dispatchEvent(new Event("input", { bubbles: true }));
     await tick();
     expect(save.disabled).toBe(false);
+  });
+
+  it("saves independent Workspace Generation rotation policies", async () => {
+    const onSaveGenerationPolicy = vi.fn(async () => undefined);
+    const target = document.body.appendChild(document.createElement("div"));
+    const component = mount(ResourceSettingsPanel, {
+      target,
+      props: { model: model({ resourceType: "workspace", resourceId: "workspace", onSaveGenerationPolicy }) },
+    });
+    cleanups.push(() => unmount(component));
+    await tick();
+
+    const budgetEnabled = target.querySelector<HTMLInputElement>('[aria-label="Enable usage-based Generation rotation"]')!;
+    const inactivityEnabled = target.querySelector<HTMLInputElement>('[aria-label="Enable inactivity-based Generation rotation"]')!;
+    const inactivityMinutes = target.querySelector<HTMLInputElement>('[aria-label="Maximum inactivity minutes per Generation"]')!;
+    expect(budgetEnabled.checked).toBe(true);
+    expect(inactivityEnabled.checked).toBe(true);
+    expect(inactivityMinutes.value).toBe("1440");
+
+    budgetEnabled.click();
+    inactivityMinutes.value = "2880";
+    inactivityMinutes.dispatchEvent(new Event("input", { bubbles: true }));
+    await tick();
+    target.querySelector<HTMLButtonElement>(".resource-settings-generation-controls button")!.click();
+    await vi.waitFor(() => expect(onSaveGenerationPolicy).toHaveBeenCalledWith({
+      budgetEnabled: false,
+      maxTurns: 20,
+      maxAccumulatedTurnMinutes: 120,
+      inactivityEnabled: true,
+      maxInactivityMinutes: 2880,
+    }));
   });
 
   it("saves the Workspace Turn stall watchdog policy", async () => {

@@ -817,12 +817,45 @@ func (s *server) updateWorkspaceDefaults(w http.ResponseWriter, r *http.Request,
 }
 
 func (s *server) updateWorkspaceGenerationPolicy(w http.ResponseWriter, r *http.Request, workspaceID string) {
-	var policy app.GenerationPolicy
+	var request struct {
+		Enabled                   *bool `json:"enabled"`
+		BudgetEnabled             *bool `json:"budgetEnabled"`
+		MaxTurns                  *int  `json:"maxTurns"`
+		MaxAccumulatedTurnMinutes *int  `json:"maxAccumulatedTurnMinutes"`
+		InactivityEnabled         *bool `json:"inactivityEnabled"`
+		MaxInactivityMinutes      *int  `json:"maxInactivityMinutes"`
+	}
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&policy); err != nil {
+	if err := decoder.Decode(&request); err != nil {
 		writeError(w, err, http.StatusBadRequest)
 		return
+	}
+	policy := app.GenerationPolicy{
+		BudgetEnabled:             true,
+		MaxTurns:                  app.DefaultGenerationMaxTurns,
+		MaxAccumulatedTurnMinutes: app.DefaultGenerationMaxAccumulatedTurnMinutes,
+		InactivityEnabled:         true,
+		MaxInactivityMinutes:      app.DefaultGenerationMaxInactivityMinutes,
+	}
+	if request.Enabled != nil {
+		policy.BudgetEnabled = *request.Enabled
+		policy.InactivityEnabled = *request.Enabled
+	}
+	if request.BudgetEnabled != nil {
+		policy.BudgetEnabled = *request.BudgetEnabled
+	}
+	if request.MaxTurns != nil {
+		policy.MaxTurns = *request.MaxTurns
+	}
+	if request.MaxAccumulatedTurnMinutes != nil {
+		policy.MaxAccumulatedTurnMinutes = *request.MaxAccumulatedTurnMinutes
+	}
+	if request.InactivityEnabled != nil {
+		policy.InactivityEnabled = *request.InactivityEnabled
+	}
+	if request.MaxInactivityMinutes != nil {
+		policy.MaxInactivityMinutes = *request.MaxInactivityMinutes
 	}
 	workspace, err := s.workspace(workspaceID)
 	if err != nil {
@@ -1862,8 +1895,9 @@ func (s *server) treeAt(ctx context.Context, path string, userNames ...string) (
 			Task:    app.AgentBinding{Kind: "profile", Name: "default"},
 		}
 		tree.GenerationPolicy = app.GenerationPolicy{
-			Enabled: true, MaxTurns: app.DefaultGenerationMaxTurns,
+			BudgetEnabled: true, MaxTurns: app.DefaultGenerationMaxTurns,
 			MaxAccumulatedTurnMinutes: app.DefaultGenerationMaxAccumulatedTurnMinutes,
+			InactivityEnabled:         true, MaxInactivityMinutes: app.DefaultGenerationMaxInactivityMinutes,
 		}
 		tree.StallWatchdogPolicy = app.StallWatchdogPolicy{Enabled: true, TimeoutMinutes: app.DefaultStallWatchdogTimeoutMinutes}
 	}

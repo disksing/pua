@@ -1284,7 +1284,7 @@ function detailPanelModel(): DetailPanelModel {
 		},
 		workspaceUsers: controllerState.workspaceUsers,
 		currentUserName: currentUserName(),
-		generationPolicy: controllerState.tree?.generationPolicy || { enabled: true, maxTurns: 20, maxAccumulatedTurnMinutes: 120 },
+			generationPolicy: controllerState.tree?.generationPolicy || { budgetEnabled: true, maxTurns: 20, maxAccumulatedTurnMinutes: 120, inactivityEnabled: true, maxInactivityMinutes: 1440 },
 		stallWatchdogPolicy: controllerState.tree?.stallWatchdogPolicy || { enabled: true, timeoutMinutes: 30 },
 		agentBinding: controllerState.selectedId === "workspace"
 			? controllerState.tree?.agentBinding || { kind: "profile", name: "default" }

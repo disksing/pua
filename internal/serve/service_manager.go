@@ -133,6 +133,8 @@ type serviceRuntime struct {
 	exports               ServiceExportFile
 	logWriters            []*serviceLogWriter
 	terminationPending    bool
+	orphanRecoveryPending bool
+	orphanCleanupComplete bool
 	processOwnership      serviceProcessOwnership
 }
 
@@ -157,6 +159,8 @@ type serviceRuntimeConfigSnapshot struct {
 	exports               ServiceExportFile
 	logWriters            []*serviceLogWriter
 	terminationPending    bool
+	orphanRecoveryPending bool
+	orphanCleanupComplete bool
 	processOwnership      serviceProcessOwnership
 }
 
@@ -167,7 +171,8 @@ type serviceRuntimeConfigSnapshot struct {
 // out of runtime state.
 type persistedServiceRuntimeState struct {
 	ServiceStatus
-	ProcessConfig *persistedServiceProcessConfig `json:"processConfig,omitempty"`
+	ProcessConfig         *persistedServiceProcessConfig `json:"processConfig,omitempty"`
+	OrphanRecoveryPending bool                           `json:"orphanRecoveryPending,omitempty"`
 }
 
 type persistedServiceProcessConfig struct {
@@ -382,6 +387,8 @@ func (m *ServiceManager) loadStatusLocked(rt *serviceRuntime) error {
 	if status.Exports.Variables == nil {
 		status.Exports.Variables = map[string]string{}
 	}
+	rt.orphanRecoveryPending = persisted.OrphanRecoveryPending || status.PID > 0 || status.ProcessGroup > 0
+	rt.orphanCleanupComplete = false
 	if persisted.ProcessConfig != nil {
 		if persisted.ProcessConfig.SchemaVersion != serviceSchemaVersion {
 			return fmt.Errorf("runtime process config has unsupported schema version %d", persisted.ProcessConfig.SchemaVersion)
@@ -396,7 +403,7 @@ func (m *ServiceManager) loadStatusLocked(rt *serviceRuntime) error {
 		if err := validateServiceConfig(m.root, processConfig); err != nil {
 			return fmt.Errorf("runtime process config: %w", err)
 		}
-		if status.PID > 0 || status.ProcessGroup > 0 {
+		if status.PID > 0 || status.ProcessGroup > 0 || persisted.OrphanRecoveryPending {
 			rt.processConfig = &processConfig
 			rt.processCommandDigest = persisted.ProcessConfig.CommandDigest
 		}
@@ -439,11 +446,6 @@ func (m *ServiceManager) Start(ctx context.Context) error {
 	}
 	m.stopping = false
 	m.started = true
-	for _, rt := range m.runtimes {
-		if err := m.recoverOrphanLocked(rt); err != nil {
-			return err
-		}
-	}
 	return m.reconcileLocked(ctx)
 }
 
@@ -510,21 +512,21 @@ func (m *ServiceManager) reconcileLocked(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	result := m.recoverOrphansLocked()
 	if err := m.invalidateStaleServiceGenerationsLocked(ctx); err != nil {
-		return err
+		return errors.Join(result, err)
 	}
 	ids := m.sortedIDsLocked()
-	var first error
 	for _, id := range ids {
 		rt := m.runtimes[id]
-		if rt == nil {
+		if rt == nil || rt.orphanRecoveryPending {
 			continue
 		}
-		if err := m.reconcileOneLocked(ctx, rt, m.graph[id]); err != nil && first == nil {
-			first = err
+		if err := m.reconcileOneLocked(ctx, rt, m.graph[id]); err != nil {
+			result = errors.Join(result, err)
 		}
 	}
-	return first
+	return result
 }
 
 // invalidateStaleServiceGenerationsLocked completes an Apply whose desired
@@ -1876,37 +1878,94 @@ func (m *ServiceManager) resolveTemplateLocked(template string) (string, string,
 	return result, "service-template", nil
 }
 
-func (m *ServiceManager) recoverOrphanLocked(rt *serviceRuntime) error {
-	if rt.status.PID <= 0 && rt.status.ProcessGroup <= 0 {
+// recoverOrphansLocked reclaims persisted process ownership in the same
+// dependent-first order used for ordinary service shutdown. Every candidate is
+// attempted even when an earlier recovery fails, so one broken cleanup cannot
+// strand an unrelated process group. A pending runtime is excluded from normal
+// reconciliation until a later pass completes its recovery.
+func (m *ServiceManager) recoverOrphansLocked() error {
+	pending := make(map[string]struct{})
+	for id, rt := range m.runtimes {
+		if serviceRuntimeNeedsOrphanRecovery(rt) {
+			pending[id] = struct{}{}
+		}
+	}
+	if len(pending) == 0 {
 		return nil
 	}
-	if err := m.terminateRuntimeProcessGroupLocked(context.Background(), rt, 500*time.Millisecond); err != nil {
-		return m.failOrphanRecoveryLocked(rt, err)
+	order, err := serviceGraphSubsetStopOrder(m.graph, pending)
+	if err != nil {
+		return err
 	}
-	rt.processOwnership = serviceProcessOwnershipReconstructed
-	rt.status.PID, rt.status.ProcessGroup = 0, 0
-	cleanupErr := m.restoreProcessCleanupEnvironmentLocked(rt)
-	if cleanupErr == nil {
-		cleanupErr = m.runCleanupLocked(context.Background(), rt)
+	var result error
+	for _, id := range order {
+		if err := m.recoverOrphanLocked(m.runtimes[id]); err != nil {
+			result = errors.Join(result, fmt.Errorf("recover service %s orphan: %w", id, err))
+		}
 	}
+	return result
+}
+
+func (m *ServiceManager) recoverOrphanLocked(rt *serviceRuntime) error {
+	if !serviceRuntimeNeedsOrphanRecovery(rt) {
+		return nil
+	}
+	rt.orphanRecoveryPending = true
+	if rt.status.PID > 0 || rt.status.ProcessGroup > 0 {
+		if err := m.terminateRuntimeProcessGroupLocked(context.Background(), rt, 500*time.Millisecond); err != nil {
+			return m.failOrphanRecoveryLocked(rt, err)
+		}
+		rt.processOwnership = serviceProcessOwnershipReconstructed
+		rt.status.PID, rt.status.ProcessGroup = 0, 0
+	}
+	if !rt.orphanCleanupComplete {
+		cleanupErr := m.restoreProcessCleanupEnvironmentLocked(rt)
+		if cleanupErr == nil {
+			cleanupErr = m.runCleanupLocked(context.Background(), rt)
+		}
+		if cleanupErr != nil {
+			message := security.NewRedactor(rt.secretValues...).RedactString(cleanupErr.Error())
+			rt.status.State = ServiceStateAttentionRequired
+			rt.status.AttentionRequired = true
+			rt.status.Readiness.Ready = false
+			rt.status.LastError = message
+			rt.status.Cleanup.LastError = message
+			return errors.Join(errors.New(message), m.persistStatusLocked(rt))
+		}
+		rt.orphanCleanupComplete = true
+	}
+	processConfig := rt.processConfig
+	processCommandDigest := rt.processCommandDigest
+	rt.orphanRecoveryPending = false
+	rt.orphanCleanupComplete = false
 	rt.processConfig = nil
 	rt.processCommandDigest = ""
-	if cleanupErr != nil {
-		message := security.NewRedactor(rt.secretValues...).RedactString(cleanupErr.Error())
-		rt.status.State = ServiceStateAttentionRequired
-		rt.status.AttentionRequired = true
-		rt.status.Readiness.Ready = false
-		rt.status.LastError = message
-		rt.status.Cleanup.LastError = message
-		return errors.Join(errors.New(message), m.persistStatusLocked(rt))
-	}
 	rt.status.State = ServiceStateStopped
 	// Successful orphan reaping resolves process ownership, not operator
 	// intent. A failed manual stop persists this bit so reconciliation remains
 	// suppressed until an explicit Start, Restart, or Enable clears it.
 	rt.status.AttentionRequired = false
 	rt.status.LastError = ""
-	return m.persistStatusLocked(rt)
+	if err := m.persistStatusLocked(rt); err != nil {
+		// Keep recovery explicit until its final durable state is recorded. The
+		// cleanup already completed in this manager, so a retry only rewrites the
+		// status and cannot duplicate the cleanup side effect or launch a process.
+		rt.orphanRecoveryPending = true
+		rt.orphanCleanupComplete = true
+		rt.processConfig = processConfig
+		rt.processCommandDigest = processCommandDigest
+		message := security.NewRedactor(rt.secretValues...).RedactString(err.Error())
+		rt.status.State = ServiceStateAttentionRequired
+		rt.status.AttentionRequired = true
+		rt.status.Readiness.Ready = false
+		rt.status.LastError = message
+		return err
+	}
+	return nil
+}
+
+func serviceRuntimeNeedsOrphanRecovery(rt *serviceRuntime) bool {
+	return rt != nil && rt.process == nil && (rt.orphanRecoveryPending || rt.status.PID > 0 || rt.status.ProcessGroup > 0)
 }
 
 func (m *ServiceManager) restoreProcessCleanupEnvironmentLocked(rt *serviceRuntime) error {
@@ -1927,6 +1986,8 @@ func (m *ServiceManager) restoreProcessCleanupEnvironmentLocked(rt *serviceRunti
 }
 
 func (m *ServiceManager) failOrphanRecoveryLocked(rt *serviceRuntime, cause error) error {
+	rt.orphanRecoveryPending = true
+	rt.orphanCleanupComplete = false
 	message := security.NewRedactor(rt.secretValues...).RedactString(cause.Error())
 	rt.status.State = ServiceStateAttentionRequired
 	rt.status.AttentionRequired = true
@@ -1961,8 +2022,11 @@ func (m *ServiceManager) persistStatusLocked(rt *serviceRuntime) error {
 	if writeJSON == nil {
 		writeJSON = writeServiceJSON
 	}
-	persisted := persistedServiceRuntimeState{ServiceStatus: cloneServiceStatus(rt.status)}
-	if (rt.status.PID > 0 || rt.status.ProcessGroup > 0) && rt.processConfig != nil {
+	persisted := persistedServiceRuntimeState{
+		ServiceStatus:         cloneServiceStatus(rt.status),
+		OrphanRecoveryPending: rt.orphanRecoveryPending,
+	}
+	if (rt.status.PID > 0 || rt.status.ProcessGroup > 0 || rt.orphanRecoveryPending) && rt.processConfig != nil {
 		persisted.ProcessConfig = newPersistedServiceProcessConfig(rt)
 	}
 	if err := writeJSON(path, persisted, 0o600); err != nil {
@@ -2711,6 +2775,8 @@ func snapshotServiceRuntimeConfig(rt *serviceRuntime) serviceRuntimeConfigSnapsh
 		exports:               cloneServiceExportFile(rt.exports),
 		logWriters:            append([]*serviceLogWriter(nil), rt.logWriters...),
 		terminationPending:    rt.terminationPending,
+		orphanRecoveryPending: rt.orphanRecoveryPending,
+		orphanCleanupComplete: rt.orphanCleanupComplete,
 		processOwnership:      rt.processOwnership,
 	}
 }
@@ -2769,6 +2835,8 @@ func restoreServiceRuntimeConfig(rt *serviceRuntime, snapshot serviceRuntimeConf
 	rt.exports = cloneServiceExportFile(snapshot.exports)
 	rt.logWriters = append([]*serviceLogWriter(nil), snapshot.logWriters...)
 	rt.terminationPending = snapshot.terminationPending
+	rt.orphanRecoveryPending = snapshot.orphanRecoveryPending
+	rt.orphanCleanupComplete = snapshot.orphanCleanupComplete
 	rt.processOwnership = snapshot.processOwnership
 }
 
@@ -2994,11 +3062,15 @@ func (m *ServiceManager) StartService(ctx context.Context, id string) error {
 	if rt == nil {
 		return os.ErrNotExist
 	}
-	if rt.process == nil && rt.status.ProcessGroup > 0 {
+	if serviceRuntimeNeedsOrphanRecovery(rt) {
 		rt.status.State = ServiceStateAttentionRequired
 		rt.status.AttentionRequired = true
 		if rt.status.LastError == "" {
-			rt.status.LastError = fmt.Sprintf("service process group %d ownership is unresolved", rt.status.ProcessGroup)
+			if rt.status.ProcessGroup > 0 {
+				rt.status.LastError = fmt.Sprintf("service process group %d ownership is unresolved", rt.status.ProcessGroup)
+			} else {
+				rt.status.LastError = "service orphan recovery is pending"
+			}
 		}
 		return errors.Join(errors.New(rt.status.LastError), m.persistStatusLocked(rt))
 	}

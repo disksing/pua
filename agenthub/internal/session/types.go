@@ -94,6 +94,26 @@ const (
 	MessageDeliveryAccepted   = "accepted"
 )
 
+// MessageProviderDelivery is the public result of one durably accepted
+// message request. Pending means the canonical input is safe to retry with
+// the same MessageID, but the Provider has not yet accepted it.
+type MessageProviderDelivery struct {
+	MessageID string `json:"messageId,omitempty"`
+	State     string `json:"state"`
+}
+
+// MessageSendResult is the response contract for one durably accepted
+// inbound message.
+type MessageSendResult struct {
+	Session  Session                 `json:"session"`
+	Delivery MessageProviderDelivery `json:"delivery"`
+}
+
+const (
+	MessageProviderDeliveryPending   = "pending"
+	MessageProviderDeliveryDelivered = "delivered"
+)
+
 // DurableMessage is reconstructed exclusively from canonical Events.
 type DurableMessage struct {
 	EventID   int64

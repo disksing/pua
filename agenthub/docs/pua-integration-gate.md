@@ -63,6 +63,9 @@ capability negotiation, and structured errors. PUA still owns:
   interruption or unknown event;
 - deduplicating client retries according to each endpoint's documented
   idempotency, and reconciling ambiguous message delivery through events;
+- retaining mailbox demand when a successful message response reports
+  `delivery.state: pending`, then retrying that same stable message id until
+  AgentHub reports `delivered`;
 - deciding when a stopped session should be resumed or archived.
 
 When a Session reports `ephemeralEnvironmentRequired: true`, PUA must attach a
@@ -71,6 +74,8 @@ Provider process. AgentHub retains only that boolean requirement across stop,
 archive, provider failure, and daemon replay; it never retains the overlay's
 names or values, and implicit delivery retries remain stopped until PUA
 explicitly supplies another overlay.
+PUA must therefore Resume a stopped marked Session with a fresh overlay before
+confirming any accepted message whose Provider delivery is still pending.
 
 PUA no longer exposes resource Session Locks, AutoRun/Self-Driving, a
 reserved Scheduler Profile, or public commands for manually creating,

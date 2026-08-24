@@ -37,6 +37,7 @@ const (
 	CapabilitySessionInputCapabilities = "session.input-capabilities"
 	CapabilityMessageIdempotency       = "messages.idempotent"
 	CapabilityMessageAtLeastOnce       = "messages.at-least-once"
+	CapabilityMessageDeliveryResult    = "messages.delivery-result"
 	CapabilityMessageOpaquePayloadV2   = "messages.opaque-payload-v2"
 	CapabilityTurnsStableIndex         = "turns.stable-index"
 	CapabilityTurnsMaterialized        = "turns.materialized"
@@ -281,6 +282,7 @@ func (s *Server) capabilities() []string {
 		CapabilitySessionInputCapabilities,
 		CapabilityMessageIdempotency,
 		CapabilityMessageAtLeastOnce,
+		CapabilityMessageDeliveryResult,
 		CapabilityMessageOpaquePayloadV2,
 		CapabilityTurnsStableIndex,
 		CapabilityTurnsMaterialized,
@@ -1010,7 +1012,7 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id string) 
 		writeAPIError(w, http.StatusConflict, "turn_active", "session already has an active turn; set steer=true or wait", map[string]any{"turnId": current.CurrentTurnID})
 		return
 	}
-	value, err := s.runtime.SendMessage(id, input)
+	result, err := s.runtime.SendMessageResult(id, input)
 	if err != nil {
 		var inputErr *session.MessageInputError
 		if errors.As(err, &inputErr) {
@@ -1020,7 +1022,7 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id string) 
 		s.writeRuntimeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"session": value})
+	writeJSON(w, http.StatusAccepted, map[string]any{"session": result.Session, "delivery": result.Delivery})
 }
 
 func (s *Server) resumeSession(w http.ResponseWriter, r *http.Request, id string) {

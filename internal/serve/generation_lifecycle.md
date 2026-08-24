@@ -14,7 +14,7 @@
 
 1. 归档资源先把 queued/delivering/interrupting mailbox 项收敛为 `undeliverable` 或 `delivery_unknown`，不向归档资源继续投递。
 2. archive、replacement、recovery intent 统一执行 `WaitForTurnTerminal → StopSession → WaitForStopped → ArchiveSession → RetireGeneration`。活动 Turn 或 approval 只等待自然 terminal，不被 idle/资源归档静默中断。idle intent 只执行 `StopSession`；`stopped` 的 current generation 在无 mailbox 时保持 stopped，有待办时执行 `ResumeSession`，确认同一 Session ready 后才进入 delivery。
-3. delivering/interrupting 项先执行 `WaitForMessageReceipt`；稳定 message ID 的结果未知时不能改发另一条消息。
+3. delivering/interrupting 项先收敛稳定 receipt；结果未知时执行 `WaitForMessageReceipt`，明确的 Provider-delivery-pending 项则在 stopped 边界先 `ResumeSession`，随后只用同一 message ID 执行 `DeliverMessage` 确认，不能改发另一条消息。
 4. active Turn 中，interrupt 规划 `InterruptTurn`；支持 steer 时规划 `DeliverMessage`；enqueue 等待 Turn terminal。ready Session 才能 delivery。
 5. 没有 current generation 且 mailbox 有待办时规划 `CreateGeneration`；资源已归档时永不创建。
 6. idle deadline 只在 proven ready boundary 规划 `StopSession`。

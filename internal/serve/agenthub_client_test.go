@@ -65,6 +65,18 @@ func TestAgentHubClientContract(t *testing.T) {
 				t.Errorf("unexpected resume environment overlays: %+v", request)
 			}
 			writeFakeAgentHubJSON(t, w, sessionEnvelope("ses_1", "ready"))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/sessions/ses_1/messages":
+			if r.Header.Get("Content-Type") != "application/json" {
+				t.Errorf("missing JSON content type for %s", r.URL.Path)
+			}
+			var message agentHubInboundMessage
+			if err := json.NewDecoder(r.Body).Decode(&message); err != nil {
+				t.Errorf("decode message request: %v", err)
+			}
+			writeFakeAgentHubJSON(t, w, map[string]any{
+				"session":  sessionData("ses_1", "ready"),
+				"delivery": map[string]any{"messageId": message.MessageID, "state": "delivered"},
+			})
 		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/sessions/ses_1/"):
 			if r.Header.Get("Content-Type") != "application/json" {
 				t.Errorf("missing JSON content type for %s", r.URL.Path)
@@ -106,7 +118,7 @@ func TestAgentHubClientContract(t *testing.T) {
 	if _, err := client.GetSession(ctx, "ses_1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.Message(ctx, "ses_1", agentHubInboundMessage{Text: "hello"}); err != nil {
+	if result, err := client.Message(ctx, "ses_1", agentHubInboundMessage{Text: "hello", MessageID: "msg-1"}); err != nil || result.Delivery.State != "delivered" || result.Delivery.MessageID != "msg-1" {
 		t.Fatal(err)
 	}
 	if _, err := client.Message(ctx, "ses_1", agentHubInboundMessage{

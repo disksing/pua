@@ -188,13 +188,19 @@ func (c *Client) SendMessage(id, text string, steer bool) (session.Session, erro
 // SendMessageInput sends one canonical input. Schema-v2 payload is opaque to
 // AgentHub; schema-v1 provenance fields remain available for compatibility.
 func (c *Client) SendMessageInput(id string, input session.MessageInput) (session.Session, error) {
-	var result struct {
-		Session session.Session `json:"session"`
-	}
+	result, err := c.SendMessageInputResult(id, input)
+	return result.Session, err
+}
+
+// SendMessageInputResult distinguishes durable input acceptance from Provider
+// delivery. The older SendMessageInput method retains its Session-only return
+// shape for source compatibility.
+func (c *Client) SendMessageInputResult(id string, input session.MessageInput) (session.MessageSendResult, error) {
+	var result session.MessageSendResult
 	if err := c.request(http.MethodPost, "/v1/sessions/"+id+"/messages", input, &result); err != nil {
-		return session.Session{}, err
+		return session.MessageSendResult{}, err
 	}
-	return result.Session, nil
+	return result, nil
 }
 
 func (c *Client) SessionAction(id, action string) (session.Session, error) {

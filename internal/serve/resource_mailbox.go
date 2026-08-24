@@ -77,9 +77,9 @@ type providerMessageContext struct {
 }
 
 // resourceMailboxMessage is the durable PUA-side ownership record for one
-// accepted resource message. Delivery is complete when AgentHub has durably
-// accepted the stable message id and assumed its at-least-once responsibility;
-// it does not mean the resulting Turn has completed.
+// accepted resource message. Delivery is complete only when AgentHub confirms
+// that the Provider accepted the stable message id; it does not mean the
+// resulting Turn has completed.
 type resourceMailboxMessage struct {
 	ID                        string                       `json:"id"`
 	Sequence                  uint64                       `json:"sequence"`
@@ -107,6 +107,7 @@ type resourceMailboxMessage struct {
 	AgentHubSessionID         string                       `json:"agentHubSessionId,omitempty"`
 	TurnID                    string                       `json:"turnId,omitempty"`
 	ProviderContext           *providerMessageContext      `json:"providerContext,omitempty"`
+	ProviderDeliveryPending   bool                         `json:"providerDeliveryPending,omitempty"`
 	TurnTerminalAt            string                       `json:"turnTerminalAt,omitempty"`
 	InterruptTurnID           string                       `json:"interruptTurnId,omitempty"`
 	InterruptAt               string                       `json:"interruptAt,omitempty"`
@@ -1454,7 +1455,7 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 		if outboundErr != nil {
 			return outboundErr
 		}
-		delivered, deliveryErr := client.Message(ctx, session.ID, outbound)
+		deliveryResult, deliveryErr := client.Message(ctx, session.ID, outbound)
 		if deliveryErr != nil {
 			stillCurrent, guardErr := legacyLifecyclePlanStillCurrent(workspace, deliveryPlan, &session)
 			if guardErr != nil {
@@ -1485,6 +1486,7 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 				}
 				_, persistErr := updateMailboxMessage(workspace.Path, message.ID, func(current *resourceMailboxMessage) {
 					current.Status = resourceMessageDelivered
+					current.ProviderDeliveryPending = false
 					current.DeliveredAt = time.Now().Format(time.RFC3339Nano)
 					current.TerminalAt = current.DeliveredAt
 					current.LastError = ""
@@ -1518,6 +1520,50 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 			recordMailboxFailure(workspace.Path, message.ID, deliveryErr)
 			return deliveryErr
 		}
+		delivered := deliveryResult.Session
+		deliveryState := strings.TrimSpace(deliveryResult.Delivery.State)
+		responseMessageID := strings.TrimSpace(deliveryResult.Delivery.MessageID)
+		if deliveryState != "" && responseMessageID != message.ID {
+			responseErr := fmt.Errorf("AgentHub delivery identified message %q, want %q", responseMessageID, message.ID)
+			recordMailboxFailure(workspace.Path, message.ID, responseErr)
+			return responseErr
+		}
+		if deliveryState == agentHubMessageDeliveryPending {
+			stillCurrent, guardErr := legacyLifecyclePlanStillCurrent(workspace, deliveryPlan, &delivered)
+			if guardErr != nil {
+				return guardErr
+			}
+			if !stillCurrent {
+				return nil
+			}
+			_, err = updateMailboxMessage(workspace.Path, message.ID, func(current *resourceMailboxMessage) {
+				// AgentHub durably owns this stable MessageID, but the Provider has
+				// not accepted it. Keep the in-flight receipt nonterminal while
+				// recording enough demand for the planner to Resume a stopped
+				// ephemeral Session before retrying the exact canonical input.
+				current.Status = resourceMessageDelivering
+				current.ProviderDeliveryPending = true
+				current.AgentHubSessionID = delivered.ID
+				if turnID := strings.TrimSpace(delivered.CurrentTurnID); turnID != "" {
+					current.TurnID = turnID
+				}
+				current.LastError = ""
+				current.LastErrorCode = ""
+			})
+			if err != nil {
+				return err
+			}
+			rt.applyAgentHubSessionState(m, delivered)
+			// End this pass even when the Provider is still live. The normal
+			// reconcile cadence supplies bounded retry/backoff and avoids a
+			// tight loop on a Provider that keeps rejecting the prompt.
+			return nil
+		}
+		if deliveryState != "" && deliveryState != agentHubMessageDeliveryDelivered {
+			responseErr := fmt.Errorf("AgentHub returned unknown Provider delivery state %q", deliveryState)
+			recordMailboxFailure(workspace.Path, message.ID, responseErr)
+			return responseErr
+		}
 		stillCurrent, guardErr := legacyLifecyclePlanStillCurrent(workspace, deliveryPlan, &delivered)
 		if guardErr != nil {
 			return guardErr
@@ -1528,6 +1574,7 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 		turnID := deliveredMailboxTurnID(ctx, client, session.ID, message, delivered, session)
 		_, err = updateMailboxMessage(workspace.Path, message.ID, func(current *resourceMailboxMessage) {
 			current.Status = resourceMessageDelivered
+			current.ProviderDeliveryPending = false
 			current.DeliveredAt = time.Now().Format(time.RFC3339Nano)
 			current.TerminalAt = current.DeliveredAt
 			current.TurnID = turnID

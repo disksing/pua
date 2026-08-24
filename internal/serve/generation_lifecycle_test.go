@@ -215,6 +215,43 @@ func TestPlanGenerationLifecycleTable(t *testing.T) {
 			reason:    "message_receipt_pending",
 		},
 		{
+			name: "stopped Provider-pending delivery resumes exact Session",
+			mutate: func(f *GenerationLifecycleFacts) {
+				f.SessionState = "stopped"
+				f.SessionResumable = true
+				f.MailboxPending = true
+				f.NextMessage = generationMessage(GenerationMessageModeEnqueue, GenerationMessageStatusDelivering)
+				f.NextMessage.ProviderDeliveryPending = true
+			},
+			operation: GenerationOperationResumeSession,
+			reason:    "resume_pending_provider_delivery",
+		},
+		{
+			name: "active Provider-pending enqueue confirms same input",
+			mutate: func(f *GenerationLifecycleFacts) {
+				f.SessionState = "running"
+				f.TurnActive = true
+				f.TurnID = "turn-1"
+				f.MailboxPending = true
+				f.NextMessage = generationMessage(GenerationMessageModeEnqueue, GenerationMessageStatusDelivering)
+				f.NextMessage.ProviderDeliveryPending = true
+			},
+			operation: GenerationOperationDeliverMessage,
+			reason:    "confirm_pending_provider_delivery",
+		},
+		{
+			name: "Provider-pending delivery waits for Session recovery",
+			mutate: func(f *GenerationLifecycleFacts) {
+				f.SessionKnown = false
+				f.SessionState = ""
+				f.MailboxPending = true
+				f.NextMessage = generationMessage(GenerationMessageModeEnqueue, GenerationMessageStatusDelivering)
+				f.NextMessage.ProviderDeliveryPending = true
+			},
+			operation: GenerationOperationWaitForSession,
+			reason:    "session_state_not_ready",
+		},
+		{
 			name:      "idle deadline stops only an empty ready generation",
 			mutate:    func(f *GenerationLifecycleFacts) { f.IdleDeadlineDue = true },
 			operation: GenerationOperationStopSession,

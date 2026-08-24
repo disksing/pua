@@ -73,6 +73,29 @@ func TestRequestReturnsStructuredAPIError(t *testing.T) {
 	}
 }
 
+func TestSendMessageInputResultExposesProviderDelivery(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/sessions/ses_test/messages" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(session.MessageSendResult{
+			Session: session.Session{ID: "ses_test"},
+			Delivery: session.MessageProviderDelivery{
+				MessageID: "msg-1",
+				State:     session.MessageProviderDeliveryPending,
+			},
+		})
+	}))
+	defer server.Close()
+	result, err := New(server.URL).SendMessageInputResult("ses_test", session.MessageInput{Text: "hello", MessageID: "msg-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Session.ID != "ses_test" || result.Delivery.MessageID != "msg-1" || result.Delivery.State != session.MessageProviderDeliveryPending {
+		t.Fatalf("message result = %+v", result)
+	}
+}
+
 func TestEventsAfterPagesToInitialDurableHead(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		after, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)

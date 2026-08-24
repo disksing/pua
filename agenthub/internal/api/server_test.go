@@ -2416,6 +2416,7 @@ func TestStatusCapabilitiesAreBackedByHTTPBehavior(t *testing.T) {
 		CapabilitySessionInputCapabilities,
 		CapabilityMessageIdempotency,
 		CapabilityMessageAtLeastOnce,
+		CapabilityMessageDeliveryResult,
 		CapabilityMessageOpaquePayloadV2,
 		CapabilityTurnsStableIndex,
 		CapabilityTurnsMaterialized,
@@ -2503,7 +2504,7 @@ func TestStatusOmitsUnavailableRuntimeCapabilities(t *testing.T) {
 		CapabilityEventsSemanticV1, CapabilityEventRawV1,
 		CapabilityActivityGlobalSSE, CapabilitySessionSource, CapabilitySessionSourceMetadata,
 		CapabilitySessionIdempotentCreate, CapabilitySessionInputCapabilities,
-		CapabilityMessageIdempotency, CapabilityMessageAtLeastOnce, CapabilityMessageOpaquePayloadV2, CapabilityTurnsStableIndex, CapabilityTurnsMaterialized,
+		CapabilityMessageIdempotency, CapabilityMessageAtLeastOnce, CapabilityMessageDeliveryResult, CapabilityMessageOpaquePayloadV2, CapabilityTurnsStableIndex, CapabilityTurnsMaterialized,
 		CapabilityTurnsActivityItems,
 	}
 	if strings.Join(body.Capabilities, ",") != strings.Join(want, ",") {
@@ -2692,5 +2693,42 @@ func TestMessageSourceValidationUsesStructuredErrors(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("valid opaque request must pass validation before runtime check: status = %d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestMessageResponseReportsPendingProviderDelivery(t *testing.T) {
+	store, err := session.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := store.Create(session.CreateInput{Cwd: t.TempDir(), AgentName: "Unavailable Agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := runtime.New(store, config.Config{})
+	t.Cleanup(manager.Close)
+	handler := New(store, "test", time.Now(), Dependencies{Runtime: manager}).Handler()
+	request := httptest.NewRequest(http.MethodPost, "/v1/sessions/"+created.ID+"/messages", strings.NewReader(`{"text":"keep this pending","messageId":"stable-pending-1"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	var body struct {
+		Session  session.Session                 `json:"session"`
+		Delivery session.MessageProviderDelivery `json:"delivery"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != http.StatusAccepted || body.Session.ID != created.ID {
+		t.Fatalf("response = %d %+v", response.Code, body)
+	}
+	if body.Delivery.MessageID != "stable-pending-1" || body.Delivery.State != session.MessageProviderDeliveryPending {
+		t.Fatalf("delivery = %+v, want stable pending", body.Delivery)
+	}
+	message, found, err := store.DurableMessageByID(created.ID, "stable-pending-1")
+	if err != nil || !found || message.Delivered {
+		t.Fatalf("durable message = %+v, found=%v, err=%v", message, found, err)
 	}
 }

@@ -229,7 +229,7 @@ GET    /v1/sessions/{id}/turns/{turnId}
 
 资源编排客户端可在创建请求中提供 `idempotencyKey`，并在 `source.metadata`
 保存 Workspace 实例、资源和代际标识；完全相同的请求在 daemon 重启后仍返回
-原 Session。入站消息可提供稳定 `messageId`，并发或重启重试只会持久化一次规范输入。AgentHub 在返回可出队的成功响应前接管至少一次投递责任；Provider 失败、响应不明或 daemon 重启时继续重试。如果 Provider 已接收而确认 Event 尚未落盘，恢复可能产生少量重复投递。
+原 Session。入站消息可提供稳定 `messageId`，并发或重启重试只会持久化一次规范输入。成功响应通过 `delivery.state` 的 `pending` 或 `delivered` 区分规范输入已持久化与 Provider 已接收；前者仍可用相同 ID 确认投递。Provider 失败、响应不明或 daemon 重启时 AgentHub 继续重试。如果 Provider 已接收而确认 Event 尚未落盘，恢复可能产生少量重复投递。
 Session 的 `inputCapabilities.steer` 明确说明当前 Provider 是否支持活动 Turn
 输入；不支持时调用方应排队。`turns` 端点返回以稳定 event id 为引用的紧凑
 Turn 索引，Session 归档后仍可读取。

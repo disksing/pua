@@ -42,6 +42,7 @@ type runtimeFakeAgentHub struct {
 	resumeErrorMessage   string
 	resumeUpdatesAt      bool
 	failNextMessage      bool
+	pendingNextMessage   bool
 	enforceMessageIDs    bool
 	rejectAgentName      string
 	extraAgents          []string
@@ -53,6 +54,8 @@ type runtimeFakeAgentHub struct {
 	messageSenders       []*agentHubMessageSender
 	messageIDs           []string
 	messageInputs        map[string]agentHubInboundMessage
+	messageDelivered     map[string]bool
+	providerDeliveries   map[string]int
 	createRequests       []agentHubCreateSessionRequest
 	actions              []string
 	resumeEnvironments   []map[string]string
@@ -67,10 +70,12 @@ type runtimeFakeAgentHub struct {
 
 func newRuntimeFakeAgentHub() *runtimeFakeAgentHub {
 	return &runtimeFakeAgentHub{
-		sessions:      make(map[string]agentHubSession),
-		events:        make(map[string][]agentHubEvent),
-		turns:         make(map[string]map[string]agentHubTurn),
-		messageInputs: make(map[string]agentHubInboundMessage),
+		sessions:           make(map[string]agentHubSession),
+		events:             make(map[string][]agentHubEvent),
+		turns:              make(map[string]map[string]agentHubTurn),
+		messageInputs:      make(map[string]agentHubInboundMessage),
+		messageDelivered:   make(map[string]bool),
+		providerDeliveries: make(map[string]int),
 	}
 }
 
@@ -215,15 +220,33 @@ func (f *runtimeFakeAgentHub) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		if f.enforceMessageIDs && body.MessageID != "" {
 			if previous, exists := f.messageInputs[body.MessageID]; exists {
 				session := f.sessions[id]
-				f.mu.Unlock()
 				if !reflect.DeepEqual(previous, body) {
+					f.mu.Unlock()
 					w.WriteHeader(http.StatusConflict)
 					writeRuntimeFakeJSON(w, map[string]any{"error": map[string]any{
 						"code": "runtime_operation_failed", "message": "message id conflicts with an existing input",
 					}})
 					return
 				}
-				writeRuntimeFakeJSON(w, map[string]any{"session": session})
+				if !f.messageDelivered[body.MessageID] && session.State == "stopped" && session.EphemeralEnvironmentRequired {
+					f.mu.Unlock()
+					writeRuntimeFakeJSON(w, map[string]any{
+						"session":  session,
+						"delivery": map[string]any{"messageId": body.MessageID, "state": "pending"},
+					})
+					return
+				}
+				if !f.messageDelivered[body.MessageID] {
+					f.messageDelivered[body.MessageID] = true
+					f.providerDeliveries[body.MessageID]++
+					session.State = "running"
+					f.sessions[id] = session
+				}
+				f.mu.Unlock()
+				writeRuntimeFakeJSON(w, map[string]any{
+					"session":  session,
+					"delivery": map[string]any{"messageId": body.MessageID, "state": "delivered"},
+				})
 				return
 			}
 			f.messageInputs[body.MessageID] = body
@@ -236,6 +259,12 @@ func (f *runtimeFakeAgentHub) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		f.sessions[id] = session
 		fail := f.failNextMessage
 		f.failNextMessage = false
+		pending := f.pendingNextMessage
+		f.pendingNextMessage = false
+		if !pending && body.MessageID != "" {
+			f.messageDelivered[body.MessageID] = true
+			f.providerDeliveries[body.MessageID]++
+		}
 		f.mu.Unlock()
 		if fail {
 			w.WriteHeader(http.StatusBadGateway)
@@ -244,7 +273,14 @@ func (f *runtimeFakeAgentHub) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 			}})
 			return
 		}
-		writeRuntimeFakeJSON(w, map[string]any{"session": session})
+		deliveryState := "delivered"
+		if pending {
+			deliveryState = "pending"
+		}
+		writeRuntimeFakeJSON(w, map[string]any{
+			"session":  session,
+			"delivery": map[string]any{"messageId": body.MessageID, "state": deliveryState},
+		})
 		return
 	}
 	if len(parts) == 5 && parts[3] == "approvals" {

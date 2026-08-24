@@ -106,6 +106,7 @@ Current runtime-backed daemon instances advertise:
 | `session.input-capabilities` | Every Session reports whether its selected provider supports active-Turn steer. |
 | `messages.idempotent` | A non-empty `messageId` creates at most one canonical `message.input` per Session; conflicting reuse is rejected. |
 | `messages.at-least-once` | Once a message request is durably accepted, AgentHub retains provider delivery responsibility across ambiguous responses, provider failures, and daemon restarts. A crash after provider acceptance but before durable acknowledgement can cause a limited duplicate attempt. |
+| `messages.delivery-result` | Message success responses distinguish durable input acceptance from Provider acceptance through `delivery.state: pending|delivered`. |
 | `messages.opaque-payload-v2` | Schema-v2 inputs persist caller-owned JSON payloads opaquely and forward provider-facing text without transformation. |
 | `turns.stable-index` | Turn pages expose event ranges, trigger/final-reply event references, status and forward/backward cursors. |
 | `turns.materialized` | Closed Turns and ordered compact items are read from rebuildable `turns.jsonl`; single-Turn queries repair projection lag and Event ranges provide bounded detail expansion. |
@@ -246,6 +247,7 @@ Daemon status, effective data paths and runtime summary.
     "session.input-capabilities",
     "messages.idempotent",
     "messages.at-least-once",
+    "messages.delivery-result",
     "messages.opaque-payload-v2",
     "turns.stable-index",
     "turns.materialized",
@@ -1008,9 +1010,9 @@ trust semantics from that payload.
     prompt (the ACP providers: Kimi and OpenCode) reject steer requests.
   - `messageId` (optional) — caller-stable idempotency key for this Session.
     Once the canonical input is durable, concurrent retries and retries after
-    daemon restart never append it again. They return success immediately only
-    after durable Provider acceptance; an unconfirmed input stays on the
-    recoverable delivery path. A crash after Provider acceptance but before
+    daemon restart never append it again. A success response distinguishes a
+    durable input still pending Provider acceptance from one the Provider has
+    accepted; the former stays on the recoverable delivery path. A crash after Provider acceptance but before
     the acceptance Event is durable can produce one or more limited duplicate
     attempts, which is the intentional at-least-once tradeoff.
     Reusing the id with different canonical text, payload, or steer input
@@ -1019,7 +1021,10 @@ trust semantics from that payload.
     `replyTo`, and `correlationId` retain their historical behavior, including
     AgentHub's provenance header construction. Schema v2 rejects these fields
     so application metadata cannot leak back into the transport abstraction.
-- **Success `202`:** `{"session": {...}}` — the turn runs asynchronously;
+- **Success `202`:** `{"session": {...},"delivery":{"messageId":"msg-...","state":"pending|delivered"}}`.
+  The request is durably accepted in both states. `pending` means a caller with
+  a stable `messageId` may retry the identical request to confirm delivery;
+  `delivered` means the Provider accepted it. The turn runs asynchronously;
   watch it through the events endpoint.
 - **Errors:** `400 invalid_request`, `415 json_required`,
   `400 invalid_message_schema`, `400 mixed_message_schema`,
@@ -1202,7 +1207,7 @@ AgentHub does not interpret an `Idempotency-Key` header. Callers use the JSON
 | Operation | Idempotency contract | Important conflict |
 | --- | --- | --- |
 | Create | Without `idempotencyKey`, every accepted request creates a Session. With a key, identical retries return the original Session across daemon restarts; reuse with different immutable creation input fails. | `idempotency_conflict`; provider startup is 502. |
-| Message | Without `messageId`, retry outcome may be ambiguous. With a stable id, concurrent or restarted identical retries append at most one canonical `message.input` event and return the current Session after acceptance. | Reusing an id with different canonical input is rejected; also `turn_active`, `session_stopping`, `session_archived`. |
+| Message | Without `messageId`, retry outcome may be ambiguous. With a stable id, concurrent or restarted identical retries append at most one canonical `message.input` event; `delivery.state` distinguishes durable acceptance (`pending`) from Provider acceptance (`delivered`). | Reusing an id with different canonical input is rejected; also `turn_active`, `session_stopping`, `session_archived`. |
 | Steer (`messages` with `steer=true`) | The same `messageId` rule applies. Active-turn steer is accepted only when `session.inputCapabilities.steer` is true. With no active turn it starts a normal turn. | `session_stopping`, `session_archived`; unsupported steer and provider rejection use `runtime_operation_failed`. |
 | Approval | Non-idempotent. Once resolved, the same id is no longer pending. | `approval_not_pending`, `session_archived`. |
 | Interrupt | Not retry-idempotent: a successful call creates one `turn.cancelled`; a repeat sees no active turn. | `turn_not_active`, `session_archived`. |
@@ -1225,6 +1230,7 @@ for capability in session.source session.source-metadata \
   session.launch-environment session.launch-environment-update \
   session.ephemeral-environment \
   session.strict-stopped messages.idempotent messages.at-least-once \
+  messages.delivery-result \
   messages.opaque-payload-v2 turns.stable-index turns.materialized \
   events.lossless-replay events.semantic-v1 event.raw-v1 \
   events.canonical-turn-terminals recovery.closed-turns; do

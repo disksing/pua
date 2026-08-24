@@ -206,6 +206,21 @@ type agentHubInboundMessage struct {
 	TurnID        string                 `json:"-"`
 }
 
+type agentHubMessageDelivery struct {
+	MessageID string `json:"messageId,omitempty"`
+	State     string `json:"state,omitempty"`
+}
+
+const (
+	agentHubMessageDeliveryPending   = "pending"
+	agentHubMessageDeliveryDelivered = "delivered"
+)
+
+type agentHubMessageResult struct {
+	Session  agentHubSession         `json:"session"`
+	Delivery agentHubMessageDelivery `json:"delivery,omitempty"`
+}
+
 type agentHubCreateSessionRequest struct {
 	Title                string                  `json:"title,omitempty"`
 	Cwd                  string                  `json:"cwd"`
@@ -566,12 +581,10 @@ func (c *agentHubClient) ListSessions(ctx context.Context, filter agentHubSessio
 	return response.Sessions, err
 }
 
-func (c *agentHubClient) Message(ctx context.Context, sessionID string, message agentHubInboundMessage) (agentHubSession, error) {
-	var response struct {
-		Session agentHubSession `json:"session"`
-	}
+func (c *agentHubClient) Message(ctx context.Context, sessionID string, message agentHubInboundMessage) (agentHubMessageResult, error) {
+	var response agentHubMessageResult
 	err := c.doJSON(ctx, http.MethodPost, sessionPath(sessionID)+"/messages", message, &response)
-	return response.Session, err
+	return response, err
 }
 
 func (c *agentHubClient) Approval(ctx context.Context, sessionID, approvalID string, reply agentHubApprovalReply) (agentHubSession, error) {

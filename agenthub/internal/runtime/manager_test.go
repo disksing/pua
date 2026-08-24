@@ -125,6 +125,56 @@ func TestStableMessageRetryContinuesUntilProviderAccepts(t *testing.T) {
 	}
 }
 
+func TestStableMessageResultDistinguishesPendingProviderDelivery(t *testing.T) {
+	store, err := session.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := store.Create(session.CreateInput{Cwd: t.TempDir(), AgentName: "Fast Agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := New(store, testConfig())
+	adapter := &fakeSession{holdTurn: true, promptErrors: []error{errors.New("temporary provider failure")}}
+	manager.factory = func(options provider.Options) (provider.Session, error) {
+		adapter.hooks = options.Hooks
+		return adapter, nil
+	}
+	input := session.MessageInput{Text: "deliver me", Role: session.MessageRoleUser, MessageID: "stable-result-1"}
+
+	first, err := manager.SendMessageResult(value.ID, input)
+	if err != nil {
+		t.Fatalf("durably accepted message returned an error: %v", err)
+	}
+	if first.Delivery.MessageID != input.MessageID || first.Delivery.State != session.MessageProviderDeliveryPending {
+		t.Fatalf("first delivery = %+v, want stable pending result", first.Delivery)
+	}
+	second, err := manager.SendMessageResult(value.ID, input)
+	if err != nil {
+		t.Fatalf("stable retry failed: %v", err)
+	}
+	if second.Delivery.MessageID != input.MessageID || second.Delivery.State != session.MessageProviderDeliveryDelivered {
+		t.Fatalf("retry delivery = %+v, want same stable message delivered", second.Delivery)
+	}
+	message, found, err := store.DurableMessageByID(value.ID, input.MessageID)
+	if err != nil || !found || !message.Delivered {
+		t.Fatalf("durable retry state = %+v, found=%v, err=%v", message, found, err)
+	}
+	events, err := store.EventsAfter(value.ID, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputs := 0
+	for _, event := range events {
+		if event.Type == session.EventMessageInput {
+			inputs++
+		}
+	}
+	if inputs != 1 {
+		t.Fatalf("canonical input count = %d, want 1", inputs)
+	}
+}
+
 func TestConcurrentStableMessageRetryCreatesOneInputAndOneAcceptedPrompt(t *testing.T) {
 	store, err := session.Open(t.TempDir())
 	if err != nil {

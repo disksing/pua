@@ -238,73 +238,102 @@ func (m *Manager) Send(id, text string, steer bool) (session.Session, error) {
 	})
 }
 
+// MessageSendResult separates durable request acceptance from Provider
+// delivery. Callers with a stable MessageID can safely retry a pending result
+// without appending another canonical input.
+type MessageSendResult = session.MessageSendResult
+
 // SendMessage persists and delivers one canonical inbound message. The
 // schema-v2 text is delivered byte-for-byte. Schema-v1 prompt construction is
 // retained by provider.PromptText only for old requests and durable replay.
 func (m *Manager) SendMessage(id string, input session.MessageInput) (session.Session, error) {
+	result, err := m.SendMessageResult(id, input)
+	return result.Session, err
+}
+
+// SendMessageResult persists one canonical inbound message and reports
+// whether the Provider accepted it during this or an earlier attempt.
+func (m *Manager) SendMessageResult(id string, input session.MessageInput) (MessageSendResult, error) {
 	input, err := session.NormalizeMessageInput(input)
 	if err != nil {
-		return session.Session{}, err
+		return MessageSendResult{}, err
 	}
 	lock := m.inputLock(id)
 	lock.Lock()
 	defer lock.Unlock()
 	value, err := m.store.Get(id)
 	if err != nil {
-		return session.Session{}, err
+		return MessageSendResult{}, err
 	}
 	if value.State == session.StateArchived {
-		return session.Session{}, session.ErrArchived
+		return MessageSendResult{}, session.ErrArchived
 	}
 	if value.State == session.StateStopping {
-		return session.Session{}, errors.New("session provider is stopping")
+		return MessageSendResult{}, errors.New("session provider is stopping")
 	}
 	if input.MessageID != "" {
 		previous, accepted, err := m.store.DurableMessageByID(id, input.MessageID)
 		if err != nil {
-			return session.Session{}, err
+			return MessageSendResult{}, err
 		}
 		if accepted {
 			if !reflect.DeepEqual(previous.Input, input) {
-				return session.Session{}, session.ErrMessageIDConflict
+				return MessageSendResult{}, session.ErrMessageIDConflict
 			}
-			if !previous.Delivered {
-				m.deliverMessageLocked(id, previous)
+			delivered := previous.Delivered
+			if !delivered {
+				delivered = m.deliverMessageLocked(id, previous)
 			}
-			return m.store.Get(id)
+			return m.messageSendResult(id, input.MessageID, delivered)
 		}
 	}
 	current := value.CurrentTurnID
 	if current != "" && input.Steer && !value.InputCapabilities.Steer {
-		return session.Session{}, errors.New("session provider does not support steering an active turn")
+		return MessageSendResult{}, errors.New("session provider does not support steering an active turn")
 	}
 	if current != "" && !input.Steer {
-		return session.Session{}, errors.New("session already has an active turn; set steer=true or wait")
+		return MessageSendResult{}, errors.New("session already has an active turn; set steer=true or wait")
 	}
 	turnID := current
+	delivered := false
 	if turnID == "" {
 		turnID, err = session.NewID("turn")
 		if err != nil {
-			return session.Session{}, err
+			return MessageSendResult{}, err
 		}
 		messageEvent, err := m.store.Append(id, session.EventMessageInput, turnID, marshal(input))
 		if err != nil {
-			return session.Session{}, err
+			return MessageSendResult{}, err
 		}
 		// turn.started is lifecycle-only. The canonical message.input event is
 		// the sole durable source for message text and provenance.
 		if _, err := m.store.Append(id, "turn.started", turnID, nil); err != nil {
-			return session.Session{}, err
+			return MessageSendResult{}, err
 		}
-		m.deliverMessageLocked(id, session.DurableMessage{EventID: messageEvent.ID, TurnID: turnID, Input: input})
+		delivered = m.deliverMessageLocked(id, session.DurableMessage{EventID: messageEvent.ID, TurnID: turnID, Input: input})
 	} else {
 		messageEvent, err := m.store.Append(id, session.EventMessageInput, turnID, marshal(input))
 		if err != nil {
-			return session.Session{}, err
+			return MessageSendResult{}, err
 		}
-		m.deliverMessageLocked(id, session.DurableMessage{EventID: messageEvent.ID, TurnID: turnID, Input: input})
+		delivered = m.deliverMessageLocked(id, session.DurableMessage{EventID: messageEvent.ID, TurnID: turnID, Input: input})
 	}
-	return m.store.Get(id)
+	return m.messageSendResult(id, input.MessageID, delivered)
+}
+
+func (m *Manager) messageSendResult(id, messageID string, delivered bool) (MessageSendResult, error) {
+	value, err := m.store.Get(id)
+	if err != nil {
+		return MessageSendResult{}, err
+	}
+	state := session.MessageProviderDeliveryPending
+	if delivered {
+		state = session.MessageProviderDeliveryDelivered
+	}
+	return MessageSendResult{
+		Session:  value,
+		Delivery: session.MessageProviderDelivery{MessageID: messageID, State: state},
+	}, nil
 }
 
 // deliverMessageLocked attempts one pending durable input while the caller

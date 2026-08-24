@@ -263,11 +263,15 @@ below is relative to that endpoint. For example, `GET /v1/status` resolves to
 actually exercise: `session.source`, `session.launch-environment`,
 `session.source-metadata`, `session.idempotent-create`,
 `session.input-capabilities`, `messages.idempotent`, `messages.at-least-once`,
-`messages.opaque-payload-v2`, `turns.stable-index`, `turns.materialized`, `turns.activity-items`,
+`messages.delivery-result`, `messages.opaque-payload-v2`, `turns.stable-index`, `turns.materialized`, `turns.activity-items`,
 `session.launch-environment-update`, `session.ephemeral-environment`,
 `session.strict-stopped`, `events.lossless-replay`, `events.delta-merge`,
 `activity.global-sse`,
-`events.canonical-turn-terminals`, and `recovery.closed-turns`. Recovery closes interrupted delivered Turns, while a durably accepted input still awaiting Provider delivery remains on the at-least-once retry path. A client
+`events.canonical-turn-terminals`, and `recovery.closed-turns`. Message `202`
+responses keep durable acceptance separate from Provider acceptance through a
+`delivery.state` of `pending` or `delivered`. Recovery closes interrupted
+delivered Turns, while a durably accepted input still awaiting Provider
+delivery remains on the at-least-once retry path. A client
 must reject an unsupported API version or a missing required capability
 before creating a session; older daemons with neither field are explicitly
 incompatible. Unknown additional capabilities, response fields and event

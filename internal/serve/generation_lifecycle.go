@@ -132,6 +132,9 @@ type GenerationMessageFacts struct {
 	TurnID           string `json:"turnId,omitempty"`
 	InterruptTurnID  string `json:"interruptTurnId,omitempty"`
 	AgentHubAccepted bool   `json:"agentHubAccepted,omitempty"`
+	// ProviderDeliveryPending means AgentHub durably accepted the stable input
+	// but still needs an explicit same-ID confirmation after Provider recovery.
+	ProviderDeliveryPending bool `json:"providerDeliveryPending,omitempty"`
 }
 
 // GenerationLifecycleFacts is a snapshot assembled by the store/runtime
@@ -376,6 +379,25 @@ func planMessage(plan GenerationLifecyclePlan, facts GenerationLifecycleFacts) G
 	plan.MessageID = strings.TrimSpace(message.ID)
 	plan.MessageMode = normalizedGenerationMessageMode(message)
 	phase := observedGenerationPhase(facts)
+	if message.Status == GenerationMessageStatusDelivering && message.ProviderDeliveryPending {
+		if !facts.SessionKnown || phase == GenerationPhaseCreating || phase == GenerationPhaseRecovering || phase == GenerationPhaseAbsent {
+			return finishGenerationPlan(plan, GenerationOperationWaitForSession, "session_state_not_ready", message)
+		}
+		switch phase {
+		case GenerationPhaseStopping, GenerationPhaseArchived:
+			return finishGenerationPlan(plan, GenerationOperationWaitForStopped, "generation_not_deliverable", message)
+		case GenerationPhaseStopped:
+			if facts.SessionKnown && facts.SessionResumable && !facts.SessionResumeUnavailable {
+				if facts.ResumeBackoffActive {
+					return finishGenerationPlan(plan, GenerationOperationWaitForSession, "resume_backoff", message)
+				}
+				return finishGenerationPlan(plan, GenerationOperationResumeSession, "resume_pending_provider_delivery", message)
+			}
+			return finishGenerationPlan(plan, GenerationOperationWaitForStopped, "generation_not_deliverable", message)
+		default:
+			return finishGenerationPlan(plan, GenerationOperationDeliverMessage, "confirm_pending_provider_delivery", message)
+		}
+	}
 	if message.Status == GenerationMessageStatusDelivering || message.Status == GenerationMessageStatusInterrupting || message.AgentHubAccepted {
 		return finishGenerationPlan(plan, GenerationOperationWaitForMessageReceipt, "message_receipt_pending", message)
 	}
@@ -845,16 +867,17 @@ func mailboxFacts(mailbox resourceMailbox, resourceID string) (bool, *Generation
 			mode = GenerationMessageModeEnqueue
 		}
 		return true, &GenerationMessageFacts{
-			ID:               message.ID,
-			Status:           message.Status,
-			RequestedMode:    mode,
-			ActualMode:       message.ActualMode,
-			ModeFrozen:       message.ModeFrozen,
-			GenerationID:     message.GenerationID,
-			SessionID:        message.AgentHubSessionID,
-			TurnID:           message.TurnID,
-			InterruptTurnID:  message.InterruptTurnID,
-			AgentHubAccepted: message.Status == resourceMessageDelivered,
+			ID:                      message.ID,
+			Status:                  message.Status,
+			RequestedMode:           mode,
+			ActualMode:              message.ActualMode,
+			ModeFrozen:              message.ModeFrozen,
+			GenerationID:            message.GenerationID,
+			SessionID:               message.AgentHubSessionID,
+			TurnID:                  message.TurnID,
+			InterruptTurnID:         message.InterruptTurnID,
+			AgentHubAccepted:        message.Status == resourceMessageDelivered,
+			ProviderDeliveryPending: message.ProviderDeliveryPending,
 		}
 	}
 	return false, nil

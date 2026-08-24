@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -182,6 +183,119 @@ func TestAgentHubRecoveryResumesRecoveredOrphanWithSecretOverlay(t *testing.T) {
 	if resumeEnvironments[0]["PUBLIC_ENDPOINT"] != "http://service.test" ||
 		resumedSession.LaunchEnvironment["PUA_RESOURCE_ID"] != record.ResourceID {
 		t.Fatalf("recovery Resume environment = overlay %#v durable %#v", resumeEnvironments[0], resumedSession.LaunchEnvironment)
+	}
+	assertWorkspaceSecretAbsent(t, workspace.Path, secret)
+}
+
+func TestPendingProviderDeliverySurvivesRestartAndResumesWithFreshOverlay(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	fake.enforceMessageIDs = true
+	fake.pendingNextMessage = true
+	capabilities := append(append([]string(nil), requiredAgentHubCapabilities...), agentHubEphemeralEnvironmentCapability)
+	hub := httptest.NewServer(runtimeFakeAgentHubWithCapabilities(fake, capabilities))
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+	const secret = "pending-delivery-overlay-secret"
+	writeRuntimeServiceBindings(t, workspace, secret)
+	cfg, client, err := manager.agentHubRuntimeConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := manager.resolveResourceAgent(workspace, "project1.task1", cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := manager.createResourceGeneration(context.Background(), workspace, "project1.task1", workspace.Path, cfg, client, resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, err := acceptMailboxMessage(workspace.Path, record.ResourceID, resourceMessageRequest{
+		Text: "retry after fresh overlay", Mode: resourceMessageModeEnqueue,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.withResourceController(context.Background(), workspace, record.ResourceID, func() error {
+		return manager.reconcileResourceMailboxLocked(context.Background(), workspace, record.ResourceID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pending, found, err := mailboxMessageByID(workspace.Path, message.ID)
+	if err != nil || !found || pending.Status != resourceMessageDelivering || !pending.ProviderDeliveryPending || pending.TerminalAt != "" {
+		t.Fatalf("pending Provider delivery mailbox = %#v, found=%v err=%v", pending, found, err)
+	}
+	fake.mu.Lock()
+	firstSession := fake.sessions[record.AgentHubSessionID]
+	firstIDs := append([]string(nil), fake.messageIDs...)
+	firstDeliveries := fake.providerDeliveries[message.ID]
+	fake.mu.Unlock()
+	if len(firstIDs) != 1 || firstIDs[0] != message.ID || firstDeliveries != 0 || firstSession.State != "running" {
+		t.Fatalf("initial pending delivery = ids %#v deliveries %d session %#v", firstIDs, firstDeliveries, firstSession)
+	}
+
+	// Model a PUA crash/restart after AgentHub durably accepts the message but
+	// before the pending response is committed locally and before the Provider
+	// exits. The reconstructed manager must rediscover the pending result and
+	// retain demand when the exact Session is subsequently observed stopped.
+	if _, err := updateMailboxMessage(workspace.Path, message.ID, func(current *resourceMailboxMessage) {
+		current.ProviderDeliveryPending = false
+	}); err != nil {
+		t.Fatal(err)
+	}
+	restarted := newAgentManager(manager.server)
+	manager.server.agents = restarted
+	fake.mu.Lock()
+	stopped := fake.sessions[record.AgentHubSessionID]
+	stopped.State = "stopped"
+	stopped.StopReason = "provider_error"
+	fake.sessions[stopped.ID] = stopped
+	fake.mu.Unlock()
+	if err := restarted.recoverAgentHubGenerations(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	reconstructed, found, err := mailboxMessageByID(workspace.Path, message.ID)
+	if err != nil || !found || reconstructed.Status != resourceMessageDelivering || !reconstructed.ProviderDeliveryPending || reconstructed.TerminalAt != "" {
+		t.Fatalf("reconstructed pending delivery = %#v, found=%v err=%v", reconstructed, found, err)
+	}
+	if err := restarted.withResourceController(context.Background(), workspace, record.ResourceID, func() error {
+		return restarted.reconcileResourceMailboxLocked(context.Background(), workspace, record.ResourceID)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	delivered, found, err := mailboxMessageByID(workspace.Path, message.ID)
+	if err != nil || !found || delivered.Status != resourceMessageDelivered || delivered.TerminalAt == "" {
+		t.Fatalf("recovered pending delivery = %#v, found=%v err=%v", delivered, found, err)
+	}
+	fake.mu.Lock()
+	ids := append([]string(nil), fake.messageIDs...)
+	resumeSecrets := append([]map[string]string(nil), fake.resumeSecrets...)
+	providerDeliveries := fake.providerDeliveries[message.ID]
+	canonicalInputs := len(fake.messageInputs)
+	fake.mu.Unlock()
+	if !reflect.DeepEqual(ids, []string{message.ID, message.ID, message.ID}) {
+		t.Fatalf("pending retry did not reuse stable id: %#v", ids)
+	}
+	if len(resumeSecrets) != 1 || resumeSecrets[0]["SERVICE_TOKEN"] != secret {
+		t.Fatalf("pending retry Resume overlay = %#v", resumeSecrets)
+	}
+	if providerDeliveries != 1 || canonicalInputs != 1 {
+		t.Fatalf("Provider/canonical deliveries = %d/%d, want exactly once/one", providerDeliveries, canonicalInputs)
+	}
+
+	// A duplicate confirmation remains idempotent after terminal delivery.
+	fake.mu.Lock()
+	canonical := fake.messageInputs[message.ID]
+	fake.mu.Unlock()
+	confirmation, err := client.Message(context.Background(), delivered.AgentHubSessionID, canonical)
+	if err != nil || confirmation.Delivery.State != "delivered" || confirmation.Delivery.MessageID != message.ID {
+		t.Fatalf("duplicate confirmation = %#v err=%v", confirmation, err)
+	}
+	fake.mu.Lock()
+	providerDeliveries = fake.providerDeliveries[message.ID]
+	canonicalInputs = len(fake.messageInputs)
+	fake.mu.Unlock()
+	if providerDeliveries != 1 || canonicalInputs != 1 {
+		t.Fatalf("duplicate retry changed delivery/input counts = %d/%d", providerDeliveries, canonicalInputs)
 	}
 	assertWorkspaceSecretAbsent(t, workspace.Path, secret)
 }

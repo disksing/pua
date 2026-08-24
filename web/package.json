@@ -13,7 +13,7 @@
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "dev": "vite --host 127.0.0.1",
     "test": "vitest run && npm run test:sites",
-    "test:sites": "node ../agenthub/frontend/tests/sites-worker.test.mjs",
+    "test:sites": "npm run build:agenthub && node ../agenthub/frontend/tests/sites-worker.test.mjs",
     "test:perf": "vitest run --config vitest.perf.config.ts",
     "test:watch": "vitest",
     "test:e2e": "playwright test"

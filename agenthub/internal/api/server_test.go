@@ -2732,3 +2732,126 @@ func TestMessageResponseReportsPendingProviderDelivery(t *testing.T) {
 		t.Fatalf("durable message = %+v, found=%v, err=%v", message, found, err)
 	}
 }
+
+func TestStableMessageRetryPassesActiveTurnToRuntime(t *testing.T) {
+	store, err := session.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerRoot := t.TempDir()
+	missingCommand := filepath.Join(providerRoot, "missing-provider")
+	providerCommand := filepath.Join(providerRoot, "fake-provider")
+	promptLog := filepath.Join(providerRoot, "prompts.log")
+	if err := os.WriteFile(providerCommand, []byte("#!/bin/sh\nexec "+strconv.Quote(os.Args[0])+" -test.run='^TestAPIMessageProviderProcess$' -- \"$@\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configForCommand := func(command string) config.Config {
+		return config.Config{
+			Version: 1,
+			AgentProviders: []config.Provider{{
+				ID: "provider", Name: "API retry provider", Type: "pi", Enabled: true, Command: command,
+			}},
+			Agents: []config.Agent{{
+				Name: "API Retry Agent", ProviderID: "provider",
+				Environment: map[string]string{"AGENTHUB_API_PROMPT_LOG": promptLog},
+			}},
+		}
+	}
+	manager := runtime.New(store, configForCommand(missingCommand))
+	t.Cleanup(manager.Close)
+	created, err := store.Create(session.CreateInput{Cwd: t.TempDir(), AgentName: "API Retry Agent", Provider: "pi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := New(store, "test", time.Now(), Dependencies{Runtime: manager}).Handler()
+	send := func(body string) (int, string, session.MessageProviderDelivery) {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodPost, "/v1/sessions/"+created.ID+"/messages", strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		var payload struct {
+			Delivery session.MessageProviderDelivery `json:"delivery"`
+			Error    struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		return response.Code, payload.Error.Code, payload.Delivery
+	}
+
+	stableBody := `{"text":"deliver once","messageId":"stable-http-retry"}`
+	status, code, delivery := send(stableBody)
+	if status != http.StatusAccepted || code != "" || delivery.State != session.MessageProviderDeliveryPending {
+		t.Fatalf("first response = %d/%s %+v, want accepted pending", status, code, delivery)
+	}
+	if err := manager.SetConfig(configForCommand(providerCommand)); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENTHUB_API_MESSAGE_PROVIDER", "1")
+	status, code, delivery = send(stableBody)
+	if status != http.StatusAccepted || code != "" || delivery.State != session.MessageProviderDeliveryDelivered {
+		t.Fatalf("retry response = %d/%s %+v, want accepted delivered", status, code, delivery)
+	}
+	status, code, _ = send(`{"text":"different","messageId":"different-message"}`)
+	if status != http.StatusConflict || code != "turn_active" {
+		t.Fatalf("different message response = %d/%s, want conflict/turn_active", status, code)
+	}
+
+	messages, err := store.DurableMessages(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 1 || messages[0].Input.MessageID != "stable-http-retry" || !messages[0].Delivered {
+		t.Fatalf("durable messages = %+v, want one delivered message", messages)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		data, readErr := os.ReadFile(promptLog)
+		if readErr == nil && strings.Count(strings.TrimSpace(string(data)), "\n") == 0 && strings.TrimSpace(string(data)) == "deliver once" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("provider prompt log = %q, err=%v, want one acceptance", data, readErr)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestAPIMessageProviderProcess(t *testing.T) {
+	if os.Getenv("AGENTHUB_API_MESSAGE_PROVIDER") != "1" {
+		return
+	}
+	scanner := bufio.NewScanner(os.Stdin)
+	encoder := json.NewEncoder(os.Stdout)
+	for scanner.Scan() {
+		var request struct {
+			ID   json.RawMessage `json:"id"`
+			Type string          `json:"type"`
+			Text string          `json:"message"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &request) != nil || request.Type == "" {
+			continue
+		}
+		switch request.Type {
+		case "get_state":
+			_ = encoder.Encode(map[string]any{
+				"id": request.ID, "type": "response", "command": request.Type, "success": true,
+				"data": map[string]any{"sessionId": "api-retry-provider"},
+			})
+		case "prompt":
+			file, err := os.OpenFile(os.Getenv("AGENTHUB_API_PROMPT_LOG"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+			if err == nil {
+				_, _ = file.WriteString(request.Text + "\n")
+				_ = file.Close()
+			}
+		default:
+			_ = encoder.Encode(map[string]any{
+				"id": request.ID, "type": "response", "command": request.Type, "success": true, "data": map[string]any{},
+			})
+		}
+	}
+	os.Exit(0)
+}

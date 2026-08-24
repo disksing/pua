@@ -999,25 +999,29 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id string) 
 		writeAPIError(w, http.StatusServiceUnavailable, "runtime_unavailable", "runtime is unavailable", nil)
 		return
 	}
-	current, err := s.store.Get(id)
-	if err != nil {
-		s.writeStoreError(w, err)
-		return
-	}
-	if current.State == session.StateStopping {
-		writeAPIError(w, http.StatusConflict, "session_stopping", "session provider is stopping", nil)
-		return
-	}
-	if current.CurrentTurnID != "" && !input.Steer {
-		writeAPIError(w, http.StatusConflict, "turn_active", "session already has an active turn; set steer=true or wait", map[string]any{"turnId": current.CurrentTurnID})
-		return
-	}
 	result, err := s.runtime.SendMessageResult(id, input)
 	if err != nil {
 		var inputErr *session.MessageInputError
 		if errors.As(err, &inputErr) {
 			writeMessageInputError(w, err)
 			return
+		}
+		if current, storeErr := s.store.Get(id); storeErr == nil {
+			if current.State == session.StateStopping {
+				writeAPIError(w, http.StatusConflict, "session_stopping", "session provider is stopping", nil)
+				return
+			}
+			if current.CurrentTurnID != "" && !input.Steer {
+				_, stableRetry, lookupErr := s.store.DurableMessageByID(id, input.MessageID)
+				if lookupErr != nil {
+					s.writeStoreError(w, lookupErr)
+					return
+				}
+				if !stableRetry {
+					writeAPIError(w, http.StatusConflict, "turn_active", "session already has an active turn; set steer=true or wait", map[string]any{"turnId": current.CurrentTurnID})
+					return
+				}
+			}
 		}
 		s.writeRuntimeError(w, err)
 		return

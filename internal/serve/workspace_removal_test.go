@@ -95,6 +95,22 @@ func TestRemoveWorkspaceUsesPersistedInstanceWhenRuntimeUnavailable(t *testing.T
 	}
 }
 
+func TestRemoveUnavailableWorkspaceAfterOrdinaryOwnershipFails(t *testing.T) {
+	server, workspace := newWorkspaceRemovalFixture(t)
+	if err := os.RemoveAll(workspace.Path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.requireWorkspaceInstanceOwnership(workspace); err == nil {
+		t.Fatal("ordinary ownership unexpectedly accepted an unavailable Workspace")
+	} else {
+		requireWorkspaceOwnershipError(t, err)
+	}
+	if err := server.removeWorkspace(workspace.ID); err != nil {
+		t.Fatalf("remove unavailable Workspace after rejected ordinary access: %v", err)
+	}
+	requireWorkspaceRemoved(t, server, workspace)
+}
+
 func TestRemoveLegacyWorkspaceUsesVerifiedLiveInstanceFallback(t *testing.T) {
 	server, workspace := newWorkspaceRemovalFixture(t)
 	controller, err := server.agents.controllerForResource(workspace, app.SchedulerResourceID)

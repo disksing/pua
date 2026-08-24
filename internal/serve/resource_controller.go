@@ -170,16 +170,23 @@ func (m *agentManager) workspaceBarrierTicket(workspacePath string) (*workspaceH
 	return barrier, barrier.ticket(), nil
 }
 
-func (m *agentManager) withWorkspaceResourceJob(ctx context.Context, workspacePath string, barrier *workspaceHandoffBarrier, ticket uint64, fn func() error) error {
+func (m *agentManager) withWorkspaceResourceJob(ctx context.Context, workspace serveWorkspace, barrier *workspaceHandoffBarrier, ticket uint64, fn func() error) error {
 	release, err := barrier.acquireShared(ctx, ticket)
 	if err != nil {
 		if errors.Is(err, errWorkspaceHandoffComplete) {
-			message := fmt.Sprintf("workspace %s is not owned by this pua serve instance; ownership handoff completed before the resource job started", workspacePath)
+			message := fmt.Sprintf("workspace %s is not owned by this pua serve instance; ownership handoff completed before the resource job started", workspace.Path)
 			return &resourceAPIError{Code: "workspace_not_owned", Message: message}
 		}
 		return err
 	}
 	defer release()
+	// A queued job can outlive a remove/recreate cycle at the same pathname.
+	// Recheck both the named advisory-lock inode and the configured runtime
+	// identity after acquiring the shared lease, immediately before user code
+	// can touch the replacement Workspace.
+	if _, err := m.workspaceControllerInstanceID(workspace); err != nil {
+		return err
+	}
 	return fn()
 }
 
@@ -298,11 +305,22 @@ func resourceControllerKeyForStaleWorkspacePath(workspacePath, resourceID string
 }
 
 func (m *agentManager) resourceControllerKey(workspace serveWorkspace, resourceID string) (resourceControllerKey, error) {
-	instanceID, err := workspaceInstanceID(workspace.Path)
+	instanceID, err := m.workspaceControllerInstanceID(workspace)
 	if err != nil {
 		return resourceControllerKey{}, err
 	}
 	return resourceControllerKeyForInstanceID(instanceID, resourceID)
+}
+
+// workspaceControllerInstanceID validates the complete ordinary-job ownership
+// claim before a controller is selected. Removal-only controller primitives
+// intentionally bypass it because they address a persisted instance directly
+// or use the collision-free stale-path namespace.
+func (m *agentManager) workspaceControllerInstanceID(workspace serveWorkspace) (string, error) {
+	if m != nil && m.server != nil {
+		return m.server.requireWorkspaceInstanceOwnership(workspace)
+	}
+	return workspaceInstanceID(workspace.Path)
 }
 
 func (m *agentManager) controllerForResourceKey(key resourceControllerKey) *resourceController {
@@ -373,7 +391,7 @@ func (m *agentManager) withResourceController(ctx context.Context, workspace ser
 	// follow-up jobs before the caller returns; keeping the worker registered
 	// until its FIFO is empty prevents shutdown from racing those follow-ups.
 	return controller.doWithStart(ctx, func() error {
-		return m.withWorkspaceResourceJob(ctx, workspace.Path, barrier, ticket, fn)
+		return m.withWorkspaceResourceJob(ctx, workspace, barrier, ticket, fn)
 	}, m.runBackground)
 }
 
@@ -400,6 +418,9 @@ func (m *agentManager) withResourceControllers(ctx context.Context, workspace se
 	var acquire func(int) error
 	acquire = func(index int) error {
 		if index == len(ids) {
+			if _, err := m.workspaceControllerInstanceID(workspace); err != nil {
+				return err
+			}
 			return fn()
 		}
 		controller, err := m.controllerForResource(workspace, ids[index])
@@ -427,7 +448,7 @@ func (m *agentManager) enqueueResourceController(workspace serveWorkspace, resou
 	// lets a tracked worker enqueue follow-up work without racing the final
 	// background wait.
 	controller.enqueueWithStart(context.Background(), func() error {
-		return m.withWorkspaceResourceJob(context.Background(), workspace.Path, barrier, ticket, fn)
+		return m.withWorkspaceResourceJob(context.Background(), workspace, barrier, ticket, fn)
 	}, m.runBackground)
 	return nil
 }

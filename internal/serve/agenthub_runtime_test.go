@@ -614,7 +614,11 @@ func newRuntimeTestManager(t *testing.T, hubURL string) (*agentManager, serveWor
 	if _, err := puaWorkspace.CreateTask(app.CreateTaskInput{ProjectID: project.ID, Title: "Runtime test task", Slug: "runtime-test"}); err != nil {
 		t.Fatal(err)
 	}
-	workspace := serveWorkspace{ID: "workspace-test", Name: "Test", Path: workspacePath}
+	runtimeConfig, err := puaWorkspace.RuntimeConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := serveWorkspace{ID: "workspace-test", InstanceID: runtimeConfig.InstanceID, Name: "Test", Path: workspacePath}
 	configPath := filepath.Join(t.TempDir(), "serve.json")
 	configData, _ := json.Marshal(agentHubServeConfig{
 		Version: agentHubConfigVersion, Workspaces: []serveWorkspace{workspace},

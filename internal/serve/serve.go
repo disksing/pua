@@ -809,8 +809,14 @@ func (s *server) revalidateWorkspaceMutation(expected serveWorkspace) (serveWork
 				Message: fmt.Sprintf("workspace %s changed while the mutation was waiting for ownership", expected.ID),
 			}
 		}
-		if err := s.requireWorkspaceOwnership(current.Path); err != nil {
-			return serveWorkspace{}, &resourceAPIError{Code: "workspace_not_owned", Message: err.Error()}
+		if s.locks == nil && strings.TrimSpace(current.InstanceID) == "" {
+			if err := s.requireWorkspaceOwnership(current.Path); err != nil {
+				return serveWorkspace{}, &resourceAPIError{Code: "workspace_not_owned", Message: err.Error()}
+			}
+			return current, nil
+		}
+		if _, err := s.requireWorkspaceInstanceOwnership(current); err != nil {
+			return serveWorkspace{}, err
 		}
 		return current, nil
 	}
@@ -2094,7 +2100,7 @@ func (s *server) removeWorkspace(id string) error {
 }
 
 func (s *server) removeWorkspaceLocked(id, expectedPath, controllerInstanceID string, legacyInstanceLookup, staleLegacyRemoval bool) error {
-	if err := s.requireWorkspaceOwnership(expectedPath); err != nil {
+	if err := s.requireWorkspaceRemovalClaim(expectedPath); err != nil {
 		return err
 	}
 	var removedPath string

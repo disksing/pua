@@ -62,7 +62,8 @@ func (n *NativeScheduler) requireWorkspaceOwnership() error {
 	if n.manager == nil || n.manager.server == nil {
 		return nil
 	}
-	return n.manager.server.requireWorkspaceOwnership(n.workspace.Path)
+	_, err := n.manager.server.requireWorkspaceInstanceOwnership(n.workspace)
+	return err
 }
 
 func schedulerConfigDigest(config app.SchedulerConfig) (string, error) {
@@ -989,6 +990,12 @@ func (n *NativeScheduler) deliverPrepared(ctx context.Context, schedule app.Sche
 	}
 	if err == nil {
 		return nil
+	}
+	// Ownership loss is a handoff boundary, not a retryable Scheduler failure.
+	// Recording it would itself write the replacement Workspace after a target
+	// controller detected the stale identity or lock inode.
+	if resourceDeliveryErrorCode(err) == "workspace_not_owned" {
+		return err
 	}
 	return n.recordScheduleError(schedule.ID, runtime, now, err)
 }

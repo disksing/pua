@@ -1025,8 +1025,10 @@ func (m *agentManager) acceptResourceMessage(ctx context.Context, workspace serv
 // wake the resource controller after this short durable boundary.
 func (m *agentManager) acceptResourceMessageDurable(ctx context.Context, workspace serveWorkspace, resourceID string, request resourceMessageRequest) (resourceMailboxMessage, error) {
 	resourceID = normalizedResourceID(resourceID)
-	if err := m.server.requireWorkspaceOwnership(workspace.Path); err != nil {
-		return resourceMailboxMessage{}, &resourceAPIError{Code: "workspace_not_owned", Message: err.Error()}
+	if m.server != nil {
+		if _, err := m.server.requireWorkspaceInstanceOwnership(workspace); err != nil {
+			return resourceMailboxMessage{}, err
+		}
 	}
 	exists, archived, _, err := resourceExistsAndArchived(workspace.Path, resourceID)
 	if err != nil || !exists {
@@ -1088,8 +1090,10 @@ func mailboxMessageResourceID(workspacePath, messageID string) (string, error) {
 }
 
 func (m *agentManager) promoteWaitingMessageLocked(ctx context.Context, workspace serveWorkspace, messageID string) (resourceMailboxMessage, error) {
-	if err := m.server.requireWorkspaceOwnership(workspace.Path); err != nil {
-		return resourceMailboxMessage{}, &resourceAPIError{Code: "workspace_not_owned", Message: err.Error()}
+	if m.server != nil {
+		if _, err := m.server.requireWorkspaceInstanceOwnership(workspace); err != nil {
+			return resourceMailboxMessage{}, err
+		}
 	}
 	message, found, err := mailboxMessageByID(workspace.Path, messageID)
 	if err != nil {
@@ -1153,8 +1157,8 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 	// legacy-tick cleanup as defense in depth for isolated direct callers, which
 	// intentionally bypass production controller wiring.
 	if m.server != nil {
-		if err := m.server.requireWorkspaceOwnership(workspace.Path); err != nil {
-			return &resourceAPIError{Code: "workspace_not_owned", Message: err.Error()}
+		if _, err := m.server.requireWorkspaceInstanceOwnership(workspace); err != nil {
+			return err
 		}
 	}
 	resourceID = normalizedResourceID(resourceID)

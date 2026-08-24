@@ -3110,7 +3110,7 @@ func TestSchedulerActiveResumeNoOpAndFailureDoNotWake(t *testing.T) {
 	}
 }
 
-func TestSchedulerActiveResumeOwnershipLossSuppressesWake(t *testing.T) {
+func TestSchedulerActiveResumeOwnershipLossRejectsQueuedChange(t *testing.T) {
 	manager, workspace, schedule, prepared := prepareResourceBindingAttention(t)
 	rewriteSchedulerTestProfiles(t, manager.server.config, []agentHubProfileRoute{{Key: "default", AgentName: "fake-agent"}})
 	manager.server.locks = newWorkspaceLockManager("127.0.0.1:4936", manager.server.config)
@@ -3133,19 +3133,20 @@ func TestSchedulerActiveResumeOwnershipLossSuppressesWake(t *testing.T) {
 	waitForResourceControllerQueue(t, controller, 1)
 	manager.server.locks.release(workspace.Path)
 	release()
-	if err := <-done; err != nil {
-		t.Fatalf("attention recovery before ownership loss = %v", err)
+	if err := <-done; err == nil {
+		t.Fatal("attention recovery crossed ownership loss")
+	} else {
+		requireWorkspaceOwnershipError(t, err)
 	}
-	if messages := scheduleOccurrenceMessages(t, workspace.Path, schedule.Target); len(messages) != 1 || messages[0].ID != prepared.MessageID {
-		t.Fatalf("ownership-lost attention recovery messages = %#v", messages)
+	if messages := scheduleOccurrenceMessages(t, workspace.Path, schedule.Target); len(messages) != 0 {
+		t.Fatalf("ownership-lost attention recovery messages = %#v, want none for %s", messages, prepared.MessageID)
 	}
 	if request := manager.takeReconcileRequests(); request&reconcileScheduler != 0 {
 		t.Fatalf("ownership-lost active resume requested Scheduler reconciliation: %08b", request)
 	}
-	// Delivery may independently wake AgentHub or mailbox reconciliation. The
-	// lost owner must not contribute the Scheduler timer-refresh request.
 	select {
 	case <-manager.reconcileWake:
+		t.Fatal("rejected active resume woke reconciliation")
 	default:
 	}
 }
@@ -7243,7 +7244,7 @@ func TestSchedulerControllerJobCancellationBoundaries(t *testing.T) {
 	}{
 		{name: "normalized no-op", outcome: schedulerControllerJobOutcome[string]{Value: "unchanged"}},
 		{name: "validation or write failure", outcome: schedulerControllerJobOutcome[string]{Material: true, Err: errors.New("write failed")}, wantErr: true},
-		{name: "ownership lost", outcome: schedulerControllerJobOutcome[string]{Value: "persisted", Material: true}, loseLock: true},
+		{name: "ownership lost", outcome: schedulerControllerJobOutcome[string]{Value: "persisted", Material: true}, loseLock: true, wantErr: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")

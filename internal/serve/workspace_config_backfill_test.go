@@ -301,8 +301,8 @@ func TestBackfilledLegacyRemovalRejectsReplacementAtSamePath(t *testing.T) {
 	if err != nil || len(cfg.Workspaces) != 1 || cfg.Workspaces[0].InstanceID != instanceID {
 		t.Fatalf("replacement rejection changed config: %#v, %v", cfg.Workspaces, err)
 	}
-	if !server.locks.owns(path) {
-		t.Fatal("replacement rejection released Workspace lock")
+	if server.locks.owns(path) {
+		t.Fatal("replacement rejection treated the unlinked old lock inode as current ownership")
 	}
 }
 

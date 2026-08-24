@@ -2,9 +2,12 @@ package serve
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -87,6 +90,200 @@ func TestWorkspaceHandoffEpochRejectsOldJobsAfterRevive(t *testing.T) {
 		t.Fatalf("revived handoff ticket: %v", err)
 	}
 	release()
+}
+
+func TestOrdinaryResourceJobRejectsReplacementWorkspaceAndStaleLock(t *testing.T) {
+	first, second, workspace, _ := newSchedulerOwnershipHandoffFixture(t)
+	var healthyRan atomic.Bool
+	if err := first.agents.withResourceController(context.Background(), workspace, "workspace", func() error {
+		healthyRan.Store(true)
+		return nil
+	}); err != nil {
+		t.Fatalf("healthy ordinary resource job: %v", err)
+	}
+	if !healthyRan.Load() {
+		t.Fatal("healthy ordinary resource job did not run")
+	}
+
+	controller, err := first.agents.controllerForResource(workspace, "workspace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockerStarted := make(chan struct{})
+	releaseBlocker := make(chan struct{})
+	controller.enqueueWithStart(context.Background(), func() error {
+		close(blockerStarted)
+		<-releaseBlocker
+		return nil
+	}, first.agents.runBackground)
+	select {
+	case <-blockerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("ordinary controller blocker did not start")
+	}
+
+	var staleCallbackRan atomic.Bool
+	queuedDone := make(chan error, 1)
+	go func() {
+		queuedDone <- first.agents.withResourceController(context.Background(), workspace, "workspace", func() error {
+			staleCallbackRan.Store(true)
+			if err := os.WriteFile(filepath.Join(workspace.Path, "stale-owner-write"), []byte("stale"), 0o600); err != nil {
+				return err
+			}
+			if _, err := acceptMailboxMessage(workspace.Path, "workspace", resourceMessageRequest{
+				Text: "stale owner mailbox write", Mode: resourceMessageModeEnqueue, Role: "user",
+			}); err != nil {
+				return err
+			}
+			description := "stale owner schedule write"
+			condition := "one hour from now"
+			target := "workspace"
+			trigger := app.ScheduleTrigger{Type: app.ScheduleTriggerAt, At: time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)}
+			_, err := newNativeScheduler(nil, workspace).Change(context.Background(), NativeSchedulerChange{
+				Operation: app.ScheduleChangeCreate, Description: &description, Condition: &condition,
+				Target: &target, Trigger: &trigger,
+			})
+			return err
+		})
+	}()
+	waitForResourceControllerQueue(t, controller, 1)
+
+	if err := os.RemoveAll(workspace.Path); err != nil {
+		t.Fatal(err)
+	}
+	replacementApp, err := app.Initialize(workspace.Path, "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := second.addWorkspace(context.Background(), workspace.Path)
+	if err != nil {
+		t.Fatalf("new Server add replacement Workspace: %v", err)
+	}
+	if replacement.InstanceID == workspace.InstanceID {
+		t.Fatal("replacement Workspace reused the removed runtime identity")
+	}
+	mailboxBefore, err := loadResourceMailboxStoreForRead(workspace.Path, "workspace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	schedulerBefore, err := replacementApp.Scheduler()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	close(releaseBlocker)
+	select {
+	case err := <-queuedDone:
+		requireWorkspaceOwnershipError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("queued old-owner job did not fail after Workspace replacement")
+	}
+	if staleCallbackRan.Load() {
+		t.Fatal("queued old-owner callback ran against the replacement Workspace")
+	}
+	if first.ownsWorkspace(workspace.Path) {
+		t.Fatal("old Server retained a lock descriptor for the removed inode")
+	}
+	if !second.ownsWorkspace(replacement.Path) {
+		t.Fatal("new Server does not own the replacement Workspace")
+	}
+
+	var lateCallbackRan atomic.Bool
+	err = first.agents.withResourceController(context.Background(), workspace, "workspace", func() error {
+		lateCallbackRan.Store(true)
+		return nil
+	})
+	requireWorkspaceOwnershipError(t, err)
+	if lateCallbackRan.Load() {
+		t.Fatal("old Server allocated a fresh controller for the replacement Workspace")
+	}
+	if err := second.agents.withResourceController(context.Background(), replacement, "workspace", func() error { return nil }); err != nil {
+		t.Fatalf("new owner ordinary resource job: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(workspace.Path, "stale-owner-write")); !os.IsNotExist(err) {
+		t.Fatalf("old owner created a filesystem marker: %v", err)
+	}
+	mailboxAfter, err := loadResourceMailboxStoreForRead(workspace.Path, "workspace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(mailboxAfter, mailboxBefore) {
+		t.Fatalf("old owner changed replacement mailbox: before=%#v after=%#v", mailboxBefore, mailboxAfter)
+	}
+	schedulerAfter, err := replacementApp.Scheduler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(schedulerAfter, schedulerBefore) {
+		t.Fatalf("old owner changed replacement Scheduler: before=%#v after=%#v", schedulerBefore, schedulerAfter)
+	}
+}
+
+func TestQueuedOrdinaryResourceJobRechecksConfiguredRuntimeIdentity(t *testing.T) {
+	server, workspace := newWorkspaceRemovalFixture(t)
+	controller, err := server.agents.controllerForResource(workspace, "workspace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	blockerStarted := make(chan struct{})
+	releaseBlocker := make(chan struct{})
+	controller.enqueueWithStart(context.Background(), func() error {
+		close(blockerStarted)
+		<-releaseBlocker
+		return nil
+	}, server.agents.runBackground)
+	select {
+	case <-blockerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("ordinary controller blocker did not start")
+	}
+
+	var callbackRan atomic.Bool
+	queuedDone := make(chan error, 1)
+	go func() {
+		queuedDone <- server.agents.withResourceController(context.Background(), workspace, "workspace", func() error {
+			callbackRan.Store(true)
+			return nil
+		})
+	}()
+	waitForResourceControllerQueue(t, controller, 1)
+
+	configPath := filepath.Join(workspace.Path, "workspace.json")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var runtimeConfig app.Config
+	if err := json.Unmarshal(data, &runtimeConfig); err != nil {
+		t.Fatal(err)
+	}
+	runtimeConfig.InstanceID = "replacement-runtime-instance"
+	data, err = json.MarshalIndent(runtimeConfig, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(configPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !server.locks.owns(workspace.Path) {
+		t.Fatal("runtime identity edit unexpectedly invalidated the named lock inode")
+	}
+
+	close(releaseBlocker)
+	select {
+	case err := <-queuedDone:
+		requireWorkspaceOwnershipError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("queued job did not fail after runtime identity replacement")
+	}
+	if callbackRan.Load() {
+		t.Fatal("queued job ran after its configured runtime identity was replaced")
+	}
+	if !server.locks.owns(workspace.Path) {
+		t.Fatal("identity mismatch should not discard the still-current advisory lock")
+	}
 }
 
 func TestWorkspaceRemovalDrainsAgentHubDeliveryBeforeOwnershipHandoff(t *testing.T) {

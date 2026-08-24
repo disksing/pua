@@ -15,14 +15,35 @@ import (
 )
 
 type schedulerChangeRequest struct {
-	Operation        string                `json:"operation"`
-	ID               string                `json:"id,omitempty"`
-	ExpectedRevision schedulerapi.Revision `json:"expectedRevision,omitempty"`
-	Description      *string               `json:"description,omitempty"`
-	Condition        *string               `json:"condition,omitempty"`
-	Guard            *string               `json:"guard,omitempty"`
-	Target           *string               `json:"target,omitempty"`
-	Trigger          *app.ScheduleTrigger  `json:"trigger,omitempty"`
+	Operation        string                    `json:"operation"`
+	ID               string                    `json:"id,omitempty"`
+	ExpectedRevision schedulerExpectedRevision `json:"expectedRevision,omitempty"`
+	Description      *string                   `json:"description,omitempty"`
+	Condition        *string                   `json:"condition,omitempty"`
+	Guard            *string                   `json:"guard,omitempty"`
+	Target           *string                   `json:"target,omitempty"`
+	Trigger          *app.ScheduleTrigger      `json:"trigger,omitempty"`
+}
+
+// schedulerExpectedRevision adds request-field context while delegating the
+// lossless decimal-string contract to schedulerapi.Revision.
+type schedulerExpectedRevision schedulerapi.Revision
+
+func (revision *schedulerExpectedRevision) UnmarshalJSON(data []byte) error {
+	var parsed schedulerapi.Revision
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return fmt.Errorf("expectedRevision: %w", err)
+	}
+	*revision = schedulerExpectedRevision(parsed)
+	return nil
+}
+
+func (revision schedulerExpectedRevision) Uint64() (uint64, error) {
+	parsed, err := schedulerapi.Revision(revision).Uint64()
+	if err != nil {
+		return 0, fmt.Errorf("expectedRevision: %w", err)
+	}
+	return parsed, nil
 }
 
 type schedulerResourceDetail struct {
@@ -223,10 +244,10 @@ func writeSchedulerTargetError(w http.ResponseWriter) {
 
 func (s *server) handleNaturalLanguageScheduleRequest(w http.ResponseWriter, r *http.Request, workspace serveWorkspace, operation app.ScheduleChangeOperation, id string) {
 	var body struct {
-		ExpectedRevision *schedulerapi.Revision `json:"expectedRevision,omitempty"`
-		Description      string                 `json:"description"`
-		Condition        string                 `json:"condition"`
-		Target           string                 `json:"target"`
+		ExpectedRevision *schedulerExpectedRevision `json:"expectedRevision,omitempty"`
+		Description      string                     `json:"description"`
+		Condition        string                     `json:"condition"`
+		Target           string                     `json:"target"`
 	}
 	if err := decodeSchedulerBody(r, &body); err != nil {
 		writeError(w, err, http.StatusBadRequest)

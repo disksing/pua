@@ -410,7 +410,7 @@ func TestSchedulerHTTPRevisionExhaustionIsConflict(t *testing.T) {
 	t.Cleanup(s.agents.waitBackground)
 	description := "Cannot wrap"
 	body, err := json.Marshal(schedulerChangeRequest{
-		Operation: string(app.ScheduleChangeUpdate), ID: created.ID, ExpectedRevision: schedulerapi.RevisionFromUint64(^uint64(0)),
+		Operation: string(app.ScheduleChangeUpdate), ID: created.ID, ExpectedRevision: schedulerExpectedRevision(schedulerapi.RevisionFromUint64(^uint64(0))),
 		Description: &description, Trigger: &trigger,
 	})
 	if err != nil {
@@ -441,6 +441,60 @@ func TestSchedulerHTTPRevisionExhaustionIsConflict(t *testing.T) {
 	loaded, err := puaWorkspace.Scheduler()
 	if err != nil || len(loaded.Schedules) != 1 || loaded.Schedules[0].Revision != ^uint64(0) {
 		t.Fatalf("Scheduler after HTTP revision exhaustion = %#v, %v", loaded.Schedules, err)
+	}
+}
+
+func TestSchedulerHTTPExpectedRevisionErrorsNameField(t *testing.T) {
+	root := t.TempDir()
+	if _, err := app.Initialize(root, "en"); err != nil {
+		t.Fatal(err)
+	}
+	workspace := serveWorkspace{ID: "workspace-scheduler-revision-errors", Name: "Scheduler Revision Errors", Path: root}
+	s := &server{config: filepath.Join(t.TempDir(), "serve.json")}
+	if err := s.saveConfig(config{Version: agentHubConfigVersion, Workspaces: []serveWorkspace{workspace}}); err != nil {
+		t.Fatal(err)
+	}
+	s.agents = newAgentManager(s)
+	t.Cleanup(s.agents.waitBackground)
+
+	const (
+		scheduleID             = "schedule-111111111111111111111111"
+		invalidRevisionMessage = "expectedRevision: schedule revision must be a canonical decimal string between 1 and 18446744073709551615"
+		missingRevisionMessage = "expectedRevision is required for schedule updates"
+		extraRevisionMessage   = "expectedRevision is only valid for schedule updates"
+	)
+	for _, test := range []struct {
+		name, method, path, body, wantError string
+	}{
+		{name: "structured zero", method: http.MethodPost, path: "/scheduler/changes", body: `{"operation":"update","id":"` + scheduleID + `","expectedRevision":"0"}`, wantError: invalidRevisionMessage},
+		{name: "structured number", method: http.MethodPost, path: "/scheduler/changes", body: `{"operation":"update","id":"` + scheduleID + `","expectedRevision":1}`, wantError: invalidRevisionMessage},
+		{name: "structured noncanonical", method: http.MethodPost, path: "/scheduler/changes", body: `{"operation":"update","id":"` + scheduleID + `","expectedRevision":"01"}`, wantError: invalidRevisionMessage},
+		{name: "structured overflow", method: http.MethodPost, path: "/scheduler/changes", body: `{"operation":"update","id":"` + scheduleID + `","expectedRevision":"18446744073709551616"}`, wantError: invalidRevisionMessage},
+		{name: "structured missing update revision", method: http.MethodPost, path: "/scheduler/changes", body: `{"operation":"update","id":"` + scheduleID + `"}`, wantError: missingRevisionMessage},
+		{name: "structured create extra revision", method: http.MethodPost, path: "/scheduler/changes", body: `{"operation":"create","expectedRevision":"1"}`, wantError: extraRevisionMessage},
+		{name: "natural zero", method: http.MethodPut, path: "/scheduler/" + scheduleID, body: `{"expectedRevision":"0","description":"Review","condition":"later","target":"workspace"}`, wantError: invalidRevisionMessage},
+		{name: "natural number", method: http.MethodPut, path: "/scheduler/" + scheduleID, body: `{"expectedRevision":1,"description":"Review","condition":"later","target":"workspace"}`, wantError: invalidRevisionMessage},
+		{name: "natural noncanonical", method: http.MethodPut, path: "/scheduler/" + scheduleID, body: `{"expectedRevision":"+1","description":"Review","condition":"later","target":"workspace"}`, wantError: invalidRevisionMessage},
+		{name: "natural overflow", method: http.MethodPut, path: "/scheduler/" + scheduleID, body: `{"expectedRevision":"18446744073709551616","description":"Review","condition":"later","target":"workspace"}`, wantError: invalidRevisionMessage},
+		{name: "natural missing update revision", method: http.MethodPut, path: "/scheduler/" + scheduleID, body: `{"description":"Review","condition":"later","target":"workspace"}`, wantError: missingRevisionMessage},
+		{name: "natural create extra revision", method: http.MethodPost, path: "/scheduler", body: `{"expectedRevision":"1","description":"Review","condition":"later","target":"workspace"}`, wantError: extraRevisionMessage},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			request := httptest.NewRequest(test.method, "/api/workspaces/"+workspace.ID+test.path, strings.NewReader(test.body))
+			s.handleWorkspace(response, request)
+			if response.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+				t.Fatalf("decode error response: %v", err)
+			}
+			want := map[string]any{"error": test.wantError}
+			if !reflect.DeepEqual(payload, want) {
+				t.Fatalf("error response = %#v, want %#v", payload, want)
+			}
+		})
 	}
 }
 
@@ -627,7 +681,7 @@ func TestSchedulerHTTPMissingMutationsAreNotFound(t *testing.T) {
 		name, method, path string
 		body               *schedulerChangeRequest
 	}{
-		{name: "changes update", method: http.MethodPost, path: "/scheduler/changes", body: &schedulerChangeRequest{Operation: string(app.ScheduleChangeUpdate), ID: missingID, ExpectedRevision: schedulerapi.RevisionFromUint64(^uint64(0)), Description: &description, Trigger: &trigger}},
+		{name: "changes update", method: http.MethodPost, path: "/scheduler/changes", body: &schedulerChangeRequest{Operation: string(app.ScheduleChangeUpdate), ID: missingID, ExpectedRevision: schedulerExpectedRevision(schedulerapi.RevisionFromUint64(^uint64(0))), Description: &description, Trigger: &trigger}},
 		{name: "changes pause", method: http.MethodPost, path: "/scheduler/changes", body: &schedulerChangeRequest{Operation: string(app.ScheduleChangePause), ID: missingID}},
 		{name: "changes resume", method: http.MethodPost, path: "/scheduler/changes", body: &schedulerChangeRequest{Operation: string(app.ScheduleChangeResume), ID: missingID}},
 		{name: "changes remove", method: http.MethodPost, path: "/scheduler/changes", body: &schedulerChangeRequest{Operation: string(app.ScheduleChangeRemove), ID: missingID}},

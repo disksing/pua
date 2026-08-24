@@ -22,5 +22,19 @@
 	<string>11.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUAutomaticallyUpdate</key>
+	<false/>
+	<key>SUVerifyUpdateBeforeExtraction</key>
+	<true/>
+	<key>SURequireSignedFeed</key>
+	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
+	<key>SUFeedURL</key>
+	<string>https://disksing.github.io/pua/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>RELEASE_BUILD_MUST_SET_SPARKLE_PUBLIC_KEY</string>
 </dict>
 </plist>

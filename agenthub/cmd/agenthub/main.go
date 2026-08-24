@@ -22,14 +22,8 @@ import (
 	"github.com/disksing/pua/internal/buildinfo"
 )
 
-const developmentVersion = "0.1.0-dev"
-
 func version() string {
-	info := buildinfo.Current()
-	if info.SHA == "unknown" {
-		return developmentVersion
-	}
-	return info.SHA
+	return buildinfo.Current("agenthub").Version
 }
 
 func main() {
@@ -68,10 +62,28 @@ func run(args []string) error {
 			printTopic("version")
 			return nil
 		}
+		if len(args) == 2 && args[1] == "--json" {
+			data, err := buildinfo.JSON("agenthub")
+			if err != nil {
+				return err
+			}
+			fmt.Printf("%s\n", data)
+			return nil
+		}
+		if len(args) != 1 {
+			return errors.New("usage: agenthub version [--json]")
+		}
 		fmt.Print(buildinfo.Text("agenthub"))
 		return nil
 	case "--version", "-version":
 		fmt.Print(buildinfo.Text("agenthub"))
+		return nil
+	case "--version-json":
+		data, err := buildinfo.JSON("agenthub")
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s\n", data)
 		return nil
 	default:
 		return fmt.Errorf("unknown command %q\nRun 'agenthub help' for usage.", args[0])

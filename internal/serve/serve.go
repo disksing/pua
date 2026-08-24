@@ -217,7 +217,7 @@ Options:
   --agenthub-mode <mode> AgentHub mode: embedded (default) or external
   --agenthub-endpoint    external AgentHub base URL ending in /agenthub;
                          required when --agenthub-mode=external
-  --version              print build-time branch and sha
+  --version              print product version and source build identity
 
 Workspace ownership:
   Each managed Workspace is exclusively owned by one pua serve process via
@@ -261,7 +261,7 @@ func Main(args []string) error {
 	flags.BoolVar(&noDefaultWorkspace, "no-default-workspace", false, "do not add the current directory to an empty config")
 	flags.StringVar(&agentHubMode, "agenthub-mode", agentHubModeEmbedded, "AgentHub mode: embedded or external")
 	flags.StringVar(&agentHubEndpoint, "agenthub-endpoint", "", "external AgentHub base URL ending in /agenthub")
-	flags.BoolVar(&showVersion, "version", false, "print build-time branch and sha")
+	flags.BoolVar(&showVersion, "version", false, "print product version and source build identity")
 	if err := flags.Parse(args); err != nil {
 		fmt.Fprint(os.Stderr, serveUsage)
 		return err
@@ -309,8 +309,8 @@ func Main(args []string) error {
 	defer configLock.Close()
 	var agentHubService *agenthubapp.Service
 	if agentHubMode == agentHubModeEmbedded {
-		info := buildinfo.Current()
-		agentHubService, err = agenthubapp.New(agenthubapp.Options{Address: addr, Version: info.SHA})
+		info := buildinfo.Current("pua")
+		agentHubService, err = agenthubapp.New(agenthubapp.Options{Address: addr, Version: info.EmbeddedAgentHubVersion})
 		if err != nil {
 			return fmt.Errorf("initialize embedded AgentHub: %w", err)
 		}

@@ -25,13 +25,28 @@ trap cleanup EXIT HUP INT TERM
 mkdir -p "$stage/PUA.app/Contents/MacOS" "$stage/PUA.app/Contents/Resources"
 cp "$root/desktop/macos/Info.plist" "$stage/PUA.app/Contents/Info.plist"
 cp "$stage/backend/pua" "$stage/PUA.app/Contents/Resources/pua"
+cp "$stage/backend/agenthub" "$stage/PUA.app/Contents/Resources/agenthub"
+
+branch=$(git -C "$root" rev-parse --abbrev-ref HEAD 2>/dev/null || printf unknown)
+sha=$(git -C "$root" rev-parse HEAD 2>/dev/null || printf unknown)
+build_time=$(git -C "$root" show -s --format=%cI HEAD 2>/dev/null || printf unknown)
+app_version=$("$root/scripts/version" macapp)
+app_build=$(git -C "$root" rev-list --count HEAD 2>/dev/null || printf 1)
+ldflags="-X github.com/disksing/pua/internal/buildinfo.Version=$app_version -X github.com/disksing/pua/internal/buildinfo.Channel=dev -X github.com/disksing/pua/internal/buildinfo.Branch=$branch -X github.com/disksing/pua/internal/buildinfo.SHA=$sha -X github.com/disksing/pua/internal/buildinfo.BuildTime=$build_time"
+
+/usr/libexec/PlistBuddy -c "Set :CFBundleName PUA Dev" "$stage/PUA.app/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier com.disksing.pua.desktop.dev" "$stage/PUA.app/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $app_version" "$stage/PUA.app/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $app_build" "$stage/PUA.app/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Delete :SUFeedURL" "$stage/PUA.app/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Delete :SUPublicEDKey" "$stage/PUA.app/Contents/Info.plist"
 
 cd "$root"
-MACOSX_DEPLOYMENT_TARGET=11.0 go build -tags production -o "$stage/PUA.app/Contents/MacOS/PUA" ./desktop/cmd/pua-desktop
+MACOSX_DEPLOYMENT_TARGET=11.0 go build -tags production -ldflags "$ldflags" -o "$stage/PUA.app/Contents/MacOS/PUA" ./desktop/cmd/pua-desktop
 codesign --force --deep --sign - "$stage/PUA.app"
 
-app_path=$out_path/PUA.app
-old_path=$out_path/.PUA.app.previous
+app_path=$out_path/PUA\ Dev.app
+old_path=$out_path/.PUA\ Dev.app.previous
 if [ -e "$old_path" ]; then
 	rm -rf -- "$old_path"
 fi
@@ -48,4 +63,4 @@ if [ -e "$old_path" ]; then
 	rm -rf -- "$old_path"
 fi
 
-printf '%s\n' "built $app_path"
+printf '%s\n' "built $app_path (isolated data and ports 14936/14646)"

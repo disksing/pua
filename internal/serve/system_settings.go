@@ -16,6 +16,9 @@ type systemSettingsResponse struct {
 }
 
 type puaSystemInfo struct {
+	Version     string                `json:"version"`
+	Channel     string                `json:"channel"`
+	MinAgentHub string                `json:"minAgentHubVersion"`
 	Address     string                `json:"address"`
 	Port        string                `json:"port"`
 	ConfigPath  string                `json:"configPath"`
@@ -30,15 +33,17 @@ type systemWorkspaceInfo struct {
 }
 
 type agentHubSystemInfo struct {
-	Mode       string        `json:"mode"`
-	Address    string        `json:"address"`
-	Port       string        `json:"port"`
-	Endpoint   string        `json:"endpoint"`
-	Connected  bool          `json:"connected"`
-	Compatible bool          `json:"compatible"`
-	Version    string        `json:"version"`
-	Paths      agentHubPaths `json:"paths"`
-	Error      string        `json:"error"`
+	Mode         string        `json:"mode"`
+	Address      string        `json:"address"`
+	Port         string        `json:"port"`
+	Endpoint     string        `json:"endpoint"`
+	Connected    bool          `json:"connected"`
+	Compatible   bool          `json:"compatible"`
+	Version      string        `json:"version"`
+	APIMajor     string        `json:"apiMajor"`
+	Capabilities []string      `json:"capabilities"`
+	Paths        agentHubPaths `json:"paths"`
+	Error        string        `json:"error"`
 }
 
 func (s *server) handleSystemSettings(w http.ResponseWriter, r *http.Request) {
@@ -60,10 +65,11 @@ func (s *server) readSystemSettings(ctx context.Context) (systemSettingsResponse
 		return systemSettingsResponse{}, err
 	}
 	address, port := splitAddress(s.addr)
-	build := buildinfo.Current()
+	build := buildinfo.Current("pua")
 	response := systemSettingsResponse{
 		PUA: puaSystemInfo{
 			Address: address, Port: port, ConfigPath: s.config,
+			Version: build.Version, Channel: build.Channel, MinAgentHub: build.MinAgentHubVersion,
 			BuildBranch: build.Branch, BuildCommit: build.SHA,
 			Workspaces: make([]systemWorkspaceInfo, 0, len(cfg.Workspaces)),
 		},
@@ -100,6 +106,8 @@ func (s *server) readSystemSettings(ctx context.Context) (systemSettingsResponse
 	}
 	response.AgentHub.Connected = true
 	response.AgentHub.Version = status.Version
+	response.AgentHub.APIMajor = status.APIVersion
+	response.AgentHub.Capabilities = append([]string(nil), status.Capabilities...)
 	response.AgentHub.Paths = status.Paths
 	if err := validateAgentHubStatus(status); err != nil {
 		response.AgentHub.Error = err.Error()

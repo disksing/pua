@@ -1,0 +1,33 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+component=${1:-}
+mode=${2:-dev}
+
+case "$component" in
+macapp|pua|agenthub) ;;
+*) printf '%s\n' "usage: scripts/version macapp|pua|agenthub [dev|stable]" >&2; exit 2 ;;
+esac
+
+target=$(tr -d '[:space:]' <"$root/versions/$component")
+case "$target" in
+''|*[!0-9.]*) printf '%s\n' "invalid target version in versions/$component: $target" >&2; exit 1 ;;
+esac
+
+if [ "$mode" = stable ]; then
+	printf '%s\n' "$target"
+	exit 0
+fi
+if [ "$mode" != dev ]; then
+	printf '%s\n' "usage: scripts/version macapp|pua|agenthub [dev|stable]" >&2
+	exit 2
+fi
+
+sha=$(git -C "$root" rev-parse --short=12 HEAD 2>/dev/null || printf unknown)
+count=$(git -C "$root" rev-list --count HEAD 2>/dev/null || printf 0)
+metadata="g$sha"
+if [ -n "$(git -C "$root" status --porcelain 2>/dev/null || true)" ]; then
+	metadata="$metadata.dirty"
+fi
+printf '%s-dev.%s+%s\n' "$target" "$count" "$metadata"

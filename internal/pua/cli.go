@@ -41,6 +41,16 @@ func Run(args []string) error {
 		}
 		fmt.Print(buildinfo.Text("pua"))
 		return nil
+	case "--version-json":
+		if len(args) != 1 {
+			return errors.New("usage: pua --version-json")
+		}
+		data, err := buildinfo.JSON("pua")
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s\n", data)
+		return nil
 	case "init":
 		return runInit(args[1:])
 	case "repo":
@@ -291,7 +301,7 @@ Usage:
 
 Commands:
   pua --version
-    Print the build-time branch and sha.
+    Print the product version and source build identity.
 
   pua init [--language=<language>]
     Initialize the current directory as a new AgentWorkspace. Fails when run

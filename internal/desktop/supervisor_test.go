@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -257,6 +256,22 @@ func TestActiveTurnCount(t *testing.T) {
 	}
 }
 
+func TestAgentHubActiveTurnCountIncludesDirectSessions(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/agenthub/v1/sessions" {
+			http.NotFound(response, request)
+			return
+		}
+		_, _ = response.Write([]byte(`{"sessions":[{"currentTurnId":"turn-1"},{},{"currentTurnId":"turn-2"}]}`))
+	}))
+	defer server.Close()
+	count, err := AgentHubActiveTurnCount(context.Background(), Options{HTTPClient: server.Client()}, Result{AgentHubURL: server.URL + "/agenthub"})
+	if err != nil || count != 2 {
+		t.Fatalf("AgentHubActiveTurnCount() = %d, %v", count, err)
+	}
+}
+
 func TestStopManagedBackendRequiresMatchingStateAndLock(t *testing.T) {
 	temporary := t.TempDir()
 	command := exec.Command("sleep", "30")
@@ -399,10 +414,15 @@ func TestHealthyRejectsReadinessFailure(t *testing.T) {
 
 func TestEnsureStartsRealBackend(t *testing.T) {
 	backend := os.Getenv("PUA_DESKTOP_TEST_BACKEND")
-	if backend == "" {
-		t.Skip("set PUA_DESKTOP_TEST_BACKEND to run the real backend integration test")
+	agentHub := os.Getenv("PUA_DESKTOP_TEST_AGENTHUB")
+	if backend == "" || agentHub == "" {
+		t.Skip("set PUA_DESKTOP_TEST_BACKEND and PUA_DESKTOP_TEST_AGENTHUB to run the real integration test")
 	}
 	backend, err := filepath.Abs(backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentHub, err = filepath.Abs(agentHub)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -414,24 +434,33 @@ func TestEnsureStartsRealBackend(t *testing.T) {
 	if err := listener.Close(); err != nil {
 		t.Fatal(err)
 	}
+	agentHubListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentHubAddress := agentHubListener.Addr().String()
+	if err := agentHubListener.Close(); err != nil {
+		t.Fatal(err)
+	}
 
 	temporary := t.TempDir()
-	t.Setenv("AGENTHUB_HOME", filepath.Join(temporary, "agenthub"))
+	agentHubHome := filepath.Join(temporary, "agenthub")
+	t.Setenv("AGENTHUB_HOME", agentHubHome)
 	t.Setenv("PUA_WORKSPACE_ROOT", "")
 	options := Options{
-		Address:        address,
-		ConfigPath:     filepath.Join(temporary, "pua", "serve.json"),
-		AppSupportDir:  filepath.Join(temporary, "desktop"),
-		BackendPath:    backend,
-		CLIPath:        filepath.Join(temporary, ".pua", "bin", "pua"),
-		ShellProfile:   filepath.Join(temporary, ".zprofile"),
-		StartupTimeout: 30 * time.Second,
-		HTTPClient:     &http.Client{Timeout: time.Second},
+		Address: address, AgentHubAddress: agentHubAddress,
+		ConfigPath: filepath.Join(temporary, "pua", "serve.json"), AppSupportDir: filepath.Join(temporary, "desktop"),
+		BackendPath: backend, AgentHubPath: agentHub, AgentHubHome: agentHubHome,
+		AgentHubStatePath: filepath.Join(agentHubHome, "state", "server.json"), AgentHubLockPath: filepath.Join(agentHubHome, "state", "server.lock"),
+		CLIPath: filepath.Join(temporary, ".pua", "bin", "pua"), AgentHubCLIPath: filepath.Join(temporary, ".pua", "bin", "agenthub"),
+		ShellProfile: filepath.Join(temporary, ".zprofile"), StartupTimeout: 30 * time.Second, HTTPClient: &http.Client{Timeout: time.Second},
 	}
+	var latest Result
 	t.Cleanup(func() {
-		lock, ok := readJSON[serveLock](options.ConfigPath + ".lock")
-		if ok && lock.PID > 0 {
-			_ = syscall.Kill(-lock.PID, syscall.SIGTERM)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if latest.PID > 0 || latest.AgentHubPID > 0 {
+			_ = StopManaged(ctx, options, latest)
 		}
 	})
 
@@ -441,6 +470,10 @@ func TestEnsureStartsRealBackend(t *testing.T) {
 	}
 	if !result.Managed || result.PID <= 0 {
 		t.Fatalf("backend was not marked managed: %+v", result)
+	}
+	latest = result
+	if !result.AgentHubManaged || result.AgentHubPID <= 0 || !agentHubHealthy(context.Background(), options.HTTPClient, result.AgentHubURL) {
+		t.Fatalf("AgentHub was not independently managed and healthy: %+v", result)
 	}
 	if !healthy(context.Background(), options.HTTPClient, result.URL) {
 		t.Fatalf("backend %s is not healthy", result.URL)
@@ -491,6 +524,10 @@ func TestEnsureStartsRealBackend(t *testing.T) {
 	}
 	if !upgraded.Managed || upgraded.PID <= 0 || upgraded.PID == result.PID {
 		t.Fatalf("managed backend was not replaced: before=%+v after=%+v", result, upgraded)
+	}
+	latest = upgraded
+	if upgraded.AgentHubPID != result.AgentHubPID {
+		t.Fatalf("PUA replacement restarted AgentHub: before=%+v after=%+v", result, upgraded)
 	}
 	expectedDigest, err := fileDigest(backend)
 	if err != nil {

@@ -28,9 +28,11 @@ func TestSystemSettingsReportsPUAAndAgentHubRuntimeFacts(t *testing.T) {
 	}))
 	defer fakeHub.Close()
 
-	previousBranch, previousSHA := buildinfo.Branch, buildinfo.SHA
-	buildinfo.Branch, buildinfo.SHA = "task549", "pua-commit"
-	t.Cleanup(func() { buildinfo.Branch, buildinfo.SHA = previousBranch, previousSHA })
+	previousBranch, previousSHA, previousVersion := buildinfo.Branch, buildinfo.SHA, buildinfo.Version
+	buildinfo.Branch, buildinfo.SHA, buildinfo.Version = "task549", "pua-commit", "0.4.2-dev.1"
+	t.Cleanup(func() {
+		buildinfo.Branch, buildinfo.SHA, buildinfo.Version = previousBranch, previousSHA, previousVersion
+	})
 
 	configPath := filepath.Join(t.TempDir(), "serve.json")
 	s := &server{addr: "192.168.2.150:4936", config: configPath, agentHubMode: agentHubModeExternal}
@@ -63,11 +65,17 @@ func TestSystemSettingsReportsPUAAndAgentHubRuntimeFacts(t *testing.T) {
 	if response.PUA.BuildBranch != "task549" || response.PUA.BuildCommit != "pua-commit" || len(response.PUA.Workspaces) != 2 {
 		t.Fatalf("unexpected PUA build or Workspace info: %+v", response.PUA)
 	}
+	if response.PUA.Version != "0.4.2-dev.1" || response.PUA.MinAgentHub == "" {
+		t.Fatalf("unexpected PUA product compatibility info: %+v", response.PUA)
+	}
 	if response.AgentHub.Mode != agentHubModeExternal || response.AgentHub.Endpoint != fakeHub.URL || !response.AgentHub.Connected || !response.AgentHub.Compatible {
 		t.Fatalf("unexpected AgentHub connection info: %+v", response.AgentHub)
 	}
 	if response.AgentHub.Address != "127.0.0.1" || response.AgentHub.Port == "" || response.AgentHub.Version != "hub-commit" {
 		t.Fatalf("unexpected AgentHub network or version info: %+v", response.AgentHub)
+	}
+	if response.AgentHub.APIMajor != "1" || len(response.AgentHub.Capabilities) != len(requiredAgentHubCapabilities) {
+		t.Fatalf("unexpected AgentHub API compatibility info: %+v", response.AgentHub)
 	}
 	if response.AgentHub.Paths.Config != "/var/lib/agenthub/config.json" || response.AgentHub.Paths.Sessions != "/var/lib/agenthub/sessions" || response.AgentHub.Paths.Archive != "/var/lib/agenthub/sessions/Archive" || response.AgentHub.Paths.Logs != "/var/lib/agenthub/logs" {
 		t.Fatalf("unexpected AgentHub paths: %+v", response.AgentHub.Paths)

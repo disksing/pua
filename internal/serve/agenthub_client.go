@@ -12,11 +12,15 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/disksing/pua/agenthub/protocol"
+	"github.com/disksing/pua/internal/buildinfo"
+	productversion "github.com/disksing/pua/internal/version"
 )
 
 const (
 	defaultAgentHubEndpoint = "http://127.0.0.1:4646/agenthub"
-	agentHubAPIVersion      = "1"
+	agentHubAPIVersion      = protocol.APIMajor
 	agentHubRequestTimeout  = 30 * time.Second
 )
 
@@ -26,25 +30,7 @@ const (
 // guards against runaway memory usage. It is a variable so tests can lower it.
 var agentHubMaxResponseBytes int64 = 256 << 20
 
-var requiredAgentHubCapabilities = []string{
-	"session.source",
-	"session.source-metadata",
-	"session.idempotent-create",
-	"session.input-capabilities",
-	"messages.idempotent",
-	"messages.at-least-once",
-	"messages.opaque-payload-v2",
-	"turns.stable-index",
-	"turns.materialized",
-	"session.launch-environment",
-	"session.launch-environment-update",
-	"session.strict-stopped",
-	"events.lossless-replay",
-	"events.canonical-turn-terminals",
-	"events.semantic-v1",
-	"event.raw-v1",
-	"recovery.closed-turns",
-}
+var requiredAgentHubCapabilities = protocol.BaselineV1[:]
 
 type agentHubClient struct {
 	endpoint   string
@@ -386,6 +372,9 @@ func validateAgentHubStatus(status agentHubStatus) error {
 	if status.APIVersion != agentHubAPIVersion {
 		return fmt.Errorf("incompatible AgentHub apiVersion %q; PUA requires %q", status.APIVersion, agentHubAPIVersion)
 	}
+	if err := validateAgentHubProductVersion(status.Version); err != nil {
+		return err
+	}
 	available := make(map[string]bool, len(status.Capabilities))
 	for _, capability := range status.Capabilities {
 		available[capability] = true
@@ -398,6 +387,30 @@ func validateAgentHubStatus(status agentHubStatus) error {
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("AgentHub is missing required capabilities: %s", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+func validateAgentHubProductVersion(value string) error {
+	puaInfo := buildinfo.Current("pua")
+	minimum, minimumErr := productversion.Parse(puaInfo.MinAgentHubVersion)
+	actual, actualErr := productversion.Parse(value)
+	if buildinfo.IsDevelopment(puaInfo) {
+		// Development checkouts may jointly implement an unreleased protocol.
+		// API major and the fixed safety baseline remain mandatory below.
+		return nil
+	}
+	if minimumErr != nil {
+		return fmt.Errorf("PUA has invalid minimum AgentHub version %q", puaInfo.MinAgentHubVersion)
+	}
+	if actualErr != nil {
+		return fmt.Errorf("AgentHub reports invalid product version %q; PUA requires at least %s", value, puaInfo.MinAgentHubVersion)
+	}
+	if productversion.IsDevelopment(actual) {
+		return fmt.Errorf("stable PUA refuses development AgentHub version %q", value)
+	}
+	if productversion.Compare(actual, minimum) < 0 {
+		return fmt.Errorf("AgentHub version %s is too old; PUA requires at least %s", value, puaInfo.MinAgentHubVersion)
 	}
 	return nil
 }

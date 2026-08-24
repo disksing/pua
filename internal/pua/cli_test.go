@@ -46,7 +46,7 @@ func TestVersion(t *testing.T) {
 	})
 
 	out := run(t, "--version")
-	if out != "pua branch=task-branch sha=abc123\n" {
+	if out != "pua version=0.1.0-dev channel=dev branch=task-branch sha=abc123\n" {
 		t.Fatalf("unexpected version output: %q", out)
 	}
 }
@@ -451,7 +451,7 @@ func TestRemovedStartAndServeSubcommands(t *testing.T) {
 		t.Fatalf("expected pua serve to reject positional arguments, got %v", err)
 	}
 	version := run(t, "serve", "--version")
-	if !strings.HasPrefix(version, "pua branch=") {
+	if !strings.HasPrefix(version, "pua version=") {
 		t.Fatalf("expected pua serve --version to print pua build info, got %q", version)
 	}
 }

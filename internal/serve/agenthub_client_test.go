@@ -10,7 +10,29 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/disksing/pua/internal/buildinfo"
 )
+
+func TestStablePUAEnforcesMinimumAgentHubVersion(t *testing.T) {
+	oldVersion, oldChannel, oldMinimum := buildinfo.Version, buildinfo.Channel, buildinfo.MinAgentHubVersion
+	buildinfo.Version, buildinfo.Channel, buildinfo.MinAgentHubVersion = "0.4.0", "stable", "0.7.0"
+	t.Cleanup(func() {
+		buildinfo.Version, buildinfo.Channel, buildinfo.MinAgentHubVersion = oldVersion, oldChannel, oldMinimum
+	})
+	status := agentHubStatus{APIVersion: agentHubAPIVersion, Capabilities: append([]string(nil), requiredAgentHubCapabilities...), Version: "0.6.9"}
+	if err := validateAgentHubStatus(status); err == nil || !strings.Contains(err.Error(), "too old") {
+		t.Fatalf("old AgentHub validation error = %v", err)
+	}
+	status.Version = "0.7.0"
+	if err := validateAgentHubStatus(status); err != nil {
+		t.Fatalf("minimum compatible AgentHub was rejected: %v", err)
+	}
+	status.Version = "0.8.0-dev.1"
+	if err := validateAgentHubStatus(status); err == nil || !strings.Contains(err.Error(), "development") {
+		t.Fatalf("development AgentHub validation error = %v", err)
+	}
+}
 
 func TestAgentHubClientContract(t *testing.T) {
 	var methods []string

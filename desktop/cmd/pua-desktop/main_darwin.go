@@ -4,140 +4,304 @@ package main
 
 import (
 	"context"
+	"embed"
 	"fmt"
-	"html"
 	"os"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/disksing/pua/internal/buildinfo"
 	"github.com/disksing/pua/internal/desktop"
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/events"
 )
+
+//go:embed assets/*
+var assets embed.FS
+
+type DesktopService struct {
+	manager   *desktop.Manager
+	onChanged func()
+}
+
+func (service *DesktopService) Status() desktop.Status {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	return service.manager.Status(ctx)
+}
+
+func (service *DesktopService) Start() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	if err := service.manager.Start(ctx); err != nil {
+		return err
+	}
+	service.onChanged()
+	return nil
+}
+
+func (service *DesktopService) Stop() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := service.manager.Stop(ctx); err != nil {
+		return err
+	}
+	service.onChanged()
+	return nil
+}
+
+func (service *DesktopService) Restart() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := service.manager.Restart(ctx); err != nil {
+		return err
+	}
+	service.onChanged()
+	return nil
+}
+
+func (service *DesktopService) SaveConfig(config desktop.Config) (bool, error) {
+	return service.manager.SaveConfig(config)
+}
+
+func (service *DesktopService) OpenFullDiskAccessSettings() error {
+	return desktop.OpenFullDiskAccessSettings()
+}
+
+func (service *DesktopService) CheckUpdates() (desktop.UpdateCheck, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	return service.manager.CheckUpdates(ctx)
+}
+
+func (service *DesktopService) InstallUpdates(components []string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	if err := service.manager.InstallUpdates(ctx, components); err != nil {
+		return err
+	}
+	service.onChanged()
+	return nil
+}
+
+type windowSet struct {
+	mu      sync.Mutex
+	app     *application.App
+	manager *desktop.Manager
+	windows map[string]*application.WebviewWindow
+}
+
+func (set *windowSet) show(name string) {
+	set.mu.Lock()
+	defer set.mu.Unlock()
+	if window := set.windows[name]; window != nil {
+		if name != "services" {
+			set.updateRemoteURL(name, window)
+		}
+		window.UnMinimise()
+		window.Show()
+		window.Focus()
+		return
+	}
+	options := application.WebviewWindowOptions{Name: name, Width: 1240, Height: 820, MinWidth: 840, MinHeight: 580}
+	switch name {
+	case "services":
+		options.Title, options.URL, options.Width, options.Height = "PUA Service Manager", "/", 960, 760
+	case "agenthub":
+		options.Title = "AgentHub"
+	case "beeper":
+		options.Title, options.Width, options.Height = "AgentHub Beeper", 760, 680
+	default:
+		options.Name, options.Title, name = "main", "PUA", "main"
+	}
+	window := set.app.Window.NewWithOptions(options)
+	set.windows[name] = window
+	if name != "services" {
+		set.updateRemoteURL(name, window)
+	}
+	window.RegisterHook(events.Common.WindowClosing, func(event *application.WindowEvent) {
+		event.Cancel()
+		window.Hide()
+	})
+}
+
+func (set *windowSet) updateRemoteURL(name string, window *application.WebviewWindow) {
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	status := set.manager.Status(ctx)
+	cancel()
+	base := strings.TrimRight(status.PUA.Endpoint, "/")
+	if base == "" {
+		return
+	}
+	path := "/"
+	if name == "agenthub" {
+		path = "/agenthub/"
+	} else if name == "beeper" {
+		path = "/agenthub/beeper"
+	}
+	window.SetURL(base + path)
+}
+
+func (set *windowSet) refreshRemoteWindows() {
+	set.mu.Lock()
+	defer set.mu.Unlock()
+	for name, window := range set.windows {
+		if name != "services" {
+			set.updateRemoteURL(name, window)
+		}
+	}
+}
 
 func main() {
 	options, err := desktop.DefaultOptions()
 	if err != nil {
 		fatal(err)
 	}
-
-	var window *application.WebviewWindow
-	var result desktop.Result
-	var backendErr error
+	manager, err := desktop.NewManager(options)
+	if err != nil {
+		fatal(err)
+	}
 	var quitInProgress atomic.Bool
 	var quitApproved atomic.Bool
 	var app *application.App
+	windows := &windowSet{manager: manager, windows: map[string]*application.WebviewWindow{}}
+	service := &DesktopService{manager: manager, onChanged: windows.refreshRemoteWindows}
+	appName, uniqueID := "PUA", "com.disksing.pua.desktop"
+	if buildinfo.IsDevelopment(buildinfo.Current("macapp")) {
+		appName, uniqueID = "PUA Dev", "com.disksing.pua.desktop.dev"
+	}
 	app = application.New(application.Options{
-		Name:        "PUA",
-		Description: "PUA desktop application",
+		Name:        appName,
+		Description: "PUA desktop application and service manager",
+		Assets: application.AssetOptions{
+			Handler:        application.BundledAssetFileServer(assets),
+			DisableLogging: true,
+		},
+		Services: []application.Service{application.NewService(service)},
 		ShouldQuit: func() bool {
 			if quitApproved.Load() {
 				return true
 			}
-			if backendErr != nil || !result.Managed {
-				return true
-			}
 			if quitInProgress.CompareAndSwap(false, true) {
-				go prepareQuit(app, window, options, result, &quitInProgress, &quitApproved)
+				go prepareQuit(app, manager, &quitInProgress, &quitApproved)
 			}
 			return false
 		},
-		Mac: application.MacOptions{
-			ApplicationShouldTerminateAfterLastWindowClosed: false,
-		},
+		Mac: application.MacOptions{ApplicationShouldTerminateAfterLastWindowClosed: false},
 		SingleInstance: &application.SingleInstanceOptions{
-			UniqueID: "com.disksing.pua.desktop",
-			OnSecondInstanceLaunch: func(application.SecondInstanceData) {
-				if window != nil {
-					window.UnMinimise()
-					window.Show()
-					window.Focus()
+			UniqueID: uniqueID,
+			OnSecondInstanceLaunch: func(data application.SecondInstanceData) {
+				if hasArgument(data.Args, "--service-manager") {
+					windows.show("services")
+				} else {
+					windows.show("main")
 				}
 			},
 			ExitCode: 0,
 		},
 	})
+	windows.app = app
+	startSparkle()
+	installMenu(app, windows)
 	ctx, cancel := context.WithTimeout(context.Background(), options.StartupTimeout+5*time.Second)
-	result, backendErr = desktop.Ensure(ctx, options)
+	_, backendErr := manager.Ensure(ctx)
 	cancel()
-
-	windowOptions := application.WebviewWindowOptions{
-		Name:      "main",
-		Title:     "PUA",
-		Width:     1440,
-		Height:    900,
-		MinWidth:  980,
-		MinHeight: 640,
-	}
-	if backendErr == nil {
-		windowOptions.URL = result.URL
+	if backendErr != nil || hasArgument(os.Args, "--service-manager") {
+		windows.show("services")
 	} else {
-		windowOptions.HTML = errorPage(backendErr)
+		windows.show("main")
 	}
-	window = app.Window.NewWithOptions(windowOptions)
-	window.RegisterHook(events.Common.WindowClosing, func(event *application.WindowEvent) {
-		event.Cancel()
-		window.Hide()
-	})
+	go automaticUpdateChecks(app, manager, windows)
 	if err := app.Run(); err != nil {
 		fatal(err)
 	}
 }
 
-func prepareQuit(app *application.App, window *application.WebviewWindow, options desktop.Options, result desktop.Result, inProgress, approved *atomic.Bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	activeTurns, err := desktop.ActiveTurnCount(ctx, options, result)
-	cancel()
-	if err == nil && activeTurns == 0 {
-		stopAndQuit(app, options, result, inProgress, approved)
-		return
+func hasArgument(arguments []string, target string) bool {
+	for _, argument := range arguments {
+		if argument == target {
+			return true
+		}
 	}
+	return false
+}
 
-	if window != nil {
-		window.Show()
-		window.Focus()
+func installMenu(app *application.App, windows *windowSet) {
+	menu := app.NewMenu()
+	menu.AddRole(application.AppMenu)
+	navigate := menu.AddSubmenu("Navigate")
+	navigate.Add("PUA").SetAccelerator("CmdOrCtrl+1").OnClick(func(*application.Context) { windows.show("main") })
+	navigate.Add("AgentHub").SetAccelerator("CmdOrCtrl+2").OnClick(func(*application.Context) { windows.show("agenthub") })
+	navigate.Add("Beeper").SetAccelerator("CmdOrCtrl+3").OnClick(func(*application.Context) { windows.show("beeper") })
+	navigate.AddSeparator()
+	navigate.Add("Service Manager…").SetAccelerator("CmdOrCtrl+,").OnClick(func(*application.Context) { windows.show("services") })
+	navigate.AddSeparator()
+	navigate.Add("Check for PUA.app Updates…").OnClick(func(*application.Context) { checkSparkle() })
+	menu.AddRole(application.EditMenu)
+	menu.AddRole(application.ViewMenu)
+	menu.AddRole(application.WindowMenu)
+	menu.AddRole(application.HelpMenu)
+	app.Menu.SetApplicationMenu(menu)
+}
+
+func automaticUpdateChecks(app *application.App, manager *desktop.Manager, windows *windowSet) {
+	timer := time.NewTimer(15 * time.Second)
+	defer timer.Stop()
+	for {
+		select {
+		case <-timer.C:
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			status := manager.Status(ctx)
+			if status.Config.AutoCheck && manager.AutomaticUpdateDue(time.Now()) {
+				check, err := manager.CheckUpdates(ctx)
+				if err == nil && (check.Plan.PUA != nil || check.Plan.AgentHub != nil || check.Plan.AppUpdateRequired) {
+					app.Dialog.Info().SetTitle("PUA updates are available").SetMessage("Open Service Manager to review and install component updates. PUA.app updates are offered separately.").Show()
+					windows.show("services")
+				}
+			}
+			cancel()
+			timer.Reset(time.Hour)
+		}
 	}
-	message := "PUA has active Agent work. You can keep the backend running in the background or stop it before quitting."
-	if activeTurns > 1 {
-		message = fmt.Sprintf("PUA has %d active Agent tasks. You can keep the backend running in the background or stop it before quitting.", activeTurns)
-	} else if err != nil {
-		message = "PUA could not confirm whether Agent work is active. Choose whether to keep the backend running or stop it before quitting."
-	}
-	dialog := app.Dialog.Question().SetTitle("Quit PUA?").SetMessage(message)
-	dialog.AddButton("Keep Running").SetAsDefault().OnClick(func() {
+}
+
+func prepareQuit(app *application.App, manager *desktop.Manager, inProgress, approved *atomic.Bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	status := manager.Status(ctx)
+	activeTurns, activeErr := manager.ActiveTurns(ctx)
+	cancel()
+	if !status.PUA.Managed && !status.AgentHub.Managed {
 		approved.Store(true)
 		app.Quit()
-	})
-	dialog.AddButton("Stop and Quit").OnClick(func() {
-		go stopAndQuit(app, options, result, inProgress, approved)
-	})
-	dialog.AddButton("Cancel").SetAsCancel().OnClick(func() {
-		inProgress.Store(false)
-	})
+		return
+	}
+	if activeErr == nil && activeTurns == 0 {
+		stopAndQuit(app, manager, inProgress, approved)
+		return
+	}
+	message := "PUA could not confirm whether AgentHub has active turns. Quitting will stop the managed services and may interrupt work."
+	if activeErr == nil {
+		message = fmt.Sprintf("AgentHub has %d active turn(s). Quitting will stop the managed services and interrupt that work.", activeTurns)
+	}
+	dialog := app.Dialog.Question().SetTitle("Stop services and quit PUA?").SetMessage(message)
+	dialog.AddButton("Cancel").SetAsDefault().SetAsCancel().OnClick(func() { inProgress.Store(false) })
+	dialog.AddButton("Stop and Quit").OnClick(func() { go stopAndQuit(app, manager, inProgress, approved) })
 	dialog.Show()
 }
 
-func stopAndQuit(app *application.App, options desktop.Options, result desktop.Result, inProgress, approved *atomic.Bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	err := desktop.StopManaged(ctx, options, result)
+func stopAndQuit(app *application.App, manager *desktop.Manager, inProgress, approved *atomic.Bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	err := manager.Stop(ctx)
 	cancel()
 	if err != nil {
-		approved.Store(false)
 		inProgress.Store(false)
-		app.Dialog.Error().SetTitle("PUA could not stop").SetMessage(err.Error()).Show()
+		app.Dialog.Error().SetTitle("PUA could not stop its services").SetMessage(err.Error()).Show()
 		return
 	}
 	approved.Store(true)
 	app.Quit()
-}
-
-func errorPage(err error) string {
-	return `<!doctype html><html><head><meta charset="utf-8"><title>PUA</title>` +
-		`<style>body{margin:0;background:#f5f5f7;color:#1d1d1f;font:15px -apple-system,BlinkMacSystemFont,sans-serif}` +
-		`main{max-width:680px;margin:12vh auto;padding:36px;background:white;border-radius:16px;box-shadow:0 8px 32px #0001}` +
-		`h1{font-size:24px;margin-top:0}pre{white-space:pre-wrap;background:#f5f5f7;padding:16px;border-radius:10px}</style></head>` +
-		`<body><main><h1>PUA backend could not start</h1><p>The desktop shell is running, but it could not connect to PUA.</p><pre>` +
-		html.EscapeString(err.Error()) + `</pre><p>Quit and reopen PUA after resolving the error.</p></main></body></html>`
 }
 
 func fatal(err error) {

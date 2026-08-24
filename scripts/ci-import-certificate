@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+umask 077
+[ -n "${CERTIFICATE_P12:-}" ] && [ -n "${CERTIFICATE_PASSWORD:-}" ] || { echo "certificate secrets are missing" >&2; exit 1; }
+keychain=$RUNNER_TEMP/pua-signing.keychain-db
+printf '%s' "$CERTIFICATE_P12" | base64 -D >"$RUNNER_TEMP/certificate.p12"
+security create-keychain -p temporary "$keychain"
+security set-keychain-settings -lut 21600 "$keychain"
+security unlock-keychain -p temporary "$keychain"
+security import "$RUNNER_TEMP/certificate.p12" -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+security list-keychain -d user -s "$keychain"
+security default-keychain -d user -s "$keychain"
+security set-key-partition-list -S apple-tool:,apple: -s -k temporary "$keychain"
+printf '%s\n' "$keychain" >"$RUNNER_TEMP/pua-signing-keychain-path"

@@ -1,0 +1,109 @@
+#!/bin/sh
+set -eu
+
+die() { echo "release-macapp: $*" >&2; exit 1; }
+require() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+version=${1:-}
+output_dir=${2:-dist/macapp-$version}
+if ! printf '%s\n' "$version" | awk -F. 'NF == 3 { for (i = 1; i <= 3; i++) if ($i !~ /^(0|[1-9][0-9]*)$/) exit 1; found=1 } END { exit !found }'; then
+	die "stable version must be major.minor.patch without leading zeroes"
+fi
+[ "$(uname -s)" = Darwin ] || die "mac app releases must run on macOS"
+for name in go git npm codesign security xcrun hdiutil lipo install_name_tool ditto plutil shasum curl tar; do require "$name"; done
+[ -n "${SPARKLE_PUBLIC_KEY:-}" ] || die "SPARKLE_PUBLIC_KEY is required"
+[ -n "${SPARKLE_PRIVATE_KEY:-}${SPARKLE_KEY_ACCOUNT:-}" ] || die "SPARKLE_PRIVATE_KEY or SPARKLE_KEY_ACCOUNT is required"
+[ -n "${COMPONENT_UPDATE_PUBLIC_KEY:-}" ] || die "COMPONENT_UPDATE_PUBLIC_KEY is required"
+[ -n "${COMPONENT_MANIFEST_URL:-}" ] || die "COMPONENT_MANIFEST_URL is required"
+feed_url=${SPARKLE_FEED_URL:-https://disksing.github.io/pua/appcast.xml}
+case "$output_dir" in /*) output=$output_dir ;; *) output=$root/$output_dir ;; esac
+[ ! -e "$output" ] || die "output already exists: $output"
+[ -z "$(git -C "$root" status --porcelain)" ] || die "refusing to release a dirty worktree"
+mkdir -p "$output"
+
+identity=${CODESIGN_IDENTITY:-}
+if [ -z "$identity" ]; then identity=$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/^.*"\(Developer ID Application:.*\)"$/\1/p' | head -1); fi
+[ -n "$identity" ] || die "no Developer ID Application identity found"
+profile=${NOTARYTOOL_KEYCHAIN_PROFILE:-pua-notary}
+keychain=${NOTARYTOOL_KEYCHAIN:-$(security default-keychain -d user | tr -d '"[:space:]')}
+sha=$(git -C "$root" rev-parse HEAD)
+branch=$(git -C "$root" rev-parse --abbrev-ref HEAD)
+build_time=$(git -C "$root" show -s --format=%cI HEAD)
+build_number=${MACAPP_BUILD_NUMBER:-${GITHUB_RUN_NUMBER:-$(git -C "$root" rev-list --count HEAD)}}
+pua_version=$(tr -d '[:space:]' <"$root/versions/pua")
+agenthub_version=$(tr -d '[:space:]' <"$root/versions/agenthub")
+pua_min_agenthub=$(tr -d '[:space:]' <"$root/versions/pua-min-agenthub")
+pua_min_manager=$(tr -d '[:space:]' <"$root/versions/pua-min-desktop-manager")
+agenthub_min_manager=$(tr -d '[:space:]' <"$root/versions/agenthub-min-desktop-manager")
+sparkle=$($root/scripts/fetch-sparkle)
+
+npm --prefix "$root/web" ci
+npm --prefix "$root/web" run check
+npm --prefix "$root/web" run build
+stage=$(mktemp -d "${TMPDIR:-/tmp}/pua-macapp-release.XXXXXX")
+cleanup() { rm -rf -- "$stage"; }
+trap cleanup EXIT HUP INT TERM
+app=$stage/PUA.app
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app/Contents/Frameworks"
+cp "$root/desktop/macos/Info.plist" "$app/Contents/Info.plist"
+cp -R "$sparkle/Sparkle.framework" "$app/Contents/Frameworks/Sparkle.framework"
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$app/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $build_number" "$app/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :SUFeedURL $feed_url" "$app/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :SUPublicEDKey $SPARKLE_PUBLIC_KEY" "$app/Contents/Info.plist"
+
+common="-X github.com/disksing/pua/internal/buildinfo.Channel=stable -X github.com/disksing/pua/internal/buildinfo.Branch=$branch -X github.com/disksing/pua/internal/buildinfo.SHA=$sha -X github.com/disksing/pua/internal/buildinfo.BuildTime=$build_time"
+app_ldflags="$common -X github.com/disksing/pua/internal/buildinfo.Version=$version -X github.com/disksing/pua/internal/buildinfo.ComponentManifestURL=$COMPONENT_MANIFEST_URL -X github.com/disksing/pua/internal/buildinfo.ComponentUpdatePublicKey=$COMPONENT_UPDATE_PUBLIC_KEY"
+pua_ldflags="$common -X github.com/disksing/pua/internal/buildinfo.Version=$pua_version -X github.com/disksing/pua/internal/buildinfo.EmbeddedAgentHubVersion=$agenthub_version -X github.com/disksing/pua/internal/buildinfo.MinAgentHubVersion=$pua_min_agenthub -X github.com/disksing/pua/internal/buildinfo.MinDesktopManagerProtocol=$pua_min_manager"
+hub_ldflags="$common -X github.com/disksing/pua/internal/buildinfo.Version=$agenthub_version -X github.com/disksing/pua/internal/buildinfo.MinDesktopManagerProtocol=$agenthub_min_manager"
+
+build_universal_go() {
+	package=$1; destination=$2; flags=$3; tags=$4; cgo=$5
+	for arch in arm64 amd64; do
+		if [ "$cgo" = 1 ]; then
+			CGO_ENABLED=1 GOOS=darwin GOARCH=$arch MACOSX_DEPLOYMENT_TARGET=11.0 \
+				CGO_CFLAGS="-F$sparkle -arch $arch -mmacosx-version-min=11.0" CGO_LDFLAGS="-F$sparkle -arch $arch -mmacosx-version-min=11.0" \
+				go -C "$root" build -trimpath -tags "$tags" -ldflags "$flags" -o "$stage/$(basename "$destination").$arch" "$package"
+		else
+			CGO_ENABLED=0 GOOS=darwin GOARCH=$arch go -C "$root" build -trimpath -tags "$tags" -ldflags "$flags" -o "$stage/$(basename "$destination").$arch" "$package"
+		fi
+	done
+	lipo -create "$stage/$(basename "$destination").arm64" "$stage/$(basename "$destination").amd64" -output "$destination"
+	lipo -verify_arch arm64 x86_64 "$destination"
+}
+
+build_universal_go ./cli/cmd/pua "$app/Contents/Resources/pua" "$pua_ldflags" embed_frontend 0
+build_universal_go ./agenthub/cmd/agenthub "$app/Contents/Resources/agenthub" "$hub_ldflags" embed_frontend 0
+build_universal_go ./desktop/cmd/pua-desktop "$app/Contents/MacOS/PUA" "$app_ldflags" production,sparkle 1
+install_name_tool -add_rpath @executable_path/../Frameworks "$app/Contents/MacOS/PUA"
+
+for binary in "$app/Contents/Resources/pua" "$app/Contents/Resources/agenthub"; do codesign --force --sign "$identity" --options runtime --timestamp "$binary"; done
+codesign --force --deep --sign "$identity" --options runtime --timestamp "$app/Contents/Frameworks/Sparkle.framework"
+codesign --force --sign "$identity" --options runtime --timestamp "$app"
+codesign --verify --deep --strict --verbose=4 "$app"
+
+dmg_stage=$stage/dmg
+mkdir -p "$dmg_stage"
+cp -R "$app" "$dmg_stage/PUA.app"
+ln -s /Applications "$dmg_stage/Applications"
+dmg=$output/PUA-$version.dmg
+hdiutil create -fs HFS+ -volname "PUA $version" -srcfolder "$dmg_stage" -format UDZO "$dmg"
+codesign --force --sign "$identity" --timestamp "$dmg"
+xcrun notarytool submit --keychain-profile "$profile" --keychain "$keychain" --wait --output-format json "$dmg" >"$output/notarization.json"
+[ "$(plutil -extract status raw -o - "$output/notarization.json")" = Accepted ] || die "notarization was not accepted"
+xcrun stapler staple "$dmg"
+xcrun stapler validate "$dmg"
+hdiutil verify "$dmg"
+
+appcast_stage=$stage/appcast
+mkdir -p "$appcast_stage"
+cp "$dmg" "$appcast_stage/"
+if [ -n "${SPARKLE_PRIVATE_KEY:-}" ]; then
+	printf '%s' "$SPARKLE_PRIVATE_KEY" | "$sparkle/bin/generate_appcast" --ed-key-file - --download-url-prefix "${MACAPP_RELEASE_URL_BASE:-https://github.com/${GITHUB_REPOSITORY:-disksing/pua}/releases/download/macapp-v$version}/" "$appcast_stage"
+elif [ -n "${SPARKLE_KEY_ACCOUNT:-}" ]; then
+	"$sparkle/bin/generate_appcast" --account "$SPARKLE_KEY_ACCOUNT" --download-url-prefix "${MACAPP_RELEASE_URL_BASE:-https://github.com/${GITHUB_REPOSITORY:-disksing/pua}/releases/download/macapp-v$version}/" "$appcast_stage"
+fi
+cp "$appcast_stage/appcast.xml" "$output/appcast.xml"
+(cd "$output" && shasum -a 256 "PUA-$version.dmg" >SHA256SUMS)
+printf '%s\n' "mac app release written to $output"

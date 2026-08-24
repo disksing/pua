@@ -1,0 +1,23 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+destination=${1:-$root/.cache/sparkle}
+version=$(tr -d '[:space:]' <"$root/desktop/macos/Sparkle.version")
+expected=$(tr -d '[:space:]' <"$root/desktop/macos/Sparkle.sha256")
+archive=$destination/Sparkle-$version.tar.xz
+
+mkdir -p "$destination"
+if [ ! -f "$archive" ] || [ "$(shasum -a 256 "$archive" | awk '{print $1}')" != "$expected" ]; then
+	curl -fL "https://github.com/sparkle-project/Sparkle/releases/download/$version/Sparkle-$version.tar.xz" -o "$archive.download"
+	actual=$(shasum -a 256 "$archive.download" | awk '{print $1}')
+	[ "$actual" = "$expected" ] || { echo "Sparkle checksum mismatch: $actual" >&2; exit 1; }
+	mv "$archive.download" "$archive"
+fi
+
+extract=$destination/$version
+if [ ! -d "$extract/Sparkle.framework" ]; then
+	mkdir -p "$extract"
+	tar -xJf "$archive" -C "$extract" ./Sparkle.framework ./bin/generate_appcast ./bin/sign_update ./bin/generate_keys
+fi
+printf '%s\n' "$extract"

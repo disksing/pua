@@ -26,34 +26,35 @@ import (
 	"github.com/disksing/pua/agenthub/internal/runtime"
 	"github.com/disksing/pua/agenthub/internal/semantic"
 	"github.com/disksing/pua/agenthub/internal/session"
+	"github.com/disksing/pua/agenthub/protocol"
 )
 
-const APIVersion = "1"
+const APIVersion = protocol.APIMajor
 
 const (
-	CapabilitySessionSource            = "session.source"
-	CapabilitySessionSourceMetadata    = "session.source-metadata"
-	CapabilitySessionIdempotentCreate  = "session.idempotent-create"
-	CapabilitySessionInputCapabilities = "session.input-capabilities"
-	CapabilityMessageIdempotency       = "messages.idempotent"
-	CapabilityMessageAtLeastOnce       = "messages.at-least-once"
-	CapabilityMessageOpaquePayloadV2   = "messages.opaque-payload-v2"
-	CapabilityTurnsStableIndex         = "turns.stable-index"
-	CapabilityTurnsMaterialized        = "turns.materialized"
-	CapabilityTurnsActivityItems       = "turns.activity-items"
-	CapabilitySessionLaunchEnvironment = "session.launch-environment"
+	CapabilitySessionSource            = protocol.CapabilitySessionSource
+	CapabilitySessionSourceMetadata    = protocol.CapabilitySessionSourceMetadata
+	CapabilitySessionIdempotentCreate  = protocol.CapabilitySessionIdempotentCreate
+	CapabilitySessionInputCapabilities = protocol.CapabilitySessionInputCapabilities
+	CapabilityMessageIdempotency       = protocol.CapabilityMessageIdempotency
+	CapabilityMessageAtLeastOnce       = protocol.CapabilityMessageAtLeastOnce
+	CapabilityMessageOpaquePayloadV2   = protocol.CapabilityMessageOpaquePayloadV2
+	CapabilityTurnsStableIndex         = protocol.CapabilityTurnsStableIndex
+	CapabilityTurnsMaterialized        = protocol.CapabilityTurnsMaterialized
+	CapabilityTurnsActivityItems       = protocol.CapabilityTurnsActivityItems
+	CapabilitySessionLaunchEnvironment = protocol.CapabilitySessionLaunchEnvironment
 	// CapabilitySessionLaunchEnvironmentUpdate reports that resume accepts
 	// an optional launchEnvironment overlay persisted before provider start.
-	CapabilitySessionLaunchEnvironmentUpdate = "session.launch-environment-update"
-	CapabilitySessionStrictStopped           = "session.strict-stopped"
-	CapabilityEventsLosslessReplay           = "events.lossless-replay"
-	CapabilityEventsDeltaMerge               = "events.delta-merge"
-	CapabilityEventsBackwardPagination       = "events.backward-pagination"
-	CapabilityEventsCanonicalTerminal        = "events.canonical-turn-terminals"
-	CapabilityEventsSemanticV1               = "events.semantic-v1"
-	CapabilityEventRawV1                     = "event.raw-v1"
-	CapabilityActivityGlobalSSE              = "activity.global-sse"
-	CapabilityRecoveryClosedTurns            = "recovery.closed-turns"
+	CapabilitySessionLaunchEnvironmentUpdate = protocol.CapabilitySessionLaunchEnvironmentUpdate
+	CapabilitySessionStrictStopped           = protocol.CapabilitySessionStrictStopped
+	CapabilityEventsLosslessReplay           = protocol.CapabilityEventsLosslessReplay
+	CapabilityEventsDeltaMerge               = protocol.CapabilityEventsDeltaMerge
+	CapabilityEventsBackwardPagination       = protocol.CapabilityEventsBackwardPagination
+	CapabilityEventsCanonicalTerminal        = protocol.CapabilityEventsCanonicalTerminal
+	CapabilityEventsSemanticV1               = protocol.CapabilityEventsSemanticV1
+	CapabilityEventRawV1                     = protocol.CapabilityEventRawV1
+	CapabilityActivityGlobalSSE              = protocol.CapabilityActivityGlobalSSE
+	CapabilityRecoveryClosedTurns            = protocol.CapabilityRecoveryClosedTurns
 )
 
 // ModelLister enumerates the models of a built-in provider and can drop its

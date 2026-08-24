@@ -1,0 +1,88 @@
+#!/bin/sh
+set -eu
+
+die() { echo "release-component: $*" >&2; exit 1; }
+require() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+component=${1:-}
+version=${2:-}
+output_dir=${3:-dist/$component-$version}
+
+case "$component" in pua|agenthub) ;; *) die "component must be pua or agenthub" ;; esac
+if ! printf '%s\n' "$version" | awk -F. 'NF == 3 { for (i = 1; i <= 3; i++) if ($i !~ /^(0|[1-9][0-9]*)$/) exit 1; found=1 } END { exit !found }'; then
+	die "stable version must be major.minor.patch without leading zeroes"
+fi
+[ "$(uname -s)" = Darwin ] || die "component releases must run on macOS"
+for command in go git npm codesign security xcrun ditto plutil shasum jq; do require "$command"; done
+case "$output_dir" in /*) output=$output_dir ;; *) output=$root/$output_dir ;; esac
+[ ! -e "$output" ] || die "output already exists: $output"
+[ -z "$(git -C "$root" status --porcelain)" ] || die "refusing to release a dirty worktree"
+mkdir -p "$output"
+
+identity=${CODESIGN_IDENTITY:-}
+if [ -z "$identity" ]; then
+	identity=$(security find-identity -v -p codesigning 2>/dev/null | sed -n 's/^.*"\(Developer ID Application:.*\)"$/\1/p' | head -1)
+fi
+[ -n "$identity" ] || die "no Developer ID Application identity found"
+profile=${NOTARYTOOL_KEYCHAIN_PROFILE:-pua-notary}
+keychain=${NOTARYTOOL_KEYCHAIN:-$(security default-keychain -d user | tr -d '"[:space:]')}
+sha=$(git -C "$root" rev-parse HEAD)
+branch=$(git -C "$root" rev-parse --abbrev-ref HEAD)
+build_time=$(git -C "$root" show -s --format=%cI HEAD)
+minimum_agenthub=${PUA_MIN_AGENTHUB_VERSION:-$(tr -d '[:space:]' <"$root/versions/pua-min-agenthub")}
+minimum_manager=$(tr -d '[:space:]' <"$root/versions/$component-min-desktop-manager")
+ldflags="-X github.com/disksing/pua/internal/buildinfo.Version=$version -X github.com/disksing/pua/internal/buildinfo.Channel=stable -X github.com/disksing/pua/internal/buildinfo.Branch=$branch -X github.com/disksing/pua/internal/buildinfo.SHA=$sha -X github.com/disksing/pua/internal/buildinfo.BuildTime=$build_time -X github.com/disksing/pua/internal/buildinfo.MinDesktopManagerProtocol=$minimum_manager"
+if [ "$component" = pua ]; then
+	package=./cli/cmd/pua
+	identifier=com.disksing.pua
+	ldflags="$ldflags -X github.com/disksing/pua/internal/buildinfo.MinAgentHubVersion=$minimum_agenthub -X github.com/disksing/pua/internal/buildinfo.EmbeddedAgentHubVersion=$(tr -d '[:space:]' <"$root/versions/agenthub")"
+else
+	package=./agenthub/cmd/agenthub
+	identifier=com.disksing.agenthub
+fi
+
+npm --prefix "$root/web" ci
+npm --prefix "$root/web" run check
+npm --prefix "$root/web" run build
+
+stage=$(mktemp -d "${TMPDIR:-/tmp}/pua-component-release.XXXXXX")
+notary_zip=$stage.notarization.zip
+cleanup() { rm -rf -- "$stage" "$notary_zip"; }
+trap cleanup EXIT HUP INT TERM
+for target in darwin:arm64 darwin:amd64 linux:arm64 linux:amd64; do
+	os=${target%:*}; arch=${target#*:}
+	asset=$component-$version-$os-$arch
+	CGO_ENABLED=0 GOOS=$os GOARCH=$arch go -C "$root" build -trimpath -tags embed_frontend -ldflags "$ldflags" -o "$output/$asset" "$package"
+	if [ "$os" = darwin ]; then
+		codesign --force --sign "$identity" --identifier "$identifier" --options runtime --timestamp "$output/$asset"
+		codesign --verify --strict --verbose=4 "$output/$asset"
+		cp "$output/$asset" "$stage/$asset"
+	fi
+done
+
+ditto -c -k --norsrc --noextattr --noqtn --noacl "$stage" "$notary_zip"
+xcrun notarytool submit --keychain-profile "$profile" --keychain "$keychain" --wait --output-format json "$notary_zip" >"$output/notarization.json"
+[ "$(plutil -extract status raw -o - "$output/notarization.json")" = Accepted ] || die "notarization was not accepted"
+for arch in arm64 amd64; do codesign -vvvv -R=notarized --check-notarization "$output/$component-$version-darwin-$arch"; done
+
+release_url_base=${RELEASE_URL_BASE:-https://github.com/${GITHUB_REPOSITORY:-disksing/pua}/releases/download/$component-v$version}
+assets_json='[]'
+for target in darwin:arm64 darwin:amd64 linux:arm64 linux:amd64; do
+	os=${target%:*}; arch=${target#*:}; name=$component-$version-$os-$arch
+	digest=$(shasum -a 256 "$output/$name" | awk '{print $1}')
+	size=$(stat -f %z "$output/$name")
+	code_identity=''
+	[ "$os" != darwin ] || code_identity=$identity
+	assets_json=$(printf '%s' "$assets_json" | jq --arg os "$os" --arg arch "$arch" --arg url "$release_url_base/$name" --arg sha "$digest" --argjson size "$size" --arg identity "$code_identity" '. + [{os:$os,arch:$arch,url:$url,sha256:$sha,size:$size,codeIdentity:$identity}]')
+done
+api_major=1
+if [ "$component" = pua ]; then
+	jq -n --arg component "$component" --arg version "$version" --arg commit "$sha" --arg api "$api_major" --arg min "$minimum_agenthub" --argjson assets "$assets_json" \
+		--argjson manager "$minimum_manager" '{component:$component,version:$version,commit:$commit,minDesktopManagerProtocol:$manager,apiMajor:$api,minAgentHubVersion:$min,assets:$assets}' >"$output/release.json"
+else
+	jq -n --arg component "$component" --arg version "$version" --arg commit "$sha" --arg api "$api_major" --argjson assets "$assets_json" \
+		--argjson manager "$minimum_manager" '{component:$component,version:$version,commit:$commit,minDesktopManagerProtocol:$manager,apiMajor:$api,assets:$assets}' >"$output/release.json"
+fi
+(cd "$output" && shasum -a 256 "$component-$version-"* >SHA256SUMS)
+printf '%s\n' "component release written to $output"

@@ -19,12 +19,20 @@ if [ -z "$sha" ]; then
 	sha=unknown
 fi
 
-ldflags="-X github.com/disksing/pua/internal/buildinfo.Branch=$branch -X github.com/disksing/pua/internal/buildinfo.SHA=$sha"
+build_time=$(git -C "$root" show -s --format=%cI HEAD 2>/dev/null || printf unknown)
+pua_version=$("$root/scripts/version" pua)
+agenthub_version=$("$root/scripts/version" agenthub)
+pua_min_agenthub=$(tr -d '[:space:]' <"$root/versions/pua-min-agenthub")
+pua_min_manager=$(tr -d '[:space:]' <"$root/versions/pua-min-desktop-manager")
+agenthub_min_manager=$(tr -d '[:space:]' <"$root/versions/agenthub-min-desktop-manager")
+common_ldflags="-X github.com/disksing/pua/internal/buildinfo.Channel=dev -X github.com/disksing/pua/internal/buildinfo.Branch=$branch -X github.com/disksing/pua/internal/buildinfo.SHA=$sha -X github.com/disksing/pua/internal/buildinfo.BuildTime=$build_time"
+pua_ldflags="$common_ldflags -X github.com/disksing/pua/internal/buildinfo.Version=$pua_version -X github.com/disksing/pua/internal/buildinfo.EmbeddedAgentHubVersion=$agenthub_version -X github.com/disksing/pua/internal/buildinfo.MinAgentHubVersion=$pua_min_agenthub -X github.com/disksing/pua/internal/buildinfo.MinDesktopManagerProtocol=$pua_min_manager"
+agenthub_ldflags="$common_ldflags -X github.com/disksing/pua/internal/buildinfo.Version=$agenthub_version -X github.com/disksing/pua/internal/buildinfo.MinDesktopManagerProtocol=$agenthub_min_manager"
 
 mkdir -p "$out_path"
 cd "$root"
 npm --prefix web ci
 npm --prefix web run check
 npm --prefix web run build
-go build -tags embed_frontend -ldflags "$ldflags" -o "$out_path/pua" ./cli/cmd/pua
-go build -tags embed_frontend -ldflags "$ldflags" -o "$out_path/agenthub" ./agenthub/cmd/agenthub
+go build -tags embed_frontend -ldflags "$pua_ldflags" -o "$out_path/pua" ./cli/cmd/pua
+go build -tags embed_frontend -ldflags "$agenthub_ldflags" -o "$out_path/agenthub" ./agenthub/cmd/agenthub

@@ -276,6 +276,8 @@ func newServiceManager(root string, options ServiceManagerOptions, runtimeStateS
 	if m.now == nil {
 		m.now = time.Now
 	}
+	releaseDefinitionTransaction := acquireServiceDefinitionTransactionLock(m.root)
+	defer releaseDefinitionTransaction()
 	if err := m.loadLocked(); err != nil {
 		return nil, err
 	}
@@ -3083,6 +3085,8 @@ func (m *ServiceManager) ApplyAll(configs []ServiceConfig) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	releaseDefinitionTransaction := acquireServiceDefinitionTransactionLock(m.root)
+	defer releaseDefinitionTransaction()
 	return m.applyAllLocked(configs, true)
 }
 
@@ -3901,16 +3905,54 @@ func writeServiceDataAtomic(path string, data []byte, mode os.FileMode, rename f
 	return nil
 }
 
-// ValidateServices loads all definitions and validates dependency/template
-// cycles without changing runtime state.
+// ValidateServices loads a stable definition snapshot and validates
+// dependency/template cycles without recovering transactions or changing
+// definitions and runtime state. An owning manager in this process holds the
+// same root-scoped lock across its complete ApplyAll and rollback window.
 func ValidateServices(root string) error {
-	m, err := NewServiceManager(root, ServiceManagerOptions{})
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return errors.New("workspace root is required")
+	}
+	root, err := filepath.Abs(root)
 	if err != nil {
 		return err
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return validateServiceGraph(m.root, m.configs)
+	root = filepath.Clean(root)
+	releaseDefinitionTransaction := acquireServiceDefinitionTransactionLock(root)
+	defer releaseDefinitionTransaction()
+
+	if err := ensureNoServiceDefinitionTransaction(root); err != nil {
+		return err
+	}
+	reader := &ServiceManager{root: root, configs: map[string]ServiceConfig{}}
+	configs, err := reader.readServiceDefinitionsLocked()
+	if err != nil {
+		return err
+	}
+	if err := ensureNoServiceDefinitionTransaction(root); err != nil {
+		return err
+	}
+	verified, err := reader.readServiceDefinitionsLocked()
+	if err != nil {
+		return err
+	}
+	if err := ensureNoServiceDefinitionTransaction(root); err != nil {
+		return err
+	}
+	if !sameServiceConfigCollection(configs, verified) {
+		return errors.New("service definitions changed during validation; retry after the service manager completes its update")
+	}
+	graph, err := validatedServiceDependencyGraph(root, configs)
+	if err != nil {
+		return err
+	}
+	reader.configs = configs
+	reader.graph = graph
+	if _, err := reader.loadBindingsLocked(); err != nil {
+		return err
+	}
+	return ensureNoServiceDefinitionTransaction(root)
 }
 
 // ResolveBindings evaluates Workspace service bindings for an AgentHub

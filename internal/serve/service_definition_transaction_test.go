@@ -1,14 +1,167 @@
 package serve
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 var errSimulatedServiceDefinitionCrash = errors.New("simulated service definition transaction crash")
+
+func TestValidateServicesSerializesDefinitionCommitAndRollback(t *testing.T) {
+	root := t.TempDir()
+	oldConfigs := serviceDefinitionGenerationConfigs(root, "old")
+	for index := range oldConfigs {
+		oldConfigs[index].Enabled = false
+		writeTestService(t, root, oldConfigs[index])
+	}
+	manager, err := NewServiceManager(root, ServiceManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := serviceDefinitionGenerationConfigs(root, "new")
+	for index := range next {
+		next[index].Enabled = false
+	}
+
+	targetPaused := make(chan struct{})
+	releaseTarget := make(chan struct{})
+	rollbackPaused := make(chan struct{})
+	releaseRollback := make(chan struct{})
+	var journalSyncs atomic.Int32
+	var definitionSyncs atomic.Int32
+	injected := errors.New("injected definition commit failure")
+	manager.definitionTransactionStore.checkpoint = func(boundary string) error {
+		switch boundary {
+		case "journal-sync":
+			switch journalSyncs.Add(1) {
+			case 1:
+				close(targetPaused)
+				<-releaseTarget
+			case 2:
+				close(rollbackPaused)
+				<-releaseRollback
+			}
+		case "definitions-sync":
+			if definitionSyncs.Add(1) == 1 {
+				return injected
+			}
+		}
+		return nil
+	}
+
+	applyResult := make(chan error, 1)
+	go func() { applyResult <- manager.ApplyAll(next) }()
+	waitForServiceDefinitionTestSignal(t, targetPaused, "target journal")
+	targetJournal := readOptionalServiceTransactionFile(t, serviceDefinitionTransactionPath(root))
+	assertServiceDefinitionFilesGeneration(t, root, "old")
+
+	validationResult := make(chan error, 1)
+	go func() { validationResult <- ValidateServices(root) }()
+	assertServiceDefinitionValidationBlocked(t, validationResult, "target journal")
+	if current := readOptionalServiceTransactionFile(t, serviceDefinitionTransactionPath(root)); !bytes.Equal(current, targetJournal) {
+		t.Fatal("validation replaced or removed the target journal")
+	}
+	assertServiceDefinitionFilesGeneration(t, root, "old")
+	close(releaseTarget)
+
+	waitForServiceDefinitionTestSignal(t, rollbackPaused, "rollback journal")
+	rollbackJournal := readOptionalServiceTransactionFile(t, serviceDefinitionTransactionPath(root))
+	if bytes.Equal(rollbackJournal, targetJournal) {
+		t.Fatal("definition failure did not replace the target journal with rollback intent")
+	}
+	assertServiceDefinitionFilesGeneration(t, root, "new")
+	assertServiceDefinitionValidationBlocked(t, validationResult, "rollback journal")
+	if current := readOptionalServiceTransactionFile(t, serviceDefinitionTransactionPath(root)); !bytes.Equal(current, rollbackJournal) {
+		t.Fatal("validation replaced or removed the rollback journal")
+	}
+	assertServiceDefinitionFilesGeneration(t, root, "new")
+	close(releaseRollback)
+
+	if err := waitForServiceDefinitionTestResult(t, applyResult, "ApplyAll rollback"); !errors.Is(err, injected) {
+		t.Fatalf("ApplyAll error = %v, want injected failure", err)
+	}
+	if err := waitForServiceDefinitionTestResult(t, validationResult, "validation after rollback"); err != nil {
+		t.Fatalf("ValidateServices after rollback = %v", err)
+	}
+	assertServiceDefinitionFilesGeneration(t, root, "old")
+	assertNoServiceDefinitionJournal(t, root)
+}
+
+func TestValidateServicesFailsClosedWithoutRecoveringExternalJournal(t *testing.T) {
+	root := t.TempDir()
+	oldConfigs := serviceDefinitionGenerationConfigs(root, "old")
+	for index := range oldConfigs {
+		oldConfigs[index].Enabled = false
+		writeTestService(t, root, oldConfigs[index])
+	}
+	manager, err := NewServiceManager(root, ServiceManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshots := make(map[string]serviceFileSnapshot, len(oldConfigs))
+	for _, cfg := range oldConfigs {
+		snapshots[cfg.ID], err = snapshotServiceFile(serviceConfigPath(root, cfg.ID))
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	next := serviceDefinitionGenerationConfigs(root, "new")
+	for index := range next {
+		next[index].Enabled = false
+	}
+	if err := manager.beginServiceDefinitionTransactionLocked(serviceConfigMap(next), []string{"alpha", "bravo"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	manager.definitionTransactionStore.checkpoint = crashAtServiceDefinitionBoundary("journal-sync")
+	if err := manager.beginServiceDefinitionTransactionLocked(serviceConfigMap(oldConfigs), []string{"alpha", "bravo"}, snapshots); !errors.Is(err, errSimulatedServiceDefinitionCrash) {
+		t.Fatalf("rollback journal error = %v, want simulated crash", err)
+	}
+	manager.definitionTransactionStore.checkpoint = nil
+
+	journalBefore := readOptionalServiceTransactionFile(t, serviceDefinitionTransactionPath(root))
+	definitionsBefore := map[string][]byte{}
+	for _, id := range []string{"alpha", "bravo"} {
+		definitionsBefore[id] = readOptionalServiceTransactionFile(t, serviceConfigPath(root, id))
+	}
+	if err := ValidateServices(root); !errors.Is(err, errServiceDefinitionTransactionInProgress) {
+		t.Fatalf("ValidateServices error = %v, want transaction in progress", err)
+	}
+	if journalAfter := readOptionalServiceTransactionFile(t, serviceDefinitionTransactionPath(root)); !bytes.Equal(journalAfter, journalBefore) {
+		t.Fatal("validation mutated the external rollback journal")
+	}
+	for id, before := range definitionsBefore {
+		if after := readOptionalServiceTransactionFile(t, serviceConfigPath(root, id)); !bytes.Equal(after, before) {
+			t.Fatalf("validation mutated service definition %s", id)
+		}
+	}
+	assertServiceDefinitionFilesGeneration(t, root, "new")
+
+	// Manager construction is the recovery boundary. It may apply the durable
+	// rollback journal after read-only validation has refused to do so.
+	if _, err := NewServiceManager(root, ServiceManagerOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	assertServiceDefinitionFilesGeneration(t, root, "old")
+	assertNoServiceDefinitionJournal(t, root)
+}
+
+func TestValidateServicesReadsNormalDefinitionsWithoutTransaction(t *testing.T) {
+	root := t.TempDir()
+	for _, cfg := range serviceDefinitionGenerationConfigs(root, "normal") {
+		cfg.Enabled = false
+		writeTestService(t, root, cfg)
+	}
+	if err := ValidateServices(root); err != nil {
+		t.Fatalf("ValidateServices = %v", err)
+	}
+	assertNoServiceDefinitionJournal(t, root)
+}
 
 func TestServiceDefinitionTransactionRecoversEveryCommitBoundary(t *testing.T) {
 	tests := []struct {
@@ -358,6 +511,52 @@ func assertNoServiceDefinitionJournal(t *testing.T, root string) {
 	t.Helper()
 	if _, err := os.Lstat(serviceDefinitionTransactionPath(root)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("service definition journal survived recovery: %v", err)
+	}
+}
+
+func waitForServiceDefinitionTestSignal(t *testing.T, signal <-chan struct{}, description string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", description)
+	}
+}
+
+func waitForServiceDefinitionTestResult(t *testing.T, result <-chan error, description string) error {
+	t.Helper()
+	select {
+	case err := <-result:
+		return err
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", description)
+		return nil
+	}
+}
+
+func assertServiceDefinitionValidationBlocked(t *testing.T, result <-chan error, description string) {
+	t.Helper()
+	select {
+	case err := <-result:
+		t.Fatalf("ValidateServices returned during %s: %v", description, err)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func assertServiceDefinitionFilesGeneration(t *testing.T, root, generation string) {
+	t.Helper()
+	reader := &ServiceManager{root: root}
+	configs, err := reader.readServiceDefinitionsLocked()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(configs) != 2 {
+		t.Fatalf("service definition count = %d, want 2", len(configs))
+	}
+	for id, cfg := range configs {
+		if !strings.Contains(strings.Join(cfg.Command, " "), ":"+generation+`\n`) {
+			t.Fatalf("service %s has mixed definition generation: %#v", id, cfg.Command)
+		}
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"syscall"
 )
 
@@ -17,6 +18,59 @@ const (
 	serviceDefinitionTransactionFile   = ".definitions-transaction"
 	serviceDefinitionTransactionLimit  = 4 << 20
 )
+
+var errServiceDefinitionTransactionInProgress = errors.New("service definition transaction is in progress; retry after it completes or restart the service manager to recover it")
+
+type serviceDefinitionTransactionLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+var serviceDefinitionTransactionLocks = struct {
+	sync.Mutex
+	byRoot map[string]*serviceDefinitionTransactionLock
+}{byRoot: map[string]*serviceDefinitionTransactionLock{}}
+
+// acquireServiceDefinitionTransactionLock serializes an owning manager's
+// complete definition transaction with read-only validation in this process.
+// References are counted so validating many temporary Workspace roots does not
+// leave a process-lifetime registry behind.
+func acquireServiceDefinitionTransactionLock(root string) func() {
+	key := filepath.Clean(root)
+	if resolved, err := filepath.EvalSymlinks(key); err == nil {
+		key = filepath.Clean(resolved)
+	}
+	serviceDefinitionTransactionLocks.Lock()
+	entry := serviceDefinitionTransactionLocks.byRoot[key]
+	if entry == nil {
+		entry = &serviceDefinitionTransactionLock{}
+		serviceDefinitionTransactionLocks.byRoot[key] = entry
+	}
+	entry.refs++
+	serviceDefinitionTransactionLocks.Unlock()
+
+	entry.mu.Lock()
+	return func() {
+		entry.mu.Unlock()
+		serviceDefinitionTransactionLocks.Lock()
+		entry.refs--
+		if entry.refs == 0 && serviceDefinitionTransactionLocks.byRoot[key] == entry {
+			delete(serviceDefinitionTransactionLocks.byRoot, key)
+		}
+		serviceDefinitionTransactionLocks.Unlock()
+	}
+}
+
+func ensureNoServiceDefinitionTransaction(root string) error {
+	_, err := os.Lstat(serviceDefinitionTransactionPath(root))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("check service definition transaction: %w", err)
+	}
+	return errServiceDefinitionTransactionInProgress
+}
 
 type serviceDefinitionTransactionOperation struct {
 	ID     string         `json:"id"`

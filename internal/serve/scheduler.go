@@ -217,10 +217,7 @@ func (n *NativeScheduler) Change(ctx context.Context, change NativeSchedulerChan
 		if change.Trigger == nil {
 			return app.Schedule{}, errNativeSchedulerUpdateTriggerRequired
 		}
-		if err := app.ValidateScheduleTrigger(*change.Trigger); err != nil {
-			return app.Schedule{}, err
-		}
-		return workspace.UpdateSchedule(app.UpdateScheduleInput{
+		input := app.UpdateScheduleInput{
 			ID:               change.ID,
 			ExpectedRevision: change.ExpectedRevision,
 			Description:      change.Description,
@@ -228,7 +225,33 @@ func (n *NativeScheduler) Change(ctx context.Context, change NativeSchedulerChan
 			Guard:            change.Guard,
 			Target:           change.Target,
 			Trigger:          change.Trigger,
-		})
+		}
+		current, preview, err := workspace.PreviewScheduleUpdate(input)
+		if err != nil {
+			return app.Schedule{}, err
+		}
+		materialize := scheduleUpdatePreservesRepeatingActivation(current, preview)
+		if materialize {
+			runtime, err := n.schedulerRuntime(current.ID)
+			if err != nil {
+				return app.Schedule{}, err
+			}
+			materialize = runtime.Revision == 0
+		}
+		mutationBoundary := time.Now()
+		if n.manager != nil {
+			mutationBoundary = n.manager.now()
+		}
+		if materialize {
+			if err := n.reconcileSchedule(ctx, current, mutationBoundary); err != nil {
+				return app.Schedule{}, err
+			}
+		}
+		updated, err := workspace.UpdateSchedule(input)
+		if err != nil || !materialize {
+			return updated, err
+		}
+		return updated, n.reconcileSchedule(ctx, updated, mutationBoundary)
 	case app.ScheduleChangePause:
 		if change.ID == "" {
 			return app.Schedule{}, errors.New("pause requires id")
@@ -335,6 +358,19 @@ func (n *NativeScheduler) Change(ctx context.Context, change NativeSchedulerChan
 		return workspace.RemoveSchedule(change.ID)
 	}
 	return app.Schedule{}, fmt.Errorf("Scheduler change %q was not dispatched", change.Operation)
+}
+
+func scheduleUpdatePreservesRepeatingActivation(current, updated app.Schedule) bool {
+	if current.State != app.ScheduleStateActive || current.Trigger == nil || updated.Trigger == nil ||
+		current.Target != updated.Target || *current.Trigger != *updated.Trigger {
+		return false
+	}
+	switch current.Trigger.Type {
+	case app.ScheduleTriggerInterval, app.ScheduleTriggerCron:
+		return true
+	default:
+		return false
+	}
 }
 
 // Reconcile recovers any frozen occurrence, prepares due work, advances

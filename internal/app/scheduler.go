@@ -1028,12 +1028,8 @@ func (w *Workspace) UpdateSchedule(input UpdateScheduleInput) (Schedule, error) 
 	if err := w.require(); err != nil {
 		return Schedule{}, err
 	}
-	input.ID = strings.TrimSpace(input.ID)
-	if input.ID == "" || (input.Description == nil && input.Condition == nil && input.Guard == nil && input.Target == nil && input.Trigger == nil) {
-		return Schedule{}, &APIError{Operation: "update schedule", Kind: "scheduler", Workspace: w.root, Err: errors.New("schedule id and at least one updated field are required")}
-	}
-	if input.ExpectedRevision == 0 {
-		return Schedule{}, &APIError{Operation: "update schedule", Kind: "scheduler", Workspace: w.root, Err: errors.New("expectedRevision is required")}
+	if err := validateUpdateScheduleInput(&input); err != nil {
+		return Schedule{}, &APIError{Operation: "update schedule", Kind: "scheduler", Workspace: w.root, Err: err}
 	}
 	var updated Schedule
 	err := withWorkspaceMutationLock(w.root, func() error {
@@ -1045,50 +1041,8 @@ func (w *Workspace) UpdateSchedule(input UpdateScheduleInput) (Schedule, error) 
 		if index < 0 {
 			return &ScheduleNotFoundError{ScheduleID: input.ID}
 		}
-		updated = config.Schedules[index]
-		if input.ExpectedRevision != updated.Revision {
-			return &ScheduleRevisionConflictError{ScheduleID: input.ID, Expected: input.ExpectedRevision, Actual: updated.Revision}
-		}
-		description, condition, target := updated.Description, updated.Condition, updated.Target
-		if input.Description != nil {
-			description = *input.Description
-		}
-		if input.Condition != nil {
-			condition = *input.Condition
-		}
-		if input.Target != nil {
-			target = *input.Target
-		}
-		description, condition, target, err = w.normalizeScheduleFields(description, condition, target, input.Target != nil)
+		updated, err = w.prepareScheduleUpdate(config.Schedules[index], input)
 		if err != nil {
-			return err
-		}
-		guard := updated.Guard
-		if input.Guard != nil {
-			guard = strings.TrimSpace(*input.Guard)
-			if len(guard) > maximumScheduleTextLength || strings.ContainsRune(guard, '\x00') {
-				return errors.New("schedule guard is invalid")
-			}
-		}
-		mutationTime := time.Now()
-		trigger := updated.Trigger
-		if input.Trigger != nil {
-			copy := *input.Trigger
-			if err := validateScheduleTriggerForUpdate(copy, updated.Trigger, mutationTime); err != nil {
-				return err
-			}
-			trigger = &copy
-		}
-		updated.Description, updated.Condition, updated.Guard, updated.Target = description, condition, guard, target
-		updated.Trigger = trigger
-		if updated.State == ScheduleStateNeedsCompilation && trigger != nil {
-			updated.State = ScheduleStateActive
-		}
-		if err := incrementScheduleRevision(&updated); err != nil {
-			return err
-		}
-		updated.UpdatedAt = mutationTime.Format(time.RFC3339Nano)
-		if err := validateSchedule(updated); err != nil {
 			return err
 		}
 		config.Schedules[index] = updated
@@ -1096,6 +1050,98 @@ func (w *Workspace) UpdateSchedule(input UpdateScheduleInput) (Schedule, error) 
 	})
 	if err != nil {
 		return Schedule{}, &APIError{Operation: "update schedule", Kind: "scheduler", Workspace: w.root, Err: err}
+	}
+	return updated, nil
+}
+
+// PreviewScheduleUpdate runs the same compare-and-swap and portable-definition
+// validation as UpdateSchedule without writing scheduler.json. NativeScheduler
+// uses the current definition to decide whether old runtime work must be
+// materialized before a metadata-only revision changes UpdatedAt.
+func (w *Workspace) PreviewScheduleUpdate(input UpdateScheduleInput) (Schedule, Schedule, error) {
+	if err := w.require(); err != nil {
+		return Schedule{}, Schedule{}, err
+	}
+	if err := validateUpdateScheduleInput(&input); err != nil {
+		return Schedule{}, Schedule{}, &APIError{Operation: "update schedule", Kind: "scheduler", Workspace: w.root, Err: err}
+	}
+	var current, updated Schedule
+	err := withWorkspaceMutationLock(w.root, func() error {
+		config, err := readSchedulerJSON(schedulerJSONPath(w.root))
+		if err != nil {
+			return err
+		}
+		index := scheduleIndex(config.Schedules, input.ID)
+		if index < 0 {
+			return &ScheduleNotFoundError{ScheduleID: input.ID}
+		}
+		current = config.Schedules[index]
+		updated, err = w.prepareScheduleUpdate(current, input)
+		return err
+	})
+	if err != nil {
+		return Schedule{}, Schedule{}, &APIError{Operation: "update schedule", Kind: "scheduler", Workspace: w.root, Err: err}
+	}
+	return current, updated, nil
+}
+
+func validateUpdateScheduleInput(input *UpdateScheduleInput) error {
+	input.ID = strings.TrimSpace(input.ID)
+	if input.ID == "" || (input.Description == nil && input.Condition == nil && input.Guard == nil && input.Target == nil && input.Trigger == nil) {
+		return errors.New("schedule id and at least one updated field are required")
+	}
+	if input.ExpectedRevision == 0 {
+		return errors.New("expectedRevision is required")
+	}
+	return nil
+}
+
+func (w *Workspace) prepareScheduleUpdate(current Schedule, input UpdateScheduleInput) (Schedule, error) {
+	if input.ExpectedRevision != current.Revision {
+		return Schedule{}, &ScheduleRevisionConflictError{ScheduleID: input.ID, Expected: input.ExpectedRevision, Actual: current.Revision}
+	}
+	description, condition, target := current.Description, current.Condition, current.Target
+	if input.Description != nil {
+		description = *input.Description
+	}
+	if input.Condition != nil {
+		condition = *input.Condition
+	}
+	if input.Target != nil {
+		target = *input.Target
+	}
+	description, condition, target, err := w.normalizeScheduleFields(description, condition, target, input.Target != nil)
+	if err != nil {
+		return Schedule{}, err
+	}
+	guard := current.Guard
+	if input.Guard != nil {
+		guard = strings.TrimSpace(*input.Guard)
+		if len(guard) > maximumScheduleTextLength || strings.ContainsRune(guard, '\x00') {
+			return Schedule{}, errors.New("schedule guard is invalid")
+		}
+	}
+	mutationTime := time.Now()
+	trigger := current.Trigger
+	if input.Trigger != nil {
+		copy := *input.Trigger
+		if err := validateScheduleTriggerForUpdate(copy, current.Trigger, mutationTime); err != nil {
+			return Schedule{}, err
+		}
+		trigger = &copy
+	}
+	updated := current
+	updated.Description, updated.Condition, updated.Guard, updated.Target = description, condition, guard, target
+	updated.Trigger = trigger
+	if updated.State == ScheduleStateNeedsCompilation && trigger != nil {
+		updated.State = ScheduleStateActive
+	}
+	if err := incrementScheduleRevision(&updated); err != nil {
+		return Schedule{}, err
+	}
+	updated.UpdatedAt = mutationTime.Format(time.RFC3339Nano)
+	if err := validateSchedule(updated); err != nil {
+		return Schedule{}, err
 	}
 	return updated, nil
 }

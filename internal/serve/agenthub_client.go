@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -33,6 +34,7 @@ var requiredAgentHubCapabilities = []string{
 	"session.input-capabilities",
 	"messages.idempotent",
 	"messages.at-least-once",
+	"messages.delivery-result",
 	"messages.opaque-payload-v2",
 	"turns.stable-index",
 	"turns.materialized",
@@ -49,7 +51,18 @@ var requiredAgentHubCapabilities = []string{
 type agentHubClient struct {
 	endpoint   string
 	httpClient *http.Client
+
+	compatibilityMu      sync.Mutex
+	compatibilityCheck   chan struct{}
+	compatibilityStatus  agentHubStatus
+	compatibilityErr     error
+	compatibilityExpires time.Time
 }
+
+const (
+	agentHubCompatibilitySuccessTTL = 30 * time.Second
+	agentHubCompatibilityFailureTTL = 2 * time.Second
+)
 
 type agentHubAPIError struct {
 	StatusCode int
@@ -396,6 +409,58 @@ func (c *agentHubClient) Status(ctx context.Context) (agentHubStatus, error) {
 	return response, err
 }
 
+// CompatibleStatus performs the runtime compatibility handshake and shares
+// its result across concurrent and nearby operations on this client. A short
+// failure cache prevents an unavailable or legacy daemon from turning the
+// reconcile loop into a hot status-request loop, while successful handshakes
+// are refreshed periodically so a daemon replacement is noticed.
+func (c *agentHubClient) CompatibleStatus(ctx context.Context) (agentHubStatus, error) {
+	for {
+		now := time.Now()
+		c.compatibilityMu.Lock()
+		if !c.compatibilityExpires.IsZero() && now.Before(c.compatibilityExpires) {
+			status, err := c.compatibilityStatus, c.compatibilityErr
+			c.compatibilityMu.Unlock()
+			return status, err
+		}
+		if checking := c.compatibilityCheck; checking != nil {
+			c.compatibilityMu.Unlock()
+			select {
+			case <-checking:
+				continue
+			case <-ctx.Done():
+				return agentHubStatus{}, ctx.Err()
+			}
+		}
+		checking := make(chan struct{})
+		c.compatibilityCheck = checking
+		c.compatibilityMu.Unlock()
+
+		status, err := c.Status(ctx)
+		if err == nil {
+			err = validateAgentHubStatus(status)
+		}
+		ttl := agentHubCompatibilitySuccessTTL
+		if err != nil {
+			ttl = agentHubCompatibilityFailureTTL
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				// A caller-specific cancellation says nothing about daemon
+				// compatibility. Wake waiters so one of their live contexts can
+				// perform the shared check instead of inheriting this error.
+				ttl = 0
+			}
+		}
+		c.compatibilityMu.Lock()
+		c.compatibilityStatus = status
+		c.compatibilityErr = err
+		c.compatibilityExpires = time.Now().Add(ttl)
+		c.compatibilityCheck = nil
+		close(checking)
+		c.compatibilityMu.Unlock()
+		return status, err
+	}
+}
+
 func validateAgentHubStatus(status agentHubStatus) error {
 	if status.APIVersion != agentHubAPIVersion {
 		return fmt.Errorf("incompatible AgentHub apiVersion %q; PUA requires %q", status.APIVersion, agentHubAPIVersion)
@@ -427,7 +492,7 @@ func agentHubHasCapability(status agentHubStatus, capability string) bool {
 
 func (c *agentHubClient) Agents(ctx context.Context) (agentHubCatalog, error) {
 	var response agentHubCatalog
-	err := c.doJSON(ctx, http.MethodGet, "/v1/agents", nil, &response)
+	err := c.doCompatibleJSON(ctx, http.MethodGet, "/v1/agents", nil, &response)
 	return response, err
 }
 
@@ -435,7 +500,7 @@ func (c *agentHubClient) Config(ctx context.Context) (agentHubConfiguredConfig, 
 	var response struct {
 		Config agentHubConfiguredConfig `json:"config"`
 	}
-	err := c.doJSON(ctx, http.MethodGet, "/v1/config", nil, &response)
+	err := c.doCompatibleJSON(ctx, http.MethodGet, "/v1/config", nil, &response)
 	return response.Config, err
 }
 
@@ -443,7 +508,7 @@ func (c *agentHubClient) SaveConfig(ctx context.Context, config agentHubConfigur
 	var response struct {
 		Config agentHubConfiguredConfig `json:"config"`
 	}
-	err := c.doJSON(ctx, http.MethodPut, "/v1/config", struct {
+	err := c.doCompatibleJSON(ctx, http.MethodPut, "/v1/config", struct {
 		Config agentHubConfiguredConfig `json:"config"`
 	}{Config: config}, &response)
 	return response.Config, err
@@ -453,7 +518,7 @@ func (c *agentHubClient) SetProviderEnabled(ctx context.Context, id string, enab
 	var response struct {
 		Provider agentHubConfiguredProvider `json:"provider"`
 	}
-	err := c.doJSON(ctx, http.MethodPut, "/v1/config/providers/"+url.PathEscape(strings.TrimSpace(id)), struct {
+	err := c.doCompatibleJSON(ctx, http.MethodPut, "/v1/config/providers/"+url.PathEscape(strings.TrimSpace(id)), struct {
 		Enabled bool `json:"enabled"`
 	}{Enabled: enabled}, &response)
 	return response.Provider, err
@@ -463,7 +528,7 @@ func (c *agentHubClient) CreateSession(ctx context.Context, request agentHubCrea
 	var response struct {
 		Session agentHubSession `json:"session"`
 	}
-	err := c.doJSON(ctx, http.MethodPost, "/v1/sessions", request, &response)
+	err := c.doCompatibleJSON(ctx, http.MethodPost, "/v1/sessions", request, &response)
 	return response.Session, err
 }
 
@@ -471,7 +536,7 @@ func (c *agentHubClient) GetSession(ctx context.Context, sessionID string) (agen
 	var response struct {
 		Session agentHubSession `json:"session"`
 	}
-	err := c.doJSON(ctx, http.MethodGet, sessionPath(sessionID), nil, &response)
+	err := c.doCompatibleJSON(ctx, http.MethodGet, sessionPath(sessionID), nil, &response)
 	return response.Session, err
 }
 
@@ -489,7 +554,7 @@ func (c *agentHubClient) SessionFrames(ctx context.Context, sessionID string, af
 		Frames       []agentHubSemanticFrame `json:"frames"`
 		LatestCursor int64                   `json:"latestCursor"`
 	}
-	err := c.doJSON(ctx, http.MethodGet, sessionPath(sessionID)+"/events?"+query.Encode(), nil, &response)
+	err := c.doCompatibleJSON(ctx, http.MethodGet, sessionPath(sessionID)+"/events?"+query.Encode(), nil, &response)
 	if err == nil && response.Schema != "agenthub.semantic-events.v1" {
 		err = fmt.Errorf("AgentHub returned unsupported events schema %q", response.Schema)
 	}
@@ -519,7 +584,7 @@ func (c *agentHubClient) SessionTurns(ctx context.Context, sessionID string, bef
 	if encoded := query.Encode(); encoded != "" {
 		path += "?" + encoded
 	}
-	err := c.doJSON(ctx, http.MethodGet, path, nil, &response)
+	err := c.doCompatibleJSON(ctx, http.MethodGet, path, nil, &response)
 	return response, err
 }
 
@@ -528,7 +593,7 @@ func (c *agentHubClient) SessionTurn(ctx context.Context, sessionID, turnID stri
 		Turn          agentHubTurn `json:"turn"`
 		LatestEventID int64        `json:"latestEventId"`
 	}
-	err := c.doJSON(ctx, http.MethodGet, sessionPath(sessionID)+"/turns/"+url.PathEscape(turnID), nil, &response)
+	err := c.doCompatibleJSON(ctx, http.MethodGet, sessionPath(sessionID)+"/turns/"+url.PathEscape(turnID), nil, &response)
 	return response.Turn, response.LatestEventID, err
 }
 
@@ -537,7 +602,7 @@ func (c *agentHubClient) SessionEvent(ctx context.Context, sessionID string, eve
 		return agentHubEventDetail{}, errors.New("event id must be positive")
 	}
 	var result agentHubEventDetail
-	err := c.doJSON(ctx, http.MethodGet, sessionPath(sessionID)+"/event/"+strconv.FormatInt(eventID, 10), nil, &result)
+	err := c.doCompatibleJSON(ctx, http.MethodGet, sessionPath(sessionID)+"/event/"+strconv.FormatInt(eventID, 10), nil, &result)
 	if err != nil {
 		return agentHubEventDetail{}, err
 	}
@@ -577,13 +642,23 @@ func (c *agentHubClient) ListSessions(ctx context.Context, filter agentHubSessio
 	var response struct {
 		Sessions []agentHubSession `json:"sessions"`
 	}
-	err := c.doJSON(ctx, http.MethodGet, path, nil, &response)
+	err := c.doCompatibleJSON(ctx, http.MethodGet, path, nil, &response)
 	return response.Sessions, err
 }
 
 func (c *agentHubClient) Message(ctx context.Context, sessionID string, message agentHubInboundMessage) (agentHubMessageResult, error) {
 	var response agentHubMessageResult
-	err := c.doJSON(ctx, http.MethodPost, sessionPath(sessionID)+"/messages", message, &response)
+	err := c.doCompatibleJSON(ctx, http.MethodPost, sessionPath(sessionID)+"/messages", message, &response)
+	if err == nil {
+		switch strings.TrimSpace(response.Delivery.State) {
+		case agentHubMessageDeliveryPending, agentHubMessageDeliveryDelivered:
+		default:
+			err = fmt.Errorf("AgentHub advertised messages.delivery-result but returned invalid delivery state %q", response.Delivery.State)
+		}
+	}
+	if err == nil && strings.TrimSpace(message.MessageID) != "" && strings.TrimSpace(response.Delivery.MessageID) != strings.TrimSpace(message.MessageID) {
+		err = fmt.Errorf("AgentHub delivery identified message %q, want %q", response.Delivery.MessageID, message.MessageID)
+	}
 	return response, err
 }
 
@@ -592,7 +667,7 @@ func (c *agentHubClient) Approval(ctx context.Context, sessionID, approvalID str
 		Session agentHubSession `json:"session"`
 	}
 	path := sessionPath(sessionID) + "/approvals/" + url.PathEscape(approvalID)
-	err := c.doJSON(ctx, http.MethodPost, path, reply, &response)
+	err := c.doCompatibleJSON(ctx, http.MethodPost, path, reply, &response)
 	return response.Session, err
 }
 
@@ -618,7 +693,7 @@ func (c *agentHubClient) ResumeWithEnvironment(ctx context.Context, sessionID st
 	var response struct {
 		Session agentHubSession `json:"session"`
 	}
-	err := c.doJSON(ctx, http.MethodPost, sessionPath(sessionID)+"/resume", agentHubResumeRequest{
+	err := c.doCompatibleJSON(ctx, http.MethodPost, sessionPath(sessionID)+"/resume", agentHubResumeRequest{
 		LaunchEnvironment:    launchEnvironment,
 		EphemeralEnvironment: ephemeralEnvironment,
 	}, &response)
@@ -629,7 +704,7 @@ func (c *agentHubClient) Archive(ctx context.Context, sessionID string) (agentHu
 	var response struct {
 		Session agentHubSession `json:"session"`
 	}
-	err := c.doJSON(ctx, http.MethodDelete, sessionPath(sessionID), struct{}{}, &response)
+	err := c.doCompatibleJSON(ctx, http.MethodDelete, sessionPath(sessionID), struct{}{}, &response)
 	return response.Session, err
 }
 
@@ -637,8 +712,15 @@ func (c *agentHubClient) sessionAction(ctx context.Context, sessionID, action st
 	var response struct {
 		Session agentHubSession `json:"session"`
 	}
-	err := c.doJSON(ctx, http.MethodPost, sessionPath(sessionID)+"/"+action, struct{}{}, &response)
+	err := c.doCompatibleJSON(ctx, http.MethodPost, sessionPath(sessionID)+"/"+action, struct{}{}, &response)
 	return response.Session, err
+}
+
+func (c *agentHubClient) doCompatibleJSON(ctx context.Context, method, path string, body, output any) error {
+	if _, err := c.CompatibleStatus(ctx); err != nil {
+		return fmt.Errorf("validate AgentHub runtime compatibility: %w", err)
+	}
+	return c.doJSON(ctx, method, path, body, output)
 }
 
 func (c *agentHubClient) doJSON(ctx context.Context, method, path string, body, output any) error {

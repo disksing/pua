@@ -28,10 +28,17 @@ func (m *agentManager) agentHubRuntimeConfig() (config, *agentHubClient, error) 
 	if err != nil {
 		return config{}, nil, err
 	}
+	m.agentHubClientMu.Lock()
+	defer m.agentHubClientMu.Unlock()
+	if m.agentHubClient != nil && m.agentHubClientEndpoint == endpoint {
+		return cfg, m.agentHubClient, nil
+	}
 	client, err := newAgentHubClient(endpoint, nil)
 	if err != nil {
 		return config{}, nil, err
 	}
+	m.agentHubClientEndpoint = endpoint
+	m.agentHubClient = client
 	return cfg, client, nil
 }
 
@@ -165,7 +172,7 @@ func (m *agentManager) resolveAgentHubEnvironmentOverlay(ctx context.Context, cl
 	if client == nil {
 		return agentHubEnvironmentOverlay{}, errors.New("AgentHub client is unavailable for ephemeral service secrets")
 	}
-	status, err := client.Status(ctx)
+	status, err := client.CompatibleStatus(ctx)
 	if err != nil {
 		return agentHubEnvironmentOverlay{}, err
 	}

@@ -1430,6 +1430,12 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 		if message.Status != resourceMessageDelivering && session.State != "ready" && message.ActualMode != resourceMessageModeSteer {
 			return nil
 		}
+		// Keep an incompatible daemon on the queued/delivering boundary. This
+		// preflight must happen before recording a new delivery attempt; Message
+		// repeats the cached check immediately before the network effect.
+		if _, err := client.CompatibleStatus(ctx); err != nil {
+			return fmt.Errorf("validate AgentHub runtime compatibility before message delivery: %w", err)
+		}
 		message, err = m.ensureProviderMessageContext(ctx, workspace, client, session, record.GenerationID, message)
 		if err != nil {
 			return err

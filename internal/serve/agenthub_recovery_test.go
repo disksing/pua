@@ -15,7 +15,10 @@ import (
 func runtimeFakeAgentHubWithCapabilities(fake *runtimeFakeAgentHub, capabilities []string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/status" && r.Method == http.MethodGet {
-			writeRuntimeFakeJSON(w, agentHubStatus{APIVersion: agentHubAPIVersion, Capabilities: capabilities})
+			fake.mu.Lock()
+			fake.statusCalls++
+			fake.mu.Unlock()
+			writeRuntimeFakeJSON(w, agentHubStatus{APIVersion: agentHubAPIVersion, Capabilities: capabilities, Version: "test"})
 			return
 		}
 		fake.ServeHTTP(w, r)

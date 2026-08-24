@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -149,7 +150,7 @@ func TestAgentHubClientContract(t *testing.T) {
 	if err != nil || archived.State != "archived" {
 		t.Fatalf("archive: %+v, %v", archived, err)
 	}
-	if len(methods) != 14 {
+	if len(methods) != 15 || methods[0] != "GET /v1/status" || methods[1] != "GET /v1/status" {
 		t.Fatalf("expected all client operations, got %d: %v", len(methods), methods)
 	}
 	wantReplies := []agentHubApprovalReply{
@@ -225,6 +226,111 @@ func TestAgentHubStatusValidation(t *testing.T) {
 	}
 	if err := validateAgentHubStatus(valid); err == nil || !strings.Contains(err.Error(), "events.semantic-v1") {
 		t.Fatalf("expected semantic events capability error, got %v", err)
+	}
+}
+
+func TestAgentHubClientCompatibilityHandshakeIsFailClosedAndCached(t *testing.T) {
+	var mu sync.Mutex
+	statusCalls := 0
+	sessionCalls := 0
+	capabilities := make([]string, 0, len(requiredAgentHubCapabilities)-1)
+	for _, capability := range requiredAgentHubCapabilities {
+		if capability != "messages.delivery-result" {
+			capabilities = append(capabilities, capability)
+		}
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.URL.Path == "/v1/status" {
+			statusCalls++
+			writeFakeAgentHubJSON(t, w, agentHubStatus{APIVersion: agentHubAPIVersion, Capabilities: capabilities, Version: "legacy"})
+			return
+		}
+		sessionCalls++
+		writeFakeAgentHubJSON(t, w, sessionEnvelope("ses-legacy", "ready"))
+	}))
+	defer server.Close()
+	client, err := newAgentHubClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if _, err := client.GetSession(context.Background(), "ses-legacy"); err == nil || !strings.Contains(err.Error(), "messages.delivery-result") {
+			t.Fatalf("legacy runtime error = %v", err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if statusCalls != 1 || sessionCalls != 0 {
+		t.Fatalf("legacy handshake calls: status=%d session=%d", statusCalls, sessionCalls)
+	}
+}
+
+func TestAgentHubClientCompatibleHandshakeAvoidsHotStatusLoop(t *testing.T) {
+	var mu sync.Mutex
+	statusCalls := 0
+	sessionCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.URL.Path == "/v1/status" {
+			statusCalls++
+			writeFakeAgentHubJSON(t, w, agentHubStatus{APIVersion: agentHubAPIVersion, Capabilities: requiredAgentHubCapabilities, Version: "current"})
+			return
+		}
+		sessionCalls++
+		writeFakeAgentHubJSON(t, w, sessionEnvelope("ses-current", "ready"))
+	}))
+	defer server.Close()
+	client, err := newAgentHubClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		if _, err := client.GetSession(context.Background(), "ses-current"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if statusCalls != 1 || sessionCalls != 3 {
+		t.Fatalf("compatible handshake calls: status=%d session=%d", statusCalls, sessionCalls)
+	}
+}
+
+func TestAgentHubClientCompatibilityFailureBacksOffUnavailableDaemon(t *testing.T) {
+	var mu sync.Mutex
+	statusCalls := 0
+	operationCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if r.URL.Path == "/v1/status" {
+			statusCalls++
+			w.WriteHeader(http.StatusServiceUnavailable)
+			writeFakeAgentHubJSON(t, w, map[string]any{"error": map[string]any{
+				"code": "runtime_unavailable", "message": "starting", "retryable": true,
+			}})
+			return
+		}
+		operationCalls++
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	client, err := newAgentHubClient(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		if _, err := client.ListSessions(context.Background(), agentHubSessionFilter{}); err == nil || !strings.Contains(err.Error(), "runtime_unavailable") {
+			t.Fatalf("unavailable compatibility error = %v", err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if statusCalls != 1 || operationCalls != 0 {
+		t.Fatalf("unavailable handshake calls: status=%d operation=%d", statusCalls, operationCalls)
 	}
 }
 

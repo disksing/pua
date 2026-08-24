@@ -43,6 +43,7 @@ type runtimeFakeAgentHub struct {
 	resumeUpdatesAt      bool
 	failNextMessage      bool
 	pendingNextMessage   bool
+	omitNextDelivery     bool
 	enforceMessageIDs    bool
 	rejectAgentName      string
 	extraAgents          []string
@@ -66,6 +67,7 @@ type runtimeFakeAgentHub struct {
 	eventsAttempts       int
 	eventsCalls          int
 	streamCalls          int
+	statusCalls          int
 }
 
 func newRuntimeFakeAgentHub() *runtimeFakeAgentHub {
@@ -80,6 +82,15 @@ func newRuntimeFakeAgentHub() *runtimeFakeAgentHub {
 }
 
 func (f *runtimeFakeAgentHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/v1/status" && r.Method == http.MethodGet {
+		f.mu.Lock()
+		f.statusCalls++
+		f.mu.Unlock()
+		writeRuntimeFakeJSON(w, agentHubStatus{
+			APIVersion: agentHubAPIVersion, Capabilities: append([]string(nil), requiredAgentHubCapabilities...), Version: "test",
+		})
+		return
+	}
 	if r.URL.Path == "/v1/agents" && r.Method == http.MethodGet {
 		f.mu.Lock()
 		rejected := f.rejectAgentName
@@ -261,6 +272,8 @@ func (f *runtimeFakeAgentHub) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		f.failNextMessage = false
 		pending := f.pendingNextMessage
 		f.pendingNextMessage = false
+		omitDelivery := f.omitNextDelivery
+		f.omitNextDelivery = false
 		if !pending && body.MessageID != "" {
 			f.messageDelivered[body.MessageID] = true
 			f.providerDeliveries[body.MessageID]++
@@ -271,6 +284,10 @@ func (f *runtimeFakeAgentHub) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 			writeRuntimeFakeJSON(w, map[string]any{"error": map[string]any{
 				"code": "message_outcome_unknown", "message": "synthetic ambiguous message failure",
 			}})
+			return
+		}
+		if omitDelivery {
+			writeRuntimeFakeJSON(w, map[string]any{"session": session})
 			return
 		}
 		deliveryState := "delivered"
@@ -1279,6 +1296,76 @@ func sendRuntimeAgentInput(t *testing.T, manager *agentManager, workspace serveW
 		"turnId": response.TurnID, "lastError": response.LastError, "lastErrorCode": response.LastErrorCode,
 	})
 	return recorder
+}
+
+func TestRuntimeRejectsMissingDeliveryCapabilityBeforeMailboxAttempt(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	capabilities := make([]string, 0, len(requiredAgentHubCapabilities)-1)
+	for _, capability := range requiredAgentHubCapabilities {
+		if capability != "messages.delivery-result" {
+			capabilities = append(capabilities, capability)
+		}
+	}
+	hub := httptest.NewServer(runtimeFakeAgentHubWithCapabilities(fake, capabilities))
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+
+	message, err := manager.acceptResourceMessage(context.Background(), workspace, "project1.task1", resourceMessageRequest{
+		Text: "retain me", Mode: resourceMessageModeEnqueue, Role: "user",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message.Status != resourceMessageQueued || message.AttemptCount != 0 || message.TerminalAt != "" || message.GenerationID != "" ||
+		!strings.Contains(message.LastError, "messages.delivery-result") {
+		t.Fatalf("mailbox message crossed incompatible boundary: %#v", message)
+	}
+	if err := manager.reconcileResourceMailboxLocked(context.Background(), workspace, "project1.task1"); err == nil || !strings.Contains(err.Error(), "messages.delivery-result") {
+		t.Fatalf("second incompatible reconcile error = %v", err)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.statusCalls != 1 || len(fake.createRequests) != 0 || len(fake.messageIDs) != 0 || len(fake.providerDeliveries) != 0 {
+		t.Fatalf("incompatible daemon effects: status=%d creates=%d messages=%d deliveries=%#v", fake.statusCalls, len(fake.createRequests), len(fake.messageIDs), fake.providerDeliveries)
+	}
+}
+
+func TestRuntimeFailsClosedWhenAdvertisedDeliveryResultIsMissing(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	fake.enforceMessageIDs = true
+	fake.omitNextDelivery = true
+	hub := httptest.NewServer(fake)
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+
+	message, err := manager.acceptResourceMessage(context.Background(), workspace, "project1.task1", resourceMessageRequest{
+		Text: "retry safely", Mode: resourceMessageModeEnqueue, Role: "user",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message.Status != resourceMessageDelivering || message.TerminalAt != "" || !strings.Contains(message.LastError, "invalid delivery state") {
+		t.Fatalf("malformed delivery response was terminalized: %#v", message)
+	}
+	fake.mu.Lock()
+	firstProviderDeliveries := fake.providerDeliveries[message.ID]
+	fake.mu.Unlock()
+	if firstProviderDeliveries != 1 {
+		t.Fatalf("first Provider deliveries = %d, want 1", firstProviderDeliveries)
+	}
+
+	if err := manager.reconcileResourceMailboxLocked(context.Background(), workspace, "project1.task1"); err != nil {
+		t.Fatal(err)
+	}
+	retried, found, err := mailboxMessageByID(workspace.Path, message.ID)
+	if err != nil || !found || retried.Status != resourceMessageDelivered || retried.TerminalAt == "" {
+		t.Fatalf("stable retry did not converge: found=%v err=%v message=%#v", found, err, retried)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.providerDeliveries[message.ID] != 1 || fake.statusCalls != 1 {
+		t.Fatalf("retry duplicated Provider delivery or status handshake: deliveries=%d status=%d", fake.providerDeliveries[message.ID], fake.statusCalls)
+	}
 }
 
 func fakeEventText(event agentHubEvent) string {

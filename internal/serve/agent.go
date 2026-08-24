@@ -210,24 +210,27 @@ type agentRuntime struct {
 }
 
 type agentManager struct {
-	server                *server
-	mu                    sync.Mutex
-	backgroundWork        sync.WaitGroup
-	resourceControllersMu sync.Mutex
-	resourceControllers   map[string]*resourceController
-	runtimes              map[string]*agentRuntime
-	subscribers           map[string]map[chan agentStreamMessage]bool
-	schedulerDigests      map[string]string
-	reconcileWake         chan struct{}
-	reconcilePending      reconcileRequest
-	now                   func() time.Time
-	idleSleepAfter        time.Duration
-	activePollInterval    time.Duration
-	stablePollInterval    time.Duration
-	coldAuditInterval     time.Duration
-	mailboxRetryInterval  time.Duration
-	notificationInterval  time.Duration
-	schedulerFallback     time.Duration
+	server                 *server
+	mu                     sync.Mutex
+	agentHubClientMu       sync.Mutex
+	agentHubClientEndpoint string
+	agentHubClient         *agentHubClient
+	backgroundWork         sync.WaitGroup
+	resourceControllersMu  sync.Mutex
+	resourceControllers    map[string]*resourceController
+	runtimes               map[string]*agentRuntime
+	subscribers            map[string]map[chan agentStreamMessage]bool
+	schedulerDigests       map[string]string
+	reconcileWake          chan struct{}
+	reconcilePending       reconcileRequest
+	now                    func() time.Time
+	idleSleepAfter         time.Duration
+	activePollInterval     time.Duration
+	stablePollInterval     time.Duration
+	coldAuditInterval      time.Duration
+	mailboxRetryInterval   time.Duration
+	notificationInterval   time.Duration
+	schedulerFallback      time.Duration
 }
 
 // runBackground tracks short-lived work started by an HTTP request. The

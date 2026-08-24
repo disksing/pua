@@ -95,11 +95,7 @@ func (key resourceControllerKey) string() string {
 	return key.workspaceInstanceID + "\x00" + key.resourceID
 }
 
-func (m *agentManager) resourceControllerKey(workspace serveWorkspace, resourceID string) (resourceControllerKey, error) {
-	instanceID, err := workspaceInstanceID(workspace.Path)
-	if err != nil {
-		return resourceControllerKey{}, err
-	}
+func resourceControllerKeyForInstanceID(instanceID, resourceID string) (resourceControllerKey, error) {
 	instanceID = strings.TrimSpace(instanceID)
 	if instanceID == "" {
 		return resourceControllerKey{}, errors.New("Workspace runtime instance id is empty")
@@ -107,11 +103,15 @@ func (m *agentManager) resourceControllerKey(workspace serveWorkspace, resourceI
 	return resourceControllerKey{workspaceInstanceID: instanceID, resourceID: normalizedResourceID(resourceID)}, nil
 }
 
-func (m *agentManager) controllerForResource(workspace serveWorkspace, resourceID string) (*resourceController, error) {
-	key, err := m.resourceControllerKey(workspace, resourceID)
+func (m *agentManager) resourceControllerKey(workspace serveWorkspace, resourceID string) (resourceControllerKey, error) {
+	instanceID, err := workspaceInstanceID(workspace.Path)
 	if err != nil {
-		return nil, err
+		return resourceControllerKey{}, err
 	}
+	return resourceControllerKeyForInstanceID(instanceID, resourceID)
+}
+
+func (m *agentManager) controllerForResourceKey(key resourceControllerKey) *resourceController {
 	keyString := key.string()
 	m.resourceControllersMu.Lock()
 	defer m.resourceControllersMu.Unlock()
@@ -120,7 +120,31 @@ func (m *agentManager) controllerForResource(workspace serveWorkspace, resourceI
 		controller = &resourceController{}
 		m.resourceControllers[keyString] = controller
 	}
-	return controller, nil
+	return controller
+}
+
+func (m *agentManager) controllerForResourceInstanceID(instanceID, resourceID string) (*resourceController, error) {
+	key, err := resourceControllerKeyForInstanceID(instanceID, resourceID)
+	if err != nil {
+		return nil, err
+	}
+	return m.controllerForResourceKey(key), nil
+}
+
+func (m *agentManager) controllerForResource(workspace serveWorkspace, resourceID string) (*resourceController, error) {
+	key, err := m.resourceControllerKey(workspace, resourceID)
+	if err != nil {
+		return nil, err
+	}
+	return m.controllerForResourceKey(key), nil
+}
+
+func (m *agentManager) withResourceControllerInstanceID(ctx context.Context, instanceID, resourceID string, fn func() error) error {
+	controller, err := m.controllerForResourceInstanceID(instanceID, resourceID)
+	if err != nil {
+		return err
+	}
+	return controller.doWithStart(ctx, fn, m.runBackground)
 }
 
 func (m *agentManager) withResourceController(ctx context.Context, workspace serveWorkspace, resourceID string, fn func() error) error {

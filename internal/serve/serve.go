@@ -1852,19 +1852,31 @@ func (s *server) removeWorkspace(id string) error {
 	if err != nil {
 		return err
 	}
-	remove := func() error {
-		return s.removeWorkspaceLocked(id, expectedPath)
-	}
+	controllerInstanceID := strings.TrimSpace(removing.InstanceID)
 	if s.agents == nil {
-		return remove()
+		return s.removeWorkspaceLocked(id, expectedPath, controllerInstanceID, false)
+	}
+	legacyInstanceLookup := controllerInstanceID == ""
+	if legacyInstanceLookup {
+		controllerInstanceID, err = workspaceInstanceID(removing.Path)
+		if err != nil {
+			return fmt.Errorf("resolve legacy Workspace %s instance id: %w", id, err)
+		}
+		controllerInstanceID = strings.TrimSpace(controllerInstanceID)
+		if controllerInstanceID == "" {
+			return fmt.Errorf("resolve legacy Workspace %s instance id: Workspace runtime instance id is empty", id)
+		}
+	}
+	remove := func() error {
+		return s.removeWorkspaceLocked(id, expectedPath, controllerInstanceID, legacyInstanceLookup)
 	}
 	// Ownership release is a Scheduler-controller operation. Jobs that were
 	// already queued finish while this Server still owns the Workspace; jobs
 	// behind removal revalidate ownership and fail before a durable write.
-	return s.agents.withResourceController(context.Background(), removing, app.SchedulerResourceID, remove)
+	return s.agents.withResourceControllerInstanceID(context.Background(), controllerInstanceID, app.SchedulerResourceID, remove)
 }
 
-func (s *server) removeWorkspaceLocked(id, expectedPath string) error {
+func (s *server) removeWorkspaceLocked(id, expectedPath, controllerInstanceID string, legacyInstanceLookup bool) error {
 	if err := s.requireWorkspaceOwnership(expectedPath); err != nil {
 		return err
 	}
@@ -1879,6 +1891,17 @@ func (s *server) removeWorkspaceLocked(id, expectedPath string) error {
 		if workspace.ID == id {
 			if canonical, canonicalErr := canonicalWorkspacePath(workspace.Path); canonicalErr != nil || canonical != expectedPath {
 				return fmt.Errorf("workspace %s changed while removal was waiting", id)
+			}
+			configuredInstanceID := strings.TrimSpace(workspace.InstanceID)
+			if configuredInstanceID == "" && legacyInstanceLookup {
+				liveInstanceID, liveErr := workspaceInstanceID(workspace.Path)
+				if liveErr != nil {
+					return fmt.Errorf("verify legacy Workspace %s instance id: %w", id, liveErr)
+				}
+				configuredInstanceID = strings.TrimSpace(liveInstanceID)
+			}
+			if configuredInstanceID != controllerInstanceID {
+				return fmt.Errorf("workspace %s instance changed while removal was waiting", id)
 			}
 			removed = true
 			removedPath = workspace.Path

@@ -2681,10 +2681,11 @@ func TestNativeSchedulerIntervalRangeFailureDoesNotRetry(t *testing.T) {
 	}
 }
 
-func TestResourceBindingChangeWakesAttentionHeldScheduler(t *testing.T) {
+func prepareResourceBindingAttention(t *testing.T) (*agentManager, serveWorkspace, app.Schedule, schedulerPreparedOccurrence) {
+	t.Helper()
 	fake := newRuntimeFakeAgentHub()
 	hub := httptest.NewServer(fake)
-	defer hub.Close()
+	t.Cleanup(hub.Close)
 	manager, workspace, configPath := newRuntimeTestManager(t, hub.URL)
 	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
 	if err != nil {
@@ -2709,7 +2710,11 @@ func TestResourceBindingChangeWakesAttentionHeldScheduler(t *testing.T) {
 	if err != nil || runtime.EffectiveState != schedulerOutcomeAttention || runtime.Prepared == nil {
 		t.Fatalf("binding attention runtime = %#v, %v", runtime, err)
 	}
-	prepared := *runtime.Prepared
+	return manager, workspace, schedule, *runtime.Prepared
+}
+
+func TestResourceBindingChangeWakesAttentionHeldScheduler(t *testing.T) {
+	manager, workspace, schedule, prepared := prepareResourceBindingAttention(t)
 	_ = manager.takeReconcileRequests()
 	select {
 	case <-manager.reconcileWake:
@@ -2749,6 +2754,138 @@ func TestResourceBindingChangeWakesAttentionHeldScheduler(t *testing.T) {
 	}
 }
 
+func TestResourceBindingControllerJobCancellationBoundaries(t *testing.T) {
+	t.Run("cancelled before start", func(t *testing.T) {
+		manager, workspace, schedule, prepared := prepareResourceBindingAttention(t)
+		_ = manager.takeReconcileRequests()
+		select {
+		case <-manager.reconcileWake:
+		default:
+		}
+		controller, release := holdResourceController(t, manager, workspace, schedule.Target)
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() {
+			_, _, err := manager.updateResourceAgentBinding(ctx, workspace, schedule.Target, app.AgentBinding{Kind: "agent", Name: "fake-agent"})
+			done <- err
+		}()
+		waitForResourceControllerQueue(t, controller, 1)
+		cancel()
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled queued binding mutation = %v", err)
+		}
+		release()
+		if err := manager.withResourceController(context.Background(), workspace, schedule.Target, func() error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+		puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		binding, err := puaWorkspace.ResourceAgentBinding(schedule.Target)
+		wantBinding := app.AgentBinding{Kind: "profile", Name: "default"}
+		if err != nil || binding != wantBinding {
+			t.Fatalf("cancelled queued binding = %#v, %v; want %#v", binding, err, wantBinding)
+		}
+		if request := manager.takeReconcileRequests(); request&reconcileScheduler != 0 {
+			t.Fatalf("cancelled queued binding requested Scheduler reconciliation: %08b", request)
+		}
+		select {
+		case <-manager.reconcileWake:
+			t.Fatal("cancelled queued binding woke the reconcile loop")
+		default:
+		}
+		runtime, err := newNativeScheduler(manager, workspace).schedulerRuntime(schedule.ID)
+		if err != nil || runtime.Prepared == nil || runtime.Prepared.MessageID != prepared.MessageID || runtime.EffectiveState != schedulerOutcomeAttention {
+			t.Fatalf("cancelled queued binding attention = %#v, %v", runtime, err)
+		}
+		if messages := scheduleOccurrenceMessages(t, workspace.Path, schedule.Target); len(messages) != 0 {
+			t.Fatalf("cancelled queued binding delivered occurrences: %#v", messages)
+		}
+	})
+
+	t.Run("cancelled after start", func(t *testing.T) {
+		manager, workspace, schedule, prepared := prepareResourceBindingAttention(t)
+		_ = manager.takeReconcileRequests()
+		select {
+		case <-manager.reconcileWake:
+		default:
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		started := make(chan struct{})
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		releaseMutation := func() { releaseOnce.Do(func() { close(release) }) }
+		defer releaseMutation()
+		done := make(chan resourceBindingMutationOutcome, 1)
+		go func() {
+			done <- manager.runResourceBindingControllerJob(ctx, workspace, schedule.Target, func(jobCtx context.Context) resourceBindingMutationOutcome {
+				close(started)
+				<-release
+				return manager.updateResourceAgentBindingLocked(jobCtx, workspace, schedule.Target, app.AgentBinding{Kind: "agent", Name: "fake-agent"})
+			})
+		}()
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("binding mutation did not start")
+		}
+		cancel()
+		if outcome := <-done; !errors.Is(outcome.err, context.Canceled) || outcome.persisted {
+			t.Fatalf("cancelled running binding caller = %#v", outcome)
+		}
+		if messages := scheduleOccurrenceMessages(t, workspace.Path, schedule.Target); len(messages) != 0 {
+			t.Fatalf("blocked binding mutation delivered occurrences: %#v", messages)
+		}
+		releaseMutation()
+		if err := manager.withResourceController(context.Background(), workspace, schedule.Target, func() error { return nil }); err != nil {
+			t.Fatal(err)
+		}
+		puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		binding, err := puaWorkspace.ResourceAgentBinding(schedule.Target)
+		wantBinding := app.AgentBinding{Kind: "agent", Name: "fake-agent"}
+		if err != nil || binding != wantBinding {
+			t.Fatalf("cancelled running binding = %#v, %v; want %#v", binding, err, wantBinding)
+		}
+		if request := manager.takeReconcileRequests(); request&reconcileScheduler == 0 {
+			t.Fatalf("completed running binding reconcile request = %08b, want Scheduler", request)
+		}
+		if request := manager.takeReconcileRequests(); request != 0 {
+			t.Fatalf("completed running binding requested duplicate reconciliation: %08b", request)
+		}
+		select {
+		case <-manager.reconcileWake:
+		default:
+			t.Fatal("completed running binding did not wake the reconcile loop")
+		}
+		select {
+		case <-manager.reconcileWake:
+			t.Fatal("completed running binding woke the reconcile loop twice")
+		default:
+		}
+		if err := manager.reconcileOwnedWorkspaceSchedulers(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		messages := scheduleOccurrenceMessages(t, workspace.Path, schedule.Target)
+		if len(messages) != 1 || messages[0].ID != prepared.MessageID {
+			t.Fatalf("cancelled binding wake delivered occurrences = %#v, want %s", messages, prepared.MessageID)
+		}
+		runtime, err := newNativeScheduler(manager, workspace).schedulerRuntime(schedule.ID)
+		if err != nil || runtime.Prepared != nil || runtime.LastOutcome != schedulerOutcomeAccepted {
+			t.Fatalf("cancelled binding acceptance checkpoint = %#v, %v", runtime, err)
+		}
+		if err := manager.reconcileOwnedWorkspaceSchedulers(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if messages := scheduleOccurrenceMessages(t, workspace.Path, schedule.Target); len(messages) != 1 || messages[0].ID != prepared.MessageID {
+			t.Fatalf("cancelled binding wake duplicated occurrence: %#v", messages)
+		}
+	})
+}
+
 func TestResourceBindingMutationRequestsSchedulerOnlyAfterChangedReconciliation(t *testing.T) {
 	t.Run("no-op", func(t *testing.T) {
 		manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
@@ -2761,6 +2898,11 @@ func TestResourceBindingMutationRequestsSchedulerOnlyAfterChangedReconciliation(
 		}
 		if request := manager.takeReconcileRequests(); request&reconcileScheduler != 0 {
 			t.Fatalf("no-op binding update requested Scheduler reconciliation: %08b", request)
+		}
+		select {
+		case <-manager.reconcileWake:
+			t.Fatal("no-op binding update woke the reconcile loop")
+		default:
 		}
 	})
 
@@ -2809,6 +2951,82 @@ func TestResourceBindingMutationRequestsSchedulerOnlyAfterChangedReconciliation(
 		}
 		if request := manager.takeReconcileRequests(); request&reconcileScheduler != 0 {
 			t.Fatalf("failed binding reconciliation requested Scheduler reconciliation: %08b", request)
+		}
+		select {
+		case <-manager.reconcileWake:
+			t.Fatal("failed binding reconciliation woke the reconcile loop")
+		default:
+		}
+	})
+
+	t.Run("ownership missing before start", func(t *testing.T) {
+		manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+		manager.server.locks = newWorkspaceLockManager("127.0.0.1:4936", manager.server.config)
+		t.Cleanup(manager.server.locks.closeAll)
+		_ = manager.takeReconcileRequests()
+		select {
+		case <-manager.reconcileWake:
+		default:
+		}
+		_, persisted, err := manager.updateResourceAgentBinding(context.Background(), workspace, "project1.task1", app.AgentBinding{Kind: "agent", Name: "replacement-agent"})
+		if err == nil || persisted {
+			t.Fatalf("unowned binding mutation = persisted %v, err %v", persisted, err)
+		}
+		puaWorkspace, openErr := app.OpenWorkspace(workspace.Path)
+		if openErr != nil {
+			t.Fatal(openErr)
+		}
+		binding, bindingErr := puaWorkspace.ResourceAgentBinding("project1.task1")
+		wantBinding := app.AgentBinding{Kind: "profile", Name: "default"}
+		if bindingErr != nil || binding != wantBinding {
+			t.Fatalf("unowned binding = %#v, %v; want %#v", binding, bindingErr, wantBinding)
+		}
+		if request := manager.takeReconcileRequests(); request&reconcileScheduler != 0 {
+			t.Fatalf("unowned binding requested Scheduler reconciliation: %08b", request)
+		}
+		select {
+		case <-manager.reconcileWake:
+			t.Fatal("unowned binding woke the reconcile loop")
+		default:
+		}
+	})
+
+	t.Run("ownership lost after material change", func(t *testing.T) {
+		manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+		manager.server.locks = newWorkspaceLockManager("127.0.0.1:4936", manager.server.config)
+		t.Cleanup(manager.server.locks.closeAll)
+		if _, err := manager.server.locks.acquire(workspace.Path); err != nil {
+			t.Fatal(err)
+		}
+		_ = manager.takeReconcileRequests()
+		select {
+		case <-manager.reconcileWake:
+		default:
+		}
+		outcome := manager.runResourceBindingControllerJob(context.Background(), workspace, "project1.task1", func(jobCtx context.Context) resourceBindingMutationOutcome {
+			outcome := manager.updateResourceAgentBindingLocked(jobCtx, workspace, "project1.task1", app.AgentBinding{Kind: "agent", Name: "replacement-agent"})
+			manager.server.locks.release(workspace.Path)
+			return outcome
+		})
+		if outcome.err != nil || !outcome.persisted || !outcome.material {
+			t.Fatalf("binding mutation before ownership loss = %#v", outcome)
+		}
+		puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		binding, err := puaWorkspace.ResourceAgentBinding("project1.task1")
+		wantBinding := app.AgentBinding{Kind: "agent", Name: "replacement-agent"}
+		if err != nil || binding != wantBinding {
+			t.Fatalf("binding before ownership loss = %#v, %v; want %#v", binding, err, wantBinding)
+		}
+		if request := manager.takeReconcileRequests(); request&reconcileScheduler != 0 {
+			t.Fatalf("ownership-lost binding requested Scheduler reconciliation: %08b", request)
+		}
+		select {
+		case <-manager.reconcileWake:
+			t.Fatal("ownership-lost binding woke the reconcile loop")
+		default:
 		}
 	})
 }
@@ -5602,16 +5820,16 @@ func newSchedulerOwnershipHandoffFixture(t *testing.T) (*server, *server, serveW
 	return first, second, workspace, puaWorkspace
 }
 
-func holdSchedulerController(t *testing.T, manager *agentManager, workspace serveWorkspace) (*resourceController, func()) {
+func holdResourceController(t *testing.T, manager *agentManager, workspace serveWorkspace, resourceID string) (*resourceController, func()) {
 	t.Helper()
-	controller, err := manager.controllerForResource(workspace, app.SchedulerResourceID)
+	controller, err := manager.controllerForResource(workspace, resourceID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	started := make(chan struct{})
 	release := make(chan struct{})
 	var releaseOnce sync.Once
-	if err := manager.enqueueResourceController(workspace, app.SchedulerResourceID, func() error {
+	if err := manager.enqueueResourceController(workspace, resourceID, func() error {
 		close(started)
 		<-release
 		return nil
@@ -5621,14 +5839,19 @@ func holdSchedulerController(t *testing.T, manager *agentManager, workspace serv
 	select {
 	case <-started:
 	case <-time.After(time.Second):
-		t.Fatal("Scheduler controller blocker did not start")
+		t.Fatalf("%s controller blocker did not start", resourceID)
 	}
 	closeBlocker := func() { releaseOnce.Do(func() { close(release) }) }
 	t.Cleanup(closeBlocker)
 	return controller, closeBlocker
 }
 
-func waitForSchedulerControllerQueue(t *testing.T, controller *resourceController, want int) {
+func holdSchedulerController(t *testing.T, manager *agentManager, workspace serveWorkspace) (*resourceController, func()) {
+	t.Helper()
+	return holdResourceController(t, manager, workspace, app.SchedulerResourceID)
+}
+
+func waitForResourceControllerQueue(t *testing.T, controller *resourceController, want int) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
 	for {
@@ -5639,10 +5862,15 @@ func waitForSchedulerControllerQueue(t *testing.T, controller *resourceControlle
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("Scheduler controller queued jobs = %d, want at least %d", queued, want)
+			t.Fatalf("resource controller queued jobs = %d, want at least %d", queued, want)
 		}
 		time.Sleep(time.Millisecond)
 	}
+}
+
+func waitForSchedulerControllerQueue(t *testing.T, controller *resourceController, want int) {
+	t.Helper()
+	waitForResourceControllerQueue(t, controller, want)
 }
 
 func TestSchedulerControllerJobCancellationBoundaries(t *testing.T) {

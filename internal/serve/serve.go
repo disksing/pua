@@ -1770,6 +1770,11 @@ func (s *server) addWorkspaceWithOptionsAndSave(ctx context.Context, path string
 		if err := s.agents.reviveWorkspaceBarrier(workspace.Path); err != nil {
 			return serveWorkspace{}, err
 		}
+		// Configuration persistence makes this Workspace visible to the global
+		// Scheduler deadline projection. Refresh it only after a retired handoff
+		// barrier has been revived, and independently of caller cancellation: at
+		// this point the live add is already durable.
+		s.agents.requestReconcile(reconcileScheduler)
 	}
 	if s.doctor != nil {
 		s.doctor.requestScan()

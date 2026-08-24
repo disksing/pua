@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -234,44 +235,68 @@ func (s *server) changeNativeSchedule(ctx context.Context, workspace serveWorksp
 		if err := s.requireWorkspaceOwnership(workspace.Path); err != nil {
 			return schedulerControllerJobOutcome[app.Schedule]{Err: err}
 		}
-		material, err := nativeScheduleChangeIsMaterial(workspace, change)
+		before, err := nativeScheduleMaterialState(workspace, native, change)
 		if err != nil {
 			return schedulerControllerJobOutcome[app.Schedule]{Err: err}
 		}
 		changed, err := native.Change(jobCtx, change)
-		return schedulerControllerJobOutcome[app.Schedule]{Value: changed, Material: material, Err: err}
+		if err != nil {
+			return schedulerControllerJobOutcome[app.Schedule]{Value: changed, Err: err}
+		}
+		after, err := nativeScheduleMaterialState(workspace, native, change)
+		if err != nil {
+			return schedulerControllerJobOutcome[app.Schedule]{Value: changed, Err: err}
+		}
+		return schedulerControllerJobOutcome[app.Schedule]{
+			Value: changed, Material: nativeScheduleChangeIsMaterial(change, before, after),
+		}
 	}, func(app.Schedule) {
 		s.agents.requestReconcile(reconcileScheduler)
 	})
 }
 
-func nativeScheduleChangeIsMaterial(workspace serveWorkspace, change NativeSchedulerChange) (bool, error) {
-	desiredState := ""
+type nativeScheduleMaterialityState struct {
+	PortableState string
+	Runtime       schedulerScheduleRuntime
+}
+
+// nativeScheduleMaterialState is called before and after Change while the
+// Scheduler controller is held. No other Scheduler job can change portable
+// definitions or checkpoints between these observations.
+func nativeScheduleMaterialState(workspace serveWorkspace, native *NativeScheduler, change NativeSchedulerChange) (nativeScheduleMaterialityState, error) {
 	switch change.Operation {
-	case app.ScheduleChangePause:
-		desiredState = app.ScheduleStatePaused
-	case app.ScheduleChangeResume:
-		desiredState = app.ScheduleStateActive
+	case app.ScheduleChangePause, app.ScheduleChangeResume:
+	default:
+		return nativeScheduleMaterialityState{}, nil
+	}
+	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+	if err != nil {
+		return nativeScheduleMaterialityState{}, err
+	}
+	config, err := puaWorkspace.Scheduler()
+	if err != nil {
+		return nativeScheduleMaterialityState{}, err
+	}
+	for _, schedule := range config.Schedules {
+		if schedule.ID == change.ID {
+			state := nativeScheduleMaterialityState{PortableState: schedule.State}
+			state.Runtime, err = native.schedulerRuntime(change.ID)
+			return state, err
+		}
+	}
+	return nativeScheduleMaterialityState{}, nil
+}
+
+func nativeScheduleChangeIsMaterial(change NativeSchedulerChange, before, after nativeScheduleMaterialityState) bool {
+	switch change.Operation {
+	case app.ScheduleChangePause, app.ScheduleChangeResume:
+		return before.PortableState != after.PortableState || !reflect.DeepEqual(before.Runtime, after.Runtime)
 	default:
 		// Successful create, update, and remove operations always rewrite the
 		// portable definition. Validation and write failures are filtered by
 		// the job outcome before its follow-up runs.
-		return true, nil
+		return true
 	}
-	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
-	if err != nil {
-		return false, err
-	}
-	config, err := puaWorkspace.Scheduler()
-	if err != nil {
-		return false, err
-	}
-	for _, schedule := range config.Schedules {
-		if schedule.ID == change.ID {
-			return schedule.State != desiredState, nil
-		}
-	}
-	return false, nil
 }
 
 func writeSchedulerChangeError(w http.ResponseWriter, err error) {

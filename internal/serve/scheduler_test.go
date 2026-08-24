@@ -2713,6 +2713,183 @@ func prepareResourceBindingAttention(t *testing.T) (*agentManager, serveWorkspac
 	return manager, workspace, schedule, *runtime.Prepared
 }
 
+func TestSchedulerActiveResumeRefreshesRecoveredAttentionDeadline(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		now  func(schedulerPreparedOccurrence) time.Time
+	}{
+		{
+			name: "future next occurrence",
+			now: func(prepared schedulerPreparedOccurrence) time.Time {
+				return generationTime(prepared.NextRunAt).Add(-time.Second)
+			},
+		},
+		{
+			name: "already due next occurrence",
+			now: func(prepared schedulerPreparedOccurrence) time.Time {
+				return generationTime(prepared.NextRunAt).Add(time.Second)
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			manager, workspace, schedule, prepared := prepareResourceBindingAttention(t)
+			// Recover the binding which originally held the immutable prepared
+			// occurrence in attention_required.
+			rewriteSchedulerTestProfiles(t, manager.server.config, []agentHubProfileRoute{{Key: "default", AgentName: "fake-agent"}})
+			now := test.now(prepared)
+			manager.now = func() time.Time { return now }
+			_ = manager.takeReconcileRequests()
+			select {
+			case <-manager.reconcileWake:
+			default:
+			}
+
+			resumed, err := manager.server.changeNativeSchedule(context.Background(), workspace,
+				newNativeScheduler(manager, workspace), NativeSchedulerChange{Operation: app.ScheduleChangeResume, ID: schedule.ID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resumed.Revision != schedule.Revision || resumed.State != app.ScheduleStateActive {
+				t.Fatalf("active attention resume changed portable definition: %#v", resumed)
+			}
+			runtime, err := newNativeScheduler(manager, workspace).schedulerRuntime(schedule.ID)
+			if err != nil || runtime.Prepared != nil || runtime.EffectiveState != app.ScheduleStateActive || runtime.LastOutcome != schedulerOutcomeAccepted || runtime.NextRunAt != prepared.NextRunAt {
+				t.Fatalf("active attention resume runtime = %#v, %v", runtime, err)
+			}
+			messages := scheduleOccurrenceMessages(t, workspace.Path, schedule.Target)
+			if len(messages) != 1 || messages[0].ID != prepared.MessageID {
+				t.Fatalf("active attention resume messages = %#v, want %s", messages, prepared.MessageID)
+			}
+			if request := manager.takeReconcileRequests(); request&reconcileScheduler == 0 {
+				t.Fatalf("active attention resume reconcile request = %08b, want Scheduler", request)
+			}
+			select {
+			case <-manager.reconcileWake:
+			default:
+				t.Fatal("active attention resume did not wake the reconcile loop")
+			}
+			select {
+			case <-manager.reconcileWake:
+				t.Fatal("active attention resume woke the reconcile loop twice")
+			default:
+			}
+			wantDeadline := generationTime(prepared.NextRunAt)
+			if wantDeadline.Before(now) {
+				wantDeadline = now
+			}
+			if deadline := manager.nextSchedulerReconcileDeadline(now); !deadline.Equal(wantDeadline) {
+				t.Fatalf("recovered Scheduler deadline = %s, want %s", deadline, wantDeadline)
+			}
+			if _, err := newNativeScheduler(manager, workspace).Reconcile(context.Background(), now); err != nil {
+				t.Fatal(err)
+			}
+			assertSingleDurableOccurrence(t, workspace.Path, prepared, 1)
+		})
+	}
+}
+
+func TestSchedulerActiveResumeNoOpAndFailureDoNotWake(t *testing.T) {
+	manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	manager.now = func() time.Time { return now }
+	schedule, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Remain active", Condition: "every minute", Target: "workspace",
+		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerInterval, EverySeconds: 60, AnchorAt: now.Add(time.Minute).Format(time.RFC3339Nano)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	native := newNativeScheduler(manager, workspace)
+	if _, err := native.Reconcile(context.Background(), now); err != nil {
+		t.Fatal(err)
+	}
+	before, err := native.schedulerRuntime(schedule.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = manager.takeReconcileRequests()
+	select {
+	case <-manager.reconcileWake:
+	default:
+	}
+
+	resumed, err := manager.server.changeNativeSchedule(context.Background(), workspace, native,
+		NativeSchedulerChange{Operation: app.ScheduleChangeResume, ID: schedule.ID})
+	if err != nil || resumed.Revision != schedule.Revision {
+		t.Fatalf("active no-op resume = %#v, %v", resumed, err)
+	}
+	after, err := native.schedulerRuntime(schedule.ID)
+	if err != nil || !reflect.DeepEqual(after, before) {
+		t.Fatalf("active no-op resume runtime changed: before=%#v after=%#v err=%v", before, after, err)
+	}
+	if request := manager.takeReconcileRequests(); request&reconcileScheduler != 0 {
+		t.Fatalf("active no-op resume requested Scheduler reconciliation: %08b", request)
+	}
+	select {
+	case <-manager.reconcileWake:
+		t.Fatal("active no-op resume woke the reconcile loop")
+	default:
+	}
+
+	_, err = manager.server.changeNativeSchedule(context.Background(), workspace, native,
+		NativeSchedulerChange{Operation: app.ScheduleChangeResume, ID: "schedule-ffffffffffffffffffffffff"})
+	if !errors.Is(err, app.ErrScheduleNotFound) {
+		t.Fatalf("missing active resume error = %v", err)
+	}
+	if request := manager.takeReconcileRequests(); request&reconcileScheduler != 0 {
+		t.Fatalf("failed active resume requested Scheduler reconciliation: %08b", request)
+	}
+	select {
+	case <-manager.reconcileWake:
+		t.Fatal("failed active resume woke the reconcile loop")
+	default:
+	}
+}
+
+func TestSchedulerActiveResumeOwnershipLossSuppressesWake(t *testing.T) {
+	manager, workspace, schedule, prepared := prepareResourceBindingAttention(t)
+	rewriteSchedulerTestProfiles(t, manager.server.config, []agentHubProfileRoute{{Key: "default", AgentName: "fake-agent"}})
+	manager.server.locks = newWorkspaceLockManager("127.0.0.1:4936", manager.server.config)
+	t.Cleanup(manager.server.locks.closeAll)
+	if _, err := manager.server.locks.acquire(workspace.Path); err != nil {
+		t.Fatal(err)
+	}
+	_ = manager.takeReconcileRequests()
+	select {
+	case <-manager.reconcileWake:
+	default:
+	}
+	controller, release := holdResourceController(t, manager, workspace, schedule.Target)
+	done := make(chan error, 1)
+	go func() {
+		_, err := manager.server.changeNativeSchedule(context.Background(), workspace,
+			newNativeScheduler(manager, workspace), NativeSchedulerChange{Operation: app.ScheduleChangeResume, ID: schedule.ID})
+		done <- err
+	}()
+	waitForResourceControllerQueue(t, controller, 1)
+	manager.server.locks.release(workspace.Path)
+	release()
+	if err := <-done; err != nil {
+		t.Fatalf("attention recovery before ownership loss = %v", err)
+	}
+	if messages := scheduleOccurrenceMessages(t, workspace.Path, schedule.Target); len(messages) != 1 || messages[0].ID != prepared.MessageID {
+		t.Fatalf("ownership-lost attention recovery messages = %#v", messages)
+	}
+	if request := manager.takeReconcileRequests(); request&reconcileScheduler != 0 {
+		t.Fatalf("ownership-lost active resume requested Scheduler reconciliation: %08b", request)
+	}
+	// Delivery may independently wake AgentHub or mailbox reconciliation. The
+	// lost owner must not contribute the Scheduler timer-refresh request.
+	select {
+	case <-manager.reconcileWake:
+	default:
+	}
+}
+
 func TestResourceBindingChangeWakesAttentionHeldScheduler(t *testing.T) {
 	manager, workspace, schedule, prepared := prepareResourceBindingAttention(t)
 	_ = manager.takeReconcileRequests()

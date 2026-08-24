@@ -420,12 +420,16 @@ func (n *NativeScheduler) reconcileSchedule(ctx context.Context, schedule app.Sc
 			runtime.TriggerDigest = triggerDigest
 			runtime.Target = schedule.Target
 		} else {
+			previousRuntime := runtime
 			runtime, err = initialScheduleRuntime(schedule, now)
 			if err != nil {
 				if errors.Is(err, app.ErrScheduleOccurrenceOutOfRange) {
 					return n.recordScheduleError(schedule.ID, runtime, now, err)
 				}
 				return err
+			}
+			if (enteringPaused || resumingPaused) && !runtimeCompletesSameOneTimeOccurrence(runtime, schedule) {
+				preserveScheduleOccurrenceProjection(&runtime, previousRuntime)
 			}
 		}
 		if err := n.storeSchedulerRuntime(schedule.ID, runtime); err != nil {
@@ -555,9 +559,21 @@ func initialScheduleRuntime(schedule app.Schedule, now time.Time) (schedulerSche
 	return runtime, nil
 }
 
+// preserveScheduleOccurrenceProjection carries user-visible execution history
+// across pause and resume revisions. Lifecycle changes rebuild delivery cursors,
+// but are not themselves occurrence results.
+func preserveScheduleOccurrenceProjection(runtime *schedulerScheduleRuntime, previous schedulerScheduleRuntime) {
+	runtime.LastOccurrenceAt = previous.LastOccurrenceAt
+	runtime.LastOutcome = previous.LastOutcome
+	runtime.LastError = previous.LastError
+}
+
 func (n *NativeScheduler) reconcilePausedSchedule(schedule app.Schedule, runtime schedulerScheduleRuntime, now time.Time) error {
-	changed := runtime.Prepared != nil || runtime.RetryAt != "" || runtime.EffectiveState != app.ScheduleStatePaused
+	changed := runtime.Prepared != nil || runtime.RetryAt != "" || runtime.RetryCount != 0 ||
+		runtime.AttentionTarget != "" || runtime.EffectiveState != app.ScheduleStatePaused
 	runtime.Prepared, runtime.RetryAt = nil, ""
+	runtime.RetryCount = 0
+	runtime.AttentionTarget = ""
 	runtime.EffectiveState = app.ScheduleStatePaused
 	if completeExpiredOneTimeWhilePaused(&runtime, schedule.Trigger, now) {
 		changed = true
@@ -591,7 +607,10 @@ func completeExpiredOneTimeWhilePaused(runtime *schedulerScheduleRuntime, trigge
 	runtime.EffectiveState = app.ScheduleStateCompleted
 	runtime.LastOccurrenceAt = at.Format(time.RFC3339Nano)
 	runtime.LastOutcome = schedulerOutcomePaused
+	runtime.LastError = ""
 	runtime.Prepared, runtime.NextRunAt, runtime.RetryAt = nil, "", ""
+	runtime.RetryCount = 0
+	runtime.AttentionTarget = ""
 	return true
 }
 

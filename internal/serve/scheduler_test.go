@@ -5338,6 +5338,242 @@ func TestNativeSchedulerPauseResumeSkipsPausedOccurrences(t *testing.T) {
 	}
 }
 
+func TestNativeSchedulerPausePreservesRepeatingHistory(t *testing.T) {
+	tests := []struct {
+		name        string
+		lastOutcome string
+		lastError   string
+	}{
+		{name: "accepted", lastOutcome: schedulerOutcomeAccepted},
+		{name: "busy", lastOutcome: schedulerOutcomeBusy},
+		{name: "transient error", lastOutcome: schedulerOutcomeAccepted, lastError: "temporary checkpoint failure"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+			puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC().Truncate(time.Second)
+			created, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+				Description: "Remember recent work", Condition: "every minute", Target: "workspace",
+				Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerInterval, EverySeconds: 60, AnchorAt: now.Add(-time.Hour).Format(time.RFC3339Nano)},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			lastOccurrenceAt := now.Add(-time.Minute).Format(time.RFC3339Nano)
+			runtime := schedulerScheduleRuntime{
+				Revision: created.Revision, TriggerDigest: mustSchedulerTriggerDigest(t, created.Trigger), Target: created.Target,
+				EffectiveState: app.ScheduleStateActive, NextRunAt: now.Add(time.Minute).Format(time.RFC3339Nano),
+				LastOccurrenceAt: lastOccurrenceAt, LastOutcome: test.lastOutcome, LastError: test.lastError,
+				RetryAt: now.Add(time.Second).Format(time.RFC3339Nano), RetryCount: 3,
+			}
+			native := newNativeScheduler(manager, workspace)
+			if err := native.storeSchedulerRuntime(created.ID, runtime); err != nil {
+				t.Fatal(err)
+			}
+			manager.now = func() time.Time { return now }
+			paused, err := native.Change(context.Background(), NativeSchedulerChange{Operation: app.ScheduleChangePause, ID: created.ID})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			persisted, err := native.schedulerRuntime(created.ID)
+			if err != nil || persisted.Revision != paused.Revision || persisted.EffectiveState != app.ScheduleStatePaused ||
+				persisted.LastOccurrenceAt != lastOccurrenceAt || persisted.LastOutcome != test.lastOutcome || persisted.LastError != test.lastError ||
+				persisted.NextRunAt != "" || persisted.Prepared != nil || persisted.RetryAt != "" || persisted.RetryCount != 0 || persisted.AttentionTarget != "" {
+				t.Fatalf("paused repeating history runtime = %#v, %v", persisted, err)
+			}
+			if deadline := schedulerRuntimeDeadline(persisted, now); !deadline.IsZero() {
+				t.Fatalf("paused history deadline = %s, want zero", deadline)
+			}
+
+			restarted := newNativeScheduler(newAgentManager(manager.server), workspace)
+			snapshot, err := restarted.Snapshot(now)
+			if err != nil || len(snapshot.Schedules) != 1 || snapshot.Schedules[0].EffectiveState != app.ScheduleStatePaused ||
+				snapshot.Schedules[0].LastOccurrenceAt != lastOccurrenceAt || snapshot.Schedules[0].LastOutcome != test.lastOutcome ||
+				snapshot.Schedules[0].LastError != test.lastError || snapshot.Schedules[0].NextRunAt != "" || snapshot.NextWakeAt != "" {
+				t.Fatalf("restarted paused history snapshot = %#v, %v", snapshot, err)
+			}
+		})
+	}
+}
+
+func TestNativeSchedulerPauseClearsRepeatingDeliveryStateWithoutInventingHistory(t *testing.T) {
+	tests := []struct {
+		name           string
+		effectiveState string
+		lastOutcome    string
+		lastError      string
+		attention      bool
+	}{
+		{name: "prepared", effectiveState: app.ScheduleStateActive, lastOutcome: schedulerOutcomeBusy},
+		{name: "attention", effectiveState: schedulerOutcomeAttention, lastOutcome: schedulerOutcomeAttention, lastError: "target is archived", attention: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+			puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC().Truncate(time.Second)
+			created, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+				Description: "Pause in-flight repeat", Condition: "every minute", Target: "workspace",
+				Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerInterval, EverySeconds: 60, AnchorAt: now.Add(-time.Hour).Format(time.RFC3339Nano)},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			lastOccurrenceAt := now.Add(-2 * time.Minute).Format(time.RFC3339Nano)
+			prepared := schedulerPreparedOccurrence{
+				ScheduleID: created.ID, ScheduleRevision: created.Revision, Target: created.Target,
+				ScheduledFor: now.Add(-time.Minute).Format(time.RFC3339Nano), NextRunAt: now.Add(time.Minute).Format(time.RFC3339Nano),
+			}
+			runtime := schedulerScheduleRuntime{
+				Revision: created.Revision, TriggerDigest: mustSchedulerTriggerDigest(t, created.Trigger), Target: created.Target,
+				EffectiveState: test.effectiveState, NextRunAt: prepared.ScheduledFor,
+				LastOccurrenceAt: lastOccurrenceAt, LastOutcome: test.lastOutcome, LastError: test.lastError,
+				RetryAt: now.Add(time.Minute).Format(time.RFC3339Nano), RetryCount: 2, Prepared: &prepared,
+			}
+			if test.attention {
+				runtime.AttentionTarget = created.Target
+			}
+			native := newNativeScheduler(manager, workspace)
+			if err := native.storeSchedulerRuntime(created.ID, runtime); err != nil {
+				t.Fatal(err)
+			}
+			manager.now = func() time.Time { return now }
+			if _, err := native.Change(context.Background(), NativeSchedulerChange{Operation: app.ScheduleChangePause, ID: created.ID}); err != nil {
+				t.Fatal(err)
+			}
+
+			persisted, err := native.schedulerRuntime(created.ID)
+			if err != nil || persisted.EffectiveState != app.ScheduleStatePaused || persisted.LastOccurrenceAt != lastOccurrenceAt ||
+				persisted.LastOutcome != test.lastOutcome || persisted.LastError != test.lastError || persisted.Prepared != nil ||
+				persisted.NextRunAt != "" || persisted.RetryAt != "" || persisted.RetryCount != 0 || persisted.AttentionTarget != "" {
+				t.Fatalf("paused %s runtime = %#v, %v", test.name, persisted, err)
+			}
+			if messages := scheduleOccurrenceMessages(t, workspace.Path, created.Target); len(messages) != 0 {
+				t.Fatalf("pause delivered discarded %s occurrence: %#v", test.name, messages)
+			}
+		})
+	}
+}
+
+func TestNativeSchedulerPauseResumePreservesRepeatingHistory(t *testing.T) {
+	manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	created, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+		Description: "Resume without forgetting", Condition: "every minute", Target: "workspace",
+		Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerInterval, EverySeconds: 60, AnchorAt: now.Add(-time.Hour).Format(time.RFC3339Nano)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lastOccurrenceAt := now.Add(-time.Minute).Format(time.RFC3339Nano)
+	runtime := schedulerScheduleRuntime{
+		Revision: created.Revision, TriggerDigest: mustSchedulerTriggerDigest(t, created.Trigger), Target: created.Target,
+		EffectiveState: app.ScheduleStateActive, NextRunAt: now.Add(time.Minute).Format(time.RFC3339Nano),
+		LastOccurrenceAt: lastOccurrenceAt, LastOutcome: schedulerOutcomeBusy,
+	}
+	native := newNativeScheduler(manager, workspace)
+	if err := native.storeSchedulerRuntime(created.ID, runtime); err != nil {
+		t.Fatal(err)
+	}
+	manager.now = func() time.Time { return now }
+	paused, err := native.Change(context.Background(), NativeSchedulerChange{Operation: app.ScheduleChangePause, ID: created.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := native.Change(context.Background(), NativeSchedulerChange{Operation: app.ScheduleChangeResume, ID: created.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := native.schedulerRuntime(created.ID)
+	resumeBoundary := generationTime(resumed.UpdatedAt)
+	if err != nil || paused.State != app.ScheduleStatePaused || resumed.State != app.ScheduleStateActive ||
+		persisted.Revision != resumed.Revision || persisted.EffectiveState != app.ScheduleStateActive ||
+		persisted.LastOccurrenceAt != lastOccurrenceAt || persisted.LastOutcome != schedulerOutcomeBusy || persisted.LastError != "" ||
+		!generationTime(persisted.NextRunAt).After(resumeBoundary) || persisted.Prepared != nil || persisted.RetryAt != "" || persisted.RetryCount != 0 || persisted.AttentionTarget != "" {
+		t.Fatalf("pause/resume history runtime = %#v, paused=%#v resumed=%#v err=%v", persisted, paused, resumed, err)
+	}
+	if messages := scheduleOccurrenceMessages(t, workspace.Path, created.Target); len(messages) != 0 {
+		t.Fatalf("pause/resume caught up occurrences: %#v", messages)
+	}
+}
+
+func TestNativeSchedulerSemanticEditResetsRepeatingHistory(t *testing.T) {
+	tests := []struct {
+		name   string
+		change func(app.Schedule) NativeSchedulerChange
+	}{
+		{
+			name: "trigger",
+			change: func(created app.Schedule) NativeSchedulerChange {
+				trigger := *created.Trigger
+				trigger.EverySeconds = 300
+				return NativeSchedulerChange{Operation: app.ScheduleChangeUpdate, ID: created.ID, ExpectedRevision: created.Revision, Trigger: &trigger}
+			},
+		},
+		{
+			name: "target",
+			change: func(created app.Schedule) NativeSchedulerChange {
+				target := "project1"
+				trigger := *created.Trigger
+				return NativeSchedulerChange{Operation: app.ScheduleChangeUpdate, ID: created.ID, ExpectedRevision: created.Revision, Target: &target, Trigger: &trigger}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+			puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC().Truncate(time.Second)
+			created, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+				Description: "Replace schedule semantics", Condition: "every minute", Target: "workspace",
+				Trigger: &app.ScheduleTrigger{Type: app.ScheduleTriggerInterval, EverySeconds: 60, AnchorAt: now.Add(-time.Hour).Format(time.RFC3339Nano)},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtime := schedulerScheduleRuntime{
+				Revision: created.Revision, TriggerDigest: mustSchedulerTriggerDigest(t, created.Trigger), Target: created.Target,
+				EffectiveState: app.ScheduleStateActive, NextRunAt: now.Add(time.Minute).Format(time.RFC3339Nano),
+				LastOccurrenceAt: now.Add(-time.Minute).Format(time.RFC3339Nano), LastOutcome: schedulerOutcomeAccepted, LastError: "old transient error",
+			}
+			native := newNativeScheduler(manager, workspace)
+			if err := native.storeSchedulerRuntime(created.ID, runtime); err != nil {
+				t.Fatal(err)
+			}
+			updated, err := native.Change(context.Background(), test.change(created))
+			if err != nil {
+				t.Fatal(err)
+			}
+			mutationAt := generationTime(updated.UpdatedAt)
+			if _, err := native.Reconcile(context.Background(), mutationAt); err != nil {
+				t.Fatal(err)
+			}
+			persisted, err := native.schedulerRuntime(created.ID)
+			if err != nil || persisted.Revision != updated.Revision || persisted.TriggerDigest != mustSchedulerTriggerDigest(t, updated.Trigger) ||
+				persisted.Target != updated.Target || persisted.EffectiveState != app.ScheduleStateActive || persisted.LastOccurrenceAt != "" ||
+				persisted.LastOutcome != "" || persisted.LastError != "" || persisted.Prepared != nil || persisted.AttentionTarget != "" ||
+				persisted.RetryAt != "" || persisted.RetryCount != 0 || !generationTime(persisted.NextRunAt).After(mutationAt) {
+				t.Fatalf("%s edit runtime = %#v, %v", test.name, persisted, err)
+			}
+		})
+	}
+}
+
 func TestNativeSchedulerPausedOneTimeUsesExactDeadline(t *testing.T) {
 	t.Run("pause through native scheduler", func(t *testing.T) {
 		manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
@@ -5516,9 +5752,9 @@ func TestExpiredOneTimePauseRuntimePathsMatch(t *testing.T) {
 			run: func(t *testing.T) schedulerScheduleRuntime {
 				runtime := schedulerScheduleRuntime{
 					Revision: schedule.Revision, TriggerDigest: digest, EffectiveState: app.ScheduleStateActive,
-					NextRunAt: now.Add(time.Minute).Format(time.RFC3339Nano),
-					RetryAt:   now.Add(2 * time.Minute).Format(time.RFC3339Nano),
-					Prepared:  &schedulerPreparedOccurrence{},
+					NextRunAt: now.Add(time.Minute).Format(time.RFC3339Nano), LastOccurrenceAt: now.Add(-time.Hour).Format(time.RFC3339Nano),
+					LastOutcome: schedulerOutcomeAttention, LastError: "stale attention error", AttentionTarget: "workspace",
+					RetryAt: now.Add(2 * time.Minute).Format(time.RFC3339Nano), RetryCount: 4, Prepared: &schedulerPreparedOccurrence{},
 				}
 				if err := native.reconcilePausedSchedule(schedule, runtime, now); err != nil {
 					t.Fatal(err)

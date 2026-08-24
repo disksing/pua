@@ -446,10 +446,42 @@ func TestSchedulerValidatesCommandsBeforeOwnerDiscovery(t *testing.T) {
 	})
 }
 
-func TestSchedulerHelpRequiresUpdateTrigger(t *testing.T) {
-	help := run(t, "scheduler", "help")
-	if strings.Contains(help, "optional trigger") || !strings.Contains(help, "pua scheduler update --id=<schedule> --revision=<n> [--description=<text>]") || !strings.Contains(help, "complete replacement trigger") {
-		t.Fatalf("scheduler help does not require an update trigger:\n%s", help)
+func TestSchedulerHelpDescribesNativeCommandSurface(t *testing.T) {
+	topLevelHelp := run(t, "help")
+	for _, marker := range []string{
+		"Manage native structured schedules through the owning pua serve process.",
+		"Subcommands: list, show, add, update, pause, resume, remove.",
+		"require --at, --every with --anchor, or --cron with --timezone",
+		"UI or Scheduler Agent to compile natural-language requests",
+	} {
+		if !strings.Contains(topLevelHelp, marker) {
+			t.Fatalf("top-level help is missing %q:\n%s", marker, topLevelHelp)
+		}
+	}
+
+	schedulerHelp := run(t, "scheduler", "help")
+	for _, command := range []string{"list", "show", "add", "update", "pause", "resume", "remove"} {
+		if !strings.Contains(schedulerHelp, "pua scheduler "+command) {
+			t.Fatalf("scheduler help is missing %q:\n%s", command, schedulerHelp)
+		}
+	}
+	for _, marker := range []string{
+		"pua scheduler update --id=<schedule> --revision=<n> [--description=<text>]",
+		"complete replacement trigger",
+		"CLI add and update accept complete structured triggers only.",
+		"Scheduler Agent to compile natural-language requests",
+	} {
+		if !strings.Contains(schedulerHelp, marker) {
+			t.Fatalf("scheduler help is missing %q:\n%s", marker, schedulerHelp)
+		}
+	}
+
+	for name, help := range map[string]string{"top-level": topLevelHelp, "scheduler": schedulerHelp} {
+		for _, obsolete := range []string{"Manage natural-language schedules", "wake interval", "wakeInterval"} {
+			if strings.Contains(help, obsolete) {
+				t.Fatalf("%s help contains obsolete wording %q:\n%s", name, obsolete, help)
+			}
+		}
 	}
 }
 

@@ -317,8 +317,10 @@ Commands:
     binding, repo.
 
   pua scheduler <command>
-    Manage natural-language schedules. Subcommands: list, show, add, update,
-    remove.
+    Manage native structured schedules through the owning pua serve process.
+    Subcommands: list, show, add, update, pause, resume, remove. Add and update
+    require --at, --every with --anchor, or --cron with --timezone. Use the Web
+    UI or Scheduler Agent to compile natural-language requests.
 
   pua template <command>
     Manage project-local content templates. Subcommands: list, show, validate,
@@ -561,7 +563,9 @@ func printSchedulerHelp() {
   pua scheduler show --id=<schedule> [--server=<url>]
   pua scheduler add --description=<text> --condition=<text> --target=<resource> [--guard=<text>] (--at=<rfc3339>|--every=<duration> --anchor=<rfc3339>|--cron=<six-fields> --timezone=<iana>) [--server=<url>]
   pua scheduler update --id=<schedule> --revision=<n> [--description=<text>] [--condition=<text>] [--guard=<text>] [--target=<resource>] (--at=<rfc3339>|--every=<duration> --anchor=<rfc3339>|--cron=<six-fields> --timezone=<iana>) [--server=<url>]
-  pua scheduler pause|resume|remove --id=<schedule> [--server=<url>]
+  pua scheduler pause --id=<schedule> [--server=<url>]
+  pua scheduler resume --id=<schedule> [--server=<url>]
+  pua scheduler remove --id=<schedule> [--server=<url>]
 
 Commands:
   pua scheduler list [--json] [--server=<url>]
@@ -579,11 +583,20 @@ Commands:
     Compare-and-swap an existing definition using its current revision and one
     complete replacement trigger.
 
-  pua scheduler pause|resume|remove ...
-    Deterministically change lifecycle state or remove a definition.
+  pua scheduler pause ...
+    Pause a definition without replaying occurrences missed while paused.
+
+  pua scheduler resume ...
+    Resume a definition from its next future occurrence.
+
+  pua scheduler remove ...
+    Remove a definition deterministically.
 
 All reads and mutations go through the owning pua serve process. If owner
 discovery fails, start the Server or pass --server explicitly.
+CLI add and update accept complete structured triggers only. Use the Web UI or
+Scheduler Agent to compile natural-language requests before changing a
+definition.
 `)
 }
 

@@ -247,6 +247,269 @@ func TestServiceManagerRestartRefreshesDependentsAndPreservesManualStop(t *testi
 	}
 }
 
+func TestServiceManagerStopOrdersDependentsAndStartRestoresThem(t *testing.T) {
+	root := t.TempDir()
+	tracePath := filepath.Join(root, "dependency-stop-trace")
+	alpha := dependencyRestartNode(tracePath, "alpha", "", "one")
+	bravo := dependencyRestartNode(tracePath, "bravo", "alpha", "")
+	charlie := dependencyRestartNode(tracePath, "charlie", "bravo", "")
+	delta := dependencyRestartNode(tracePath, "delta", "", "stable")
+	manager := startDependencyRestartManager(t, root, alpha, bravo, charlie, delta)
+	deltaPID := servicePIDs(t, manager, "delta")["delta"]
+	resetDependencyRestartTrace(t, tracePath)
+
+	if err := manager.StopService(context.Background(), "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	wantTrace := []string{
+		"stop:charlie:one-bravo-charlie",
+		"stop:bravo:one-bravo",
+		"stop:alpha:one",
+	}
+	if got := dependencyRestartTrace(t, tracePath, len(wantTrace)); !reflect.DeepEqual(got, wantTrace) {
+		t.Fatalf("Stop dependency lifecycle trace = %v, want %v", got, wantTrace)
+	}
+	for _, id := range []string{"alpha", "bravo", "charlie"} {
+		status, err := manager.Show(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status.State != ServiceStateStopped || status.PID != 0 || status.ProcessGroup != 0 {
+			t.Fatalf("%s after dependency Stop = %#v", id, status)
+		}
+		if got, want := status.ManualStop, id == "alpha"; got != want {
+			t.Fatalf("%s ManualStop after dependency Stop = %t, want %t", id, got, want)
+		}
+	}
+	if got := servicePIDs(t, manager, "delta")["delta"]; got != deltaPID {
+		t.Fatalf("Stop changed unrelated delta PID %d to %d", deltaPID, got)
+	}
+
+	resetDependencyRestartTrace(t, tracePath)
+	if err := manager.StartService(context.Background(), "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	wantTrace = []string{
+		"start:alpha:one",
+		"start:bravo:one-bravo",
+		"start:charlie:one-bravo-charlie",
+	}
+	if got := dependencyRestartTrace(t, tracePath, len(wantTrace)); !reflect.DeepEqual(got, wantTrace) {
+		t.Fatalf("Start dependency recovery trace = %v, want %v", got, wantTrace)
+	}
+	for _, id := range []string{"alpha", "bravo", "charlie"} {
+		waitForServiceState(t, manager, id, ServiceStateReady)
+	}
+	if got := servicePIDs(t, manager, "delta")["delta"]; got != deltaPID {
+		t.Fatalf("Start changed unrelated delta PID %d to %d", deltaPID, got)
+	}
+}
+
+func TestServiceManagerStopPreservesManualDependentIntent(t *testing.T) {
+	root := t.TempDir()
+	tracePath := filepath.Join(root, "dependency-manual-stop-trace")
+	alpha := dependencyRestartNode(tracePath, "alpha", "", "one")
+	bravo := dependencyRestartNode(tracePath, "bravo", "alpha", "")
+	charlie := dependencyRestartNode(tracePath, "charlie", "bravo", "")
+	delta := dependencyRestartNode(tracePath, "delta", "", "stable")
+	manager := startDependencyRestartManager(t, root, alpha, bravo, charlie, delta)
+	deltaPID := servicePIDs(t, manager, "delta")["delta"]
+
+	if err := manager.StopService(context.Background(), "bravo"); err != nil {
+		t.Fatal(err)
+	}
+	resetDependencyRestartTrace(t, tracePath)
+	if err := manager.StopService(context.Background(), "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	if got := dependencyRestartTrace(t, tracePath, 1); !reflect.DeepEqual(got, []string{"stop:alpha:one"}) {
+		t.Fatalf("Stop with manual dependent trace = %v, want only alpha", got)
+	}
+
+	resetDependencyRestartTrace(t, tracePath)
+	if err := manager.StartService(context.Background(), "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	if got := dependencyRestartTrace(t, tracePath, 1); !reflect.DeepEqual(got, []string{"start:alpha:one"}) {
+		t.Fatalf("Start with manual dependent trace = %v, want only alpha", got)
+	}
+	bravoStatus, err := manager.Show("bravo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bravoStatus.State != ServiceStateStopped || !bravoStatus.ManualStop || bravoStatus.PID != 0 {
+		t.Fatalf("manual dependent after Start = %#v", bravoStatus)
+	}
+	charlieStatus, err := manager.Show("charlie")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if charlieStatus.State != ServiceStateBlocked || charlieStatus.ManualStop || charlieStatus.PID != 0 {
+		t.Fatalf("transitive dependent behind manual stop = %#v", charlieStatus)
+	}
+
+	resetDependencyRestartTrace(t, tracePath)
+	if err := manager.StartService(context.Background(), "bravo"); err != nil {
+		t.Fatal(err)
+	}
+	wantTrace := []string{
+		"start:bravo:one-bravo",
+		"start:charlie:one-bravo-charlie",
+	}
+	if got := dependencyRestartTrace(t, tracePath, len(wantTrace)); !reflect.DeepEqual(got, wantTrace) {
+		t.Fatalf("manual dependent recovery trace = %v, want %v", got, wantTrace)
+	}
+	if got := servicePIDs(t, manager, "delta")["delta"]; got != deltaPID {
+		t.Fatalf("manual Stop recovery changed unrelated delta PID %d to %d", deltaPID, got)
+	}
+}
+
+func TestServiceManagerDisableOrdersDependentsAndEnableRestoresThem(t *testing.T) {
+	root := t.TempDir()
+	tracePath := filepath.Join(root, "dependency-disable-trace")
+	alpha := dependencyRestartNode(tracePath, "alpha", "", "one")
+	bravo := dependencyRestartNode(tracePath, "bravo", "alpha", "")
+	charlie := dependencyRestartNode(tracePath, "charlie", "bravo", "")
+	delta := dependencyRestartNode(tracePath, "delta", "", "stable")
+	manager := startDependencyRestartManager(t, root, alpha, bravo, charlie, delta)
+	deltaPID := servicePIDs(t, manager, "delta")["delta"]
+	resetDependencyRestartTrace(t, tracePath)
+
+	if err := manager.Disable(context.Background(), "alpha"); err != nil {
+		t.Fatal(err)
+	}
+	wantTrace := []string{
+		"stop:charlie:one-bravo-charlie",
+		"stop:bravo:one-bravo",
+		"stop:alpha:one",
+	}
+	if got := dependencyRestartTrace(t, tracePath, len(wantTrace)); !reflect.DeepEqual(got, wantTrace) {
+		t.Fatalf("Disable dependency lifecycle trace = %v, want %v", got, wantTrace)
+	}
+	alphaStatus, err := manager.Show("alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if alphaStatus.Enabled || alphaStatus.State != ServiceStateDisabled || alphaStatus.ManualStop || alphaStatus.PID != 0 {
+		t.Fatalf("disabled dependency status = %#v", alphaStatus)
+	}
+	for _, id := range []string{"bravo", "charlie"} {
+		status, err := manager.Show(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !status.Enabled || status.State != ServiceStateStopped || status.ManualStop || status.PID != 0 {
+			t.Fatalf("dependent %s after Disable = %#v", id, status)
+		}
+	}
+	if got := servicePIDs(t, manager, "delta")["delta"]; got != deltaPID {
+		t.Fatalf("Disable changed unrelated delta PID %d to %d", deltaPID, got)
+	}
+
+	resetDependencyRestartTrace(t, tracePath)
+	if err := manager.Enable("alpha"); err != nil {
+		t.Fatal(err)
+	}
+	wantTrace = []string{
+		"start:alpha:one",
+		"start:bravo:one-bravo",
+		"start:charlie:one-bravo-charlie",
+	}
+	if got := dependencyRestartTrace(t, tracePath, len(wantTrace)); !reflect.DeepEqual(got, wantTrace) {
+		t.Fatalf("Enable dependency recovery trace = %v, want %v", got, wantTrace)
+	}
+	for _, id := range []string{"alpha", "bravo", "charlie"} {
+		waitForServiceState(t, manager, id, ServiceStateReady)
+	}
+	if got := servicePIDs(t, manager, "delta")["delta"]; got != deltaPID {
+		t.Fatalf("Enable changed unrelated delta PID %d to %d", deltaPID, got)
+	}
+}
+
+func TestServiceManagerStopAndDisableRetainTargetWhenDependentStopFails(t *testing.T) {
+	for _, operation := range []string{"stop", "disable"} {
+		t.Run(operation, func(t *testing.T) {
+			root := t.TempDir()
+			tracePath := filepath.Join(root, "dependency-stop-failure-trace")
+			alpha := dependencyRestartNode(tracePath, "alpha", "", "one")
+			bravo := dependencyRestartNode(tracePath, "bravo", "alpha", "")
+			charlie := dependencyRestartNode(tracePath, "charlie", "bravo", "")
+			delta := dependencyRestartNode(tracePath, "delta", "", "stable")
+			manager := startDependencyRestartManager(t, root, alpha, bravo, charlie, delta)
+			before := servicePIDs(t, manager, "alpha", "bravo", "charlie", "delta")
+			bravoStatus, err := manager.Show("bravo")
+			if err != nil {
+				t.Fatal(err)
+			}
+			resetDependencyRestartTrace(t, tracePath)
+			injected := errors.New("injected dependent stop failure")
+			nativeSignal := manager.processPlatform.signalProcessGroup
+			manager.processPlatform.signalProcessGroup = func(group int, signal syscall.Signal) error {
+				if group == bravoStatus.ProcessGroup {
+					return injected
+				}
+				return nativeSignal(group, signal)
+			}
+			t.Cleanup(func() { manager.processPlatform.signalProcessGroup = nativeSignal })
+
+			var operationErr error
+			if operation == "stop" {
+				operationErr = manager.StopService(context.Background(), "alpha")
+			} else {
+				operationErr = manager.Disable(context.Background(), "alpha")
+			}
+			if operationErr == nil || !strings.Contains(operationErr.Error(), `stop dependent service "bravo" before "alpha"`) || !strings.Contains(operationErr.Error(), injected.Error()) {
+				t.Fatalf("%s error = %v, want dependent stop failure", operation, operationErr)
+			}
+			if got := dependencyRestartTrace(t, tracePath, 1); !reflect.DeepEqual(got, []string{"stop:charlie:one-bravo-charlie"}) {
+				t.Fatalf("failed %s lifecycle trace = %v, want only charlie stopped", operation, got)
+			}
+			after := servicePIDs(t, manager, "alpha", "bravo", "charlie", "delta")
+			if after["alpha"] != before["alpha"] || after["bravo"] != before["bravo"] {
+				t.Fatalf("failed %s stopped target or failing dependent: before %v, after %v", operation, before, after)
+			}
+			if after["charlie"] != 0 {
+				t.Fatalf("failed %s retained already stopped charlie PID %d", operation, after["charlie"])
+			}
+			if after["delta"] != before["delta"] {
+				t.Fatalf("failed %s changed unrelated delta: before %v, after %v", operation, before, after)
+			}
+			failedDependent, err := manager.Show("bravo")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if failedDependent.State != ServiceStateAttentionRequired || !failedDependent.AttentionRequired || failedDependent.PID != before["bravo"] || !strings.Contains(failedDependent.LastError, injected.Error()) {
+				t.Fatalf("dependent after failed %s = %#v", operation, failedDependent)
+			}
+			target, err := manager.Show("alpha")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if target.PID != before["alpha"] || target.ProcessGroup <= 0 {
+				t.Fatalf("target after failed %s lost ownership: %#v", operation, target)
+			}
+			if operation == "stop" {
+				if !target.Enabled || !target.ManualStop {
+					t.Fatalf("target after failed Stop lost manual intent: %#v", target)
+				}
+			} else {
+				if target.Enabled || target.ManualStop {
+					t.Fatalf("target after failed Disable = %#v", target)
+				}
+				persisted, err := LoadServiceConfig(serviceConfigPath(root, "alpha"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if persisted.Enabled {
+					t.Fatal("failed dependent stop did not retain disabled definition")
+				}
+			}
+
+			manager.processPlatform.signalProcessGroup = nativeSignal
+		})
+	}
+}
+
 func TestServiceManagerDependencyStopFailureRollsBackApplyAll(t *testing.T) {
 	root := t.TempDir()
 	tracePath := filepath.Join(root, "dependency-restart-trace")

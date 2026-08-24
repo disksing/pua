@@ -3016,7 +3016,13 @@ func (m *ServiceManager) Enable(id string) error {
 	} else if rt.status.AttentionRequired {
 		rt.status.State = ServiceStateAttentionRequired
 	}
-	return m.persistStatusLocked(rt)
+	if err := m.persistStatusLocked(rt); err != nil {
+		return err
+	}
+	if m.started && !m.stopping {
+		return m.reconcileLocked(context.Background())
+	}
+	return nil
 }
 func (m *ServiceManager) Disable(ctx context.Context, id string) error {
 	m.mu.Lock()
@@ -3040,20 +3046,17 @@ func (m *ServiceManager) Disable(ctx context.Context, id string) error {
 	m.graph = graph
 	rt.config = cfg
 	rt.status.Enabled = false
-	var cleanupErr error
-	if rt.process != nil || rt.status.ProcessGroup > 0 {
-		cleanupErr = m.stopProcessLocked(ctx, rt, true)
-	}
 	rt.status.ManualStop = false
-	if cleanupErr != nil {
-		rt.status.AttentionRequired = true
-		rt.status.State = ServiceStateAttentionRequired
-	} else {
-		rt.status.State = ServiceStateDisabled
-		rt.status.Readiness.Ready = false
-		rt.status.PID, rt.status.ProcessGroup = 0, 0
+	if err := m.persistStatusLocked(rt); err != nil {
+		return err
 	}
-	return errors.Join(cleanupErr, m.persistStatusLocked(rt))
+	if err := m.stopServiceDependencyChainLocked(ctx, id, false); err != nil {
+		return err
+	}
+	rt.status.State = ServiceStateDisabled
+	rt.status.Readiness.Ready = false
+	rt.status.PID, rt.status.ProcessGroup = 0, 0
+	return m.persistStatusLocked(rt)
 }
 func (m *ServiceManager) StartService(ctx context.Context, id string) error {
 	m.mu.Lock()
@@ -3085,7 +3088,10 @@ func (m *ServiceManager) StartService(ctx context.Context, id string) error {
 		m.started = true
 		m.stopping = false
 	}
-	return m.reconcileOneLocked(ctx, rt, m.graph[id])
+	if err := m.persistStatusLocked(rt); err != nil {
+		return err
+	}
+	return m.reconcileLocked(ctx)
 }
 func (m *ServiceManager) StopService(ctx context.Context, id string) error {
 	m.mu.Lock()
@@ -3095,14 +3101,55 @@ func (m *ServiceManager) StopService(ctx context.Context, id string) error {
 		return os.ErrNotExist
 	}
 	rt.status.ManualStop = true
-	if rt.process != nil || rt.status.ProcessGroup > 0 {
-		if err := m.stopProcessLocked(ctx, rt, true); err != nil {
-			return err
-		}
+	if err := m.persistStatusLocked(rt); err != nil {
+		return err
+	}
+	if err := m.stopServiceDependencyChainLocked(ctx, id, true); err != nil {
+		return err
 	}
 	rt.status.State = ServiceStateStopped
 	return m.persistStatusLocked(rt)
 }
+
+// stopServiceDependencyChainLocked stops every running transitive dependent
+// before the selected service. Only the selected service receives manual-stop
+// intent; dependents remain eligible for dependency-ordered reconciliation
+// when the selected service is explicitly started or enabled again.
+func (m *ServiceManager) stopServiceDependencyChainLocked(ctx context.Context, id string, manualTarget bool) error {
+	changed := map[string]struct{}{id: {}}
+	impacted := serviceDependencyChangeSet(m.graph, m.graph, changed)
+	stopOrder, err := serviceGraphSubsetStopOrder(m.graph, impacted)
+	if err != nil {
+		return err
+	}
+	for _, candidateID := range stopOrder {
+		candidate := m.runtimes[candidateID]
+		if candidate == nil || (candidate.process == nil && candidate.status.ProcessGroup <= 0) {
+			continue
+		}
+		if candidateID == id && manualTarget {
+			if err := m.stopProcessLocked(ctx, candidate, true); err != nil {
+				return err
+			}
+			candidate.status.Readiness.Ready = false
+			if !candidate.status.AttentionRequired {
+				candidate.status.State = ServiceStateStopped
+			}
+			if err := m.persistStatusLocked(candidate); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := m.stopRuntimeForDependencyChangeLocked(ctx, candidate); err != nil {
+			if candidateID != id {
+				return fmt.Errorf("stop dependent service %q before %q: %w", candidateID, id, err)
+			}
+			return err
+		}
+	}
+	return nil
+}
+
 func (m *ServiceManager) RestartService(ctx context.Context, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

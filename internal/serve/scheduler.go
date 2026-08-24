@@ -797,6 +797,9 @@ func (n *NativeScheduler) deliverPrepared(ctx context.Context, schedule app.Sche
 					runtime.LastOutcome = schedulerOutcomeBusy
 					runtime.LastError = ""
 					runtime.AttentionTarget = ""
+					if prepared.NextRunAt == "" {
+						runtime.EffectiveState = app.ScheduleStateCompleted
+					}
 					return n.storeSchedulerRuntime(schedule.ID, runtime)
 				}
 			}

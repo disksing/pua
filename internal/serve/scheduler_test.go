@@ -2655,6 +2655,124 @@ func TestNativeSchedulerLegacyIntervalCompletesAtPersistenceBoundary(t *testing.
 	}
 }
 
+func TestNativeSchedulerBusyRepeatingBoundaryCompletesWithoutSuccessor(t *testing.T) {
+	tests := []struct {
+		name          string
+		trigger       app.ScheduleTrigger
+		due           time.Time
+		wantState     string
+		wantNextRunAt string
+	}{
+		{
+			name: "final interval occurrence",
+			trigger: app.ScheduleTrigger{
+				Type: app.ScheduleTriggerInterval, EverySeconds: 60,
+				AnchorAt: time.Date(9999, time.December, 31, 23, 58, 59, 999999999, time.UTC).Format(time.RFC3339Nano),
+			},
+			due:       time.Date(9999, time.December, 31, 23, 59, 59, 999999999, time.UTC),
+			wantState: app.ScheduleStateCompleted,
+		},
+		{
+			name: "final sparse cron occurrence",
+			trigger: app.ScheduleTrigger{
+				Type: app.ScheduleTriggerCron, Cron: "0 0 0 29 2 *", TimeZone: "UTC",
+			},
+			due:       time.Date(9996, time.February, 29, 0, 0, 0, 0, time.UTC),
+			wantState: app.ScheduleStateCompleted,
+		},
+		{
+			name: "ordinary occurrence with future successor",
+			trigger: app.ScheduleTrigger{
+				Type: app.ScheduleTriggerInterval, EverySeconds: 60,
+				AnchorAt: time.Date(2030, time.January, 2, 3, 4, 5, 123456789, time.UTC).Format(time.RFC3339Nano),
+			},
+			due:           time.Date(2030, time.January, 2, 3, 4, 5, 123456789, time.UTC),
+			wantState:     app.ScheduleStateActive,
+			wantNextRunAt: time.Date(2030, time.January, 2, 3, 5, 5, 123456789, time.UTC).Format(time.RFC3339Nano),
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
+			puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			schedule, err := puaWorkspace.AddSchedule(app.CreateScheduleInput{
+				Description: "Skip work on the busy target", Condition: "repeat at the configured time",
+				Target: "project1.task1", Trigger: &test.trigger,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			native := newNativeScheduler(manager, workspace)
+			runtime := schedulerScheduleRuntime{
+				Revision: schedule.Revision, TriggerDigest: mustSchedulerTriggerDigest(t, schedule.Trigger), Target: schedule.Target,
+				EffectiveState: app.ScheduleStateActive, NextRunAt: test.due.Format(time.RFC3339Nano),
+			}
+			if err := native.storeSchedulerRuntime(schedule.ID, runtime); err != nil {
+				t.Fatal(err)
+			}
+			stamp := test.due.Add(-time.Minute).Format(time.RFC3339Nano)
+			if _, err := mutateResourceMailboxStoreForResource(workspace.Path, schedule.Target, func(store *resourceMailboxStore) error {
+				store.Mailbox.NextSequence++
+				store.Mailbox.Messages = append(store.Mailbox.Messages, resourceMailboxMessage{
+					ID: "busy-target-message", Sequence: store.Mailbox.NextSequence, ResourceID: schedule.Target,
+					Text: "already waiting", Role: "user", RequestedMode: resourceMessageModeEnqueue,
+					ActualMode: resourceMessageModeEnqueue, Status: resourceMessageQueued,
+					AcceptedAt: stamp, UpdatedAt: stamp,
+				})
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			deadline, err := native.Reconcile(context.Background(), test.due)
+			if err != nil {
+				t.Fatal(err)
+			}
+			persisted, err := native.schedulerRuntime(schedule.ID)
+			if err != nil || persisted.EffectiveState != test.wantState || persisted.Prepared != nil ||
+				persisted.NextRunAt != test.wantNextRunAt || persisted.RetryAt != "" || persisted.RetryCount != 0 ||
+				persisted.AttentionTarget != "" || persisted.LastOccurrenceAt != test.due.Format(time.RFC3339Nano) ||
+				persisted.LastOutcome != schedulerOutcomeBusy || persisted.LastError != "" {
+				t.Fatalf("busy skip runtime = %#v, %v", persisted, err)
+			}
+			wantDeadline := generationTime(test.wantNextRunAt)
+			if !deadline.Equal(wantDeadline) {
+				t.Fatalf("busy skip deadline = %s, want %s", deadline, wantDeadline)
+			}
+			if messages := scheduleOccurrenceMessages(t, workspace.Path, schedule.Target); len(messages) != 0 {
+				t.Fatalf("busy skip appended Scheduler occurrence: %#v", messages)
+			}
+
+			restartedManager := newAgentManager(manager.server)
+			restartedManager.now = func() time.Time { return test.due }
+			manager.server.agents = restartedManager
+			restarted := newNativeScheduler(restartedManager, workspace)
+			snapshot, err := restarted.Snapshot(test.due)
+			if err != nil || len(snapshot.Schedules) != 1 || snapshot.Schedules[0].EffectiveState != test.wantState ||
+				snapshot.Schedules[0].NextRunAt != test.wantNextRunAt || snapshot.Schedules[0].LastOccurrenceAt != test.due.Format(time.RFC3339Nano) ||
+				snapshot.Schedules[0].LastOutcome != schedulerOutcomeBusy || snapshot.Schedules[0].LastError != "" ||
+				snapshot.NextWakeAt != test.wantNextRunAt {
+				t.Fatalf("restarted busy skip snapshot = %#v, %v", snapshot, err)
+			}
+			if _, err := restarted.Reconcile(context.Background(), test.due); err != nil {
+				t.Fatal(err)
+			}
+			replayed, err := restarted.schedulerRuntime(schedule.ID)
+			if err != nil || !reflect.DeepEqual(replayed, persisted) {
+				t.Fatalf("busy skip changed after restart: before=%#v after=%#v err=%v", persisted, replayed, err)
+			}
+			if messages := scheduleOccurrenceMessages(t, workspace.Path, schedule.Target); len(messages) != 0 {
+				t.Fatalf("restarted busy skip appended Scheduler occurrence: %#v", messages)
+			}
+		})
+	}
+}
+
 func TestNativeSchedulerIntervalRangeFailureDoesNotRetry(t *testing.T) {
 	manager, workspace, _ := newRuntimeTestManager(t, "http://127.0.0.1:1")
 	puaWorkspace, err := app.OpenWorkspace(workspace.Path)

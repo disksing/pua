@@ -20,7 +20,7 @@ for name in go git npm codesign security xcrun hdiutil lipo install_name_tool di
 [ -n "${SPARKLE_PRIVATE_KEY:-}${SPARKLE_KEY_ACCOUNT:-}" ] || die "SPARKLE_PRIVATE_KEY or SPARKLE_KEY_ACCOUNT is required"
 [ -n "${COMPONENT_UPDATE_PUBLIC_KEY:-}" ] || die "COMPONENT_UPDATE_PUBLIC_KEY is required"
 [ -n "${COMPONENT_MANIFEST_URL:-}" ] || die "COMPONENT_MANIFEST_URL is required"
-feed_url=${SPARKLE_FEED_URL:-https://disksing.github.io/pua/updates/appcast.xml}
+feed_url=${SPARKLE_FEED_URL:-https://pua.dev/updates/appcast.xml}
 case "$output_dir" in /*) output=$output_dir ;; *) output=$root/$output_dir ;; esac
 [ ! -e "$output" ] || die "output already exists: $output"
 [ -z "$(git -C "$root" status --porcelain)" ] || die "refusing to release a dirty worktree"

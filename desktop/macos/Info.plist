@@ -33,7 +33,7 @@
 	<key>SUScheduledCheckInterval</key>
 	<integer>86400</integer>
 	<key>SUFeedURL</key>
-	<string>https://disksing.github.io/pua/updates/appcast.xml</string>
+	<string>https://pua.dev/updates/appcast.xml</string>
 	<key>SUPublicEDKey</key>
 	<string>RELEASE_BUILD_MUST_SET_SPARKLE_PUBLIC_KEY</string>
 </dict>

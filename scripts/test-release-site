@@ -108,6 +108,7 @@ PATH="$test_root/bin:$PATH" \
 	"$root/scripts/build-release-site" "$output" >/dev/null
 
 [ -f "$output/index.html" ] || { echo "website was not copied" >&2; exit 1; }
+grep -Fq '<link rel="canonical" href="https://pua.dev/">' "$output/index.html" || { echo "canonical URL was not copied" >&2; exit 1; }
 [ -f "$output/updates/channel-v1.json.sig" ] || { echo "component feed was not signed" >&2; exit 1; }
 [ "$(jq -r .pua.version "$output/updates/channel-v1.json")" = 0.2.0 ] || { echo "wrong PUA descriptor selected" >&2; exit 1; }
 [ "$(jq -r .agentHub.version "$output/updates/channel-v1.json")" = 0.3.0 ] || { echo "wrong AgentHub descriptor selected" >&2; exit 1; }

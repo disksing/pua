@@ -97,8 +97,8 @@ jobs:
           SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
           SPARKLE_KEY_ACCOUNT: ${{ secrets.SPARKLE_KEY_ACCOUNT }}
           COMPONENT_UPDATE_PUBLIC_KEY: ${{ secrets.COMPONENT_UPDATE_PUBLIC_KEY }}
-          COMPONENT_MANIFEST_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/updates/channel-v1.json
-          SPARKLE_FEED_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/updates/appcast.xml
+          COMPONENT_MANIFEST_URL: https://pua.dev/updates/channel-v1.json
+          SPARKLE_FEED_URL: https://pua.dev/updates/appcast.xml
         run: |
           scripts/ci-configure-notary
           scripts/release-macapp "$RELEASE_VERSION" dist/macapp

@@ -41,10 +41,10 @@ newest stable `vX.Y.Z` release containing each descriptor, so PUA and AgentHub d
 not need to have joined the same train. GitHub Pages publishes the combined site:
 
 ```text
-https://disksing.github.io/pua/
-https://disksing.github.io/pua/updates/channel-v1.json
-https://disksing.github.io/pua/updates/channel-v1.json.sig
-https://disksing.github.io/pua/updates/appcast.xml
+https://pua.dev/
+https://pua.dev/updates/channel-v1.json
+https://pua.dev/updates/channel-v1.json.sig
+https://pua.dev/updates/appcast.xml
 ```
 
 The component feed is generated only after stable PUA and AgentHub descriptors

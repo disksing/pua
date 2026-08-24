@@ -102,7 +102,10 @@ var errServiceBindingsPathEscape = errors.New("service bindings path escapes the
 
 const defaultServiceProcessTerminationGrace = 5 * time.Second
 
-const serviceExportIdentityCheckAttempts = 4
+const (
+	serviceExportIdentityCheckAttempts = 4
+	serviceExportMaxBytes              = 1 << 20
+)
 
 var errServiceExportIdentityChanged = errors.New("service export hand-off changed during identity check")
 
@@ -1376,7 +1379,7 @@ func openServiceExportHandoffWithOpen(path string, openFile func(string, int, os
 		_ = readFile.Close()
 		return nil, errServiceExportIdentityChanged
 	}
-	data, err := io.ReadAll(readFile)
+	data, err := readBoundedServiceExport(readFile)
 	if err != nil {
 		cleanupErr := removeVerifiedServiceExportHandoff(path, readFile)
 		_ = readFile.Close()
@@ -1428,8 +1431,16 @@ func openServiceExportHandoffWithOpen(path string, openFile func(string, int, os
 	return &serviceExportHandoff{path: path, file: writeFile, data: data}, nil
 }
 
+// readBoundedServiceExport reads one sentinel byte past the protocol limit so
+// callers can distinguish an exactly-full document from an oversized one
+// without sizing an allocation from an untrusted file. The returned slice can
+// therefore never exceed serviceExportMaxBytes+1 bytes.
+func readBoundedServiceExport(reader io.Reader) ([]byte, error) {
+	return io.ReadAll(io.LimitReader(reader, serviceExportMaxBytes+1))
+}
+
 func (m *ServiceManager) readExportHandoffWithGateLocked(rt *serviceRuntime, handoff *serviceExportHandoff, fromLog bool) (ServiceExportFile, error) {
-	if len(handoff.data) > 1<<20 {
+	if len(handoff.data) > serviceExportMaxBytes {
 		candidateSecrets := bestEffortJSONStrings(handoff.data)
 		registerServiceExportCandidates(rt, candidateSecrets)
 		cause := errors.New("service export exceeds 1 MiB")

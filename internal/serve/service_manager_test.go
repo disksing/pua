@@ -68,6 +68,33 @@ func waitForTestPath(t *testing.T, path, content string) {
 	}
 }
 
+type repeatingServiceExportReader struct {
+	value byte
+	read  int
+}
+
+func (reader *repeatingServiceExportReader) Read(data []byte) (int, error) {
+	for index := range data {
+		data[index] = reader.value
+	}
+	reader.read += len(data)
+	return len(data), nil
+}
+
+type failingServiceExportReader struct {
+	data []byte
+	err  error
+}
+
+func (reader *failingServiceExportReader) Read(data []byte) (int, error) {
+	if len(reader.data) == 0 {
+		return 0, reader.err
+	}
+	n := copy(data, reader.data)
+	reader.data = reader.data[n:]
+	return n, reader.err
+}
+
 func TestServiceManagerStateWireValues(t *testing.T) {
 	states := []ServiceState{
 		ServiceStateDisabled,
@@ -758,6 +785,133 @@ func TestServiceManagerRejectedExportJSONIsScrubbedAndOpaque(t *testing.T) {
 				t.Fatalf("scrubbed export mode = %o, want 600", info.Mode().Perm())
 			}
 		})
+	}
+}
+
+func TestServiceManagerBoundsExportHandoffWhileReading(t *testing.T) {
+	stream := &repeatingServiceExportReader{value: 'x'}
+	data, err := readBoundedServiceExport(stream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) != serviceExportMaxBytes+1 {
+		t.Fatalf("bounded read length = %d, want %d", len(data), serviceExportMaxBytes+1)
+	}
+	if stream.read != serviceExportMaxBytes+1 {
+		t.Fatalf("underlying streaming read = %d bytes, want %d", stream.read, serviceExportMaxBytes+1)
+	}
+
+	injected := errors.New("injected service export read failure")
+	partial := []byte("partial-export")
+	data, err = readBoundedServiceExport(&failingServiceExportReader{data: append([]byte(nil), partial...), err: injected})
+	if !errors.Is(err, injected) {
+		t.Fatalf("bounded read error = %v, want injected failure", err)
+	}
+	if !bytes.Equal(data, partial) {
+		t.Fatalf("bounded partial read = %q, want %q", data, partial)
+	}
+}
+
+func TestServiceManagerExportHandoffSizeBoundary(t *testing.T) {
+	valid := []byte(`{"schemaVersion":1,"variables":{"PUBLIC":"visible"}}`)
+	if len(valid) >= serviceExportMaxBytes {
+		t.Fatalf("test export length = %d, want below limit", len(valid))
+	}
+
+	for _, test := range []struct {
+		name    string
+		size    int
+		wantErr bool
+	}{
+		{name: "exact limit", size: serviceExportMaxBytes},
+		{name: "sentinel byte", size: serviceExportMaxBytes + 1, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(serviceRuntimePath(root, "exporter"), "export.json")
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			data := append([]byte(nil), valid...)
+			data = append(data, bytes.Repeat([]byte{' '}, test.size-len(data))...)
+			if err := os.WriteFile(path, data, 0o400); err != nil {
+				t.Fatal(err)
+			}
+			manager := &ServiceManager{root: root, now: time.Now}
+			runtime := &serviceRuntime{
+				config:        ServiceConfig{SchemaVersion: serviceSchemaVersion, ID: "exporter", Exports: true},
+				secretNames:   map[string]ServiceSecretMetadata{},
+				exportSecrets: map[string]string{},
+				redactor:      security.NewRedactor(),
+			}
+			export, err := manager.readExportsLocked(runtime)
+			if test.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "exceeds 1 MiB") {
+					t.Fatalf("oversized export error = %v, want size rejection", err)
+				}
+				scrubbed, readErr := os.ReadFile(path)
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
+				if len(scrubbed) >= serviceExportMaxBytes || !json.Valid(scrubbed) {
+					t.Fatalf("oversized export was not replaced with bounded sanitized JSON: len=%d data=%q", len(scrubbed), scrubbed)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("exact-limit export was rejected: %v", err)
+			}
+			if export.Variables["PUBLIC"] != "visible" {
+				t.Fatalf("exact-limit export = %#v", export)
+			}
+		})
+	}
+}
+
+func TestServiceManagerOversizedSparseExportScrubsHardlinks(t *testing.T) {
+	const secret = "oversized-sparse-export-secret"
+	root := t.TempDir()
+	path := filepath.Join(serviceRuntimePath(root, "exporter"), "export.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o400)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := []byte(`{"schemaVersion":1,"secrets":{"TOKEN":"` + secret + `"}}`)
+	if _, err := file.Write(prefix); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Truncate(int64(serviceExportMaxBytes * 64)); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	hardlink := filepath.Join(filepath.Dir(path), "export-hardlink.json")
+	if err := os.Link(path, hardlink); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := &ServiceManager{root: root, now: time.Now}
+	runtime := &serviceRuntime{
+		config:   ServiceConfig{SchemaVersion: serviceSchemaVersion, ID: "exporter", Exports: true},
+		redactor: security.NewRedactor(),
+	}
+	if _, err := manager.readExportsLocked(runtime); err == nil || !strings.Contains(err.Error(), "exceeds 1 MiB") {
+		t.Fatalf("oversized sparse export error = %v, want size rejection", err)
+	}
+	for _, candidate := range []string{path, hardlink} {
+		scrubbed, err := os.ReadFile(candidate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(scrubbed, []byte(secret)) || len(scrubbed) >= serviceExportMaxBytes || !json.Valid(scrubbed) {
+			t.Fatalf("oversized inode retained bytes through %s: len=%d data=%q", filepath.Base(candidate), len(scrubbed), scrubbed)
+		}
 	}
 }
 

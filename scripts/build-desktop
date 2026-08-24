@@ -3,9 +3,15 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 out_dir=${1:-bin}
+dev_feed=${PUA_DEV_SPARKLE_FEED_URL:-}
+dev_key=${PUA_DEV_SPARKLE_PUBLIC_KEY:-}
 
 if [ "$(uname -s)" != "Darwin" ]; then
 	printf '%s\n' "build-desktop requires macOS" >&2
+	exit 1
+fi
+if { [ -n "$dev_feed" ] && [ -z "$dev_key" ]; } || { [ -z "$dev_feed" ] && [ -n "$dev_key" ]; }; then
+	printf '%s\n' "PUA_DEV_SPARKLE_FEED_URL and PUA_DEV_SPARKLE_PUBLIC_KEY must be set together" >&2
 	exit 1
 fi
 
@@ -22,10 +28,12 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 "$root/scripts/build" "$stage/backend"
-mkdir -p "$stage/PUA.app/Contents/MacOS" "$stage/PUA.app/Contents/Resources"
+sparkle=$("$root/scripts/fetch-sparkle")
+mkdir -p "$stage/PUA.app/Contents/MacOS" "$stage/PUA.app/Contents/Resources" "$stage/PUA.app/Contents/Frameworks"
 cp "$root/desktop/macos/Info.plist" "$stage/PUA.app/Contents/Info.plist"
 cp "$stage/backend/pua" "$stage/PUA.app/Contents/Resources/pua"
 cp "$stage/backend/agenthub" "$stage/PUA.app/Contents/Resources/agenthub"
+cp -R "$sparkle/Sparkle.framework" "$stage/PUA.app/Contents/Frameworks/Sparkle.framework"
 
 branch=$(git -C "$root" rev-parse --abbrev-ref HEAD 2>/dev/null || printf unknown)
 sha=$(git -C "$root" rev-parse HEAD 2>/dev/null || printf unknown)
@@ -38,12 +46,24 @@ ldflags="-X github.com/disksing/pua/internal/buildinfo.Version=$app_version -X g
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier com.disksing.pua.desktop.dev" "$stage/PUA.app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $app_version" "$stage/PUA.app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $app_build" "$stage/PUA.app/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Delete :SUFeedURL" "$stage/PUA.app/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Delete :SUPublicEDKey" "$stage/PUA.app/Contents/Info.plist"
+if [ -n "$dev_feed" ] || [ -n "$dev_key" ]; then
+	/usr/libexec/PlistBuddy -c "Set :SUFeedURL $dev_feed" "$stage/PUA.app/Contents/Info.plist"
+	/usr/libexec/PlistBuddy -c "Set :SUPublicEDKey $dev_key" "$stage/PUA.app/Contents/Info.plist"
+else
+	/usr/libexec/PlistBuddy -c "Delete :SUFeedURL" "$stage/PUA.app/Contents/Info.plist"
+	/usr/libexec/PlistBuddy -c "Delete :SUPublicEDKey" "$stage/PUA.app/Contents/Info.plist"
+	/usr/libexec/PlistBuddy -c "Set :SUEnableAutomaticChecks false" "$stage/PUA.app/Contents/Info.plist"
+fi
 
 cd "$root"
-MACOSX_DEPLOYMENT_TARGET=11.0 go build -tags production -ldflags "$ldflags" -o "$stage/PUA.app/Contents/MacOS/PUA" ./desktop/cmd/pua-desktop
+CGO_ENABLED=1 MACOSX_DEPLOYMENT_TARGET=11.0 \
+	CGO_CFLAGS="-F$sparkle" CGO_LDFLAGS="-F$sparkle" \
+	go build -tags production,sparkle -ldflags "$ldflags" -o "$stage/PUA.app/Contents/MacOS/PUA" ./desktop/cmd/pua-desktop
+install_name_tool -add_rpath @executable_path/../Frameworks "$stage/PUA.app/Contents/MacOS/PUA"
+codesign --force --deep --sign - "$stage/PUA.app/Contents/Frameworks/Sparkle.framework"
 codesign --force --deep --sign - "$stage/PUA.app"
+otool -L "$stage/PUA.app/Contents/MacOS/PUA" | grep -Fq '@rpath/Sparkle.framework/'
+codesign --verify --deep --strict "$stage/PUA.app"
 
 app_path=$out_path/PUA\ Dev.app
 old_path=$out_path/.PUA\ Dev.app.previous

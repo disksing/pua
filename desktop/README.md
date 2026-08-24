@@ -32,9 +32,11 @@ scripts/build-desktop
 open "bin/PUA Dev.app"
 ```
 
-脚本会构建带完整 Web 资源的 `pua` 与 `agenthub`，再创建 `bin/PUA Dev.app` 并使用 ad-hoc
-签名。开发 App 使用独立 bundle ID、Application Support 目录、CLI 目录和端口 14936/14646，
-不会连接或覆盖正式版数据。正式发布由 release 脚本生成 Developer ID 签名、公证的 Universal DMG。
+脚本会构建带完整 Web 资源的 `pua` 与 `agenthub`，嵌入并链接校验过的真实 Sparkle framework，
+再创建 `bin/PUA Dev.app` 并使用 ad-hoc 签名。开发 App 使用独立 bundle ID、Application Support
+目录、CLI 目录和端口 14936/14646，不会连接或覆盖正式版数据。默认不配置 feed，也不会自动检查
+正式版更新；要端到端测试开发 App 的 Sparkle 更新，可同时设置 `PUA_DEV_SPARKLE_FEED_URL` 和
+`PUA_DEV_SPARKLE_PUBLIC_KEY`。正式发布由 release 脚本生成 Developer ID 签名、公证的 Universal DMG。
 
 开发和隔离测试可使用以下环境变量：
 

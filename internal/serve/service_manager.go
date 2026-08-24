@@ -1798,7 +1798,7 @@ func removeVerifiedServiceExportHandoffWithOperations(path string, file *os.File
 		return err
 	}
 	if os.SameFile(openedInfo, quarantineInfo) {
-		return operations.remove(quarantinePath)
+		return scrubAndRemoveQuarantinedServiceExport(quarantinePath, openedInfo, operations)
 	}
 	// The path changed between verification and rename. Restore the moved
 	// replacement without overwriting a still newer hand-off.

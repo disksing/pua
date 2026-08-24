@@ -925,6 +925,10 @@ func TestServiceManagerWriteOpenFailureRemovesSecretHandoff(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"schemaVersion":1,"secrets":{"TOKEN":"`+secret+`"}}`), 0o400); err != nil {
 		t.Fatal(err)
 	}
+	hardlink := filepath.Join(filepath.Dir(path), "export-hardlink.json")
+	if err := os.Link(path, hardlink); err != nil {
+		t.Fatal(err)
+	}
 	manager := &ServiceManager{
 		root: root,
 		now:  time.Now,
@@ -942,10 +946,15 @@ func TestServiceManagerWriteOpenFailureRemovesSecretHandoff(t *testing.T) {
 	if _, err := manager.readExportsLocked(runtime); err == nil {
 		t.Fatal("export with an unwritable hand-off was accepted")
 	}
-	if data, err := os.ReadFile(path); err == nil && bytes.Contains(data, []byte(secret)) {
-		t.Fatalf("failed hand-off retained its secret: %s", data)
-	} else if err != nil && !os.IsNotExist(err) {
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("failed hand-off pathname remains: %v", err)
+	}
+	data, err := os.ReadFile(hardlink)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if bytes.Contains(data, []byte(secret)) || len(data) != 0 {
+		t.Fatalf("failed hand-off hardlink retained secret bytes: %q", data)
 	}
 	matches, err := filepath.Glob(filepath.Join(filepath.Dir(path), ".export-handoff-*"))
 	if err != nil {

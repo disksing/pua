@@ -97,6 +97,10 @@
 
   function inboxRowKeydown(event: KeyboardEvent, message: ShellInboxMessage): void {
     if (event.key !== "Enter" && event.key !== " ") return;
+    // Only handle keys pressed while the row itself is focused. Keydown events
+    // bubble from children (reply textarea, action buttons), where Space and
+    // Enter must keep their native behavior.
+    if (event.target !== event.currentTarget) return;
     event.preventDefault();
     void openInboxMessage(message);
   }

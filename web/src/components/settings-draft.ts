@@ -14,7 +14,6 @@ export function createSettingsDraft(model: SettingsModel): SettingsDraft {
       id: provider.id,
       name: provider.name || provider.id,
       type: provider.type || provider.id,
-      enabled: provider.enabled !== false,
       ...(provider.command ? { command: provider.command } : {}),
     }))).map(cloneAgentHubProvider),
     agentConfigs: (model.agentHub.agentConfig?.agents || model.agentHub.agents.map((agent) => ({

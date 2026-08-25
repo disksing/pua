@@ -92,7 +92,7 @@ func (f *runtimeFakeAgentHub) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 			agents = append(agents, map[string]any{"name": extra, "providerId": "fake", "available": true})
 		}
 		writeRuntimeFakeJSON(w, map[string]any{
-			"providers": []any{map[string]any{"id": "fake", "name": "Fake", "type": "fake", "enabled": true}},
+			"providers": []any{map[string]any{"id": "fake", "name": "Fake", "type": "fake"}},
 			"agents":    agents, "probes": []any{},
 		})
 		return
@@ -661,7 +661,7 @@ func TestCreateResourceGenerationPersistsAgentHubCatalogSnapshot(t *testing.T) {
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/agents" && r.Method == http.MethodGet {
 			writeRuntimeFakeJSON(w, map[string]any{
-				"providers": []any{map[string]any{"id": "codex", "name": "Codex Cloud", "type": "cloud", "enabled": true}},
+				"providers": []any{map[string]any{"id": "codex", "name": "Codex Cloud", "type": "cloud"}},
 				"agents":    []any{map[string]any{"name": "fake-agent", "providerId": "codex", "options": map[string]string{"model": "gpt-history"}, "available": true}},
 				"probes":    []any{},
 			})

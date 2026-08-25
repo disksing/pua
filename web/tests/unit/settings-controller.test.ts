@@ -206,10 +206,10 @@ describe("SettingsController", () => {
 			connected: true,
 			compatible: true,
 			status: { apiVersion: "1", version: "test", capabilities: [] },
-			catalog: { providers: [{ id: "codex", name: "Codex", type: "codex", enabled: true }], agents: [], probes: [] },
+			catalog: { providers: [{ id: "codex", name: "Codex", type: "codex" }], agents: [], probes: [] },
 			config: { agentProfiles: [] },
 			agentConfig: {
-				providers: [{ id: "codex", name: "Codex", type: "codex", enabled: true }],
+				providers: [{ id: "codex", name: "Codex", type: "codex" }],
 				agents: [{ name: "Default", providerId: "codex" }],
 			},
 		};
@@ -228,7 +228,8 @@ describe("SettingsController", () => {
 				requests.push({ path, body });
 				const currentProvider = hub.agentConfig?.providers?.[0];
 				if (!currentProvider) throw new Error("missing test provider");
-				const provider = { ...currentProvider, enabled: body.enabled };
+				if (body.command === "/bad/path") throw new Error("codex executable \"/bad/path\" not found");
+				const provider = { ...currentProvider, command: body.command || undefined };
 				hub = { ...hub, agentConfig: { ...hub.agentConfig!, providers: [provider] } };
 				return { provider } as T;
 			}
@@ -248,12 +249,12 @@ describe("SettingsController", () => {
 		draft.dirty = true;
 		await published.at(-1)!.onSaveAgentHub(draft);
 		const savedBody = requests.find((request) => request.path === "/api/settings/agenthub")?.body as Record<string, unknown>;
-		expect(savedBody.agentProviders).toEqual([{ id: "codex", name: "Codex", type: "codex", enabled: true, command: "/opt/homebrew/bin/codex" }]);
+		expect(savedBody.agentProviders).toEqual([{ id: "codex", name: "Codex", type: "codex", command: "/opt/homebrew/bin/codex" }]);
 		expect(savedBody.agents).toEqual([{ name: "Worker", providerId: "codex" }]);
 
-		await published.at(-1)!.onToggleProvider("codex", false);
-		expect(requests.at(-1)).toEqual({ path: "/api/settings/agenthub/providers/codex", body: { enabled: false } });
-		expect(published.at(-1)?.agentHub.agentConfig?.providers[0]?.enabled).toBe(false);
+		await published.at(-1)!.onSetProviderCommand("codex", "/usr/local/bin/codex");
+		expect(requests.at(-1)).toEqual({ path: "/api/settings/agenthub/providers/codex", body: { command: "/usr/local/bin/codex" } });
+		expect(published.at(-1)?.agentHub.agentConfig?.providers[0]?.command).toBe("/usr/local/bin/codex");
 	});
 
 	it("externalSync refreshes an open modal with the latest server settings", async () => {

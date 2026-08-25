@@ -117,7 +117,6 @@ export function normalizeConfig(config = {}) {
       id: String(provider?.id ?? ""),
       name: String(provider?.name ?? ""),
       type: String(provider?.type ?? ""),
-      enabled: Boolean(provider?.enabled),
     };
     const command = String(provider?.command ?? "").trim();
     if (command) result.command = command;

@@ -201,7 +201,7 @@ func writeConfig(t *testing.T, root string) {
 		"version": 1,
 		"agentProviders": []map[string]any{{
 			"id": "fake", "name": "PUA gate fake ACP", "type": "kimi",
-			"enabled": true, "command": providerBinary,
+			"command": providerBinary,
 		}},
 		"agents": []map[string]any{{"name": "Fake ACP", "providerId": "fake"}},
 	}

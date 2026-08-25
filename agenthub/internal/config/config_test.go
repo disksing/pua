@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"bytes"
 	"os"
 	"path/filepath"
@@ -11,7 +12,7 @@ import (
 func TestAgentResolvesProvider(t *testing.T) {
 	cfg := Config{
 		Version:        1,
-		AgentProviders: []Provider{{ID: "p", Type: "pi", Enabled: true}},
+		AgentProviders: []Provider{{ID: "p", Type: "pi"}},
 		Agents:         []Agent{{Name: "Agent A", ProviderID: "p"}, {Name: "Agent B", ProviderID: "p"}},
 	}
 	agent, provider, err := cfg.Agent("Agent B")
@@ -23,14 +24,14 @@ func TestAgentResolvesProvider(t *testing.T) {
 	}
 }
 
-func TestAgentRejectsDisabledProvider(t *testing.T) {
+func TestAgentRejectsUnconfiguredProvider(t *testing.T) {
 	cfg := Config{
 		Version:        1,
-		AgentProviders: []Provider{{ID: "p", Type: "pi", Enabled: false}},
-		Agents:         []Agent{{Name: "Agent A", ProviderID: "p"}},
+		AgentProviders: []Provider{{ID: "p", Type: "pi"}},
+		Agents:         []Agent{{Name: "Agent A", ProviderID: "ghost"}},
 	}
 	if _, _, err := cfg.Agent("Agent A"); err == nil {
-		t.Fatal("expected an error for an agent whose provider is disabled")
+		t.Fatal("expected an error for an agent whose provider is not configured")
 	}
 }
 
@@ -39,7 +40,7 @@ func TestAgentRejectsDisabledProvider(t *testing.T) {
 func TestAgentLookupIsCaseInsensitiveAndTrims(t *testing.T) {
 	cfg := Config{
 		Version:        1,
-		AgentProviders: []Provider{{ID: "p", Type: "pi", Enabled: true}},
+		AgentProviders: []Provider{{ID: "p", Type: "pi"}},
 		Agents:         []Agent{{Name: "Kimi K3", ProviderID: "p"}},
 	}
 	for _, reference := range []string{"Kimi K3", "kimi k3", "  KIMI K3  "} {
@@ -51,7 +52,7 @@ func TestAgentLookupIsCaseInsensitiveAndTrims(t *testing.T) {
 }
 
 func TestValidateAgentNames(t *testing.T) {
-	provider := Provider{ID: "p", Type: "pi", Enabled: true}
+	provider := Provider{ID: "p", Type: "pi"}
 	cases := []struct {
 		name   string
 		agents []Agent
@@ -93,7 +94,7 @@ func TestValidateAgentNames(t *testing.T) {
 }
 
 func TestValidateAgentEnvironment(t *testing.T) {
-	provider := Provider{ID: "p", Type: "pi", Enabled: true}
+	provider := Provider{ID: "p", Type: "pi"}
 	cases := []struct {
 		name string
 		env  map[string]string
@@ -213,29 +214,33 @@ func TestLoadRejectsRemovedConfigFields(t *testing.T) {
 	}
 }
 
-func TestSetProviderEnabledFlipsOnlyTheFlag(t *testing.T) {
+func TestSetProviderCommandReplacesOnlyTheCommand(t *testing.T) {
+	executable := filepath.Join(t.TempDir(), "kimi-custom")
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	cfg := Config{
 		Version: 1,
 		AgentProviders: []Provider{
-			{ID: "codex", Name: "Codex app-server", Type: "codex", Enabled: true},
-			{ID: "kimi", Name: "Kimi Code", Type: "kimi", Enabled: true, Command: "/opt/kimi/bin/kimi"},
+			{ID: "codex", Name: "Codex app-server", Type: "codex"},
+			{ID: "kimi", Name: "Kimi Code", Type: "kimi", Command: "/opt/kimi/bin/kimi"},
 		},
 		Agents: []Agent{{Name: "Kimi K3", ProviderID: "kimi", Options: map[string]string{"model": "k3"}}},
 	}
-	next, provider, err := cfg.SetProviderEnabled("kimi", false)
+	next, provider, err := cfg.SetProviderCommand("kimi", executable)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if provider.Enabled || provider.Command != "/opt/kimi/bin/kimi" || provider.Name != "Kimi Code" {
-		t.Fatalf("toggle did not preserve the provider: %+v", provider)
+	if provider.Command != executable || provider.Name != "Kimi Code" {
+		t.Fatalf("command update did not preserve the provider: %+v", provider)
 	}
-	// Re-enabling restores the same underlying configuration.
-	restored, provider, err := next.SetProviderEnabled("kimi", true)
+	// Clearing the command restores automatic detection.
+	restored, provider, err := next.SetProviderCommand("kimi", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !provider.Enabled || provider.Command != "/opt/kimi/bin/kimi" {
-		t.Fatalf("re-enable lost the underlying configuration: %+v", provider)
+	if provider.Command != "" {
+		t.Fatalf("clearing the command failed: %+v", provider)
 	}
 	if len(restored.AgentProviders) != 2 || restored.AgentProviders[0].ID != "codex" {
 		t.Fatalf("provider order changed: %+v", restored.AgentProviders)
@@ -244,55 +249,62 @@ func TestSetProviderEnabledFlipsOnlyTheFlag(t *testing.T) {
 		t.Fatalf("agents were altered: %+v", restored.Agents)
 	}
 	// The input config is never mutated.
-	if !cfg.AgentProviders[1].Enabled {
-		t.Fatal("SetProviderEnabled mutated its input")
+	if cfg.AgentProviders[1].Command != "/opt/kimi/bin/kimi" {
+		t.Fatal("SetProviderCommand mutated its input")
 	}
 }
 
-func TestSetProviderEnabledCopiesEnvironment(t *testing.T) {
+func TestSetProviderCommandRejectsInvalidExecutable(t *testing.T) {
+	cfg := Defaults()
+	missing := filepath.Join(t.TempDir(), "missing-kimi")
+	if _, _, err := cfg.SetProviderCommand("kimi", missing); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("expected an executable resolution error, got %v", err)
+	}
+	directory := t.TempDir()
+	if _, _, err := cfg.SetProviderCommand("kimi", directory); err == nil {
+		t.Fatal("expected an error for a directory path")
+	}
+}
+
+func TestSetProviderCommandCopiesEnvironment(t *testing.T) {
 	cfg := Config{
 		Version:        1,
-		AgentProviders: []Provider{{ID: "codex", Name: "Codex app-server", Type: "codex", Enabled: true}, {ID: "kimi", Name: "Kimi Code", Type: "kimi", Enabled: true}},
+		AgentProviders: []Provider{{ID: "codex", Name: "Codex app-server", Type: "codex"}, {ID: "kimi", Name: "Kimi Code", Type: "kimi"}},
 		Agents:         []Agent{{Name: "Kimi K3", ProviderID: "kimi", Options: map[string]string{"model": "k3"}, Environment: map[string]string{"FOO": "bar"}}},
 	}
-	next, _, err := cfg.SetProviderEnabled("kimi", false)
+	next, _, err := cfg.SetProviderCommand("kimi", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if next.Agents[0].Environment["FOO"] != "bar" {
-		t.Fatalf("toggle lost agent environment: %+v", next.Agents[0])
+		t.Fatalf("command update lost agent environment: %+v", next.Agents[0])
 	}
 	next.Agents[0].Environment["FOO"] = "mutated"
 	if cfg.Agents[0].Environment["FOO"] != "bar" {
-		t.Fatal("SetProviderEnabled mutated the input agent environment")
+		t.Fatal("SetProviderCommand mutated the input agent environment")
 	}
 }
 
-func TestSetProviderEnabledAppendsBuiltinDefault(t *testing.T) {
+func TestSetProviderCommandAppendsBuiltinDefault(t *testing.T) {
 	cfg := Config{
 		Version:        1,
-		AgentProviders: []Provider{{ID: "codex", Name: "Codex app-server", Type: "codex", Enabled: true}},
+		AgentProviders: []Provider{{ID: "codex", Name: "Codex app-server", Type: "codex"}},
 	}
-	next, provider, err := cfg.SetProviderEnabled("pi", true)
+	next, provider, err := cfg.SetProviderCommand("pi", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if provider != (Provider{ID: "pi", Name: "Pi Coding Agent", Type: "pi", Enabled: true}) {
+	if provider.ID != "pi" || provider.Name != "Pi Coding Agent" || provider.Type != "pi" || provider.Command != "" {
 		t.Fatalf("unexpected default provider: %+v", provider)
 	}
 	if err := next.Validate(); err != nil {
 		t.Fatalf("config with appended default is invalid: %v", err)
 	}
-	// A missing provider can also be recorded as disabled.
-	_, provider, err = cfg.SetProviderEnabled("opencode", false)
-	if err != nil || provider.Enabled {
-		t.Fatalf("unexpected disabled default: %+v %v", provider, err)
-	}
 }
 
-func TestSetProviderEnabledRejectsUnknownProvider(t *testing.T) {
+func TestSetProviderCommandRejectsUnknownProvider(t *testing.T) {
 	cfg := Defaults()
-	if _, _, err := cfg.SetProviderEnabled("ghost", true); err == nil {
+	if _, _, err := cfg.SetProviderCommand("ghost", ""); err == nil {
 		t.Fatal("expected an error for an unknown provider")
 	}
 }
@@ -304,7 +316,7 @@ func TestDefaultsCoverTheFourBuiltinProviders(t *testing.T) {
 		t.Fatalf("defaults = %+v, want the four built-in providers", defaults.AgentProviders)
 	}
 	for i, provider := range builtin {
-		if defaults.AgentProviders[i].ID != provider.ID || !defaults.AgentProviders[i].Enabled {
+		if defaults.AgentProviders[i].ID != provider.ID {
 			t.Fatalf("unexpected default at %d: %+v", i, defaults.AgentProviders[i])
 		}
 	}
@@ -335,7 +347,7 @@ func TestLoadRejectsDuplicateAgentNames(t *testing.T) {
 }
 
 func TestDetectRenames(t *testing.T) {
-	providers := []Provider{{ID: "p", Type: "pi", Enabled: true}}
+	providers := []Provider{{ID: "p", Type: "pi"}}
 	oldConfig := Config{Version: 1, AgentProviders: providers, Agents: []Agent{
 		{Name: "Codex", ProviderID: "p", Options: map[string]string{"model": "m"}},
 		{Name: "Kimi", ProviderID: "p"},
@@ -386,5 +398,41 @@ func TestDetectRenames(t *testing.T) {
 	renames, err = DetectRenames(oldConfig, envChanged)
 	if err != nil || len(renames) != 0 {
 		t.Fatalf("environment-only change must not be a rename: %+v %v", renames, err)
+	}
+}
+
+// The removed "enabled" flag of older configs stays loadable; it is ignored
+// and never written back.
+func TestLoadDropsLegacyProviderEnabled(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	legacy := `{"version":1,"agentProviders":[{"id":"pi","name":"Pi Coding Agent","type":"pi","enabled":false}],"agents":[{"name":"Pi","providerId":"pi"}]}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("legacy enabled flag must stay loadable: %v", err)
+	}
+	if len(cfg.AgentProviders) != 1 || cfg.AgentProviders[0].LegacyEnabled != nil {
+		t.Fatalf("legacy flag must be cleared after load: %+v", cfg.AgentProviders)
+	}
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved struct {
+		AgentProviders []map[string]any `json:"agentProviders"`
+	}
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if len(saved.AgentProviders) != 1 {
+		t.Fatalf("saved providers = %s", data)
+	}
+	if _, exists := saved.AgentProviders[0]["enabled"]; exists {
+		t.Fatalf("saved config must not contain the removed enabled flag: %s", data)
 	}
 }

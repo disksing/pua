@@ -36,7 +36,6 @@ export interface AgentHubProviderInfo {
   id: string;
   name?: string;
   type?: string;
-  enabled?: boolean;
   command?: string;
 }
 
@@ -54,13 +53,13 @@ export interface AgentHubProbeInfo {
   type?: string;
   command?: string;
   available?: boolean;
+  error?: string;
 }
 
 export interface AgentHubConfigProvider {
   id: string;
   name: string;
   type: string;
-  enabled: boolean;
   command?: string;
 }
 
@@ -145,7 +144,7 @@ export interface SettingsModel {
   onResetFontScales: () => void;
   onThemePreference: (theme: string) => void;
   onSaveAgentHub: (draft: SettingsDraft) => Promise<void>;
-  onToggleProvider: (providerId: string, enabled: boolean) => Promise<AgentHubConfigProvider>;
+  onSetProviderCommand: (providerId: string, command: string) => Promise<AgentHubConfigProvider>;
   onBrowserNotifications: (enabled: boolean) => void;
   onCompletionSound: (enabled: boolean) => void;
   onToast: (message: string) => void;

@@ -81,10 +81,9 @@ type agentHubPaths struct {
 }
 
 type agentHubProvider struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Type    string `json:"type"`
-	Enabled bool   `json:"enabled"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Type string `json:"type"`
 }
 
 type agentHubAgent struct {
@@ -100,6 +99,7 @@ type agentHubProbe struct {
 	Type       string `json:"type"`
 	Command    string `json:"command,omitempty"`
 	Available  bool   `json:"available"`
+	Error      string `json:"error,omitempty"`
 }
 
 type agentHubCatalog struct {
@@ -116,7 +116,6 @@ type agentHubConfiguredProvider struct {
 	ID      string `json:"id"`
 	Name    string `json:"name"`
 	Type    string `json:"type"`
-	Enabled bool   `json:"enabled"`
 	Command string `json:"command,omitempty"`
 }
 
@@ -439,13 +438,13 @@ func (c *agentHubClient) SaveConfig(ctx context.Context, config agentHubConfigur
 	return response.Config, err
 }
 
-func (c *agentHubClient) SetProviderEnabled(ctx context.Context, id string, enabled bool) (agentHubConfiguredProvider, error) {
+func (c *agentHubClient) SetProviderCommand(ctx context.Context, id string, command string) (agentHubConfiguredProvider, error) {
 	var response struct {
 		Provider agentHubConfiguredProvider `json:"provider"`
 	}
 	err := c.doJSON(ctx, http.MethodPut, "/v1/config/providers/"+url.PathEscape(strings.TrimSpace(id)), struct {
-		Enabled bool `json:"enabled"`
-	}{Enabled: enabled}, &response)
+		Command string `json:"command"`
+	}{Command: command}, &response)
 	return response.Provider, err
 }
 

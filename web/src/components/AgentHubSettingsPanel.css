@@ -125,47 +125,30 @@
   font-weight: 700;
 }
 
-:where([data-component-owner="agenthub-settings-panel"]) .settings-switch {
+:where([data-component-owner="agenthub-settings-panel"]) .settings-provider-path {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+
+:where([data-component-owner="agenthub-settings-panel"]) .settings-provider-path code {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:where([data-component-owner="agenthub-settings-panel"]) .settings-provider-path-invalid {
+  color: var(--red, var(--accent));
+}
+
+:where([data-component-owner="agenthub-settings-panel"]) .settings-provider-actions {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 12px;
   flex: 0 0 auto;
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 700;
-}
-
-:where([data-component-owner="agenthub-settings-panel"]) .settings-switch > span {
-  position: relative;
-  width: 34px;
-  height: 20px;
-  border-radius: 999px;
-  background: var(--line-strong);
-  transition: background 0.12s ease;
-}
-
-:where([data-component-owner="agenthub-settings-panel"]) .settings-switch > span::after {
-  position: absolute;
-  top: 3px;
-  left: 3px;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: var(--panel);
-  content: "";
-  transition: transform 0.12s ease;
-}
-
-:where([data-component-owner="agenthub-settings-panel"]) .settings-switch[aria-checked="true"] {
-  color: var(--green-deep);
-}
-
-:where([data-component-owner="agenthub-settings-panel"]) .settings-switch[aria-checked="true"] > span {
-  background: var(--green);
-}
-
-:where([data-component-owner="agenthub-settings-panel"]) .settings-switch[aria-checked="true"] > span::after {
-  transform: translateX(14px);
 }
 
 :where([data-component-owner="agenthub-settings-panel"]) .settings-agent-card {
@@ -351,13 +334,18 @@
   color: var(--amber-deep, var(--muted));
 }
 
+:where([data-component-owner="agenthub-settings-panel"]) .pill-danger {
+  background: var(--red-soft, var(--panel-sunken));
+  color: var(--red, var(--accent));
+}
+
 @media (max-width: 980px) {
   :where([data-component-owner="agenthub-settings-panel"]) .settings-service-row {
     align-items: stretch;
     flex-direction: column;
   }
 
-  :where([data-component-owner="agenthub-settings-panel"]) .settings-switch {
+  :where([data-component-owner="agenthub-settings-panel"]) .settings-provider-actions {
     align-self: flex-end;
   }
 

@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { normalizeAgentOptions, uniqueAgentName, validateAgentHubAgents } from "../../src/components/agenthub-config";
 
 describe("AgentHub config editing", () => {
-  const providers = [{ id: "codex", name: "Codex", type: "codex", enabled: true }];
+  const providers = [{ id: "codex", name: "Codex", type: "codex" }];
 
   it("keeps only options supported by the selected provider", () => {
     expect(normalizeAgentOptions("codex", { model: " gpt-test ", sandbox: "danger-full-access", mode: "plan" })).toEqual({

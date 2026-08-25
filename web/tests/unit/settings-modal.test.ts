@@ -54,7 +54,7 @@ afterEach(async () => {
     onResetFontScales: vi.fn(),
     onThemePreference: vi.fn(),
     onSaveAgentHub: vi.fn(async () => undefined),
-    onToggleProvider: vi.fn(async (providerId, enabled) => ({ id: providerId, name: providerId, type: providerId, enabled })),
+    onSetProviderCommand: vi.fn(async (providerId) => ({ id: providerId, name: providerId, type: providerId })),
     onBrowserNotifications: vi.fn(),
     onCompletionSound: vi.fn(),
     onToast: vi.fn(),

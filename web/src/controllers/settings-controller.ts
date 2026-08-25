@@ -17,7 +17,7 @@ export interface AgentHubData {
 	error?: string;
 	status?: { apiVersion?: string; version?: string; capabilities?: string[] };
 	catalog?: {
-		providers?: Array<{ id: string; name?: string; type?: string; enabled?: boolean; command?: string }>;
+		providers?: Array<{ id: string; name?: string; type?: string; command?: string }>;
 		agents?: Array<{ name: string; providerId?: string; options?: Record<string, string>; environment?: Record<string, string>; available?: boolean; unavailableReason?: string }>;
 		probes?: Array<{ providerId: string; type?: string; command?: string; available?: boolean }>;
 	};
@@ -190,7 +190,7 @@ export function createSettingsController(dependencies: SettingsControllerDepende
 				render();
 			},
 			onSaveAgentHub: async (draft) => { syncDraft(draft); await saveAgentSettings(); },
-			onToggleProvider: toggleProvider,
+			onSetProviderCommand: setProviderCommand,
 			onBrowserNotifications: dependencies.setBrowserNotifications,
 			onCompletionSound: dependencies.setCompletionSound,
 			onToast: dependencies.toast
@@ -384,10 +384,10 @@ export function createSettingsController(dependencies: SettingsControllerDepende
 		dependencies.toast("AgentHub settings saved.");
 	}
 
-	async function toggleProvider(providerID: string, enabled: boolean): Promise<AgentHubConfigProvider> {
+	async function setProviderCommand(providerID: string, command: string): Promise<AgentHubConfigProvider> {
 		const response = await dependencies.request<{ provider: AgentHubConfigProvider }>(`/api/settings/agenthub/providers/${encodeURIComponent(providerID)}`, {
 			method: "PUT",
-			body: JSON.stringify({ enabled })
+			body: JSON.stringify({ command })
 		});
 		const current = state.data?.agentHub?.agentConfig || { providers: [], agents: [] };
 		const providers = (current.providers || []).map((provider) => provider.id === response.provider.id ? { ...response.provider } : { ...provider });

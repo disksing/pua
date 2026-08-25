@@ -251,7 +251,7 @@ async function installMockApi(page: Page, lastResourceId = "project1.task1", wit
         connected: true,
         compatible: true,
         catalog: {
-          providers: [{ id: "test", name: "Test Provider", enabled: true }],
+          providers: [{ id: "test", name: "Test Provider" }],
           agents: ["test-agent", "other-agent", ...extraAgents].map((name) => ({ name, providerId: "test", available: true })),
           probes: [],
         },
@@ -2669,7 +2669,7 @@ test("keeps Profiles settings cards inside the 390px mobile viewport without hor
         connected: true,
         compatible: true,
         catalog: {
-          providers: [{ id: "test", name: "Test Provider", enabled: true }],
+          providers: [{ id: "test", name: "Test Provider" }],
           agents: ["test-agent", "other-agent"].map((name) => ({ name, providerId: "test", available: true })),
           probes: [],
         },

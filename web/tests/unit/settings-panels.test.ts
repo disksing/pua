@@ -40,7 +40,7 @@ function model(overrides: Partial<SettingsModel> = {}): SettingsModel {
       apiVersion: "v1",
       version: "1.2.3",
       capabilities: ["sessions"],
-      providers: [{ id: "codex" }],
+      providers: [{ id: "codex", name: "Codex", type: "codex" }],
       agents: [{ name: "Codex", providerId: "codex", available: true }],
       probes: [],
     },
@@ -60,7 +60,7 @@ function model(overrides: Partial<SettingsModel> = {}): SettingsModel {
     onResetFontScales: vi.fn(),
     onThemePreference: vi.fn(),
     onSaveAgentHub: vi.fn(async () => undefined),
-    onToggleProvider: vi.fn(async (providerId, enabled) => ({ id: providerId, name: providerId, type: providerId, enabled })),
+    onSetProviderCommand: vi.fn(async (providerId) => ({ id: providerId, name: providerId, type: providerId })),
     onBrowserNotifications: vi.fn(),
     onCompletionSound: vi.fn(),
     onToast: vi.fn(),
@@ -260,7 +260,7 @@ describe("settings domain panels", () => {
     expect(target.querySelector<HTMLButtonElement>(".appearance-reset")?.disabled).toBe(true);
   });
 
-  it("owns AgentHub connection, provider switches, agent draft dirtiness, save pending, and errors", async () => {
+  it("owns AgentHub connection, provider status, agent draft dirtiness, save pending, and errors", async () => {
     const save = deferred<void>();
     const onSaveAgentHub = vi.fn()
       .mockImplementationOnce(() => save.promise)
@@ -274,14 +274,10 @@ describe("settings domain panels", () => {
 
     expect(target.textContent).toContain("Compatible");
     expect(target.textContent).toContain("Codex");
-    expect(target.textContent).toContain("1 providers · switches immediate, paths on Save All");
+    expect(target.textContent).toContain("1 providers · detected automatically, paths save on confirm");
     expect(target.textContent).toContain("1 agents");
     expect(target.textContent).not.toContain("API v1 · AgentHub 1.2.3");
     expect(target.querySelector(".settings-capability-list")).toBeNull();
-
-    input(target.querySelector<HTMLInputElement>('input[aria-label$="executable path"]')!, "/opt/homebrew/bin/codex");
-    await tick();
-    expect(target.querySelector(".settings-save-hint.visible")).toBeTruthy();
 
     input(target.querySelector<HTMLInputElement>("#settingsAgentHubEndpoint")!, "http://127.0.0.1:5656");
     await tick();
@@ -294,7 +290,7 @@ describe("settings domain panels", () => {
     expect(onSaveAgentHub).toHaveBeenCalledWith(expect.objectContaining({
       endpoint: "http://127.0.0.1:5656",
       dirty: true,
-      agentProviders: [expect.objectContaining({ id: "codex", command: "/opt/homebrew/bin/codex" })],
+      agentProviders: [expect.objectContaining({ id: "codex" })],
     }));
     expect(saveButton.disabled).toBe(true);
 
@@ -318,21 +314,105 @@ describe("settings domain panels", () => {
     expect(target.textContent).toContain("not applicable in this mode");
   });
 
-  it("toggles providers immediately and edits agent cards in the shared draft", async () => {
-    const toggle = vi.fn(async (providerId: string, enabled: boolean) => ({ id: providerId, name: "Codex", type: "codex", enabled }));
-    const current = model({ onToggleProvider: toggle });
+  it("shows detected provider paths, edits them inline, and keeps the editor on rejection", async () => {
+    const setCommand = vi.fn(async (providerId: string, command: string) => {
+      if (command === "/bad/codex") throw new Error(`codex executable "${command}" not found`);
+      return { id: providerId, name: "Codex", type: "codex", ...(command ? { command } : {}) };
+    });
+    const current = model({
+      onSetProviderCommand: setCommand,
+      agentHub: {
+        ...model().agentHub,
+        probes: [{ providerId: "codex", type: "codex", command: "/opt/homebrew/bin/codex", available: true }],
+      },
+    });
     const target = document.body.appendChild(document.createElement("div"));
     const component = mount(SettingsPanelHarness, { target, props: { panel: "agenthub", model: current, initialDraft: createSettingsDraft(current) } });
     cleanups.push(() => unmount(component));
     await tick();
 
-    input(target.querySelector<HTMLInputElement>('input[aria-label$="executable path"]')!, "/opt/homebrew/bin/codex");
+    // A resolved executable renders as enabled with the detected path.
+    expect(target.textContent).toContain("Enabled");
+    expect(target.textContent).toContain("/opt/homebrew/bin/codex");
+    expect(target.querySelector('input[aria-label$="executable path"]')).toBeNull();
+
+    // Change path turns the row into an input with a confirm button.
+    target.querySelector<HTMLButtonElement>('[aria-label="Change Codex executable path"]')!.click();
     await tick();
-    target.querySelector<HTMLButtonElement>('[role="switch"]')!.click();
-    await vi.waitFor(() => expect(toggle).toHaveBeenCalledWith("codex", false));
+    const pathInput = target.querySelector<HTMLInputElement>('input[aria-label="Codex executable path"]')!;
+    expect(pathInput).toBeTruthy();
+    input(pathInput, "/bad/codex");
+    target.querySelector<HTMLButtonElement>('[aria-label="Confirm Codex executable path"]')!.click();
+    await vi.waitFor(() => expect(setCommand).toHaveBeenCalledWith("codex", "/bad/codex"));
     await tick();
-    expect(target.querySelector('[role="switch"]')?.getAttribute("aria-checked")).toBe("false");
-    expect(target.querySelector<HTMLInputElement>('input[aria-label$="executable path"]')?.value).toBe("/opt/homebrew/bin/codex");
+    // The server rejected the path: the editor stays open with the error.
+    expect(target.querySelector('input[aria-label="Codex executable path"]')).not.toBeNull();
+    expect(target.textContent).toContain('codex executable "/bad/codex" not found');
+    expect(target.textContent).not.toContain("Unsaved changes");
+
+    // A valid path saves immediately and closes the editor.
+    input(target.querySelector<HTMLInputElement>('input[aria-label="Codex executable path"]')!, "/usr/local/bin/codex");
+    target.querySelector<HTMLButtonElement>('[aria-label="Confirm Codex executable path"]')!.click();
+    await vi.waitFor(() => expect(setCommand).toHaveBeenCalledWith("codex", "/usr/local/bin/codex"));
+    await tick();
+    expect(target.querySelector('input[aria-label="Codex executable path"]')).toBeNull();
+  });
+
+  it("shows unavailable providers in red with an inline path editor", async () => {
+    const setCommand = vi.fn(async (providerId: string, command: string) => ({ id: providerId, name: "Codex", type: "codex", ...(command ? { command } : {}) }));
+    const missing = model({
+      onSetProviderCommand: setCommand,
+      agentHub: {
+        ...model().agentHub,
+        probes: [{ providerId: "codex", type: "codex", available: false, error: 'codex executable "codex" not found' }],
+      },
+    });
+    const target = document.body.appendChild(document.createElement("div"));
+    const component = mount(SettingsPanelHarness, { target, props: { panel: "agenthub", model: missing, initialDraft: createSettingsDraft(missing) } });
+    cleanups.push(() => unmount(component));
+    await tick();
+
+    // No detected and no configured path: the row offers the input directly.
+    expect(target.textContent).toContain("Unavailable");
+    expect(target.textContent).toContain('codex executable "codex" not found');
+    expect(target.querySelector('input[aria-label="Codex executable path"]')).not.toBeNull();
+    expect(target.querySelector('[aria-label="Confirm Codex executable path"]')).not.toBeNull();
+    expect(target.querySelector('[aria-label="Change Codex executable path"]')).toBeNull();
+
+    input(target.querySelector<HTMLInputElement>('input[aria-label="Codex executable path"]')!, "/usr/local/bin/codex");
+    target.querySelector<HTMLButtonElement>('[aria-label="Confirm Codex executable path"]')!.click();
+    await vi.waitFor(() => expect(setCommand).toHaveBeenCalledWith("codex", "/usr/local/bin/codex"));
+
+    // A configured path that stopped resolving renders red with a change button.
+    const stale = model({
+      onSetProviderCommand: setCommand,
+      agentHub: {
+        ...model().agentHub,
+        providers: [{ id: "codex", command: "/old/bin/codex" }],
+        agentConfig: { providers: [{ id: "codex", name: "Codex", type: "codex", command: "/old/bin/codex" }], agents: [{ name: "Codex", providerId: "codex" }] },
+        probes: [{ providerId: "codex", type: "codex", available: false, error: 'codex executable "/old/bin/codex" not found' }],
+      },
+    });
+    const staleTarget = document.body.appendChild(document.createElement("div"));
+    const staleComponent = mount(SettingsPanelHarness, { target: staleTarget, props: { panel: "agenthub", model: stale, initialDraft: createSettingsDraft(stale) } });
+    cleanups.push(() => unmount(staleComponent));
+    await tick();
+
+    expect(staleTarget.textContent).toContain("Unavailable");
+    const invalidPath = staleTarget.querySelector(".settings-provider-path-invalid");
+    expect(invalidPath?.textContent).toContain("/old/bin/codex");
+    expect(staleTarget.querySelector('input[aria-label="Codex executable path"]')).toBeNull();
+    staleTarget.querySelector<HTMLButtonElement>('[aria-label="Change Codex executable path"]')!.click();
+    await tick();
+    expect(staleTarget.querySelector('input[aria-label="Codex executable path"]')).not.toBeNull();
+  });
+
+  it("edits agent cards in the shared draft", async () => {
+    const current = model();
+    const target = document.body.appendChild(document.createElement("div"));
+    const component = mount(SettingsPanelHarness, { target, props: { panel: "agenthub", model: current, initialDraft: createSettingsDraft(current) } });
+    cleanups.push(() => unmount(component));
+    await tick();
 
     target.querySelector<HTMLButtonElement>("#settingsAddAgent")!.click();
     await tick();

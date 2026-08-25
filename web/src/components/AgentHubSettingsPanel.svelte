@@ -19,7 +19,7 @@
     pending = $bindable(),
     onDirty,
     onSaveAgentHub,
-    onToggleProvider,
+    onSetProviderCommand,
     onToast,
   }: {
     agentHub: SettingsModel["agentHub"];
@@ -27,7 +27,7 @@
     pending: string;
     onDirty: () => void;
     onSaveAgentHub: SettingsModel["onSaveAgentHub"];
-    onToggleProvider: SettingsModel["onToggleProvider"];
+    onSetProviderCommand: SettingsModel["onSetProviderCommand"];
     onToast: SettingsModel["onToast"];
   } = $props();
 
@@ -61,6 +61,17 @@
 
   function probeFor(id: string) {
     return agentHub.probes.find((probe) => probe.providerId === id);
+  }
+
+  // A provider is available whenever its executable resolves; without probe
+  // data (e.g. a stale catalog) default to available rather than alarm.
+  function providerAvailable(id: string): boolean {
+    const probe = probeFor(id);
+    return probe ? probe.available !== false : true;
+  }
+
+  function providerPath(provider: AgentHubConfigProvider): string {
+    return probeFor(provider.id)?.command || provider.command || "";
   }
 
   function toggleAgent(index: number): void {
@@ -146,13 +157,42 @@
     onDirty();
   }
 
-  function updateProviderCommand(index: number, command: string): void {
-    const normalized = String(command || "").trim();
-    const provider = { ...draft.agentProviders[index] };
-    if (normalized) provider.command = normalized;
-    else delete provider.command;
-    draft.agentProviders[index] = provider;
-    onDirty();
+  // commandEditing holds the provider id whose executable path is being
+  // edited inline; commandDraft is the in-progress input value and
+  // commandError the last server-side validation failure.
+  let commandEditing = $state<string | null>(null);
+  let commandDraft = $state("");
+  let commandError = $state("");
+
+  function startCommandEdit(provider: AgentHubConfigProvider): void {
+    commandEditing = provider.id;
+    commandDraft = provider.command || "";
+    commandError = "";
+  }
+
+  function cancelCommandEdit(): void {
+    commandEditing = null;
+    commandDraft = "";
+    commandError = "";
+  }
+
+  async function confirmProviderCommand(provider: AgentHubConfigProvider): Promise<void> {
+    if (pending) return;
+    pending = `provider:${provider.id}`;
+    commandError = "";
+    try {
+      const updated = await onSetProviderCommand(provider.id, commandDraft.trim());
+      const index = draft.agentProviders.findIndex((item) => item.id === updated.id);
+      if (index >= 0) draft.agentProviders[index] = cloneAgentHubProvider(updated);
+      else draft.agentProviders = [...draft.agentProviders, cloneAgentHubProvider(updated)];
+      cancelCommandEdit();
+    } catch (error) {
+      // The server rejected the path: keep the editor open so the user can
+      // correct it; nothing is saved.
+      commandError = settingsErrorMessage(error);
+    } finally {
+      pending = "";
+    }
   }
 
   function addAgent(): void {
@@ -169,28 +209,6 @@
     rowIds = [...rowIds, rowIdCounter++];
     expanded = new Set(expanded).add(rowIds[rowIds.length - 1]);
     onDirty();
-  }
-
-  async function toggleProvider(provider: AgentHubConfigProvider): Promise<void> {
-    if (pending) return;
-    pending = `provider:${provider.id}`;
-    try {
-      const updated = await onToggleProvider(provider.id, !provider.enabled);
-      const index = draft.agentProviders.findIndex((item) => item.id === updated.id);
-      if (index >= 0) {
-        // Keep an unsaved executable-path edit in the modal while the
-        // immediate enabled toggle is persisted by the server.
-        const command = draft.agentProviders[index].command;
-        const next = cloneAgentHubProvider(updated);
-        if (command) next.command = command;
-        draft.agentProviders[index] = next;
-      }
-      else draft.agentProviders = [...draft.agentProviders, cloneAgentHubProvider(updated)];
-    } catch (error) {
-      onToast(settingsErrorMessage(error));
-    } finally {
-      pending = "";
-    }
   }
 
   async function saveAgentHub(): Promise<void> {
@@ -214,7 +232,7 @@
 </script>
 
 <div class="settings-panel settings-agent-panel" data-component-owner="agenthub-settings-panel" data-settings-panel data-settings-section="agenthub">
-  <div class="settings-panel-header"><h2>AgentHub</h2><p>Manage the AgentHub connection, provider switches, executable paths, and the agents used by PUA. Provider switches save immediately; paths and agent changes are saved together below.</p></div>
+  <div class="settings-panel-header"><h2>AgentHub</h2><p>Manage the AgentHub connection, provider executable paths, and the agents used by PUA. Providers are detected automatically and path changes save on confirm; agent changes are saved together below.</p></div>
 
   <section class="settings-agent-section settings-connection-section">
     <div class="settings-section-heading"><h3>Connection</h3><span class="settings-pill" class:pill-warning={!agentHub.connected || !agentHub.compatible}>{agentHub.connected && agentHub.compatible ? "Compatible" : agentHub.connected ? "Incompatible" : "Unavailable"}</span></div>
@@ -228,15 +246,36 @@
   </section>
 
   <section class="settings-agent-section">
-    <div class="settings-section-heading"><h3>Providers</h3><span>{draft.agentProviders.length} providers · switches immediate, paths on Save All</span></div>
+    <div class="settings-section-heading"><h3>Providers</h3><span>{draft.agentProviders.length} providers · detected automatically, paths save on confirm</span></div>
     <div class="settings-provider-list">
-      {#each draft.agentProviders as provider, providerIndex (provider.id)}
+      {#each draft.agentProviders as provider (provider.id)}
         {@const probe = probeFor(provider.id)}
-        {@const available = probe ? probe.available !== false : provider.enabled}
-        <div class="settings-service-row" class:settings-service-disabled={!provider.enabled}>
-          <div class="settings-provider-main"><span class="settings-agent-mark">{(provider.name || provider.id || "P").slice(0, 1).toUpperCase()}</span><span><strong>{provider.name || provider.id}</strong><small>{provider.type || provider.id} · {provider.enabled ? available ? "Available" : "Unavailable" : "Disabled"}</small></span></div>
-          <label class="settings-provider-command"><span>Executable path</span><input aria-label={`${provider.name || provider.id} executable path`} value={provider.command || ""} placeholder={`Use PATH: ${provider.type || provider.id}`} oninput={(event) => updateProviderCommand(providerIndex, event.currentTarget.value)} /><small>Optional. Leave blank to resolve the command from PATH.</small></label>
-          <button type="button" class="settings-switch" role="switch" aria-checked={provider.enabled} aria-label={`${provider.enabled ? "Disable" : "Enable"} ${provider.name || provider.id}`} disabled={Boolean(pending)} onclick={() => toggleProvider(provider)}><span></span><strong>{provider.enabled ? "On" : "Off"}</strong></button>
+        {@const available = providerAvailable(provider.id)}
+        {@const path = providerPath(provider)}
+        {@const editing = commandEditing === provider.id || (!available && !provider.command)}
+        <div class="settings-service-row" class:settings-service-disabled={!available}>
+          <div class="settings-provider-main"><span class="settings-agent-mark">{(provider.name || provider.id || "P").slice(0, 1).toUpperCase()}</span><span><strong>{provider.name || provider.id}</strong><small>{provider.type || provider.id}</small></span><span class="settings-pill" class:pill-danger={!available}>{available ? "Enabled" : "Unavailable"}</span></div>
+          {#if editing}
+            <label class="settings-provider-command"><span>Executable path</span><input aria-label={`${provider.name || provider.id} executable path`} value={commandEditing === provider.id ? commandDraft : provider.command || ""} placeholder={`Detect from PATH: ${provider.type || provider.id}`} aria-invalid={Boolean(commandError)} oninput={(event) => { commandEditing = provider.id; commandDraft = event.currentTarget.value; commandError = ""; }} /><small>Leave blank to detect the executable automatically.</small>{#if commandError && commandEditing === provider.id}<small class="settings-field-error">{commandError}</small>{:else if probe?.error && !available}<small class="settings-field-error">{probe.error}</small>{/if}</label>
+            <div class="settings-provider-actions">
+              <button type="button" class="settings-inline-button" aria-label={`Confirm ${provider.name || provider.id} executable path`} disabled={Boolean(pending)} onclick={() => confirmProviderCommand(provider)}>Confirm</button>
+              {#if commandEditing === provider.id && (available || provider.command)}
+                <button type="button" class="settings-inline-button" aria-label={`Cancel ${provider.name || provider.id} path edit`} disabled={Boolean(pending)} onclick={cancelCommandEdit}>Cancel</button>
+              {/if}
+            </div>
+          {:else}
+            <div class="settings-provider-path">
+              {#if available}
+                <code>{path || `Detect from PATH: ${provider.type || provider.id}`}</code>
+              {:else}
+                <code class="settings-provider-path-invalid">{provider.command}</code>
+                {#if probe?.error}<small class="settings-field-error">{probe.error}</small>{/if}
+              {/if}
+            </div>
+            <div class="settings-provider-actions">
+              <button type="button" class="settings-inline-button" aria-label={`Change ${provider.name || provider.id} executable path`} disabled={Boolean(pending)} onclick={() => startCommandEdit(provider)}>Change path</button>
+            </div>
+          {/if}
         </div>
       {:else}
         <div class="settings-empty">No AgentHub providers are configured.</div>
@@ -303,7 +342,7 @@
           {#if open}
             <div id={`settings-agent-${index}-body`} class="settings-agent-card-body">
               <label class="settings-field-label"><span>Name</span><input aria-label="Agent name" value={agent.name} aria-invalid={Boolean(agentNameError)} oninput={(event) => updateAgent(index, { name: event.currentTarget.value })} />{#if agentNameError}<small class="settings-field-error">{agentNameError}</small>{/if}</label>
-              <label class="settings-field-label"><span>Provider</span><select aria-label="AgentHub Provider" value={agent.providerId} aria-invalid={Boolean(providerError)} onchange={(event) => changeProvider(index, event.currentTarget.value)}><option value="">Choose a provider</option>{#each draft.agentProviders as option (option.id)}<option value={option.id}>{option.name || option.id}{option.enabled ? "" : " (Disabled)"}</option>{/each}</select>{#if providerError}<small class="settings-field-error">{providerError}</small>{/if}</label>
+              <label class="settings-field-label"><span>Provider</span><select aria-label="AgentHub Provider" value={agent.providerId} aria-invalid={Boolean(providerError)} onchange={(event) => changeProvider(index, event.currentTarget.value)}><option value="">Choose a provider</option>{#each draft.agentProviders as option (option.id)}<option value={option.id}>{option.name || option.id}{providerAvailable(option.id) ? "" : " (Unavailable)"}</option>{/each}</select>{#if providerError}<small class="settings-field-error">{providerError}</small>{/if}</label>
               {#if provider}
                 <div class="settings-agent-subsection"><div class="settings-subsection-heading"><strong>Provider options</strong><span>{provider.type}</span></div>{#each providerOptionFields(provider.type) as field (field.key)}<label class="settings-field-label"><span>{field.label}</span>{#if field.kind === "select"}<select aria-label={field.label} value={agent.options?.[field.key] || ""} onchange={(event) => updateOption(index, field.key, event.currentTarget.value)}><option value="">Default</option>{#each field.options || [] as option}<option value={option}>{option}</option>{/each}</select>{:else}<input aria-label={field.label} value={agent.options?.[field.key] || ""} oninput={(event) => updateOption(index, field.key, event.currentTarget.value)} />{/if}</label>{/each}</div>
               {/if}

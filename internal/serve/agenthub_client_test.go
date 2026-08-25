@@ -50,7 +50,7 @@ func TestAgentHubClientContract(t *testing.T) {
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/agents":
 			writeFakeAgentHubJSON(t, w, map[string]any{
-				"providers": []any{map[string]any{"id": "codex", "name": "Codex", "type": "codex", "enabled": true}},
+				"providers": []any{map[string]any{"id": "codex", "name": "Codex", "type": "codex"}},
 				"agents":    []any{map[string]any{"name": "gpt-5.6-sol", "providerId": "codex", "available": true, "future": "ignored"}},
 				"probes":    []any{},
 			})

@@ -8,7 +8,7 @@ import { buildCreatePayload } from "../../src/agenthub/core/new-session";
 import { TonePlayer } from "../../src/agenthub/companion/audio";
 import { ACTIVITY_LEAD_MS, ACTIVITY_WAVEFORMS, activityPulsesForFrame, activitySessions, activityWaveformIndex, activityWaveformPatchRange, applyBalanceTotals, filterQuotaSnapshot, pruneActivityPulses, quotaVisibilityKey, SessionToneAllocator, TERMINAL_TONE_HOLD_MS, waveformSampleY } from "../../src/agenthub/companion/model";
 import { activityPlaybackPlan } from "../../src/agenthub/companion/schedule";
-import { buildProviderSwitches } from "../../src/agenthub/settings/provider-switches";
+import { buildProviderRows } from "../../src/agenthub/settings/provider-rows";
 
 describe("AgentHub audit application", () => {
   it("builds an explicit paginated current/archived inventory query", () => {
@@ -25,10 +25,13 @@ describe("AgentHub audit application", () => {
       .toEqual({ cwd: "/tmp/project", agentName: "Codex", title: "Audit" });
   });
 
-  it("keeps provider switches fixed to the four daemon integrations", () => {
-    const switches = (buildProviderSwitches as any)({ agentProviders: [{ id: "codex", name: "Codex", type: "codex", enabled: true }] }, [{ providerId: "codex", available: true, command: "/bin/codex" }]);
-    expect(switches.map((item: any) => item.id)).toEqual(["codex", "kimi", "pi", "opencode"]);
-    expect(switches[0]).toMatchObject({ enabled: true, availability: "CLI available" });
+  it("keeps provider rows fixed to the four daemon integrations", () => {
+    const rows = (buildProviderRows as any)({ agentProviders: [{ id: "codex", name: "Codex", type: "codex" }] }, [{ providerId: "codex", available: true, command: "/bin/codex" }]);
+    expect(rows.map((item: any) => item.id)).toEqual(["codex", "kimi", "pi", "opencode"]);
+    expect(rows[0]).toMatchObject({ available: true, status: "Enabled", tone: "ok", path: "/bin/codex" });
+    // A provider missing from the config renders unavailable with an empty
+    // command so the row offers the path editor directly.
+    expect(rows[1]).toMatchObject({ present: false, available: false, command: "", status: "Unavailable", tone: "danger" });
   });
 
   it("retains a terminal activity row for five minutes but its tone for ten seconds", () => {

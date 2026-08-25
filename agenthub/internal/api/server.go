@@ -165,7 +165,7 @@ func (s *Server) routes() []apiRoute {
 		{"GET /v1/status", s.status, "GET /v1/status"},
 		{"GET /v1/config", s.getConfig, "GET /v1/config"},
 		{"PUT /v1/config", s.putConfig, "PUT /v1/config"},
-		{"PUT /v1/config/providers/{id}", s.putProviderEnabled, "PUT /v1/config/providers/{id}"},
+		{"PUT /v1/config/providers/{id}", s.putProviderCommand, "PUT /v1/config/providers/{id}"},
 		{"POST /v1/onwatch/test", s.testOnWatch, "POST /v1/onwatch/test"},
 		{"GET /v1/quota", s.quota, "GET /v1/quota"},
 		{"GET /v1/activity/events", s.activityEvents, "GET /v1/activity/events"},
@@ -416,9 +416,9 @@ const modelEnumerationTimeout = 45 * time.Second
 // providerModels enumerates the models of one built-in provider through its
 // official interface. It is read-only: it never creates a provider session
 // and never changes the configuration. Status codes distinguish the failure
-// modes a UI must render differently: 404 unknown provider, 409 disabled,
-// 503 CLI unavailable, 504 enumeration timeout, 502 upstream error; an empty
-// list is a 200 with an empty models array.
+// modes a UI must render differently: 404 unknown provider, 503 CLI
+// unavailable, 504 enumeration timeout, 502 upstream error; an empty list is
+// a 200 with an empty models array.
 func (s *Server) providerModels(w http.ResponseWriter, r *http.Request) {
 	if s.runtime == nil || s.models == nil {
 		writeAPIError(w, http.StatusServiceUnavailable, "runtime_unavailable", "runtime is unavailable", nil)
@@ -428,10 +428,6 @@ func (s *Server) providerModels(w http.ResponseWriter, r *http.Request) {
 	target, ok := s.providerByID(id)
 	if !ok {
 		writeAPIError(w, http.StatusNotFound, "unknown_provider", fmt.Sprintf("unknown built-in provider %q", id), nil)
-		return
-	}
-	if !target.Enabled {
-		writeAPIError(w, http.StatusConflict, "provider_disabled", fmt.Sprintf("provider %q is disabled", id), nil)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), modelEnumerationTimeout)
@@ -462,9 +458,9 @@ func (s *Server) providerModels(w http.ResponseWriter, r *http.Request) {
 }
 
 // providerByID resolves a built-in provider id against the live
-// configuration: a configured provider keeps its name, type, command and
-// enabled flag; a built-in provider missing from the configuration is
-// reported with its canonical definition and enabled=false.
+// configuration: a configured provider keeps its name, type and command; a
+// built-in provider missing from the configuration is reported with its
+// canonical definition.
 func (s *Server) providerByID(id string) (config.Provider, bool) {
 	canonical, ok := config.BuiltinProvider(id)
 	if !ok {
@@ -484,33 +480,41 @@ func (s *Server) invalidateModels() {
 	}
 }
 
-// putProviderEnabled flips the enabled flag of one built-in provider without
-// touching the rest of the configuration. It is the minimal contract behind
-// the four switches of the Web settings UI: clients never have to rebuild or
-// resubmit the whole provider structure, and the provider's command and other
-// fields survive a disable/enable cycle. A built-in provider missing from an
-// old config is created with its canonical defaults.
-func (s *Server) putProviderEnabled(w http.ResponseWriter, r *http.Request) {
+// putProviderCommand replaces the executable path of one built-in provider
+// without touching the rest of the configuration. It is the minimal contract
+// behind the provider rows of the Web settings UI: clients never have to
+// rebuild or resubmit the whole provider structure. A non-empty command must
+// resolve to an executable on this host and is rejected otherwise; an empty
+// command clears the override so the provider falls back to automatic
+// detection from PATH and common install directories. A built-in provider
+// missing from an old config is created with its canonical defaults.
+func (s *Server) putProviderCommand(w http.ResponseWriter, r *http.Request) {
 	if s.runtime == nil {
 		writeAPIError(w, http.StatusServiceUnavailable, "runtime_unavailable", "runtime is unavailable", nil)
 		return
 	}
 	var body struct {
-		Enabled *bool `json:"enabled"`
+		Command *string `json:"command"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeAPIError(w, http.StatusBadRequest, "invalid_request", err.Error(), nil)
 		return
 	}
-	if body.Enabled == nil {
-		writeAPIError(w, http.StatusBadRequest, "invalid_request", "enabled is required", nil)
+	if body.Command == nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "command is required", nil)
 		return
 	}
 	s.configMu.Lock()
 	defer s.configMu.Unlock()
-	next, provider, err := s.runtime.Config().SetProviderEnabled(r.PathValue("id"), *body.Enabled)
+	next, provider, err := s.runtime.Config().SetProviderCommand(r.PathValue("id"), *body.Command)
 	if err != nil {
-		writeAPIError(w, http.StatusNotFound, "unknown_provider", err.Error(), nil)
+		status := http.StatusUnprocessableEntity
+		code := "invalid_command"
+		if strings.Contains(err.Error(), "unknown built-in provider") {
+			status = http.StatusNotFound
+			code = "unknown_provider"
+		}
+		writeAPIError(w, status, code, err.Error(), nil)
 		return
 	}
 	if err := config.Save(s.config, next); err != nil {
@@ -523,9 +527,9 @@ func (s *Server) putProviderEnabled(w http.ResponseWriter, r *http.Request) {
 }
 
 // agentStatus extends an agent with its effective availability. An agent is
-// unavailable when its provider is disabled or missing; the Web UI hides such
-// agents from the new-session choices and the daemon rejects attempts to use
-// them anyway.
+// unavailable when its provider is missing or its executable cannot be
+// resolved; the Web UI hides such agents from the new-session choices and the
+// daemon rejects attempts to use them anyway.
 type agentStatus struct {
 	config.Agent
 	Available         bool   `json:"available"`
@@ -539,20 +543,22 @@ func (s *Server) agents(w http.ResponseWriter, _ *http.Request) {
 	}
 	cfg := s.runtime.Config()
 	providers := make(map[string]config.Provider, len(cfg.AgentProviders))
+	availability := make(map[string]error, len(cfg.AgentProviders))
 	for _, provider := range cfg.AgentProviders {
 		providers[provider.ID] = provider
+		_, availability[provider.ID] = config.ResolveProviderCommand(provider)
 	}
 	agents := make([]agentStatus, 0, len(cfg.Agents))
 	for _, agent := range cfg.Agents {
 		status := agentStatus{Agent: agent, Available: true}
-		provider, ok := providers[agent.ProviderID]
+		_, ok := providers[agent.ProviderID]
 		switch {
 		case !ok:
 			status.Available = false
 			status.UnavailableReason = fmt.Sprintf("provider %q is not configured", agent.ProviderID)
-		case !provider.Enabled:
+		case availability[agent.ProviderID] != nil:
 			status.Available = false
-			status.UnavailableReason = fmt.Sprintf("provider %q is disabled", agent.ProviderID)
+			status.UnavailableReason = availability[agent.ProviderID].Error()
 		}
 		agents = append(agents, status)
 	}

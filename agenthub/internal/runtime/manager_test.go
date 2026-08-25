@@ -239,7 +239,7 @@ func (f *fakeSession) Close() error {
 func testConfig() config.Config {
 	return config.Config{
 		Version:        1,
-		AgentProviders: []config.Provider{{ID: "provider", Type: "pi", Enabled: true}},
+		AgentProviders: []config.Provider{{ID: "provider", Type: "pi"}},
 		Agents:         []config.Agent{{Name: "Slow", ProviderID: "provider"}, {Name: "Fast Agent", ProviderID: "provider"}},
 	}
 }
@@ -332,7 +332,7 @@ func TestManagerMergesAgentEnvironmentWithSessionLaunchEnvironment(t *testing.T)
 	}
 	cfg := config.Config{
 		Version:        1,
-		AgentProviders: []config.Provider{{ID: "provider", Type: "pi", Enabled: true}},
+		AgentProviders: []config.Provider{{ID: "provider", Type: "pi"}},
 		Agents: []config.Agent{{
 			Name:        "Env Agent",
 			ProviderID:  "provider",

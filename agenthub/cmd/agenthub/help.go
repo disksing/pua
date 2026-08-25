@@ -211,10 +211,11 @@ Usage:
 
 Prints providers, agents and provider availability probes. Providers are
 adapters for local agent runtimes; agents are named runnable configurations
-bound to a provider, referenced everywhere by their unique name. The Web UI settings panel enables or disables the four
-built-in providers and edits agents; anything more advanced is done in the
-config file (see "agenthub help"). Agents of a disabled provider are reported
-as unavailable and cannot create sessions.
+bound to a provider, referenced everywhere by their unique name. The Web UI
+settings panel shows each built-in provider's detected executable and edits
+the executable paths and agents; anything more advanced is done in the
+config file (see "agenthub help"). Agents whose provider executable cannot
+be resolved are reported as unavailable and cannot create sessions.
 
 See also: agenthub help run, agenthub help session create
 `,

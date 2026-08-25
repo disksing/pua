@@ -55,8 +55,8 @@ func modelsTestConfig() config.Config {
 	return config.Config{
 		Version: 1,
 		AgentProviders: []config.Provider{
-			{ID: "codex", Name: "Codex app-server", Type: "codex", Enabled: true},
-			{ID: "kimi", Name: "Kimi Code", Type: "kimi", Enabled: false},
+			{ID: "codex", Name: "Codex app-server", Type: "codex"},
+			{ID: "kimi", Name: "Kimi Code", Type: "kimi"},
 		},
 		Agents: []config.Agent{{Name: "Codex", ProviderID: "codex"}},
 	}
@@ -130,21 +130,21 @@ func TestProviderModelsUnknownProvider(t *testing.T) {
 	}
 }
 
-func TestProviderModelsDisabledProvider(t *testing.T) {
-	lister := &fakeModelLister{}
+func TestProviderModelsBuiltinMissingFromConfig(t *testing.T) {
+	// A built-in provider absent from the configuration falls back to its
+	// canonical definition and is still enumerated.
+	lister := &fakeModelLister{models: []provider.Model{{ID: "pi-1", Label: "Pi 1"}}}
 	server := newModelsTestServer(t, modelsTestConfig(), lister)
-	// Configured but disabled.
-	status, body := getProviderModels(t, server, "kimi")
-	if status != http.StatusConflict || errorCode(body) != "provider_disabled" {
+	status, body := getProviderModels(t, server, "pi")
+	if status != http.StatusOK {
 		t.Fatalf("status = %d, body = %v", status, body)
 	}
-	// Built-in but missing from the configuration: also disabled.
-	status, body = getProviderModels(t, server, "pi")
-	if status != http.StatusConflict || errorCode(body) != "provider_disabled" {
-		t.Fatalf("status = %d, body = %v", status, body)
+	providerInfo, _ := body["provider"].(map[string]any)
+	if providerInfo["id"] != "pi" || providerInfo["type"] != "pi" {
+		t.Fatalf("provider = %v", providerInfo)
 	}
-	if lister.calls.Load() != 0 {
-		t.Fatalf("disabled providers must not be enumerated, calls = %d", lister.calls.Load())
+	if lister.calls.Load() != 1 {
+		t.Fatalf("lister calls = %d", lister.calls.Load())
 	}
 }
 
@@ -176,7 +176,7 @@ func TestProviderModelsCacheInvalidatedOnConfigChanges(t *testing.T) {
 	server := newModelsTestServer(t, modelsTestConfig(), lister)
 
 	// Whole-config PUT invalidates.
-	body := strings.NewReader(`{"config":{"version":1,"agentProviders":[{"id":"codex","name":"Codex app-server","type":"codex","enabled":true}],"agents":[{"name":"Codex","providerId":"codex"}]}}`)
+	body := strings.NewReader(`{"config":{"version":1,"agentProviders":[{"id":"codex","name":"Codex app-server","type":"codex"}],"agents":[{"name":"Codex","providerId":"codex"}]}}`)
 	request, _ := http.NewRequest(http.MethodPut, server.URL+"/v1/config", body)
 	request.Header.Set("Content-Type", "application/json")
 	response, err := http.DefaultClient.Do(request)
@@ -191,8 +191,8 @@ func TestProviderModelsCacheInvalidatedOnConfigChanges(t *testing.T) {
 		t.Fatalf("invalidates after PUT config = %d", lister.invalidates.Load())
 	}
 
-	// Provider toggle invalidates.
-	body = strings.NewReader(`{"enabled":false}`)
+	// A provider command update invalidates.
+	body = strings.NewReader(`{"command":""}`)
 	request, _ = http.NewRequest(http.MethodPut, server.URL+"/v1/config/providers/codex", body)
 	request.Header.Set("Content-Type", "application/json")
 	response, err = http.DefaultClient.Do(request)
@@ -201,15 +201,9 @@ func TestProviderModelsCacheInvalidatedOnConfigChanges(t *testing.T) {
 	}
 	response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		t.Fatalf("PUT provider toggle status = %d", response.StatusCode)
+		t.Fatalf("PUT provider command status = %d", response.StatusCode)
 	}
 	if lister.invalidates.Load() != 2 {
-		t.Fatalf("invalidates after provider toggle = %d", lister.invalidates.Load())
-	}
-
-	// Disabled after the toggle: the endpoint now reports provider_disabled.
-	status, respBody := getProviderModels(t, server, "codex")
-	if status != http.StatusConflict || errorCode(respBody) != "provider_disabled" {
-		t.Fatalf("status = %d, body = %v", status, respBody)
+		t.Fatalf("invalidates after provider command update = %d", lister.invalidates.Load())
 	}
 }

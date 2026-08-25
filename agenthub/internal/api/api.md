@@ -173,9 +173,11 @@ unique case-insensitively after trimming, at most 80 characters), a
 `providerId` naming one configured provider, and provider-specific `options`.
 There are no agent ids, agent profiles or tag-based routing; creating a
 session always requires an explicit agent name. The built-in provider ids
-are `codex`, `kimi`, `pi` and `opencode`; each can be enabled or disabled,
-and a disabled provider makes its agents unavailable for new work without
-disturbing sessions that are already running.
+are `codex`, `kimi`, `pi` and `opencode`; a provider is available whenever
+its executable resolves (from its configured `command`, or automatically
+from PATH and common install directories), and an unavailable provider
+makes its agents unavailable for new work without disturbing sessions that
+are already running.
 
 ### Durable source Events
 
@@ -310,7 +312,7 @@ only writer) and applies it in memory.
   "config": {
     "version": 1,
     "agentProviders": [
-      {"id": "codex", "name": "Codex app-server", "type": "codex", "enabled": true, "command": "codex"}
+      {"id": "codex", "name": "Codex app-server", "type": "codex", "command": "codex"}
     ],
     "agents": [
       {"name": "Codex", "providerId": "codex", "options": {"approval": "never", "sandbox": "danger-full-access"}, "environment": {"FOO": "bar"}}
@@ -362,25 +364,29 @@ curl -s -X PUT "$BASE/v1/config" \
 
 ### PUT /v1/config/providers/{id}
 
-Enable or disable one built-in provider without touching the rest of the
-configuration. This is the contract behind the four switches of the Web
-settings UI. The provider's other fields survive a disable/enable cycle; a
-built-in provider missing from an old configuration is created with its
-canonical defaults.
+Replace the executable path of one built-in provider without touching the
+rest of the configuration. This is the contract behind the provider rows of
+the Web settings UI. A non-empty `command` must resolve to an executable on
+the daemon host and is rejected otherwise; an empty `command` clears the
+override so the provider falls back to automatic detection from PATH and
+common install directories. A built-in provider missing from an old
+configuration is created with its canonical defaults.
 
 - **Path parameters:** `id` — one of `codex`, `kimi`, `pi`, `opencode`.
-- **Request body:** `{"enabled": true}` — `enabled` is required.
-- **Success `200`:** `{"provider": {"id", "name", "type", "enabled", "command?"}}`.
-- **Errors:** `400 invalid_request` (missing `enabled`), `415 json_required`,
-  `404 unknown_provider`, `422 invalid_config`, `503 runtime_unavailable`.
-- **Effect:** agents of a disabled provider report `available: false` from
-  `GET /v1/agents` and are rejected for new sessions; running sessions keep
-  running.
+- **Request body:** `{"command": "/opt/homebrew/bin/kimi"}` — `command` is
+  required and may be empty.
+- **Success `200`:** `{"provider": {"id", "name", "type", "command?"}}`.
+- **Errors:** `400 invalid_request` (missing `command`), `415 json_required`,
+  `404 unknown_provider`, `422 invalid_command` (the path does not resolve
+  to an executable), `422 invalid_config`, `503 runtime_unavailable`.
+- **Effect:** the provider's availability is re-probed; agents of a provider
+  whose executable does not resolve report `available: false` from
+  `GET /v1/agents`, while running sessions keep running.
 
 ```bash
 curl -s -X PUT "$BASE/v1/config/providers/kimi" \
   -H "Content-Type: application/json" \
-  -d '{"enabled": false}'
+  -d '{"command": "/opt/homebrew/bin/kimi"}'
 ```
 
 ### POST /v1/onwatch/test
@@ -445,7 +451,7 @@ changes.
 - **Success `200`:** `{"provider": {"id", "name", "type"}, "models": [...]}`;
   each model is `{"id", "label", "default?"}`, where `id` is the value the
   agent `model` option accepts. An empty `models` array is a valid result.
-- **Errors:** `404 unknown_provider`, `409 provider_disabled`,
+- **Errors:** `404 unknown_provider`,
   `503 provider_unavailable` (provider CLI missing or failed to start),
   `504 provider_timeout`, `502 provider_error` (provider ran but reported an
   error or returned unreadable data), `503 runtime_unavailable`.
@@ -457,13 +463,13 @@ curl -s "$BASE/v1/providers/codex/models"
 ### GET /v1/agents
 
 List configured providers and agents with their effective availability, plus
-CLI availability probes for enabled providers.
+CLI availability probes for every provider.
 
 - **Success `200`:**
 
 ```json
 {
-  "providers": [{"id": "codex", "name": "Codex app-server", "type": "codex", "enabled": true}],
+  "providers": [{"id": "codex", "name": "Codex app-server", "type": "codex"}],
   "agents": [
     {
       "name": "Codex",
@@ -477,8 +483,8 @@ CLI availability probes for enabled providers.
 }
 ```
 
-  An agent whose provider is missing or disabled reports `available: false`
-  with an `unavailableReason`.
+  An agent whose provider is missing or whose executable does not resolve
+  reports `available: false` with an `unavailableReason`.
 - **Errors:** `503 runtime_unavailable`.
 
 ```bash
@@ -553,7 +559,7 @@ turn before the response returns.
 - **Fields:**
   - `agentName` (required) — the unique name of a configured agent; matched
     case-insensitively, and the session records the canonical configured
-    spelling. The agent's provider must be enabled.
+    spelling.
   - `cwd` (required) — working directory for the agent; must exist and be a
     directory (symlinks are resolved).
   - `title` (optional) — display title.
@@ -589,7 +595,7 @@ turn before the response returns.
   `Location: /v1/sessions/{id}` header.
 - **Idempotent replay `200`:** `{"session": {...}, "created": false}`.
 - **Errors:** `400 invalid_request` (malformed body or removed/unknown fields), `415 json_required`, `422 agent_required`,
-  `422 invalid_agent` (unknown agent or disabled provider),
+  `422 invalid_agent` (unknown agent or unconfigured provider),
   `422 invalid_cwd`,
   `422 invalid_launch_environment` (an environment name is empty or contains
   `=`/NUL, or a value contains NUL),

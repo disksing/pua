@@ -15,7 +15,7 @@ AgentHub 是一个本地 Agent 启动器与 Session 中枢。一个 Go daemon �
   - Pi JSONL RPC，包括 Kimi K3 与 Grok 等模型
 - Session 创建、聊天、steer、interrupt、stop、resume、archive 和 approval。
 - daemon 重启后按需恢复 provider 原生 session/thread。
-- 同源 Web UI：Session 列表、实时聊天、状态、审批、停止，以及包含四个内置 Provider 开关、结构化 Agent 表单和按 Provider 加载的模型下拉框的设置界面。
+- 同源 Web UI：Session 列表、实时聊天、状态、审批、停止，以及包含四个内置 Provider 可用性探测、结构化 Agent 表单和按 Provider 加载的模型下拉框的设置界面。
 - 浮动伙伴：展示由 OnWatch 提供的 Provider 配额，以及由 AgentHub 自身事件聚合出的实时 Session 活动，可选 Web Audio 提示音。
 - Provider 模型枚举：每个内置 Provider 都能通过各自的官方接口报告当前可用模型，统一为一个只读 API。
 - CLI：一次性运行、交互聊天、attach、事件查询和 Session 管理。
@@ -116,9 +116,9 @@ $HOME/.agenthub/config.json
 {
   "version": 1,
   "agentProviders": [
-    { "id": "codex", "name": "Codex app-server", "type": "codex", "enabled": true },
-    { "id": "kimi", "name": "Kimi Code", "type": "kimi", "enabled": true },
-    { "id": "pi", "name": "Pi Coding Agent", "type": "pi", "enabled": true }
+    { "id": "codex", "name": "Codex app-server", "type": "codex" },
+    { "id": "kimi", "name": "Kimi Code", "type": "kimi" },
+    { "id": "pi", "name": "Pi Coding Agent", "type": "pi" }
   ],
   "agents": [
     {
@@ -140,15 +140,15 @@ $HOME/.agenthub/config.json
 
 浮动伙伴可以拖到视口内任意位置；归一化位置保存在浏览器本地存储中，刷新后仍会恢复，并会在视口缩放后保持可见。打开时，它会根据当前位置选择向上/向下展开及向左/向右对齐，确保卡片留在屏幕内。展开卡片还可以从外侧角调整宽高；保存的尺寸会按当前视口自动夹紧，内部控制项、波形、配额分栏和滚动布局会响应窄、矮或较宽的尺寸。标题栏可在新标签页打开 `/agenthub/beeper`；独立监控页以深色内容填满整个视口，竖屏时 Provider 配额保持单列，并继续提供设置入口。Activity 的显示、蜂鸣、音量、和弦进行、单和弦和完成音效均保存在当前浏览器来源的 `localStorage` 中，不会发送给 daemon 或写入 AgentHub 配置。Activity 波形由 AgentHub 全局 Activity SSE 流驱动：每个 Session 在每个一秒活动帧中只产生一个波峰，不受底层 event 数量影响；同一帧内多个 Session 的波峰与活动蜂鸣共用四个固定的 250ms subdivision，从右侧进入后平滑向左滚动。声音和视觉波峰统一延后 300ms；每个 Session ID 稳定绑定四套已调波形之一，单个波峰前后各占 200ms。九秒时间带由两张 Canvas 交替承载，基础微动和新增波峰只在视口外绘制，像素进入可见区后只随整条时间带平移，直至离开。1 至 4 个 Session 使用确定性密度节奏型，更多和弦音在轮换的 subdivision 上同时播放，而不会继续缩短间隔。活跃 Session 标签一行一个，每次有新活动时变亮，并在 10 秒内恢复初始颜色。Turn 成功结束后，该行以黄色保留 5 分钟；失败或取消时则以红色保留，新 Turn 会恢复活跃样式。结束 Session 的音高只继续占用 10 秒，随后即可由其他 Session 复用。Activity 设置可以保持单个和弦，也可以切换到内置卡农 C 大调进行（C–G–Am–Em–F–C–F–G）；每个和弦独立随机持续 1～6 个一秒活动帧，边界处所有 Session 同时切换到新和弦的离散音高，不做滑音或错峰迁移。完成提示音使用内置的 6 个 Codex Beeper MP3。
 
-Provider 封装一个本地 Agent 运行时或协议；Agent 引用一个 Provider 并保存具体启动参数。Agent 没有独立的 id：它的 `name` 必填（最长 80 个字符），在去除首尾空白后大小写不敏感地唯一，并且是唯一引用键——配置、API、CLI 和 Session 记录都使用它。每个 Session 都用显式 Agent 名称创建（`POST /v1/sessions` 要求 `agentName`，CLI 要求 `--agent`）；名称匹配不区分大小写，Session 记录的是配置中的规范拼写。未知、缺失或 Provider 被禁用的 Agent 会直接返回明确错误，不会被路由到其他 Agent。
+Provider 封装一个本地 Agent 运行时或协议；Agent 引用一个 Provider 并保存具体启动参数。Agent 没有独立的 id：它的 `name` 必填（最长 80 个字符），在去除首尾空白后大小写不敏感地唯一，并且是唯一引用键——配置、API、CLI 和 Session 记录都使用它。每个 Session 都用显式 Agent 名称创建（`POST /v1/sessions` 要求 `agentName`，CLI 要求 `--agent`）；名称匹配不区分大小写，Session 记录的是配置中的规范拼写。未知或缺失的 Agent 会直接返回明确错误，不会被路由到其他 Agent。
 
 重命名 Agent 是安全的：当一次配置保存把某个名称替换为唯一一个其余字段完全相同的 Agent 时，daemon 会向每个引用旧名称的活动 Session 追加 `session.agent` 事件，使这些 Session 跟随重命名。歧义重命名（存在多个字段相同的候选）会被拒绝并给出可操作错误；删除 Agent 或重命名到不存在唯一目标时，旧 Session 会以清晰的“unknown agent”错误失败，而不会猜测到其他 Agent。
 
-推荐使用 Web UI 的 **Settings** 界面管理配置。**Providers** 区块刻意保持极简：只有四个开关用于启用或停用内置 Provider（Codex、Kimi、Grok/Pi、OpenCode），不提供 Provider 增删，也不提供命令、参数、环境变量或其他高级字段的编辑。开关只通过 `PUT /v1/config/providers/{id}` 翻转 `enabled` 标志，底层配置在停用/重新启用后完整保留；旧配置中缺失的内置 Provider 会在首次启用时由 daemon 以规范默认值创建。**Agents** 区块保留结构化、带校验的表单，Provider 命令可用性探测会区分“已启用”与“CLI 可用”。所有修改都通过 daemon API 提交，daemon 仍是配置文件的唯一写入者，无需手动编辑 JSON。
+推荐使用 Web UI 的 **Settings** 界面管理配置。**Providers** 区块刻意保持极简：列出四个内置 Provider（Codex、Kimi、Grok/Pi、OpenCode）及其可用性，不提供用户控制的启用/停用开关，也不提供 Provider 增删——只要可执行文件能解析成功，Provider 就可用。启动后 daemon 会自动从 PATH 和常用安装目录探测可执行文件；找到则显示为可用并展示解析出的路径，每行提供内联编辑器修改可执行文件路径，确认时校验路径有效性、无法解析的路径会被拒绝保存（`PUT /v1/config/providers/{id}`）；清空路径则恢复自动探测。**Agents** 区块保留结构化、带校验的表单。所有修改都通过 daemon API 提交，daemon 仍是配置文件的唯一写入者，无需手动编辑 JSON。
 
 **General** 区块配置由 daemon 管理的 OnWatch 集成；**Activity** 区块的活动、声音和逐条 quota 可见性偏好只保存在当前浏览器来源的本地存储中，不通过 `GET` 或 `PUT /v1/config` 同步。设置页会列出 `/v1/quota` 当前返回的 quota 条目；隐藏某条后，展开的 Beeper 列表和折叠态 quota 轮播都会过滤该条。余额型 quota 行（例如 DeepSeek 余额）还可以为每个 Provider 配置余额总额：剩余占比按 当前余额/总额 重新计算（默认 `100`）。Provider 配额只由 daemon 从 OnWatch 拉取，经归一化和按配置间隔缓存后通过 `GET /v1/quota` 暴露；Basic Auth 密码保存在本机权限为 `0600` 的配置文件中，但所有 API 响应都会将其抹除。Session 活动只来自 AgentHub 自身持久化追加且用户可感知的 Turn 事件，并在 `GET /v1/activity/events` 中按 Session 聚合为一秒一帧。消息、思考、工具、审批、Turn 错误与 Turn 终态计为活动；Session/进程生命周期记账、消息投递记账、原始 Provider 通知、后台 metadata 和 stderr 不计为活动，避免 daemon 重启或空闲 Provider 维护动作让旧 Session 重新显示为活跃。浏览器只保持一条全局 EventSource，并通过 Web Audio 合成可选的运行蜂鸣。每个活跃 Session 按第 5、4、6、3、7 八度带的顺序领取所选大三和弦或小三和弦中的第一个可用音高，优先使用较低八度后再到最高音位；该音高保持稳定，直到当前 Turn 结束 10 秒后或 Session 退出活跃窗口，前 15 个并发 Session 使用互不重复的音位。结束态行继续保留 5 分钟：成功为黄色，失败或取消为红色；新 Turn 会清除旧结束态并重新领取音高。播放量化到四个固定的 250ms subdivision，并使用确定性节奏型和轮换；超过四个 Session 后，和弦音以归一化音量共享 subdivision，不再产生不规则的一秒分数间隔。用户选择的本地 MP3 完成提示音与活动和弦相互独立。此功能不会扫描 Codex 或其他 Provider 的原生 Session 文件。
 
-Provider 被停用后，其 Agent 会被标记为不可用（`GET /v1/agents` 中 `available: false` 并附原因），不会出现在新建 Session 的选择中；即使绕过 Web UI 直接调用 API，daemon 也会拒绝用这些 Agent 创建或恢复 Session。停用不会中断已经在运行的 Session，既有 Session 历史仍可查看。
+Provider 的可执行文件无法解析时，其 Agent 会被标记为不可用（`GET /v1/agents` 中 `available: false` 并附原因），不会出现在新建 Session 的选择中。不可用不会中断已经在运行的 Session，既有 Session 历史仍可查看。
 
 ### Per-session 启动环境
 
@@ -171,9 +171,9 @@ Agent 配置还可以携带一个可选的字符串映射 `environment`，可以
 - Pi：`--no-session` 模式下的 RPC `get_available_models` 命令（覆盖所有已配置上游；会标记 Pi 默认使用的模型）。
 - OpenCode：`opencode models --verbose`（已配置 Provider 及 OpenCode Zen 免费模型，含展示名）。
 
-`GET /v1/providers/{id}/models` 把四方统一为 `{ "provider": {...}, "models": [{ "id", "label", "default" }] }`，其中 `id` 就是可直接写入 Agent `model` 选项的值。结果按 ID 去重、保持 Provider 原有顺序，带短期缓存（成功 5 分钟、失败 15 秒）与并发去重，并在每次配置变更（整体保存或 Provider 开关）时失效。失败按类别区分，便于客户端分别展示：`404 unknown_provider`、`409 provider_disabled`、`503 provider_unavailable`（CLI 缺失或无法启动）、`504 provider_timeout`、`502 provider_error`（上游或解析失败）；空列表是成功的 `200` 并返回 `"models": []`。该端点是只读的：不创建 Provider Session，也不修改配置。
+`GET /v1/providers/{id}/models` 把四方统一为 `{ "provider": {...}, "models": [{ "id", "label", "default" }] }`，其中 `id` 就是可直接写入 Agent `model` 选项的值。结果按 ID 去重、保持 Provider 原有顺序，带短期缓存（成功 5 分钟、失败 15 秒）与并发去重，并在每次配置变更（整体保存或 Provider 路径修改）时失效。失败按类别区分，便于客户端分别展示：`404 unknown_provider`、`503 provider_unavailable`（CLI 缺失或无法启动）、`504 provider_timeout`、`502 provider_error`（上游或解析失败）；空列表是成功的 `200` 并返回 `"models": []`。该端点是只读的：不创建 Provider Session，也不修改配置。
 
-在 Web 设置中，Agent 的 **Model** 字段是由该端点加载的下拉框，不再是自由文本输入：先选择 Provider，再选择模型。空的“Provider default”选项表示不设置 `model` 选项。已保存但当前列表中不存在的模型会保留为明确的“saved, not currently listed”选项，直到用户主动更换；加载、重试、空列表和 Provider 停用状态都会内联展示。
+在 Web 设置中，Agent 的 **Model** 字段是由该端点加载的下拉框，不再是自由文本输入：先选择 Provider，再选择模型。空的“Provider default”选项表示不设置 `model` 选项。已保存但当前列表中不存在的模型会保留为明确的“saved, not currently listed”选项，直到用户主动更换；加载、重试、空列表和 Provider 不可用状态都会内联展示。
 
 ### 已移除的旧格式
 

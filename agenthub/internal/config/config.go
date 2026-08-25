@@ -20,8 +20,12 @@ type Provider struct {
 	ID      string `json:"id"`
 	Name    string `json:"name"`
 	Type    string `json:"type"`
-	Enabled bool   `json:"enabled"`
 	Command string `json:"command,omitempty"`
+	// LegacyEnabled accepts the removed "enabled" flag written by older
+	// versions. Providers are no longer toggled by the user: a provider is
+	// available whenever its executable resolves. WithDefaults clears the
+	// field so the daemon never writes it again.
+	LegacyEnabled json.RawMessage `json:"enabled,omitempty"`
 }
 
 type Agent struct {
@@ -202,9 +206,9 @@ func validateEnvironment(environment map[string]string) error {
 }
 
 // BuiltinProviders returns the canonical definitions of the four built-in
-// providers in display order. The Web settings UI exposes exactly these as
-// enable/disable switches; other providers remain manageable only through
-// the config file.
+// providers in display order. The Web settings UI exposes exactly these with
+// their availability probes and executable paths; other providers remain
+// manageable only through the config file.
 func BuiltinProviders() []Provider {
 	return []Provider{
 		{ID: "codex", Name: "Codex app-server", Type: "codex"},
@@ -224,15 +228,24 @@ func BuiltinProvider(id string) (Provider, bool) {
 	return Provider{}, false
 }
 
-// SetProviderEnabled returns a copy of the config with the enabled flag of a
-// built-in provider flipped. Only the flag changes: an existing provider keeps
-// its name, type, command and position, so disabling and re-enabling never
-// loses the underlying configuration. When the provider is absent from an old
-// config, the canonical built-in default is appended. Unknown provider IDs are
-// rejected; the input config is never mutated.
-func (c Config) SetProviderEnabled(id string, enabled bool) (Config, Provider, error) {
-	if _, ok := BuiltinProvider(id); !ok {
+// SetProviderCommand returns a copy of the config with the executable path of
+// a built-in provider replaced. A non-empty command must resolve to an
+// executable on this host; an empty command clears the override so the
+// provider falls back to automatic detection from PATH and common install
+// directories. Only the command changes: an existing provider keeps its name,
+// type and position. When the provider is absent from an old config, the
+// canonical built-in default is appended. Unknown provider IDs are rejected;
+// the input config is never mutated.
+func (c Config) SetProviderCommand(id string, command string) (Config, Provider, error) {
+	canonical, ok := BuiltinProvider(id)
+	if !ok {
 		return Config{}, Provider{}, fmt.Errorf("unknown built-in provider %q", id)
+	}
+	command = strings.TrimSpace(command)
+	if command != "" {
+		if _, err := resolveCommand(command, canonical.Type); err != nil {
+			return Config{}, Provider{}, err
+		}
 	}
 	next := Config{
 		Version:        c.Version,
@@ -260,21 +273,18 @@ func (c Config) SetProviderEnabled(id string, enabled bool) (Config, Provider, e
 	}
 	for i := range next.AgentProviders {
 		if next.AgentProviders[i].ID == id {
-			next.AgentProviders[i].Enabled = enabled
+			next.AgentProviders[i].Command = command
 			return next, next.AgentProviders[i], nil
 		}
 	}
-	provider, _ := BuiltinProvider(id)
-	provider.Enabled = enabled
+	provider := canonical
+	provider.Command = command
 	next.AgentProviders = append(next.AgentProviders, provider)
 	return next, provider, nil
 }
 
 func Defaults() Config {
 	providers := BuiltinProviders()
-	for i := range providers {
-		providers[i].Enabled = true
-	}
 	return Config{
 		Version:        1,
 		AgentProviders: providers,
@@ -293,14 +303,18 @@ func defaultOnWatch() OnWatch {
 }
 
 // WithDefaults fills fields absent from configurations written by older
-// AgentHub versions. Companion preferences moved to browser-local storage;
-// accepting and clearing the legacy field keeps existing config files
-// loadable while ensuring the daemon never returns or writes it again.
+// AgentHub versions. Companion preferences moved to browser-local storage and
+// provider enable/disable switches were removed in favor of executable
+// probing; accepting and clearing the legacy fields keeps existing config
+// files loadable while ensuring the daemon never returns or writes them again.
 func (c Config) WithDefaults() Config {
 	if c.OnWatch.ServerURL == "" && c.OnWatch.AuthMode == "" && c.OnWatch.RefreshIntervalSeconds == 0 {
 		c.OnWatch = defaultOnWatch()
 	}
 	c.LegacyCompanion = nil
+	for i := range c.AgentProviders {
+		c.AgentProviders[i].LegacyEnabled = nil
+	}
 	return c
 }
 
@@ -357,11 +371,11 @@ func (c Config) Agent(name string) (Agent, Provider, error) {
 			continue
 		}
 		for _, provider := range c.AgentProviders {
-			if provider.ID == agent.ProviderID && provider.Enabled {
+			if provider.ID == agent.ProviderID {
 				return agent, provider, nil
 			}
 		}
-		return Agent{}, Provider{}, fmt.Errorf("provider for agent %q is disabled", agent.Name)
+		return Agent{}, Provider{}, fmt.Errorf("provider %q for agent %q is not configured", agent.ProviderID, agent.Name)
 	}
 	return Agent{}, Provider{}, fmt.Errorf("unknown agent %q", strings.TrimSpace(name))
 }
@@ -444,22 +458,23 @@ func agentConfigEqual(a, b Agent) bool {
 func (c Config) Probes() []Probe {
 	result := make([]Probe, 0, len(c.AgentProviders))
 	for _, provider := range c.AgentProviders {
-		if !provider.Enabled {
-			continue
-		}
-		command := provider.Command
-		if command == "" {
-			command = providerCommand(provider.Type)
-		}
-		resolved, err := resolveCommand(command, provider.Type)
-		probe := Probe{ProviderID: provider.ID, Type: provider.Type, Command: resolved, Available: err == nil}
-		if err != nil {
-			probe.Error = err.Error()
-		}
-		result = append(result, probe)
+		result = append(result, probeProvider(provider))
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].ProviderID < result[j].ProviderID })
 	return result
+}
+
+func probeProvider(provider Provider) Probe {
+	command := provider.Command
+	if command == "" {
+		command = providerCommand(provider.Type)
+	}
+	resolved, err := resolveCommand(command, provider.Type)
+	probe := Probe{ProviderID: provider.ID, Type: provider.Type, Command: resolved, Available: err == nil}
+	if err != nil {
+		probe.Error = err.Error()
+	}
+	return probe
 }
 
 func ResolveProviderCommand(provider Provider) (string, error) {
@@ -482,12 +497,46 @@ func resolveCommand(command, providerType string) (string, error) {
 	if path, err := exec.LookPath(command); err == nil {
 		return path, nil
 	}
-	if providerType == "kimi" && runtime.GOOS != "windows" {
-		home, _ := os.UserHomeDir()
-		fallback := filepath.Join(home, ".kimi-code", "bin", "kimi")
-		if info, err := os.Stat(fallback); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
-			return fallback, nil
+	// A bare command name is also probed in common install directories that
+	// are not always on PATH (login shells and GUI launch agents often trim
+	// it). User-supplied paths containing a separator are checked as-is by
+	// exec.LookPath above and never relocated.
+	if !strings.ContainsRune(command, os.PathSeparator) {
+		for _, dir := range commonExecutableDirs(providerType) {
+			candidate := filepath.Join(dir, command)
+			if isExecutableFile(candidate) {
+				return candidate, nil
+			}
 		}
 	}
 	return "", fmt.Errorf("%s executable %q not found", providerType, command)
+}
+
+// commonExecutableDirs lists install locations probed after PATH lookup
+// fails, ordered from system-wide to user-specific.
+func commonExecutableDirs(providerType string) []string {
+	dirs := []string{"/usr/local/bin", "/opt/homebrew/bin"}
+	if runtime.GOOS == "windows" {
+		dirs = nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return dirs
+	}
+	dirs = append(dirs, filepath.Join(home, ".local", "bin"), filepath.Join(home, "bin"))
+	if providerType == "kimi" {
+		dirs = append(dirs, filepath.Join(home, ".kimi-code", "bin"))
+	}
+	return dirs
+}
+
+func isExecutableFile(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return true
+	}
+	return info.Mode()&0o111 != 0
 }

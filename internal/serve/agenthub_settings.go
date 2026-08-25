@@ -229,13 +229,13 @@ func (s *server) handleAgentHubProviderSettings(w http.ResponseWriter, r *http.R
 		return
 	}
 	var request struct {
-		Enabled *bool `json:"enabled"`
+		Command *string `json:"command"`
 	}
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&request); err != nil || request.Enabled == nil {
+	if err := decoder.Decode(&request); err != nil || request.Command == nil {
 		if err == nil {
-			err = fmt.Errorf("enabled is required")
+			err = fmt.Errorf("command is required")
 		}
 		writeError(w, err, http.StatusBadRequest)
 		return
@@ -268,7 +268,7 @@ func (s *server) handleAgentHubProviderSettings(w http.ResponseWriter, r *http.R
 		writeError(w, err, http.StatusBadRequest)
 		return
 	}
-	provider, err := client.SetProviderEnabled(r.Context(), providerID, *request.Enabled)
+	provider, err := client.SetProviderCommand(r.Context(), providerID, *request.Command)
 	if err != nil {
 		writeError(w, err, http.StatusBadRequest)
 		return

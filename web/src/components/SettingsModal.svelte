@@ -71,7 +71,7 @@
       {:else if draft.tab === "appearance"}
         <AppearanceSettingsPanel appearance={model.appearance} onLayoutPreference={model.onLayoutPreference} onFontScale={model.onFontScale} onResetFontScales={model.onResetFontScales} onThemePreference={model.onThemePreference} />
       {:else if draft.tab === "agenthub"}
-        <AgentHubSettingsPanel agentHub={model.agentHub} bind:draft bind:pending onDirty={markDirty} onSaveAgentHub={model.onSaveAgentHub} onToggleProvider={model.onToggleProvider} onToast={model.onToast} />
+        <AgentHubSettingsPanel agentHub={model.agentHub} bind:draft bind:pending onDirty={markDirty} onSaveAgentHub={model.onSaveAgentHub} onSetProviderCommand={model.onSetProviderCommand} onToast={model.onToast} />
       {:else if draft.tab === "profiles"}
         <ProfilesSettingsPanel agents={model.agents} bind:draft bind:pending onDirty={markDirty} onSaveAgentHub={model.onSaveAgentHub} onToast={model.onToast} />
       {:else}

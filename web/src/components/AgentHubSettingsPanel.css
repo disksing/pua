@@ -1,5 +1,13 @@
 @import "./SettingsPanel.css";
 
+:where([data-component-owner="agenthub-settings-panel"]) button {
+  -webkit-appearance: none;
+  appearance: none;
+  margin: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
 :where([data-component-owner="agenthub-settings-panel"]) .settings-field-label {
   display: grid;
   gap: 6px;
@@ -239,20 +247,20 @@
 }
 
 :where([data-component-owner="agenthub-settings-panel"]) .settings-delete-button {
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 30px;
   display: grid;
   place-items: center;
-  border-radius: 5px;
+  flex: none;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
   color: var(--muted);
 }
 
 :where([data-component-owner="agenthub-settings-panel"]) .settings-delete-button:hover:not(:disabled) {
-  background: var(--panel-sunken);
-  color: var(--ink);
-}
-
-:where([data-component-owner="agenthub-settings-panel"]) .settings-delete-button:hover:not(:disabled) {
+  background: var(--red-soft);
   color: var(--red, var(--accent));
 }
 

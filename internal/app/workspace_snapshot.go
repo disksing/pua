@@ -83,12 +83,13 @@ type ResourceFile struct {
 }
 
 type FileTreeEntry struct {
-	Name     string          `json:"name"`
-	Path     string          `json:"path"`
-	Type     string          `json:"type"`
-	Size     int64           `json:"size,omitempty"`
-	Modified string          `json:"modified,omitempty"`
-	Children []FileTreeEntry `json:"children,omitempty"`
+	Name      string          `json:"name"`
+	Path      string          `json:"path"`
+	Type      string          `json:"type"`
+	Size      int64           `json:"size,omitempty"`
+	Modified  string          `json:"modified,omitempty"`
+	Children  []FileTreeEntry `json:"children,omitempty"`
+	Truncated bool            `json:"truncated,omitempty"`
 }
 
 type resourceEntry struct {
@@ -98,7 +99,7 @@ type resourceEntry struct {
 
 const (
 	maxFileTreeDepth   = 3
-	maxFileTreeEntries = 200
+	maxFileTreeEntries = 10000
 )
 
 func buildWorkspaceTreeAt(root string) (WorkspaceTree, error) {
@@ -144,8 +145,7 @@ func readWorkspaceWiki(root string) WorkspaceWikiView {
 	if !info.IsDir() {
 		return WorkspaceWikiView{Exists: true, Entries: []FileTreeEntry{}, Error: "workspace wiki path is not a directory"}
 	}
-	count := 0
-	entries, err := readFileTreeLimited(root, dir, 0, &count)
+	entries, err := readFileTreeLimited(root, dir, maxFileTreeDepth, maxFileTreeEntries)
 	if err != nil {
 		return WorkspaceWikiView{Exists: true, Entries: []FileTreeEntry{}, Error: err.Error()}
 	}
@@ -271,29 +271,81 @@ func markdownContentHash(data []byte) string {
 }
 
 func readFileTree(root, dir string) []FileTreeEntry {
-	count := 0
-	entries, _ := readFileTreeLimited(root, dir, 0, &count)
-	if entries == nil {
+	entries, err := readFileTreeLimited(root, dir, maxFileTreeDepth, maxFileTreeEntries)
+	if err != nil || entries == nil {
 		return []FileTreeEntry{}
 	}
 	return entries
 }
 
-func readFileTreeLimited(root, dir string, depth int, count *int) ([]FileTreeEntry, error) {
-	if depth > maxFileTreeDepth || *count >= maxFileTreeEntries {
-		return nil, nil
-	}
-	entries, err := os.ReadDir(dir)
+func readFileTreeLimited(root, dir string, maxDepth, maxEntries int) ([]FileTreeEntry, error) {
+	count := 0
+	entries, _, err := listFileTreeEntries(root, dir, &count, maxEntries)
 	if err != nil {
 		return nil, err
 	}
-	tree := make([]FileTreeEntry, 0, len(entries))
-	for _, entry := range entries {
-		if *count >= maxFileTreeEntries {
-			break
+	expandFileTree(root, entries, dir, 0, &count, maxDepth, maxEntries)
+	if entries == nil {
+		entries = []FileTreeEntry{}
+	}
+	return entries, nil
+}
+
+type fileTreeQueueItem struct {
+	node  *FileTreeEntry
+	abs   string
+	depth int
+}
+
+func expandFileTree(root string, entries []FileTreeEntry, absDir string, depth int, count *int, maxDepth, maxEntries int) {
+	queue := make([]fileTreeQueueItem, 0)
+	enqueueDirs := func(nodes []FileTreeEntry, parentAbs string, childDepth int) {
+		for i := range nodes {
+			if nodes[i].Type != "directory" {
+				continue
+			}
+			queue = append(queue, fileTreeQueueItem{
+				node:  &nodes[i],
+				abs:   filepath.Join(parentAbs, nodes[i].Name),
+				depth: childDepth,
+			})
 		}
+	}
+	enqueueDirs(entries, absDir, depth+1)
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		if cur.depth > maxDepth {
+			continue
+		}
+		if *count >= maxEntries {
+			cur.node.Truncated = true
+			continue
+		}
+		children, truncated, err := listFileTreeEntries(root, cur.abs, count, maxEntries)
+		if err != nil {
+			continue
+		}
+		cur.node.Children = children
+		cur.node.Truncated = truncated
+		enqueueDirs(cur.node.Children, cur.abs, cur.depth+1)
+	}
+}
+
+func listFileTreeEntries(root, dir string, count *int, maxEntries int) ([]FileTreeEntry, bool, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, false, err
+	}
+	tree := make([]FileTreeEntry, 0, len(entries))
+	truncated := false
+	for _, entry := range entries {
 		if skipFileTreeDir(entry) {
 			continue
+		}
+		if *count >= maxEntries {
+			truncated = true
+			break
 		}
 		path := filepath.Join(dir, entry.Name())
 		info, err := entry.Info()
@@ -302,20 +354,19 @@ func readFileTreeLimited(root, dir string, depth int, count *int) ([]FileTreeEnt
 		}
 		*count++
 		node := FileTreeEntry{
-			Name: entry.Name(),
-			Path: relPath(root, path),
-			Type: "file",
+			Name:     entry.Name(),
+			Path:     relPath(root, path),
+			Type:     "file",
+			Modified: info.ModTime().UTC().Format(time.RFC3339Nano),
 		}
 		if entry.IsDir() {
 			node.Type = "directory"
-			node.Children, _ = readFileTreeLimited(root, path, depth+1, count)
 		} else {
 			node.Size = info.Size()
 		}
-		node.Modified = info.ModTime().UTC().Format(time.RFC3339Nano)
 		tree = append(tree, node)
 	}
-	return tree, nil
+	return tree, truncated, nil
 }
 
 func skipFileTreeDir(entry os.DirEntry) bool {

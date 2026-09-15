@@ -112,12 +112,13 @@ type workspaceWiki struct {
 }
 
 type fileTreeEntry struct {
-	Name     string          `json:"name"`
-	Path     string          `json:"path"`
-	Type     string          `json:"type"`
-	Size     int64           `json:"size,omitempty"`
-	Modified string          `json:"modified,omitempty"`
-	Children []fileTreeEntry `json:"children,omitempty"`
+	Name      string          `json:"name"`
+	Path      string          `json:"path"`
+	Type      string          `json:"type"`
+	Size      int64           `json:"size,omitempty"`
+	Modified  string          `json:"modified,omitempty"`
+	Children  []fileTreeEntry `json:"children,omitempty"`
+	Truncated bool            `json:"truncated,omitempty"`
 }
 
 type resourceSnapshot struct {

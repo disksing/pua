@@ -27,6 +27,7 @@ export interface FileTreeModel {
   size?: number;
   modified?: string;
   children?: FileTreeModel[];
+  truncated?: boolean;
 }
 
 export interface ResourceRepoModel {

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
 
+  import "../components/AgentHubSettingsPanel.css";
   import Icon from "../components/Icon.svelte";
   import { COMPLETION_SOUNDS, TonePlayer } from "./companion/audio";
   import { BEEP_PROGRESSIONS } from "./companion/chords";
@@ -8,12 +9,17 @@
   import { companionPreferencesEqual, loadCompanionPreferences, saveCompanionPreferences, validateCompanionPreferences } from "./companion/preferences";
   import { api } from "./core/api";
   import ModelSelect from "./ModelSelect.svelte";
-  import { buildPayload, createDraft, isDirty, normalizeAgentOptions, providerOptionSchema, reorderAgents, uniqueAgentName, validateDraft } from "./settings/config-model";
+  import { buildPayload, createDraft, isDirty, normalizeAgentOptions, providerOptionSchema, reorderAgents, summarizeOptions, uniqueAgentName, validateDraft } from "./settings/config-model";
   import { applyProviderUpdate, buildProviderRows, requestProviderCommand } from "./settings/provider-rows";
 
   let { onClose, onSaved }: { onClose: () => void; onSaved: () => void } = $props();
   let phase = $state<"loading" | "ready" | "error">("loading");
-  let section = $state<"general" | "activity" | "providers" | "agents">("general");
+  let section = $state<"general" | "activity" | "agents">("general");
+  let nextAgentId = 0;
+  let agentIds = $state<number[]>([]);
+  let expandedAgents = $state<Set<number>>(new Set());
+  let draggingId = $state<number | null>(null);
+  let dropId = $state<number | null>(null);
   let draft = $state<any>(null);
   let snapshot = $state<any>(null);
   let activity = $state<any>(null);
@@ -56,6 +62,8 @@
       const configBody = await api<any>("/v1/config");
       draft = createDraft(configBody.config || {});
       snapshot = clone(draft);
+      agentIds = draft.agents.map(() => nextAgentId++);
+      expandedAgents = new Set();
       activity = loadCompanionPreferences();
       activitySnapshot = clone(activity);
       phase = "ready";
@@ -69,6 +77,7 @@
   }
 
   function requestClose(): void {
+    if (saving || pendingProvider) return;
     if (dirty && !window.confirm("You have unsaved changes. Close settings and discard them?")) return;
     onClose();
   }
@@ -90,7 +99,7 @@
   }
 
   async function confirmProviderCommand(provider: any): Promise<void> {
-    if (pendingProvider) return;
+    if (pendingProvider || saving) return;
     pendingProvider = provider.id; commandError = "";
     try {
       const updated = await requestProviderCommand(api, provider.id, commandDraft.trim());
@@ -114,8 +123,13 @@
   }
 
   async function save(force = false): Promise<void> {
-    if (!dirty || saving) return;
-    if (errors.length) { section = errors[0].section; error = errors[0].message; return; }
+    if (!dirty || saving || pendingProvider) return;
+    if (errors.length) {
+      section = errors[0].section === "general" ? "general" : "agents";
+      if (errors[0].section === "agents") expandedAgents = new Set(expandedAgents).add(agentIds[errors[0].index]);
+      error = errors[0].message;
+      return;
+    }
     saving = true; error = "";
     try {
       if (isDirty(draft, snapshot) && !force) {
@@ -139,11 +153,28 @@
   }
 
   function addAgent(): void {
-    mutate((next) => next.agents.push({ name: uniqueAgentName("Agent", next.agents.map((agent: any) => agent.name)), providerId: next.agentProviders[0]?.id || "" }));
+    if (!draft.agentProviders.length) return;
+    mutate((next) => next.agents.push({ name: uniqueAgentName("Agent", next.agents.map((agent: any) => agent.name)), providerId: next.agentProviders[0].id }));
+    const id = nextAgentId++;
+    agentIds = [...agentIds, id];
+    expandedAgents = new Set(expandedAgents).add(id);
   }
 
-  function removeAgent(index: number): void { mutate((next) => next.agents.splice(index, 1)); }
-  function moveAgent(index: number, delta: number): void { const target = index + delta; if (target < 0 || target >= draft.agents.length) return; mutate((next) => { next.agents = reorderAgents(next.agents, index, target); }); }
+  function removeAgent(index: number): void {
+    mutate((next) => next.agents.splice(index, 1));
+    expandedAgents = new Set([...expandedAgents].filter((id) => id !== agentIds[index]));
+    agentIds = agentIds.filter((_, position) => position !== index);
+  }
+  function moveAgent(from: number, to: number): void {
+    if (to < 0 || to >= draft.agents.length || from === to) return;
+    mutate((next) => { next.agents = reorderAgents(next.agents, from, to); });
+    agentIds = reorderAgents(agentIds, from, to);
+  }
+  function toggleAgent(id: number): void {
+    const next = new Set(expandedAgents);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    expandedAgents = next;
+  }
   function toggleQuota(key: string, visible: boolean): void {
     const hidden = new Set<string>(activity.hiddenQuotaKeys || []);
     if (visible) hidden.delete(key); else hidden.add(key);
@@ -170,25 +201,26 @@
   function changeOption(index: number, key: string, value: string): void { mutate((next) => { const options = { ...(next.agents[index].options || {}) }; if (value) options[key] = value; else delete options[key]; next.agents[index].options = options; }); }
   function envText(agent: any): string { return Object.entries(agent.environment || {}).map(([key, value]) => `${key}=${value}`).join("\n"); }
   function changeEnv(index: number, value: string): void { mutate((next) => { const environment: Record<string, string> = {}; value.split("\n").forEach((line) => { const at = line.indexOf("="); if (at > 0) environment[line.slice(0, at).trim()] = line.slice(at + 1); }); next.agents[index].environment = environment; }); }
-  function providerRows(): any[] { return (buildProviderRows as any)(draft, probes); }
+  const providerRows = $derived(buildProviderRows(draft, probes as any));
   function providerAvailable(providerId: string): boolean {
     const probe = probes.find((item: any) => item.providerId === providerId);
     return probe ? probe.available !== false : true;
   }
   function optionFields(agent: any): any[] { return (providerOptionSchema as any)(draft.agentProviders.find((item: any) => item.id === agent.providerId)?.type || ""); }
+  function providerName(id: string): string { return draft.agentProviders.find((item: any) => item.id === id)?.name || id || "No provider"; }
   function message(reason: unknown): string { return reason instanceof Error ? reason.message : String(reason); }
 </script>
 
 <div class="modal-backdrop" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) requestClose(); }}>
   <div class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
-    <header class="settings-header"><div><span class="eyebrow">AgentHub</span><h2 id="settings-title">Settings</h2><p>Configure OnWatch, activity feedback, providers, and agents.</p></div><button type="button" class="icon-button" aria-label="Close settings" onclick={requestClose}><Icon name="x" /></button></header>
+    <header class="settings-header"><div><span class="eyebrow">AgentHub</span><h2 id="settings-title">Settings</h2><p>Configure OnWatch, activity feedback, and agents.</p></div><button type="button" class="icon-button" aria-label="Close settings" onclick={requestClose}><Icon name="x" /></button></header>
     {#if phase === "loading"}<div class="settings-status"><span class="spinner"></span>Loading configuration…</div>
     {:else if phase === "error"}<div class="settings-status"><p role="alert">{error}</p><button type="button" class="secondary-button" onclick={load}>Retry</button></div>
     {:else}
       <div class="settings-layout">
         <nav class="settings-nav" aria-label="Settings sections">
-          {#each [["general","General"],["activity","Activity"],["providers","Providers"],["agents","Agents"]] as item}
-            <button type="button" class:active={section === item[0]} onclick={() => section = item[0] as typeof section}>{item[1]}{#if errors.filter((entry: any) => entry.section === item[0]).length}<span>{errors.filter((entry: any) => entry.section === item[0]).length}</span>{/if}</button>
+          {#each [["general","General"],["activity","Activity"],["agents","Agents"]] as item}
+            <button type="button" class:active={section === item[0]} onclick={() => section = item[0] as typeof section}>{item[1]}{#if errors.filter((entry: any) => entry.section === item[0] || (item[0] === "agents" && entry.section === "providers")).length}<span>{errors.filter((entry: any) => entry.section === item[0] || (item[0] === "agents" && entry.section === "providers")).length}</span>{/if}</button>
           {/each}
         </nav>
         <div class="settings-main">
@@ -224,41 +256,60 @@
                   </section>
                 {/if}
               </section>
-            {:else if section === "providers"}
-              <section class="settings-stack"><header class="settings-section-heading"><h3>Providers</h3><p>Built-in integrations are enabled automatically when their executable is detected. Existing Sessions are not interrupted.</p></header>
-                {#each providerRows() as provider (provider.id)}
-                  {@const editing = commandEditing === provider.id || (!provider.available && !provider.command)}
-                  <article class="settings-card provider-card">
-                    <header>
-                      <div><h3>{provider.name}</h3><p>{provider.description}</p><small class={provider.tone}>{provider.status}{provider.available && provider.path ? ` · ${provider.path}` : ""}</small>{#if !provider.available && provider.error}<small class="danger">{provider.error}</small>{/if}</div>
-                    </header>
-                    {#if editing}
-                      <label><span>Executable path</span><input value={commandEditing === provider.id ? commandDraft : provider.command} placeholder={`Detect from PATH: ${provider.id}`} aria-label={`${provider.name} executable path`} oninput={(event) => { commandEditing = provider.id; commandDraft = event.currentTarget.value; commandError = ""; }} /><small>Leave blank to detect the executable automatically.</small></label>
-                      {#if commandError && commandEditing === provider.id}<small class="field-error">{commandError}</small>{/if}
-                      <div class="settings-inline">
-                        <button type="button" class="secondary-button" disabled={Boolean(pendingProvider)} aria-label={`Confirm ${provider.name} executable path`} onclick={() => confirmProviderCommand(provider)}>Confirm</button>
-                        {#if commandEditing === provider.id && (provider.available || provider.command)}
-                          <button type="button" class="secondary-button" disabled={Boolean(pendingProvider)} onclick={cancelCommandEdit}>Cancel</button>
+            {:else}
+              <div class="settings-agent-panel agenthub-settings-panel" data-component-owner="agenthub-settings-panel" data-settings-panel>
+                <section class="settings-agent-section">
+                  <div class="settings-section-heading"><h3>Providers</h3><span>Detected automatically · paths save on confirm</span></div>
+                  <div class="settings-provider-list">
+                    {#each providerRows as provider (provider.id)}
+                      {@const editing = commandEditing === provider.id || (!provider.available && !provider.command)}
+                      <div class="settings-service-row" class:settings-service-disabled={!provider.available}>
+                        <div class="settings-provider-main"><span class="settings-agent-mark">{provider.name.slice(0, 1)}</span><span><strong>{provider.name}</strong><small>{provider.description}</small></span><span class="settings-pill" class:pill-danger={!provider.available}>{provider.status}</span></div>
+                        {#if editing}
+                          <label class="settings-provider-command"><span>Executable path</span><input value={commandEditing === provider.id ? commandDraft : provider.command} placeholder={`Detect from PATH: ${provider.id}`} aria-label={`${provider.name} executable path`} aria-invalid={Boolean(commandError && commandEditing === provider.id)} oninput={(event) => { commandEditing = provider.id; commandDraft = event.currentTarget.value; commandError = ""; }} /><small>Leave blank to detect the executable automatically.</small>{#if commandError && commandEditing === provider.id}<small class="settings-field-error" role="alert">{commandError}</small>{:else if provider.error}<small class="settings-field-error">{provider.error}</small>{/if}</label>
+                          <div class="settings-provider-actions"><button type="button" class="settings-inline-button" disabled={Boolean(pendingProvider) || saving} aria-label={`Confirm ${provider.name} executable path`} onclick={() => confirmProviderCommand(provider)}>Confirm</button>{#if commandEditing === provider.id && (provider.available || provider.command)}<button type="button" class="settings-inline-button" disabled={Boolean(pendingProvider)} onclick={cancelCommandEdit}>Cancel</button>{/if}</div>
+                        {:else}
+                          <div class="settings-provider-path"><code class:settings-provider-path-invalid={!provider.available}>{provider.available ? provider.path || `Detect from PATH: ${provider.id}` : provider.command}</code>{#if provider.error}<small class="settings-field-error">{provider.error}</small>{/if}</div>
+                          <div class="settings-provider-actions"><button type="button" class="settings-inline-button" disabled={Boolean(pendingProvider) || saving} aria-label={`Change ${provider.name} executable path`} onclick={() => startCommandEdit(provider)}>Change path</button></div>
                         {/if}
                       </div>
-                    {:else}
-                      {#if !provider.available && provider.command}<p class="provider-path-invalid"><code>{provider.command}</code></p>{/if}
-                      <div class="settings-inline"><button type="button" class="secondary-button" disabled={Boolean(pendingProvider)} aria-label={`Change ${provider.name} executable path`} onclick={() => startCommandEdit(provider)}>Change path</button></div>
-                    {/if}
-                  </article>
-                {/each}
-              </section>
-            {:else}
-              <section class="settings-stack"><header class="settings-section-heading action"><div><h3>Agents</h3><p>Named configurations used when a Session starts.</p></div><button type="button" class="secondary-button" onclick={addAgent}><Icon name="plus" />Add agent</button></header>
-                {#each draft.agents as agent, index}<article class="settings-card agent-card"><header><strong>{agent.name || "Unnamed agent"}</strong><div><button type="button" class="icon-button" disabled={index === 0} aria-label="Move up" onclick={() => moveAgent(index, -1)}><Icon name="chevron-up" /></button><button type="button" class="icon-button" disabled={index === draft.agents.length - 1} aria-label="Move down" onclick={() => moveAgent(index, 1)}><Icon name="chevron-down" /></button><button type="button" class="icon-button danger" aria-label="Delete agent" onclick={() => removeAgent(index)}><Icon name="trash-2" /></button></div></header>
-                  <div class="settings-grid-two"><label><span>Name</span><input value={agent.name} aria-invalid={Boolean(fieldError("name", index))} oninput={(event) => mutate((next) => next.agents[index].name = event.currentTarget.value)} />{#if fieldError("name", index)}<small class="field-error">{fieldError("name", index)}</small>{/if}</label><label><span>Provider</span><select value={agent.providerId} onchange={(event) => changeProvider(index, event.currentTarget.value)}>{#each draft.agentProviders as provider}<option value={provider.id}>{provider.name || provider.id}</option>{/each}</select></label></div>
-                  {#each optionFields(agent) as field}<label><span>{field.label}</span>{#if field.kind === "model"}<ModelSelect providerId={agent.providerId} enabled={providerAvailable(agent.providerId)} value={agent.options?.[field.key] || ""} onChange={(value) => changeOption(index, field.key, value)} />{:else}<select value={agent.options?.[field.key] || field.fallback || ""} onchange={(event) => changeOption(index, field.key, event.currentTarget.value)}>{#each field.options as option}<option value={option.value}>{option.label}</option>{/each}</select>{/if}</label>{/each}
-                  <label><span>Environment variables</span><textarea rows="3" value={envText(agent)} placeholder="NAME=value" oninput={(event) => changeEnv(index, event.currentTarget.value)}></textarea><small>One NAME=value entry per line.</small></label>
-                </article>{:else}<div class="settings-empty">No Agents configured.</div>{/each}
-              </section>
+                    {/each}
+                  </div>
+                </section>
+                <section class="settings-agent-section">
+                  <div class="settings-section-heading"><h3>Agents</h3><span>{draft.agents.length} agents</span></div>
+                  <p class="settings-section-description">Named configurations used when a Session starts. Drag to reorder or use the arrow keys on a handle.</p>
+                  <div class="settings-agent-list">
+                    {#each draft.agents as agent, index (agentIds[index])}
+                      {@const id = agentIds[index]}
+                      {@const open = expandedAgents.has(id)}
+                      {@const invalid = errors.some((item: any) => item.section === "agents" && item.index === index)}
+                      <article class="settings-agent-card" class:settings-agent-card-open={open} class:dragging={draggingId === id} class:drop-target={dropId === id}
+                        ondragover={(event) => { if (draggingId === null || draggingId === id) return; event.preventDefault(); if (event.dataTransfer) event.dataTransfer.dropEffect = "move"; dropId = id; }}
+                        ondragleave={() => { if (dropId === id) dropId = null; }}
+                        ondrop={(event) => { event.preventDefault(); const from = agentIds.indexOf(draggingId ?? -1); if (from !== -1) moveAgent(from, index); draggingId = null; dropId = null; }}>
+                        <div class="settings-agent-card-head">
+                          <button type="button" class="settings-drag-handle" draggable="true" aria-label={`Reorder agent ${agent.name || "Unnamed agent"}, position ${index + 1} of ${draft.agents.length}. Use Arrow Up or Arrow Down.`} aria-keyshortcuts="ArrowUp ArrowDown" title="Drag to reorder (or focus and use Arrow keys)" ondragstart={(event) => { draggingId = id; if (event.dataTransfer) { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", String(id)); } }} ondragend={() => { draggingId = null; dropId = null; }} onkeydown={(event) => { if (event.key === "ArrowUp" || event.key === "ArrowDown") { event.preventDefault(); moveAgent(index, index + (event.key === "ArrowUp" ? -1 : 1)); } }}><Icon name="grip-vertical" /></button>
+                          <button type="button" class="settings-agent-card-toggle" aria-expanded={open} aria-controls={`agenthub-agent-${id}-body`} onclick={() => toggleAgent(id)}><span class="settings-card-caret" class:open><Icon name="chevron-right" /></span><span class="settings-agent-card-title"><strong>{agent.name || "Unnamed agent"}</strong><small>{providerName(agent.providerId)}{summarizeOptions(agent.options).length ? ` · ${summarizeOptions(agent.options).join(" · ")}` : ""}{invalid ? " · Needs attention" : ""}</small></span></button>
+                          <button type="button" class="settings-delete-button" aria-label={`Delete ${agent.name || "agent"}`} title="Delete Agent" onclick={() => removeAgent(index)}><Icon name="trash-2" /></button>
+                        </div>
+                        {#if open}
+                          <div id={`agenthub-agent-${id}-body`} class="settings-agent-card-body">
+                            <label class="settings-field-label"><span>Name</span><input value={agent.name} aria-invalid={Boolean(fieldError("name", index))} oninput={(event) => mutate((next) => next.agents[index].name = event.currentTarget.value)} />{#if fieldError("name", index)}<small class="settings-field-error">{fieldError("name", index)}</small>{/if}</label>
+                            <label class="settings-field-label"><span>Provider</span><select value={agent.providerId} aria-invalid={Boolean(fieldError("providerId", index))} onchange={(event) => changeProvider(index, event.currentTarget.value)}><option value="">Choose a provider</option>{#each draft.agentProviders as provider}<option value={provider.id}>{provider.name || provider.id}{providerAvailable(provider.id) ? "" : " (Unavailable)"}</option>{/each}</select>{#if fieldError("providerId", index)}<small class="settings-field-error">{fieldError("providerId", index)}</small>{/if}</label>
+                            <div class="settings-agent-subsection"><div class="settings-subsection-heading"><strong>Provider options</strong><span>{providerName(agent.providerId)}</span></div>{#each optionFields(agent) as field}<label class="settings-field-label"><span>{field.label}</span>{#if field.kind === "model"}<ModelSelect providerId={agent.providerId} enabled={providerAvailable(agent.providerId)} value={agent.options?.[field.key] || ""} onChange={(value) => changeOption(index, field.key, value)} />{:else}<select value={agent.options?.[field.key] || field.fallback || ""} onchange={(event) => changeOption(index, field.key, event.currentTarget.value)}>{#each field.options as option}<option value={option.value}>{option.label}</option>{/each}</select>{/if}</label>{/each}</div>
+                            <div class="settings-agent-subsection"><label class="settings-field-label"><span>Environment variables</span><textarea rows="3" value={envText(agent)} placeholder="NAME=value" oninput={(event) => changeEnv(index, event.currentTarget.value)}></textarea><small>One NAME=value entry per line.</small>{#if fieldError("environment", index)}<small class="settings-field-error">{fieldError("environment", index)}</small>{/if}</label></div>
+                          </div>
+                        {/if}
+                      </article>
+                    {:else}<div class="settings-empty">No Agents configured.</div>{/each}
+                  </div>
+                  <button type="button" class="settings-add-agent" disabled={!draft.agentProviders.length} onclick={addAgent}><Icon name="plus" />Add agent</button>
+                </section>
+              </div>
             {/if}
           </div>
-          <footer class="settings-savebar">{#if error}<p role="alert">{error}</p>{/if}<span>{saved ? "Saved" : dirty ? "Unsaved changes" : "Up to date"}</span><div><button type="button" class="secondary-button" disabled={saving} onclick={requestClose}>Cancel</button><button type="button" class="primary-button" disabled={!dirty || saving || errors.length > 0} onclick={() => save()}>{saving ? "Saving…" : "Save all"}</button></div></footer>
+          <footer class="settings-savebar">{#if error}<p role="alert">{error}</p>{/if}<span>{saved ? "Saved" : dirty ? "Unsaved changes" : "Up to date"}</span><div><button type="button" class="secondary-button" disabled={saving} onclick={requestClose}>Cancel</button><button type="button" class="primary-button" disabled={!dirty || saving || Boolean(pendingProvider)} onclick={() => save()}>{saving ? "Saving…" : "Save all"}</button></div></footer>
         </div>
       </div>
     {/if}

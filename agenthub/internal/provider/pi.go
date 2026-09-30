@@ -29,6 +29,9 @@ type piSession struct {
 	// snapshot-only providers need one normalized fallback at *_end, while a
 	// normal delta stream must not append its full end snapshot again.
 	messageStreams map[piMessageStreamKey]bool
+	// The read loop owns this state. Pi can emit several failed assistant
+	// messages during recovery; only agent_settled closes the public Turn.
+	assistantError string
 	closed         bool
 	done           chan struct{}
 	prompts        asyncOperations
@@ -318,11 +321,26 @@ func (p *piSession) event(kind string, raw json.RawMessage) {
 	event := Event{Type: "provider.event", Data: map[string]any{"method": kind, "raw": raw}}
 	var value struct {
 		AssistantMessageEvent piAssistantMessageUpdate `json:"assistantMessageEvent"`
+		Message               struct {
+			Role         string `json:"role"`
+			StopReason   string `json:"stopReason"`
+			ErrorMessage string `json:"errorMessage"`
+		} `json:"message"`
 	}
 	_ = json.Unmarshal(raw, &value)
 	switch kind {
 	case "message_start":
 		clear(p.messageStreams)
+	case "message_end":
+		if value.Message.Role == "assistant" {
+			p.assistantError = ""
+			if value.Message.StopReason == "error" {
+				p.assistantError = strings.TrimSpace(value.Message.ErrorMessage)
+				if p.assistantError == "" {
+					p.assistantError = "Pi assistant response failed"
+				}
+			}
+		}
 	case "message_update":
 		var emit bool
 		event, emit = p.normalizeMessageUpdate(event, value.AssistantMessageEvent, raw)
@@ -335,8 +353,14 @@ func (p *piSession) event(kind string, raw json.RawMessage) {
 	case "agent_settled":
 		clear(p.messageStreams)
 		event.Type, event.TurnDone = "provider.turn.completed", true
+		if p.assistantError != "" {
+			event.Type, event.TurnFailed = "provider.error", true
+			event.Data.(map[string]any)["message"] = p.assistantError
+		}
+		p.assistantError = ""
 	case "extension_error":
 		clear(p.messageStreams)
+		p.assistantError = ""
 		event.Type, event.TurnDone, event.TurnFailed = "provider.error", true, true
 	}
 	if p.options.Hooks.Event != nil {

@@ -1,7 +1,7 @@
 <script lang="ts">
   import "./SchedulerPanel.css";
 
-  import { onDestroy } from "svelte";
+  import { onDestroy, tick } from "svelte";
   import { ApiClient } from "../api/client";
   import { confirmDialog } from "../controllers/confirm-dialog-controller";
   import type { ScheduleRecord, SchedulerConfigRecord } from "../models/workspace";
@@ -21,6 +21,9 @@
   let condition = $state("");
   let target = $state("workspace");
   let saving = $state(false);
+  let saveError = $state("");
+  let editorOpen = $state(false);
+  let dialog: HTMLDialogElement | undefined = $state();
   const targetError = $derived(validateTarget(target));
   const conditionCount = $derived(Array.from(condition.trim()).length);
   const conditionLimit = $derived(config.conditionMaxChars ?? 128);
@@ -35,14 +38,37 @@
       : "Target must be an open resource in the current Workspace.";
   }
 
-  function edit(schedule: ScheduleRecord): void {
-    editingId = schedule.id;
-    description = schedule.description;
-    condition = schedule.condition;
-    target = schedule.target;
+  async function openEditor(schedule?: ScheduleRecord): Promise<void> {
+    if (saving) return;
+    clearForm();
+    if (schedule) {
+      editingId = schedule.id;
+      description = schedule.description;
+      condition = schedule.condition;
+      target = schedule.target;
+    }
+    editorOpen = true;
+    await tick();
+    dialog?.showModal();
+    dialog?.querySelector<HTMLInputElement>("input")?.focus();
+  }
+
+  function closeEditor(): void {
+    if (saving) return;
+    dialog?.close();
+  }
+
+  function editorClosed(): void {
+    editorOpen = false;
+    clearForm();
+  }
+
+  function targetTitle(resourceId: string): string | null {
+    return resolveResourceTitle(resourceId) || (resourceId === "scheduler" ? "Scheduler" : null);
   }
 
   function clearForm(): void {
+    saveError = "";
     editingId = "";
     description = "";
     condition = "";
@@ -52,6 +78,7 @@
   async function saveSchedule(): Promise<void> {
     if (!description.trim() || !condition.trim() || conditionError || targetError || saving) return;
     saving = true;
+    saveError = "";
     const wasEditing = Boolean(editingId);
     try {
       const path = `/api/workspaces/${encodeURIComponent(workspaceId)}/scheduler${editingId ? `/${encodeURIComponent(editingId)}` : ""}`;
@@ -59,11 +86,15 @@
         method: editingId ? "PUT" : "POST",
         body: JSON.stringify({ description, condition, target })
       });
+      dialog?.close();
+      editorOpen = false;
       clearForm();
       await onChanged();
       onToast(wasEditing ? "Schedule updated." : "Schedule added.");
     } catch (reason) {
-      onToast(reason instanceof Error ? reason.message : String(reason));
+      const message = reason instanceof Error ? reason.message : String(reason);
+      if (editorOpen) saveError = message;
+      onToast(message);
     } finally {
       saving = false;
     }
@@ -82,23 +113,45 @@
   }
 </script>
 
-<div class="schedule-editor">
-  <div class="schedule-editor-heading"><div><strong>{editingId ? "Edit schedule" : "Add schedule"}</strong><span>Conditions are natural language interpreted by the Scheduler Agent.</span></div>{#if editingId}<button type="button" class="secondary-button" onclick={clearForm}>Cancel edit</button>{/if}</div>
-  <label><span>Description</span><input bind:value={description} placeholder="What should the Scheduler understand?" /></label>
-  <label><span>Condition ({conditionCount}/{conditionLimit})</span><textarea bind:value={condition} rows="3" aria-label="Condition" placeholder="For example: when the release branch is green after 09:00 Shanghai time" aria-invalid={Boolean(conditionError)} aria-describedby={conditionError ? "schedule-condition-error" : undefined}></textarea>{#if conditionError}<small id="schedule-condition-error" class="schedule-field-error" role="alert">{conditionError}</small>{/if}</label>
-  <label><span>Target resource ID</span><input bind:value={target} placeholder="workspace, scheduler, project1, or project1.task1" aria-invalid={Boolean(targetError)} aria-describedby={targetError ? "schedule-target-error" : undefined} />{#if targetError}<small id="schedule-target-error" class="schedule-field-error" role="alert">{targetError}</small>{/if}</label>
-  <button type="button" class="primary-button" class:busy={saving} class:editing={Boolean(editingId)} disabled={saving || !description.trim() || !condition.trim() || Boolean(conditionError) || Boolean(targetError)} onclick={saveSchedule}><span class="schedule-icon schedule-icon-busy"><Icon name="loader-circle" /></span><span class="schedule-icon schedule-icon-editing"><Icon name="save" /></span><span class="schedule-icon schedule-icon-add"><Icon name="plus" /></span><span>{editingId ? "Update schedule" : "Add schedule"}</span></button>
-</div>
-
 <div class="schedule-list">
+  <header class="schedule-list-heading">
+    <div><h3>Schedules <span>{config.schedules.length}</span></h3></div>
+    <button type="button" class="primary-button" disabled={saving} onclick={() => openEditor()}><Icon name="plus" /><span>Add schedule</span></button>
+  </header>
   {#if config.schedules.length}
-    {#each config.schedules as schedule (schedule.id)}
-      <article class:editing={editingId === schedule.id}>
-        <header><div><strong>{schedule.description}</strong><code>{schedule.id}</code></div><div><button type="button" class="secondary-button" onclick={() => edit(schedule)}><Icon name="pencil" /><span>Edit</span></button><button type="button" class="danger-button" onclick={() => remove(schedule)}><Icon name="trash-2" /><span>Remove</span></button></div></header>
-        <dl><div><dt>Condition</dt><dd>{schedule.condition}</dd></div><div><dt>Target</dt><dd><code>{schedule.target}</code></dd></div></dl>
-      </article>
-    {/each}
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex (Keyboard users must be able to scroll the table.) -->
+    <div class="schedule-table-scroll" role="region" aria-label="Schedules table" tabindex="0">
+      <table class="schedule-table" aria-label="Schedules">
+        <thead><tr><th scope="col">Target</th><th scope="col">Schedule / Condition</th><th scope="col" class="schedule-actions-cell">Actions</th></tr></thead>
+        <tbody>
+          {#each config.schedules as schedule (schedule.id)}
+            <tr class:editing={editingId === schedule.id}>
+              <td class="schedule-target-cell">
+                <strong class:unavailable={!targetTitle(schedule.target)}>{targetTitle(schedule.target) || "Title unavailable"}</strong>
+                <code>{schedule.target}</code>
+              </td>
+              <td class="schedule-description-cell"><strong>{schedule.description}</strong><code>{schedule.id}</code><p>{schedule.condition}</p></td>
+              <td class="schedule-actions-cell"><div class="schedule-row-actions"><button type="button" class="secondary-button" onclick={() => openEditor(schedule)}><Icon name="pencil" /><span>Edit</span></button><button type="button" class="danger-button" onclick={() => remove(schedule)}><Icon name="trash-2" /><span>Remove</span></button></div></td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
   {:else}
     <div class="empty-list-row"><Icon name="calendar-clock" /><span>No schedules. The Server will not create empty Scheduler Turns.</span></div>
   {/if}
 </div>
+
+<dialog bind:this={dialog} class="schedule-dialog" aria-label={editingId ? "Edit schedule" : "Add schedule"} onclose={editorClosed} oncancel={(event) => { if (saving) event.preventDefault(); }}>
+{#if editorOpen}
+<div class="schedule-editor">
+  <div class="schedule-editor-heading"><div><strong>{editingId ? "Edit schedule" : "Add schedule"}</strong><span>Conditions are natural language interpreted by the Scheduler Agent.</span></div><button type="button" class="secondary-button" disabled={saving} onclick={closeEditor}>Cancel</button></div>
+  <label><span>Description</span><input bind:value={description} disabled={saving} placeholder="What should the Scheduler understand?" /></label>
+  <label><span>Condition ({conditionCount}/{conditionLimit})</span><textarea bind:value={condition} disabled={saving} rows="3" aria-label="Condition" placeholder="For example: when the release branch is green after 09:00 Shanghai time" aria-invalid={Boolean(conditionError)} aria-describedby={conditionError ? "schedule-condition-error" : undefined}></textarea>{#if conditionError}<small id="schedule-condition-error" class="schedule-field-error" role="alert">{conditionError}</small>{/if}</label>
+  <label><span>Target resource ID</span><input bind:value={target} disabled={saving} placeholder="workspace, scheduler, project1, or project1.task1" aria-invalid={Boolean(targetError)} aria-describedby={targetError ? "schedule-target-error" : undefined} />{#if targetError}<small id="schedule-target-error" class="schedule-field-error" role="alert">{targetError}</small>{/if}</label>
+  {#if saveError}<small class="schedule-field-error" role="alert">{saveError}</small>{/if}
+  <button type="button" class="primary-button" class:busy={saving} class:editing={Boolean(editingId)} disabled={saving || !description.trim() || !condition.trim() || Boolean(conditionError) || Boolean(targetError)} onclick={saveSchedule}><span class="schedule-icon schedule-icon-busy"><Icon name="loader-circle" /></span><span class="schedule-icon schedule-icon-editing"><Icon name="save" /></span><span class="schedule-icon schedule-icon-add"><Icon name="plus" /></span><span>{editingId ? "Update schedule" : "Add schedule"}</span></button>
+</div>
+
+{/if}
+</dialog>

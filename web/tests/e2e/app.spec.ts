@@ -1216,10 +1216,11 @@ test("manages natural-language schedules from the fixed Scheduler resource", asy
   await expect(page.getByRole("tab", { name: "Schedules" })).toHaveAttribute("aria-selected", "true");
   await expect(page.getByText("No schedules. The Server will not create empty Scheduler Turns.")).toBeVisible();
 
+  await page.locator(".schedule-list-heading").getByRole("button", { name: "Add schedule" }).click();
   await page.getByLabel("Description").fill("Notify when the release is ready");
   await page.getByLabel("Condition", { exact: true }).fill("When the release branch is green after 09:00 Shanghai time");
   const target = page.getByLabel("Target resource ID");
-  const addSchedule = page.getByRole("button", { name: "Add schedule", exact: true });
+  const addSchedule = page.getByRole("dialog").getByRole("button", { name: "Add schedule", exact: true });
   await target.fill("not-a-resource");
   await expect(target).toHaveAttribute("aria-invalid", "true");
   await expect(target).toHaveAttribute("aria-describedby", "schedule-target-error");
@@ -1228,8 +1229,10 @@ test("manages natural-language schedules from the fixed Scheduler resource", asy
   await target.fill("project1.task1");
   await expect(target).toHaveAttribute("aria-invalid", "false");
   await addSchedule.click();
-  await expect(page.locator(".schedule-list article")).toContainText("Notify when the release is ready");
-  await expect(page.locator(".schedule-list article")).toContainText("project1.task1");
+  await expect(page.locator(".schedule-table tbody tr")).toContainText("Notify when the release is ready");
+  await expect(page.locator(".schedule-table tbody tr")).toContainText("project1.task1");
+  await expect(page.locator(".schedule-target-cell strong")).toHaveText("Infrastructure task");
+  await expect(page.getByRole("dialog")).not.toBeVisible();
 
   await page.getByRole("tab", { name: "Settings" }).click();
   const interval = page.getByLabel("Scheduler wake interval in minutes");
@@ -1238,14 +1241,21 @@ test("manages natural-language schedules from the fixed Scheduler resource", asy
   await expect(interval).toHaveValue("45");
   await page.getByRole("tab", { name: "Schedules" }).click();
 
-  await page.locator(".schedule-list article").getByRole("button", { name: "Edit" }).click();
+  const editButton = page.locator(".schedule-table tbody tr").getByRole("button", { name: "Edit" });
+  await editButton.click();
+  await expect(page.getByRole("dialog", { name: "Edit schedule" })).toBeVisible();
+  await expect(page.getByLabel("Description")).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog")).not.toBeVisible();
+  await expect(editButton).toBeFocused();
+  await page.locator(".schedule-table tbody tr").getByRole("button", { name: "Edit" }).click();
   await page.getByLabel("Description").fill("Notify after release verification");
   await page.getByRole("button", { name: "Update schedule" }).click();
-  await expect(page.locator(".schedule-list article")).toContainText("Notify after release verification");
+  await expect(page.locator(".schedule-table tbody tr")).toContainText("Notify after release verification");
 
-  await page.locator(".schedule-list article").getByRole("button", { name: "Remove" }).click();
+  await page.locator(".schedule-table tbody tr").getByRole("button", { name: "Remove" }).click();
   await page.getByRole("alertdialog", { name: "Remove schedule" }).getByRole("button", { name: "Remove" }).click();
-  await expect(page.locator(".schedule-list article")).toHaveCount(0);
+  await expect(page.locator(".schedule-table tbody tr")).toHaveCount(0);
   expect(harness.schedulerBodies.map(({ method }) => method)).toEqual(["POST", "PUT", "PUT", "DELETE"]);
   expect(harness.schedulerBodies[0].body).toEqual({
     description: "Notify when the release is ready",
@@ -1262,7 +1272,7 @@ test("keeps Scheduler schedules content inside a 440px viewport", async ({ page 
 
   const measureSchedulerOverflow = async () => page.locator("#detailsContent").evaluate((root) => [
     { name: "details-content", element: root },
-    ...Array.from(root.querySelectorAll<HTMLElement>(".schedule-editor, .schedule-list, .schedule-list > *"))
+    ...Array.from(root.querySelectorAll<HTMLElement>(".schedule-editor, .schedule-list"))
       .map((element) => ({ name: element.className || element.tagName.toLowerCase(), element })),
   ].map(({ name, element }) => ({ name, clientWidth: element.clientWidth, scrollWidth: element.scrollWidth })));
   const expectNoSchedulerOverflow = async () => {
@@ -1282,11 +1292,27 @@ test("keeps Scheduler schedules content inside a 440px viewport", async ({ page 
   await expect(page.getByText("No schedules. The Server will not create empty Scheduler Turns.")).toBeVisible();
   await expectNoSchedulerOverflow();
 
+  await page.locator(".schedule-list-heading").getByRole("button", { name: "Add schedule" }).click();
+  await expectNoSchedulerOverflow();
   await page.getByLabel("Description").fill("Notify when the release is ready");
   await page.getByLabel("Condition", { exact: true }).fill("When the release branch is green after 09:00 Shanghai time and the deployment checklist is complete");
-  await page.getByRole("button", { name: "Add schedule", exact: true }).click();
-  await expect(page.locator(".schedule-list article")).toContainText("Notify when the release is ready");
+  await page.getByRole("dialog").getByRole("button", { name: "Add schedule", exact: true }).click();
+  await expect(page.locator(".schedule-table tbody tr")).toContainText("Notify when the release is ready");
   await expectNoSchedulerOverflow();
+  const table = page.locator(".schedule-table-scroll");
+  const tableSize = await table.evaluate((element) => ({ client: element.clientWidth, scroll: element.scrollWidth }));
+  expect(tableSize.scroll).toBeGreaterThan(tableSize.client);
+  for (const name of ["Edit", "Remove"]) {
+    const button = table.getByRole("button", { name, exact: true });
+    const box = await button.boundingBox();
+    expect(box!.height).toBeGreaterThanOrEqual(44);
+    const textLines = await button.locator("span").evaluate((element) => {
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      return range.getClientRects().length;
+    });
+    expect(textLines).toBe(1);
+  }
 });
 
 test("keeps Scheduler schedule controls at a 44px touch size on a 440px viewport", async ({ page }) => {
@@ -1294,11 +1320,12 @@ test("keeps Scheduler schedule controls at a 44px touch size on a 440px viewport
   await page.setViewportSize({ width: 440, height: 844 });
   await page.goto("/w/ws-test/r/scheduler");
 
+  await page.locator(".schedule-list-heading").getByRole("button", { name: "Add schedule" }).click();
   const editor = page.locator(".schedule-editor");
   const description = page.getByRole("textbox", { name: "Description", exact: true });
   const condition = page.getByRole("textbox", { name: "Condition", exact: true });
   const target = page.getByRole("textbox", { name: "Target resource ID", exact: true });
-  const addSchedule = page.getByRole("button", { name: "Add schedule", exact: true });
+  const addSchedule = page.getByRole("dialog").getByRole("button", { name: "Add schedule", exact: true });
 
   await expect(description).toHaveAttribute("placeholder", "What should the Scheduler understand?");
   await expect(condition).toHaveAttribute("placeholder", "For example: when the release branch is green after 09:00 Shanghai time");

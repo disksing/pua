@@ -287,7 +287,7 @@ func TestManagerRunsExplicitAgentAndResumes(t *testing.T) {
 	for _, event := range events {
 		types = append(types, event.Type)
 	}
-	expected := []string{"session.created", "message.input", "turn.started", "session.state", "session.provider", "session.state", "message.delivery", "message.assistant.delta", "provider.turn.completed", "turn.completed", "message.delivery"}
+	expected := []string{"session.created", "message.input", "turn.started", "message.delivery", "session.state", "session.provider", "session.state", "message.delivery", "message.assistant.delta", "provider.turn.completed", "turn.completed", "message.delivery"}
 	if string(mustJSON(types)) != string(mustJSON(expected)) {
 		t.Fatalf("event types = %v", types)
 	}

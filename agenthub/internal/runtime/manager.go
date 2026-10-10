@@ -17,13 +17,17 @@ import (
 type Manager struct {
 	store *session.Store
 
-	mu       sync.Mutex
-	cfg      config.Config
-	running  map[string]*active
-	inputs   map[string]*sync.Mutex
-	retrying map[string]bool
-	factory  func(provider.Options) (provider.Session, error)
+	mu        sync.Mutex
+	cfg       config.Config
+	running   map[string]*active
+	inputs    map[string]*sync.Mutex
+	retrying  map[string]bool
+	factory   func(provider.Options) (provider.Session, error)
+	done      chan struct{}
+	closeOnce sync.Once
 }
+
+const maxPendingStartupAttempts = 3
 
 type active struct {
 	mu      sync.Mutex
@@ -93,6 +97,7 @@ func New(store *session.Store, cfg config.Config) *Manager {
 	manager := &Manager{
 		store: store, cfg: cfg, running: make(map[string]*active),
 		inputs: make(map[string]*sync.Mutex), retrying: make(map[string]bool), factory: provider.New,
+		done: make(chan struct{}),
 	}
 	for _, value := range store.List(false) {
 		manager.recover(value)
@@ -203,6 +208,15 @@ func (m *Manager) SendMessage(id string, input session.MessageInput) (session.Se
 	if value.State == session.StateStopping {
 		return session.Session{}, errors.New("session provider is stopping")
 	}
+	if value.State == session.StateStopped && value.StopReason == session.StopReasonRequested {
+		m.mu.Lock()
+		m.convergeStored(id, session.StopReasonRequested, nil)
+		m.mu.Unlock()
+		value, err = m.store.Get(id)
+		if err != nil {
+			return session.Session{}, err
+		}
+	}
 	if input.MessageID != "" {
 		previous, accepted, err := m.store.DurableMessageByID(id, input.MessageID)
 		if err != nil {
@@ -212,7 +226,7 @@ func (m *Manager) SendMessage(id string, input session.MessageInput) (session.Se
 			if !reflect.DeepEqual(previous.Input, input) {
 				return session.Session{}, session.ErrMessageIDConflict
 			}
-			if !previous.Delivered {
+			if !previous.Terminal {
 				m.deliverMessageLocked(id, previous)
 			}
 			return m.store.Get(id)
@@ -252,12 +266,35 @@ func (m *Manager) SendMessage(id string, input session.MessageInput) (session.Se
 }
 
 // deliverMessageLocked attempts one pending durable input while the caller
-// holds the Session input lock. Provider errors keep the input pending: the
-// accepted HTTP request has transferred retry responsibility to AgentHub.
+// holds the Session input lock. Transient startup errors retain the input
+// within a durable budget; permanent failure and Stop settle it without replay.
 func (m *Manager) deliverMessageLocked(id string, message session.DurableMessage) bool {
+	if message.Terminal {
+		return true
+	}
+	if retryAt, err := time.Parse(time.RFC3339Nano, message.RetryAt); err == nil && time.Now().Before(retryAt) {
+		m.schedulePendingRetry(id)
+		return false
+	}
 	value, err := m.store.Get(id)
 	if err != nil {
 		return false
+	}
+	if value.State == session.StateStopping || value.State == session.StateArchived {
+		return false
+	}
+	if message.StartupAttempts >= maxPendingStartupAttempts {
+		m.mu.Lock()
+		// An explicit Resume may already have started a healthy provider.
+		// Never publish stopped while that process is still alive.
+		noRuntime := m.running[id] == nil
+		if noRuntime {
+			m.convergeStored(id, session.StopReasonStartupError, errors.New("pending input exhausted provider startup attempts"))
+		}
+		m.mu.Unlock()
+		if noRuntime {
+			return false
+		}
 	}
 	if value.CurrentTurnID == "" {
 		if _, err := m.store.Append(id, "turn.started", message.TurnID, nil); err != nil {
@@ -268,19 +305,43 @@ func (m *Manager) deliverMessageLocked(id string, message session.DurableMessage
 		m.schedulePendingRetry(id)
 		return false
 	}
-	run, err := m.ensure(id)
+	// Persist the attempt before starting the provider. A restart during a
+	// failed handshake must not reset the startup budget to zero.
+	message.Attempt++
+	message.StartupAttempts++
+	message.RetryAt = ""
+	if err := m.recordDelivery(id, message, session.MessageDeliveryAttempting, nil); err != nil {
+		m.schedulePendingRetry(id)
+		return false
+	}
+	run, err := m.ensureInput(id, message.EventID)
+	// Stop and process finalization can settle this input while ensure waits.
+	// Do not overwrite that terminal fact or schedule another startup.
+	current, readErr := m.store.DurableMessages(id)
+	if readErr != nil {
+		return false
+	}
+	for _, item := range current {
+		if item.EventID == message.EventID && item.Terminal {
+			return true
+		}
+	}
+	value, readErr = m.store.Get(id)
+	if readErr != nil || value.State == session.StateStopping || value.State == session.StateArchived ||
+		(value.State == session.StateStopped && value.StopReason == session.StopReasonRequested) {
+		return false
+	}
 	if err != nil {
-		m.recordDelivery(id, message, session.MessageDeliveryPending, err)
+		message.RetryAt = time.Now().Add(time.Second << (message.StartupAttempts - 1)).Format(time.RFC3339Nano)
+		if m.recordDelivery(id, message, session.MessageDeliveryPending, err) != nil {
+			return false
+		}
 		m.schedulePendingRetry(id)
 		return false
 	}
 	run.setTurn(message.TurnID)
-	attempt := message.Attempt + 1
-	message.Attempt = attempt
-	if _, err := m.store.Append(id, session.EventMessageDelivery, message.TurnID, marshal(session.MessageDeliveryEventData{
-		MessageEventID: message.EventID, MessageID: message.Input.MessageID,
-		State: session.MessageDeliveryAttempting, Attempt: attempt,
-	})); err != nil {
+	message.StartupAttempts = 0
+	if err := m.recordDelivery(id, message, session.MessageDeliveryAttempting, nil); err != nil {
 		m.schedulePendingRetry(id)
 		return false
 	}
@@ -291,7 +352,7 @@ func (m *Manager) deliverMessageLocked(id string, message session.DurableMessage
 	}
 	if _, err := m.store.Append(id, session.EventMessageDelivery, message.TurnID, marshal(session.MessageDeliveryEventData{
 		MessageEventID: message.EventID, MessageID: message.Input.MessageID,
-		State: session.MessageDeliveryAccepted, Attempt: attempt,
+		State: session.MessageDeliveryAccepted, Attempt: message.Attempt,
 	})); err != nil {
 		// The provider may already have accepted the prompt. Retrying after an
 		// ambiguous acknowledgement is the deliberate at-least-once window.
@@ -301,15 +362,17 @@ func (m *Manager) deliverMessageLocked(id string, message session.DurableMessage
 	return true
 }
 
-func (m *Manager) recordDelivery(id string, message session.DurableMessage, state string, cause error) {
+func (m *Manager) recordDelivery(id string, message session.DurableMessage, state string, cause error) error {
 	data := session.MessageDeliveryEventData{
 		MessageEventID: message.EventID, MessageID: message.Input.MessageID,
 		State: state, Attempt: message.Attempt,
+		StartupAttempts: message.StartupAttempts, RetryAt: message.RetryAt,
 	}
 	if cause != nil {
 		data.Error = cause.Error()
 	}
-	_, _ = m.store.Append(id, session.EventMessageDelivery, message.TurnID, marshal(data))
+	_, err := m.store.Append(id, session.EventMessageDelivery, message.TurnID, marshal(data))
+	return err
 }
 
 func (m *Manager) deliverPendingLocked(id string) {
@@ -318,7 +381,7 @@ func (m *Manager) deliverPendingLocked(id string) {
 		return
 	}
 	for _, message := range messages {
-		if message.Delivered {
+		if message.Terminal {
 			continue
 		}
 		if !m.deliverMessageLocked(id, message) {
@@ -328,6 +391,17 @@ func (m *Manager) deliverPendingLocked(id string) {
 }
 
 func (m *Manager) schedulePendingRetry(id string) {
+	delay := time.Second
+	if messages, err := m.store.DurableMessages(id); err == nil {
+		for _, message := range messages {
+			if !message.Terminal {
+				if retryAt, err := time.Parse(time.RFC3339Nano, message.RetryAt); err == nil && time.Until(retryAt) > delay {
+					delay = time.Until(retryAt)
+				}
+				break
+			}
+		}
+	}
 	m.mu.Lock()
 	if m.retrying[id] {
 		m.mu.Unlock()
@@ -336,14 +410,24 @@ func (m *Manager) schedulePendingRetry(id string) {
 	m.retrying[id] = true
 	m.mu.Unlock()
 	go func() {
-		timer := time.NewTimer(time.Second)
+		timer := time.NewTimer(delay)
 		defer timer.Stop()
-		<-timer.C
+		select {
+		case <-timer.C:
+		case <-m.done:
+			return
+		}
 		m.mu.Lock()
 		delete(m.retrying, id)
 		m.mu.Unlock()
 		lock := m.inputLock(id)
 		lock.Lock()
+		select {
+		case <-m.done:
+			lock.Unlock()
+			return
+		default:
+		}
 		value, err := m.store.Get(id)
 		if err == nil && value.State != session.StateStopping && value.State != session.StateArchived &&
 			!(value.State == session.StateStopped && value.StopReason == session.StopReasonRequested) {
@@ -404,14 +488,15 @@ func (m *Manager) Stop(id string) error {
 		return nil
 	}
 	if value.State == session.StateStopped && run == nil {
+		m.convergeStored(id, session.StopReasonRequested, nil)
 		m.mu.Unlock()
 		return nil
 	}
 	if run != nil {
 		run.markStopping(session.StopReasonRequested)
 	}
-	if value.State != session.StateStopping {
-		if _, err = m.store.Append(id, "session.state", "", marshal(session.StateEventData{State: session.StateStopping})); err != nil {
+	if value.State != session.StateStopping || value.StopReason != session.StopReasonRequested {
+		if _, err = m.store.Append(id, "session.state", "", marshal(session.StateEventData{State: session.StateStopping, Reason: session.StopReasonRequested})); err != nil {
 			m.mu.Unlock()
 			return err
 		}
@@ -488,6 +573,7 @@ func (m *Manager) Approve(id, approvalID string, reply ApprovalReply) error {
 }
 
 func (m *Manager) Close() {
+	m.closeOnce.Do(func() { close(m.done) })
 	m.mu.Lock()
 	ids := make([]string, 0, len(m.running))
 	for id := range m.running {
@@ -500,7 +586,24 @@ func (m *Manager) Close() {
 }
 
 func (m *Manager) ensure(id string) (*active, error) {
+	return m.ensureInput(id, 0)
+}
+
+func (m *Manager) ensureInput(id string, messageEventID int64) (*active, error) {
 	m.mu.Lock()
+	if messageEventID != 0 {
+		messages, err := m.store.DurableMessages(id)
+		if err != nil {
+			m.mu.Unlock()
+			return nil, err
+		}
+		for _, message := range messages {
+			if message.EventID == messageEventID && message.Terminal {
+				m.mu.Unlock()
+				return nil, errors.New("input is already terminal")
+			}
+		}
+	}
 	if run := m.running[id]; run != nil {
 		m.mu.Unlock()
 		if err := run.waitReady(); err != nil {
@@ -595,7 +698,11 @@ func (m *Manager) ensure(id string) (*active, error) {
 	if value.CurrentTurnID != "" {
 		readyState = session.StateRunning
 	}
-	_, _ = m.store.Append(id, "session.state", "", marshal(session.StateEventData{State: readyState}))
+	run.mu.Lock()
+	if run.stopReason == "" && !run.finalized {
+		_, _ = m.store.Append(id, "session.state", "", marshal(session.StateEventData{State: readyState}))
+	}
+	run.mu.Unlock()
 	run.finishStart(nil)
 	return run, nil
 }
@@ -706,7 +813,18 @@ func (m *Manager) convergeStored(id, reason string, cause error) {
 	if err != nil || value.State == session.StateArchived {
 		return
 	}
-	if value.State == session.StateStopped && value.CurrentTurnID == "" && len(value.PendingApprovalIDs) == 0 {
+	messages, err := m.store.DurableMessages(id)
+	if err != nil {
+		return
+	}
+	hasPending := false
+	for _, message := range messages {
+		if !message.Terminal {
+			hasPending = true
+			break
+		}
+	}
+	if value.State == session.StateStopped && value.CurrentTurnID == "" && len(value.PendingApprovalIDs) == 0 && !hasPending {
 		return
 	}
 	if cause != nil {
@@ -720,12 +838,24 @@ func (m *Manager) convergeStored(id, reason string, cause error) {
 		}))
 	}
 	pendingTurn := false
-	if messages, pendingErr := m.store.DurableMessages(id); pendingErr == nil {
-		for _, message := range messages {
-			if !message.Delivered && message.TurnID == value.CurrentTurnID {
-				pendingTurn = true
-				break
+	for _, message := range messages {
+		if message.Terminal {
+			continue
+		}
+		state := ""
+		if reason == session.StopReasonRequested {
+			state = session.MessageDeliveryCancelled
+		} else if reason == session.StopReasonStartupError &&
+			(errors.Is(cause, provider.ErrNativeSessionMissing) || message.StartupAttempts >= maxPendingStartupAttempts) {
+			state = session.MessageDeliveryFailed
+		}
+		if state != "" {
+			message.RetryAt = ""
+			if err := m.recordDelivery(id, message, state, cause); err != nil {
+				return // Keep the open Turn until its delivery outcome is durable.
 			}
+		} else if message.TurnID == value.CurrentTurnID {
+			pendingTurn = true
 		}
 	}
 	if value.CurrentTurnID != "" && !pendingTurn {
@@ -759,6 +889,10 @@ func (m *Manager) recover(value session.Session) {
 	if !needsRecovery {
 		return
 	}
+	stopRequested, intentErr := m.store.StopWasRequested(value.ID)
+	if intentErr != nil {
+		return // Do not resume when the durable stop intent cannot be read.
+	}
 	if value.State != session.StateStopping {
 		_, _ = m.store.Append(value.ID, "session.state", "", marshal(session.StateEventData{State: session.StateStopping}))
 	}
@@ -773,10 +907,17 @@ func (m *Manager) recover(value session.Session) {
 		}))
 		return
 	}
-	m.convergeStored(value.ID, session.StopReasonDaemonRecovery, errors.New("provider work was interrupted by daemon restart"))
+	reason := session.StopReasonDaemonRecovery
+	cause := errors.New("provider work was interrupted by daemon restart")
+	if stopRequested {
+		reason, cause = session.StopReasonRequested, nil
+	} else if value.State == session.StateStopped && value.StopReason == session.StopReasonStartupError {
+		reason = session.StopReasonStartupError
+	}
+	m.convergeStored(value.ID, reason, cause)
 	if messages, err := m.store.DurableMessages(value.ID); err == nil {
 		for _, message := range messages {
-			if !message.Delivered {
+			if !message.Terminal && reason != session.StopReasonRequested {
 				m.schedulePendingRetry(value.ID)
 				break
 			}

@@ -57,7 +57,8 @@ func (f *fake) handleRequest(message envelope) {
 	mode := os.Getenv("FAKE_MODE")
 	switch message.Method {
 	case "initialize":
-		if mode == "startup-crash" {
+		_, triggerErr := os.Stat(os.Getenv("FAKE_STARTUP_CRASH_TRIGGER"))
+		if mode == "startup-crash" || (mode == "startup-crash-on-trigger" && triggerErr == nil) {
 			os.Exit(23)
 		}
 		f.respond(message.ID, map[string]any{

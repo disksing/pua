@@ -31,10 +31,11 @@ type piSession struct {
 	messageStreams map[piMessageStreamKey]bool
 	// The read loop owns this state. Pi can emit several failed assistant
 	// messages during recovery; only agent_settled closes the public Turn.
-	assistantError string
-	closed         bool
-	done           chan struct{}
-	prompts        asyncOperations
+	assistantError       string
+	closed               bool
+	nativeSessionMissing bool
+	done                 chan struct{}
+	prompts              asyncOperations
 }
 
 type piMessageStreamKey struct {
@@ -146,6 +147,15 @@ func (p *piSession) Start(resumeID string) error {
 	}
 	response, err := p.startRequest("get_state", nil)
 	if err != nil {
+		// A broken stdin can return before the stderr reader sees why Pi
+		// exited. Confirm cleanup and drain output before classifying failure.
+		_ = p.Close()
+		p.mu.Lock()
+		missing := p.nativeSessionMissing
+		p.mu.Unlock()
+		if missing && resumeID != "" {
+			return fmt.Errorf("%w: Pi session %s: %v", ErrNativeSessionMissing, resumeID, err)
+		}
 		return err
 	}
 	native := lookup(response.Data, "sessionId")
@@ -481,6 +491,11 @@ func piPartialMessageContent(raw json.RawMessage) []json.RawMessage {
 func (p *piSession) stderrLoop(reader io.Reader) {
 	scanner := bufio.NewScanner(reader)
 	for scanner.Scan() {
+		if strings.Contains(scanner.Text(), "No session found matching '") {
+			p.mu.Lock()
+			p.nativeSessionMissing = true
+			p.mu.Unlock()
+		}
 		if text := strings.TrimSpace(scanner.Text()); text != "" && p.options.Hooks.Event != nil {
 			p.options.Hooks.Event(Event{Type: "provider.stderr", Data: map[string]any{"text": text}})
 		}

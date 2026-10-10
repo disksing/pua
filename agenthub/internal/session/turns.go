@@ -635,6 +635,7 @@ func (s *Store) DurableMessages(id string) ([]DurableMessage, error) {
 func buildDurableMessages(events []Event) []DurableMessage {
 	messages := make([]DurableMessage, 0)
 	byEventID := make(map[int64]int)
+	byTurnID := make(map[string][]int)
 	for _, event := range events {
 		switch event.Type {
 		case EventMessageInput:
@@ -643,6 +644,7 @@ func buildDurableMessages(events []Event) []DurableMessage {
 				continue
 			}
 			byEventID[event.ID] = len(messages)
+			byTurnID[event.TurnID] = append(byTurnID[event.TurnID], len(messages))
 			messages = append(messages, DurableMessage{EventID: event.ID, TurnID: event.TurnID, Input: input})
 		case EventMessageDelivery:
 			var delivery MessageDeliveryEventData
@@ -653,11 +655,41 @@ func buildDurableMessages(events []Event) []DurableMessage {
 			if !ok {
 				continue
 			}
+			if messages[index].Terminal && !(messages[index].State == MessageDeliveryClosed && delivery.State == MessageDeliveryAccepted) {
+				continue
+			}
 			if delivery.Attempt > messages[index].Attempt {
 				messages[index].Attempt = delivery.Attempt
 			}
 			if delivery.State == MessageDeliveryAccepted {
 				messages[index].Delivered = true
+				messages[index].Terminal = true
+			}
+			messages[index].State = delivery.State
+			messages[index].Error = delivery.Error
+			messages[index].StartupAttempts = delivery.StartupAttempts
+			messages[index].RetryAt = delivery.RetryAt
+			if delivery.State == MessageDeliveryFailed || delivery.State == MessageDeliveryCancelled {
+				messages[index].Terminal = true
+			}
+		case EventTurnCompleted, EventTurnFailed, EventTurnCancelled:
+			// A closed Turn must never be reopened by replaying an unconfirmed
+			// input, including old logs predating delivery terminal events.
+			var terminal TurnTerminalEventData
+			_ = json.Unmarshal(event.Data, &terminal)
+			for _, index := range byTurnID[event.TurnID] {
+				if !messages[index].Terminal {
+					messages[index].Terminal = true
+					messages[index].RetryAt = ""
+					messages[index].Error = terminal.Error
+					if event.Type == EventTurnCompleted {
+						messages[index].State = MessageDeliveryClosed
+					} else if event.Type == EventTurnFailed {
+						messages[index].State = MessageDeliveryFailed
+					} else {
+						messages[index].State = MessageDeliveryCancelled
+					}
+				}
 			}
 		}
 	}

@@ -75,19 +75,27 @@ type MessageInput struct {
 // MessageDeliveryEventData records attempts to hand one durable canonical
 // input to its provider. Accepted means the provider call returned success;
 // a crash between the provider accepting the input and this event being
-// fsynced is intentionally recovered by another attempt (at-least-once).
+// fsynced is intentionally recovered by another attempt (at-least-once),
+// unless a terminal delivery outcome or closed Turn already forbids replay.
 type MessageDeliveryEventData struct {
-	MessageEventID int64  `json:"messageEventId"`
-	MessageID      string `json:"messageId,omitempty"`
-	State          string `json:"state"`
-	Attempt        int    `json:"attempt"`
-	Error          string `json:"error,omitempty"`
+	MessageEventID  int64  `json:"messageEventId"`
+	MessageID       string `json:"messageId,omitempty"`
+	State           string `json:"state"`
+	Attempt         int    `json:"attempt"`
+	Error           string `json:"error,omitempty"`
+	StartupAttempts int    `json:"startupAttempts,omitempty"`
+	RetryAt         string `json:"retryAt,omitempty"`
 }
 
 const (
 	MessageDeliveryAttempting = "attempting"
 	MessageDeliveryPending    = "pending"
 	MessageDeliveryAccepted   = "accepted"
+	MessageDeliveryFailed     = "failed"
+	MessageDeliveryCancelled  = "cancelled"
+	// MessageDeliveryClosed marks an unconfirmed input whose Turn closed.
+	// It prevents replay without claiming that the provider accepted it.
+	MessageDeliveryClosed = "closed"
 )
 
 // DurableMessage is reconstructed exclusively from canonical Events.
@@ -97,6 +105,13 @@ type DurableMessage struct {
 	Input     MessageInput
 	Attempt   int
 	Delivered bool
+	// Terminal includes accepted, failed, cancelled, and closed unconfirmed
+	// inputs. Delivered is true only with a provider acceptance receipt.
+	Terminal        bool
+	State           string
+	Error           string
+	StartupAttempts int
+	RetryAt         string
 }
 
 // MessageInputError is returned when an inbound message cannot be accepted.

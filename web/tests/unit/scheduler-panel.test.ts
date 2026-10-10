@@ -10,17 +10,18 @@ const config: SchedulerConfigRecord = {
   schemaVersion: 1,
   agentBinding: { kind: "profile", name: "default" },
   wakeIntervalMinutes: 30,
+  conditionMaxChars: 128,
   schedules: [],
 };
 
-function mountPanel() {
+function mountPanel(panelConfig: SchedulerConfigRecord = config) {
   const target = document.createElement("section");
   document.body.append(target);
   const component = mount(SchedulerPanel, {
     target,
     props: {
       workspaceId: "ws-test",
-      config,
+      config: panelConfig,
       resolveResourceTitle: (resourceId: string) => resourceId === "project1.task1" ? "Target task" : resourceId === "workspace" ? "Test workspace" : null,
       onChanged: vi.fn(async () => undefined),
       onToast: vi.fn(),
@@ -42,7 +43,7 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-describe("SchedulerPanel target validation", () => {
+describe("SchedulerPanel validation", () => {
   it("marks an unknown target invalid and prevents the schedule request", async () => {
     const fetch = vi.fn();
     vi.stubGlobal("fetch", fetch);
@@ -89,5 +90,43 @@ describe("SchedulerPanel target validation", () => {
       condition: "when the release is ready",
       target: "project1.task1",
     });
+  });
+
+  it("counts Unicode characters and blocks oversized conditions using the configured limit", async () => {
+    const fetch = vi.fn(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetch);
+    const target = mountPanel({ ...config, conditionMaxChars: 2 });
+    await tick();
+    inputValue(target.querySelector<HTMLInputElement>("input[placeholder^='What should']")!, "Check status");
+    const condition = target.querySelector<HTMLTextAreaElement>("textarea")!;
+    const save = target.querySelector<HTMLButtonElement>(".schedule-editor > button")!;
+    inputValue(condition, "\u4e2d😀\u4e2d");
+    await tick();
+    expect(condition.getAttribute("aria-invalid")).toBe("true");
+    expect(target.querySelector("#schedule-condition-error")?.textContent).toContain("at most 2 characters");
+    expect(save.disabled).toBe(true);
+    save.click();
+    expect(fetch).not.toHaveBeenCalled();
+    inputValue(condition, " \u4e2d😀 ");
+    await tick();
+    expect(target.textContent).toContain("Condition (2/2)");
+    expect(condition.getAttribute("aria-invalid")).toBe("false");
+    expect(save.disabled).toBe(false);
+    save.click();
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+  });
+
+  it("requires an existing oversized condition to be shortened before saving an edit", async () => {
+    const target = mountPanel({ ...config, conditionMaxChars: 2, schedules: [{
+      id: "schedule-legacy", description: "Legacy", condition: "long condition", target: "workspace", createdAt: "", updatedAt: "",
+    }] });
+    await tick();
+    Array.from(target.querySelectorAll<HTMLButtonElement>(".schedule-list button")).find((button) => button.textContent?.includes("Edit"))!.click();
+    await tick();
+    expect(target.querySelector<HTMLTextAreaElement>("textarea")?.value).toBe("long condition");
+    expect(target.querySelector<HTMLButtonElement>(".schedule-editor > button")?.disabled).toBe(true);
+    inputValue(target.querySelector<HTMLTextAreaElement>("textarea")!, "ok");
+    await tick();
+    expect(target.querySelector<HTMLButtonElement>(".schedule-editor > button")?.disabled).toBe(false);
   });
 });

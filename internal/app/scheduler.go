@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/disksing/pua/internal/localize"
 )
@@ -28,6 +29,7 @@ const (
 	minimumSchedulerWakeMinutes = 1
 	maximumSchedulerWakeMinutes = 7 * 24 * 60
 	maximumScheduleTextLength   = 64 * 1024
+	defaultConditionMaxChars    = 128
 )
 
 // SchedulerConfig is the portable, Workspace-owned configuration and natural
@@ -36,6 +38,7 @@ type SchedulerConfig struct {
 	SchemaVersion       int          `json:"schemaVersion"`
 	AgentBinding        AgentBinding `json:"agentBinding"`
 	WakeIntervalMinutes int          `json:"wakeIntervalMinutes"`
+	ConditionMaxChars   int          `json:"conditionMaxChars"`
 	Schedules           []Schedule   `json:"schedules"`
 }
 
@@ -66,6 +69,7 @@ type UpdateScheduleInput struct {
 type SchedulerSettingsInput struct {
 	AgentBinding        AgentBinding
 	WakeIntervalMinutes int
+	ConditionMaxChars   *int
 }
 
 func defaultSchedulerConfig() SchedulerConfig {
@@ -73,6 +77,7 @@ func defaultSchedulerConfig() SchedulerConfig {
 		SchemaVersion:       schedulerSchemaVersion,
 		AgentBinding:        AgentBinding{Kind: "profile", Name: "default"},
 		WakeIntervalMinutes: defaultSchedulerWakeMinutes,
+		ConditionMaxChars:   defaultConditionMaxChars,
 		Schedules:           []Schedule{},
 	}
 }
@@ -238,7 +243,7 @@ func readSchedulerJSON(path string) (SchedulerConfig, error) {
 	defer file.Close()
 	decoder := json.NewDecoder(file)
 	decoder.DisallowUnknownFields()
-	var config SchedulerConfig
+	config := SchedulerConfig{ConditionMaxChars: defaultConditionMaxChars}
 	if err := decoder.Decode(&config); err != nil {
 		return SchedulerConfig{}, fmt.Errorf("read Scheduler configuration: %w", err)
 	}
@@ -271,6 +276,9 @@ func validateSchedulerConfig(config SchedulerConfig) error {
 	if config.WakeIntervalMinutes < minimumSchedulerWakeMinutes || config.WakeIntervalMinutes > maximumSchedulerWakeMinutes {
 		return fmt.Errorf("Scheduler wake interval must be between %d and %d minutes", minimumSchedulerWakeMinutes, maximumSchedulerWakeMinutes)
 	}
+	if err := validateConditionMaxChars(config.ConditionMaxChars); err != nil {
+		return err
+	}
 	seen := make(map[string]bool, len(config.Schedules))
 	for _, schedule := range config.Schedules {
 		if err := validateSchedule(schedule); err != nil {
@@ -299,7 +307,11 @@ func validateSchedule(schedule Schedule) error {
 		if value == "" {
 			return fmt.Errorf("%s is required", name)
 		}
-		if len(value) > maximumScheduleTextLength || strings.ContainsRune(value, '\x00') {
+		length := len(value)
+		if name == "condition" {
+			length = utf8.RuneCountInString(value)
+		}
+		if length > maximumScheduleTextLength || strings.ContainsRune(value, '\x00') {
 			return fmt.Errorf("%s is invalid", name)
 		}
 	}
@@ -409,6 +421,9 @@ func (w *Workspace) AddSchedule(input CreateScheduleInput) (Schedule, error) {
 		if err != nil {
 			return err
 		}
+		if err := validateScheduleCondition(condition, config.ConditionMaxChars); err != nil {
+			return err
+		}
 		id, err := newScheduleID()
 		if err != nil {
 			return err
@@ -457,6 +472,11 @@ func (w *Workspace) UpdateSchedule(input UpdateScheduleInput) (Schedule, error) 
 		if err != nil {
 			return err
 		}
+		if input.Condition != nil {
+			if err := validateScheduleCondition(condition, config.ConditionMaxChars); err != nil {
+				return err
+			}
+		}
 		updated.Description, updated.Condition, updated.Target = description, condition, target
 		updated.UpdatedAt = time.Now().Format(time.RFC3339Nano)
 		config.Schedules[index] = updated
@@ -504,6 +524,11 @@ func (w *Workspace) SetSchedulerSettings(input SchedulerSettingsInput) (Schedule
 	if input.WakeIntervalMinutes < minimumSchedulerWakeMinutes || input.WakeIntervalMinutes > maximumSchedulerWakeMinutes {
 		return SchedulerConfig{}, fmt.Errorf("Scheduler wake interval must be between %d and %d minutes", minimumSchedulerWakeMinutes, maximumSchedulerWakeMinutes)
 	}
+	if input.ConditionMaxChars != nil {
+		if err := validateConditionMaxChars(*input.ConditionMaxChars); err != nil {
+			return SchedulerConfig{}, err
+		}
+	}
 	var result SchedulerConfig
 	err = withWorkspaceMutationLock(w.root, func() error {
 		config, err := readSchedulerJSON(schedulerJSONPath(w.root))
@@ -512,6 +537,9 @@ func (w *Workspace) SetSchedulerSettings(input SchedulerSettingsInput) (Schedule
 		}
 		config.AgentBinding = binding
 		config.WakeIntervalMinutes = input.WakeIntervalMinutes
+		if input.ConditionMaxChars != nil {
+			config.ConditionMaxChars = *input.ConditionMaxChars
+		}
 		if err := writeSchedulerJSON(schedulerJSONPath(w.root), config); err != nil {
 			return err
 		}
@@ -528,7 +556,7 @@ func (w *Workspace) normalizeScheduleFields(description, condition, target strin
 	if description == "" || condition == "" || target == "" {
 		return "", "", "", errors.New("description, condition, and target are required")
 	}
-	if len(description) > maximumScheduleTextLength || len(condition) > maximumScheduleTextLength || len(target) > 200 ||
+	if len(description) > maximumScheduleTextLength || utf8.RuneCountInString(condition) > maximumScheduleTextLength || len(target) > 200 ||
 		strings.ContainsRune(description, '\x00') || strings.ContainsRune(condition, '\x00') || strings.ContainsRune(target, '\x00') {
 		return "", "", "", errors.New("schedule field is invalid")
 	}
@@ -538,6 +566,20 @@ func (w *Workspace) normalizeScheduleFields(description, condition, target strin
 		}
 	}
 	return description, condition, target, nil
+}
+
+func validateConditionMaxChars(limit int) error {
+	if limit < 1 || limit > maximumScheduleTextLength {
+		return fmt.Errorf("Scheduler condition maximum must be between 1 and %d characters", maximumScheduleTextLength)
+	}
+	return nil
+}
+
+func validateScheduleCondition(condition string, limit int) error {
+	if count := utf8.RuneCountInString(condition); count > limit {
+		return fmt.Errorf("condition must be at most %d characters (got %d)", limit, count)
+	}
+	return nil
 }
 
 func scheduleIndex(schedules []Schedule, id string) int {

@@ -235,6 +235,8 @@ pua scheduler remove --id=<schedule>
 pua message send --to=scheduler '<request>'
 ~~~
 
+condition 保持简短：字符上限由 scheduler/scheduler.json 的 conditionMaxChars 控制（默认 128）；详细上下文放入 description。
+
 description 说明要做什么，condition 写清触发时间或条件、时区、是否重复以及何时停止，target 使用稳定资源 ID。
 
 条件满足后，Scheduler 会给目标资源发送普通消息，说明 schedule ID 和触发原因。调度消息可能重复，目标 Agent 应避免重复执行。

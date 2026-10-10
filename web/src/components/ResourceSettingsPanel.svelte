@@ -14,6 +14,7 @@
 
   let pending = $state("");
   let interval = $state(30);
+  let conditionMaxChars = $state(128);
   let generationBudgetEnabled = $state(true);
   let generationMaxTurns = $state(20);
   let generationMaxMinutes = $state(120);
@@ -32,6 +33,9 @@
   $effect(() => {
     const wake = model.detail?.scheduler?.wakeIntervalMinutes;
     if (typeof wake === "number") interval = wake;
+  });
+  $effect(() => {
+    conditionMaxChars = model.detail?.scheduler?.conditionMaxChars ?? 128;
   });
   $effect(() => {
     generationBudgetEnabled = model.generationPolicy.budgetEnabled;
@@ -53,6 +57,7 @@
 
   const schedulerConfig = $derived(model.detail?.scheduler);
   const schedulerIntervalValid = $derived(Number.isInteger(interval) && interval >= 1 && interval <= 10080);
+  const schedulerConditionLimitValid = $derived(Number.isInteger(conditionMaxChars) && conditionMaxChars >= 1 && conditionMaxChars <= 65536);
   const taskDefault = $derived<ResourceAgentBindingModel>(model.detail?.taskDefault?.name ? { kind: model.detail.taskDefault.kind, name: model.detail.taskDefault.name } : { kind: "profile", name: "" });
   const description = $derived(model.detail?.description || "");
 
@@ -203,10 +208,23 @@
     void run("interval", async () => {
       await client.request(`/api/workspaces/${encodeURIComponent(model.workspaceId)}/scheduler/settings`, {
         method: "PUT",
-        body: JSON.stringify({ agentBinding: config.agentBinding, wakeIntervalMinutes: interval }),
+        body: JSON.stringify({ agentBinding: config.agentBinding, wakeIntervalMinutes: interval, conditionMaxChars: config.conditionMaxChars }),
       });
       await model.onRefreshScheduler?.();
       model.onToast("Scheduler interval saved.");
+    });
+  }
+
+  function saveSchedulerConditionLimit(): void {
+    const config = schedulerConfig;
+    if (!config || !schedulerConditionLimitValid) return;
+    void run("conditionLimit", async () => {
+      await client.request(`/api/workspaces/${encodeURIComponent(model.workspaceId)}/scheduler/settings`, {
+        method: "PUT",
+        body: JSON.stringify({ agentBinding: config.agentBinding, wakeIntervalMinutes: config.wakeIntervalMinutes, conditionMaxChars }),
+      });
+      await model.onRefreshScheduler?.();
+      model.onToast("Scheduler condition limit saved.");
     });
   }
 </script>
@@ -339,9 +357,17 @@
           <div class="resource-settings-row">
             <div class="resource-settings-row-label"><strong>Wake interval</strong><span>Minutes after the previous Server-triggered Scheduler Turn completes. Empty schedule lists do not wake.</span></div>
             <div class="resource-settings-interval">
-              <label><input type="number" min="1" max="10080" step="1" bind:value={interval} aria-label="Scheduler wake interval in minutes" aria-invalid={schedulerIntervalValid ? undefined : "true"} aria-describedby={schedulerIntervalValid ? undefined : "schedulerIntervalError"} /><span>minutes</span></label>
+              <label><input type="number" min="1" max="10080" step="1" bind:value={interval} disabled={Boolean(pending)} aria-label="Scheduler wake interval in minutes" aria-invalid={schedulerIntervalValid ? undefined : "true"} aria-describedby={schedulerIntervalValid ? undefined : "schedulerIntervalError"} /><span>minutes</span></label>
               <button type="button" class="secondary-button" disabled={Boolean(pending) || !schedulerIntervalValid || interval === schedulerConfig.wakeIntervalMinutes} onclick={saveSchedulerInterval}><Icon name="save" /><span>Save</span></button>
               {#if !schedulerIntervalValid}<span id="schedulerIntervalError" class="resource-settings-field-error" role="alert">Enter a whole number between 1 and 10080 minutes.</span>{/if}
+            </div>
+          </div>
+          <div class="resource-settings-row">
+            <div class="resource-settings-row-label"><strong>Condition character limit</strong><span>Maximum characters when adding or changing a condition. Existing conditions are preserved.</span></div>
+            <div class="resource-settings-interval resource-settings-condition-limit">
+              <label><input type="number" min="1" max="65536" step="1" bind:value={conditionMaxChars} disabled={Boolean(pending)} aria-label="Scheduler condition character limit" aria-invalid={schedulerConditionLimitValid ? undefined : "true"} aria-describedby={schedulerConditionLimitValid ? undefined : "schedulerConditionLimitError"} /><span>characters</span></label>
+              <button type="button" class="secondary-button" disabled={Boolean(pending) || !schedulerConditionLimitValid || conditionMaxChars === schedulerConfig.conditionMaxChars} onclick={saveSchedulerConditionLimit}><Icon name="save" /><span>Save</span></button>
+              {#if !schedulerConditionLimitValid}<span id="schedulerConditionLimitError" class="resource-settings-field-error" role="alert">Enter a whole number between 1 and 65536 characters.</span>{/if}
             </div>
           </div>
         </div>

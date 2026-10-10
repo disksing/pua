@@ -22,6 +22,9 @@
   let target = $state("workspace");
   let saving = $state(false);
   const targetError = $derived(validateTarget(target));
+  const conditionCount = $derived(Array.from(condition.trim()).length);
+  const conditionLimit = $derived(config.conditionMaxChars ?? 128);
+  const conditionError = $derived(conditionCount > conditionLimit ? `Condition must be at most ${conditionLimit} characters.` : "");
 
   function validateTarget(value: string): string {
     const resourceId = value.trim();
@@ -47,7 +50,7 @@
   }
 
   async function saveSchedule(): Promise<void> {
-    if (!description.trim() || !condition.trim() || targetError || saving) return;
+    if (!description.trim() || !condition.trim() || conditionError || targetError || saving) return;
     saving = true;
     const wasEditing = Boolean(editingId);
     try {
@@ -82,9 +85,9 @@
 <div class="schedule-editor">
   <div class="schedule-editor-heading"><div><strong>{editingId ? "Edit schedule" : "Add schedule"}</strong><span>Conditions are natural language interpreted by the Scheduler Agent.</span></div>{#if editingId}<button type="button" class="secondary-button" onclick={clearForm}>Cancel edit</button>{/if}</div>
   <label><span>Description</span><input bind:value={description} placeholder="What should the Scheduler understand?" /></label>
-  <label><span>Condition</span><textarea bind:value={condition} rows="3" placeholder="For example: when the release branch is green after 09:00 Shanghai time"></textarea></label>
+  <label><span>Condition ({conditionCount}/{conditionLimit})</span><textarea bind:value={condition} rows="3" aria-label="Condition" placeholder="For example: when the release branch is green after 09:00 Shanghai time" aria-invalid={Boolean(conditionError)} aria-describedby={conditionError ? "schedule-condition-error" : undefined}></textarea>{#if conditionError}<small id="schedule-condition-error" class="schedule-field-error" role="alert">{conditionError}</small>{/if}</label>
   <label><span>Target resource ID</span><input bind:value={target} placeholder="workspace, scheduler, project1, or project1.task1" aria-invalid={Boolean(targetError)} aria-describedby={targetError ? "schedule-target-error" : undefined} />{#if targetError}<small id="schedule-target-error" class="schedule-field-error" role="alert">{targetError}</small>{/if}</label>
-  <button type="button" class="primary-button" class:busy={saving} class:editing={Boolean(editingId)} disabled={saving || !description.trim() || !condition.trim() || Boolean(targetError)} onclick={saveSchedule}><span class="schedule-icon schedule-icon-busy"><Icon name="loader-circle" /></span><span class="schedule-icon schedule-icon-editing"><Icon name="save" /></span><span class="schedule-icon schedule-icon-add"><Icon name="plus" /></span><span>{editingId ? "Update schedule" : "Add schedule"}</span></button>
+  <button type="button" class="primary-button" class:busy={saving} class:editing={Boolean(editingId)} disabled={saving || !description.trim() || !condition.trim() || Boolean(conditionError) || Boolean(targetError)} onclick={saveSchedule}><span class="schedule-icon schedule-icon-busy"><Icon name="loader-circle" /></span><span class="schedule-icon schedule-icon-editing"><Icon name="save" /></span><span class="schedule-icon schedule-icon-add"><Icon name="plus" /></span><span>{editingId ? "Update schedule" : "Add schedule"}</span></button>
 </div>
 
 <div class="schedule-list">

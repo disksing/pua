@@ -208,6 +208,7 @@ async function installMockApi(page: Page, lastResourceId = "project1.task1", wit
     schemaVersion: 1,
     agentBinding: { kind: "profile" as const, name: "fast" },
     wakeIntervalMinutes: 30,
+    conditionMaxChars: 128,
     schedules: [] as Array<{
       id: string;
       description: string;
@@ -363,6 +364,7 @@ async function installMockApi(page: Page, lastResourceId = "project1.task1", wit
         ...schedulerConfig,
         agentBinding: body.agentBinding as typeof schedulerConfig.agentBinding,
         wakeIntervalMinutes: Number(body.wakeIntervalMinutes),
+        conditionMaxChars: Number(body.conditionMaxChars ?? schedulerConfig.conditionMaxChars),
       };
       return json(route, schedulerConfig);
     }
@@ -1215,7 +1217,7 @@ test("manages natural-language schedules from the fixed Scheduler resource", asy
   await expect(page.getByText("No schedules. The Server will not create empty Scheduler Turns.")).toBeVisible();
 
   await page.getByLabel("Description").fill("Notify when the release is ready");
-  await page.getByLabel("Condition").fill("When the release branch is green after 09:00 Shanghai time");
+  await page.getByLabel("Condition", { exact: true }).fill("When the release branch is green after 09:00 Shanghai time");
   const target = page.getByLabel("Target resource ID");
   const addSchedule = page.getByRole("button", { name: "Add schedule", exact: true });
   await target.fill("not-a-resource");
@@ -1232,7 +1234,7 @@ test("manages natural-language schedules from the fixed Scheduler resource", asy
   await page.getByRole("tab", { name: "Settings" }).click();
   const interval = page.getByLabel("Scheduler wake interval in minutes");
   await interval.fill("45");
-  await page.locator(".resource-settings-interval").getByRole("button", { name: "Save" }).click();
+  await page.locator(".resource-settings-interval:not(.resource-settings-condition-limit)").getByRole("button", { name: "Save" }).click();
   await expect(interval).toHaveValue("45");
   await page.getByRole("tab", { name: "Schedules" }).click();
 
@@ -1281,7 +1283,7 @@ test("keeps Scheduler schedules content inside a 440px viewport", async ({ page 
   await expectNoSchedulerOverflow();
 
   await page.getByLabel("Description").fill("Notify when the release is ready");
-  await page.getByLabel("Condition").fill("When the release branch is green after 09:00 Shanghai time and the deployment checklist is complete");
+  await page.getByLabel("Condition", { exact: true }).fill("When the release branch is green after 09:00 Shanghai time and the deployment checklist is complete");
   await page.getByRole("button", { name: "Add schedule", exact: true }).click();
   await expect(page.locator(".schedule-list article")).toContainText("Notify when the release is ready");
   await expectNoSchedulerOverflow();
@@ -2476,7 +2478,7 @@ test("keeps Scheduler Settings controls at a 44px touch size in a 440px viewport
   const contentBox = (await content.boundingBox())!;
   const binding = panel.getByRole("button", { name: "Scheduler Agent binding", exact: true });
   const interval = panel.getByRole("spinbutton", { name: "Scheduler wake interval in minutes" });
-  const save = panel.locator(".resource-settings-interval").getByRole("button", { name: "Save", exact: true });
+  const save = panel.locator(".resource-settings-interval:not(.resource-settings-condition-limit)").getByRole("button", { name: "Save", exact: true });
 
   await expect(binding).toHaveAttribute("type", "button");
   await expect(binding).toHaveAttribute("aria-haspopup", "listbox");
@@ -2486,7 +2488,12 @@ test("keeps Scheduler Settings controls at a 44px touch size in a 440px viewport
   await expect(save).toHaveAttribute("type", "button");
   await expect(save).toBeDisabled();
 
-  for (const control of [binding, interval, save]) {
+  const conditionLimit = panel.getByRole("spinbutton", { name: "Scheduler condition character limit" });
+  const limitSave = panel.locator(".resource-settings-condition-limit").getByRole("button", { name: "Save", exact: true });
+  await expect(conditionLimit).toHaveValue("128");
+  await expect(limitSave).toBeDisabled();
+
+  for (const control of [binding, interval, save, conditionLimit, limitSave]) {
     const box = await control.boundingBox();
     expect(box).not.toBeNull();
     expect(box!.height).toBeGreaterThanOrEqual(44);
@@ -2515,6 +2522,24 @@ test("keeps Scheduler Settings controls at a 44px touch size in a 440px viewport
   await expect(interval).toHaveValue("45");
   await expect(save).toBeDisabled();
 
+  await expect(conditionLimit).toBeEnabled();
+  await conditionLimit.fill("0");
+  await expect(conditionLimit).toHaveAttribute("aria-invalid", "true");
+  await expect(limitSave).toBeDisabled();
+  await conditionLimit.fill("2");
+  await expect(limitSave).toBeEnabled();
+  await limitSave.click();
+  await expect.poll(() => harness.schedulerBodies.length).toBe(2);
+  expect(harness.schedulerBodies[1].body).toMatchObject({ wakeIntervalMinutes: 45, conditionMaxChars: 2 });
+  await expect(limitSave).toBeDisabled();
+  await expect(conditionLimit).toBeEnabled();
+  await panel.getByRole("tab", { name: "Schedules", exact: true }).click();
+  await page.getByLabel("Description", { exact: true }).fill("Check");
+  await page.getByLabel("Condition", { exact: true }).fill("\u4e2d😀\u4e2d");
+  await expect(page.getByRole("button", { name: "Add schedule", exact: true })).toBeDisabled();
+  await page.getByLabel("Condition", { exact: true }).fill("\u4e2d😀");
+  await expect(page.getByRole("button", { name: "Add schedule", exact: true })).toBeEnabled();
+  await panel.getByRole("tab", { name: "Settings", exact: true }).click();
   const detailsSize = await content.evaluate((node) => ({ clientWidth: node.clientWidth, scrollWidth: node.scrollWidth }));
   expect(detailsSize.scrollWidth).toBeLessThanOrEqual(detailsSize.clientWidth);
   const documentSize = await page.evaluate(() => ({

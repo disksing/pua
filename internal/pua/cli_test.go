@@ -82,6 +82,15 @@ func TestSchedulerCommandsManageNaturalLanguageSchedules(t *testing.T) {
 		if !strings.Contains(jsonList, `"wakeIntervalMinutes": 30`) || !strings.Contains(jsonList, created.ID) {
 			t.Fatalf("JSON schedule list = %s", jsonList)
 		}
+		tooLong := strings.Repeat("\u4e2d", 129)
+		for _, args := range [][]string{
+			{"scheduler", "add", "--description=Too long", "--condition=" + tooLong, "--target=workspace"},
+			{"scheduler", "update", "--id=" + created.ID, "--condition=" + tooLong},
+		} {
+			if _, err := runErr(t, args...); err == nil || !strings.Contains(err.Error(), "at most 128 characters (got 129)") {
+				t.Fatalf("oversized CLI condition error = %v", err)
+			}
+		}
 		removed := run(t, "scheduler", "remove", "--id="+created.ID)
 		if !strings.Contains(removed, created.ID) || strings.TrimSpace(run(t, "scheduler", "list")) != "" {
 			t.Fatalf("remove result = %s", removed)

@@ -31,6 +31,7 @@ function model(overrides: Partial<DetailPanelModel> = {}): DetailPanelModel {
         schemaVersion: 1,
         agentBinding: { kind: "profile", name: "default" },
         wakeIntervalMinutes: 30,
+        conditionMaxChars: 128,
         schedules: [],
       },
     },
@@ -226,4 +227,61 @@ describe("ResourceSettingsPanel", () => {
     expect(target.querySelector("#schedulerIntervalError")).toBeNull();
     expect(save.disabled).toBe(false);
   });
+  it("saves the Scheduler condition limit beside the wake interval and validates the range", async () => {
+    const fetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetch);
+    const panelModel = model();
+    const target = document.body.appendChild(document.createElement("div"));
+    const component = mount(ResourceSettingsPanel, { target, props: { model: panelModel } });
+    cleanups.push(() => unmount(component));
+    await tick();
+    const input = target.querySelector<HTMLInputElement>('[aria-label="Scheduler condition character limit"]')!;
+    const save = target.querySelector<HTMLButtonElement>(".resource-settings-condition-limit button")!;
+    expect(input.value).toBe("128");
+    expect(save.disabled).toBe(true);
+    for (const value of ["0", "65537", "1.5", ""]) {
+      input.value = value;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      await tick();
+      expect(input.getAttribute("aria-invalid")).toBe("true");
+      expect(target.querySelector("#schedulerConditionLimitError")?.textContent).toContain("between 1 and 65536 characters");
+      expect(save.disabled).toBe(true);
+    }
+    // An unsaved interval draft must not be saved by the condition-limit button.
+    const interval = target.querySelector<HTMLInputElement>('[aria-label="Scheduler wake interval in minutes"]')!;
+    interval.value = "45";
+    interval.dispatchEvent(new Event("input", { bubbles: true }));
+    input.value = "256";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await tick();
+    expect(save.disabled).toBe(false);
+    save.click();
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+    expect(JSON.parse(String(fetch.mock.calls[0][1]?.body))).toEqual({
+      agentBinding: { kind: "profile", name: "default" }, wakeIntervalMinutes: 30, conditionMaxChars: 256,
+    });
+    await vi.waitFor(() => expect(panelModel.onRefreshScheduler).toHaveBeenCalledOnce());
+  });
+
+  it("preserves the saved condition limit when saving the wake interval", async () => {
+    const fetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetch);
+    const target = document.body.appendChild(document.createElement("div"));
+    const component = mount(ResourceSettingsPanel, { target, props: { model: model() } });
+    cleanups.push(() => unmount(component));
+    await tick();
+    const interval = target.querySelector<HTMLInputElement>('[aria-label="Scheduler wake interval in minutes"]')!;
+    interval.value = "45";
+    interval.dispatchEvent(new Event("input", { bubbles: true }));
+    const limit = target.querySelector<HTMLInputElement>('[aria-label="Scheduler condition character limit"]')!;
+    limit.value = "256";
+    limit.dispatchEvent(new Event("input", { bubbles: true }));
+    await tick();
+    target.querySelector<HTMLButtonElement>(".resource-settings-interval button")!.click();
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+    expect(JSON.parse(String(fetch.mock.calls[0][1]?.body))).toEqual({
+      agentBinding: { kind: "profile", name: "default" }, wakeIntervalMinutes: 45, conditionMaxChars: 128,
+    });
+  });
+
 });

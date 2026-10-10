@@ -235,6 +235,8 @@ You may also message the Scheduler agent directly:
 pua message send --to=scheduler '<request>'
 ~~~
 
+Keep condition concise: its character limit is conditionMaxChars in scheduler/scheduler.json (128 by default). Put detailed context in description.
+
 The description says what should happen. The condition says when to trigger, including timezone, repetition, and stopping behavior when relevant. The target is a stable PUA resource id.
 
 When a condition is met, Scheduler sends the target a normal message with the schedule id and trigger reason. Scheduled messages may repeat, so the target agent should avoid duplicate work.

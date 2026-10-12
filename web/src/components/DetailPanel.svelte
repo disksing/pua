@@ -10,7 +10,7 @@
   import FileBrowser from "./FileBrowser.svelte";
   import FilePreviewModal from "./FilePreviewModal.svelte";
   import Icon from "./Icon.svelte";
-  import HistoryTimeline from "./HistoryTimeline.svelte";
+  import ChannelEvents from "./ChannelEvents.svelte";
   import MarkdownDocument from "./MarkdownDocument.svelte";
   import SchedulerPanel from "./SchedulerPanel.svelte";
   import ResourceSettingsPanel from "./ResourceSettingsPanel.svelte";
@@ -84,25 +84,29 @@
     if (detailFiles.some((file) => file.name === "task.md")) return "task";
     if (value.resourceType === "project") return "project";
     if (value.resourceType === "task") return "task";
-    return "history";
+    return "execution-events";
   }
 
   function resourceTabs(): Array<{ id: string; label: string; icon: string }> {
     if (model.resourceType === "workspace") return [
 	  { id: "agents", label: "AGENTS.md", icon: "file-text" },
 	  { id: "wiki", label: "Wiki", icon: "book-open" },
-	  { id: "settings", label: "Settings", icon: "settings" }
+	  { id: "execution-events", label: "Execution events", icon: "history" },
+      { id: "dialogue-events", label: "Dialogue events", icon: "message-square" },
+      { id: "settings", label: "Settings", icon: "settings" }
 	];
     if (!model.detail) return [];
 	if (model.resourceType === "scheduler") return [
 	  { id: "schedules", label: "Schedules", icon: "calendar-clock" },
 	  { id: "context", label: "Context", icon: "file-text" },
-	  { id: "settings", label: "Settings", icon: "settings" }
+	  { id: "execution-events", label: "Execution events", icon: "history" },
+      { id: "dialogue-events", label: "Dialogue events", icon: "message-square" },
+      { id: "settings", label: "Settings", icon: "settings" }
 	];
     const result: Array<{ id: string; label: string; icon: string }> = [];
     if (model.resourceType === "project") result.push({ id: "project", label: "Project", icon: "file-text" });
     if (model.resourceType === "task") result.push({ id: "task", label: "Task", icon: "file-text" });
-    result.push({ id: "history", label: "History", icon: "history" }, { id: "artifacts", label: "Artifacts", icon: "paperclip" });
+    result.push({ id: "execution-events", label: "Execution events", icon: "history" }, { id: "dialogue-events", label: "Dialogue events", icon: "message-square" }, { id: "artifacts", label: "Artifacts", icon: "paperclip" });
     if (model.resourceType === "task") result.push({ id: "worktrees", label: "Worktrees", icon: "folder-git-2" });
     result.push({ id: "settings", label: "Settings", icon: "settings" });
     return result;
@@ -220,6 +224,7 @@
       {:else}<FileBrowser title="Wiki" entries={model.wiki.entries || []} emptyMessage="No Wiki files yet." {expanded} activePath={activePreviewPath} onToggle={toggleFile} onPreview={openPreview} {rawURL} showHeading={false} />{/if}
     </div>
     <div hidden={activeTab !== "settings"}><ResourceSettingsPanel {model} /></div>
+    {#if activeTab === "execution-events" || activeTab === "dialogue-events"}{#key `${model.identity}:${model.currentUserName}:${activeTab}`}<ChannelEvents {model} dialogue={activeTab === "dialogue-events"} onOpenFile={openLinkedFile} onOpenLegacy={(path) => openPreview("Artifacts", path)} />{/key}{/if}
   </div>
 {:else}
   <div class="details-header">
@@ -240,7 +245,7 @@
       {#if model.resourceType === "task" && !fileNames.has("task.md")}<div class="content-section" hidden={activeTab !== "task"}><div class="file-modal-empty detail-missing"><Icon name="file-text" /><strong>Task brief is missing</strong><span>task.md was not found in this task directory.</span></div></div>{/if}
       {#if model.resourceType === "scheduler" && model.detail.scheduler}<div hidden={activeTab !== "schedules"}><SchedulerPanel workspaceId={model.workspaceId} config={model.detail.scheduler} resolveResourceTitle={model.resolveResourceTitle} onChanged={model.onRefreshScheduler || (async () => undefined)} onToast={model.onToast} /></div>{/if}
       <div hidden={activeTab !== "settings"}><ResourceSettingsPanel {model} onOpenTemplate={(path) => openPreview("Templates", path)} /></div>
-      {#if activeTab === "history"}{#key model.identity}<HistoryTimeline workspaceId={model.workspaceId} resourceId={model.resourceId} artifacts={model.detail.artifacts || []} resolveResourceTitle={model.resolveResourceTitle} onNavigate={model.onNavigate} onOpenFile={openLinkedFile} onOpenLegacy={(path) => openPreview("Artifacts", path)} />{/key}{/if}
+      {#if activeTab === "execution-events" || activeTab === "dialogue-events"}{#key `${model.identity}:${model.currentUserName}:${activeTab}`}<ChannelEvents {model} dialogue={activeTab === "dialogue-events"} onOpenFile={openLinkedFile} onOpenLegacy={(path) => openPreview("Artifacts", path)} />{/key}{/if}
       <div hidden={activeTab !== "artifacts"}><FileBrowser title="Artifacts" entries={model.detail.artifacts || []} emptyMessage="No artifacts." {expanded} activePath={activePreviewPath} onToggle={toggleFile} onPreview={openPreview} {rawURL} onDelete={model.detail.archived ? undefined : deleteArtifact} showHeading={false} /></div>
       <div hidden={activeTab !== "worktrees"}><div class="content-section"><div class="worktree-list">{#if model.detail.repos?.length}{#each model.detail.repos as repo (`${repo.name}:${repo.worktreePath}`)}<div class="worktree-row"><div class="worktree-main"><Icon name="git-branch" className="worktree-icon" /><div><strong>{repo.branch || "HEAD"}</strong><span>{repo.name || "repository"}{repo.targetBranch ? ` · base ${repo.targetBranch}` : ""}</span><small>{repo.worktreePath || ""}</small></div></div><button type="button" class="secondary-button" onclick={() => diffRepo = repo}><Icon name="git-compare-arrows" /><span>View Diff</span></button></div>{/each}{:else}<div class="empty-list-row"><Icon name="git-branch" /><span>No worktrees.</span></div>{/if}</div></div></div>
     </div>

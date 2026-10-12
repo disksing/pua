@@ -577,6 +577,15 @@ func (m *agentManager) recoverAgentHubGenerationLocked(ctx context.Context, cfg 
 		candidates = []agentHubSession{bound}
 	}
 	if len(candidates) == 0 && live {
+		if record.ChatEpoch > 0 {
+			c, err := loadDialogue(workspace.Path, record.ResourceID)
+			if err != nil {
+				return err
+			}
+			if !c.Open || c.Epoch != record.ChatEpoch {
+				return retireGenerationWithoutSession(m.ensureRuntime(workspace, record, client), "chat_closed")
+			}
+		}
 		request := agentHubCreateSessionRequest{
 			Title: record.Title, Cwd: record.Cwd, AgentName: record.AgentHubAgentName,
 			Source:         &source,
@@ -592,6 +601,11 @@ func (m *agentManager) recoverAgentHubGenerationLocked(ctx context.Context, cfg 
 			request.Source = &source
 			request.IdempotencyKey = record.GenerationID
 			request.InitialMessage = nil
+			request.LaunchEnvironment = generationLaunchEnvironment(workspace, record)
+			if record.ChatEpoch > 0 {
+				source.Metadata["channel"] = "dialogue"
+				source.Metadata["ownerResourceId"] = record.OwnerResourceID
+			}
 		}
 		recovered, createErr := m.findOrCreateAgentHubSession(ctx, client, source, request)
 		if createErr != nil {

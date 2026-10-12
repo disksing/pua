@@ -39,7 +39,7 @@ Scheduler API 同样委托 `internal/app`，提供 `GET/POST .../scheduler`、`P
 
 ## Resource generation and AgentHub facts
 
-每个 Workspace、Scheduler、Project、Task 都持久化显式 `{kind: profile|agent, name}` 绑定，不做父级继承。资源聊天在首条消息到达时懒创建代际；PUA 使用 Workspace 稳定 instance ID、资源 ID、代际编号/ID、绑定与 Profile revision 组成 AgentHub source metadata，并用代际 ID 幂等建会。PUA 向 AgentHub 发送 schema v2 消息：顶层 `text` 是 PUA 已完整组装、应原样交给 Provider 的 prompt，`payload` 则以 `pua.resource-message.v1` 保存原始正文、role、sender、Workspace instance、type 与 causation。AgentHub 不解释 payload；PUA 在历史、时间线和重试恢复时自行解码。浏览器输入仍携带稳定 `messageId`、`role=user` 和当前用户名，这些来源字段只存在于 PUA payload，不参与认证或授权。旧 AgentHub `message.input` 中的顶层 role/sender 继续作为只读兼容数据处理。
+每个 Workspace、Scheduler、Project、Task 都持久化显式 `{kind: profile|agent, name}` 绑定，不做父级继承。资源聊天在首条消息到达时懒创建代际；PUA 使用 Workspace 稳定 instance ID、资源 ID、代际编号/ID、绑定与 Profile revision 组成 AgentHub source metadata，并用代际 ID 幂等建会。PUA 向 AgentHub 发送 schema v2 消息：顶层 `text` 是 PUA 已完整组装、应原样交给 Provider 的 prompt，`payload` 则以 `pua.resource-message.v1` 保存原始正文、role、sender、Workspace instance、type 与 causation。AgentHub 不解释 payload；PUA 在历史、时间线和重试恢复时自行解码。浏览器用户输入先保存到独立聊天，再生成交流通道的内部待办；用户名表示来源，不能被解释为额外授权。旧 AgentHub `message.input` 中的顶层 role/sender 继续作为只读兼容数据处理。
 
 Provider 消息封装跟随目标 Workspace 的 `en` / `zh-CN` 内容语言，并明确 Turn opener 的实际响应通道：用户可见进度和最终回复；有效订阅结果的 Agent 仅收到最终回复；未订阅 Agent 与 system 均不接收进度或最终回复。插入活动 Turn 的消息会显示真实 Turn opener 及其响应通道；插入者与 opener 不同时还给出精确的 `pua message send --to=...` 单独回复命令，相同时保持简短。Server 在首次投递前把语言、Turn ID、opener 身份和响应通道冻结到 mailbox 的内部 provider context，保证重启、语言切换及重试时同一 `messageId` 的顶层文本不变；该上下文不进入公开 Payload，`pua.resource-message.v1` 保持不变。旧或不完整的活动 Session 若无法提供 opener 上下文，封装会省略未知会话信息但仍继续投递；canonical 恢复继续接受升级前的英文旧封装。
 
@@ -73,22 +73,25 @@ GET  /api/workspaces/{workspaceId}/users
 POST /api/workspaces/{workspaceId}/users
 PUT  /api/workspaces/{workspaceId}/users/{name}
 DELETE /api/workspaces/{workspaceId}/users/{name}
-GET  /api/workspaces/{workspaceId}/users/{name}/messages
-POST /api/workspaces/{workspaceId}/users/{name}/messages
-PUT  /api/workspaces/{workspaceId}/users/{name}/messages/{messageId}/read
-POST /api/workspaces/{workspaceId}/users/{name}/messages/{messageId}/reply
-DELETE /api/workspaces/{workspaceId}/users/{name}/messages/{messageId}
 ```
 
 手动结束当前 Task Turn 时，Server 会在 AgentHub Interrupt 成功后把持久化 Task state 设为 `paused`，并在同一个资源控制器临界区取消尚未送达的 steer；这样 terminal event 不会把用户刚停止的 Task 自动续推。Workspace、Project 和 Scheduler 的 End Turn 不写 Task state。响应中的 `taskState` / `taskStateError` 分别报告自动暂停结果和异常。
 
 `POST .../generation/end?generationId={currentGenerationId}` 只在没有活动 Turn/approval 时接受。它以 generation ID 防止过期页面误操作，随后沿统一 lifecycle 完成 Session Stop、stopped 确认、Archive 和 generation retire；不会立即创建空 successor，下一条 mailbox 消息会按资源当前绑定懒创建新 generation。
 
-`GET /api/workspaces/{workspaceId}/tree` 还会返回由服务端计算的 `activity`，其中 `running`、`unread` 和 `problems` 是相互独立的三个列表，同一资源可同时出现在多个列表。资源树快照包含当前用户的 `userState.readTurnNumber`、`latestTurnNumber` 与 `unreadCount`；其中 `latestTurnNumber` 只表示最新已完成 Turn，活动 Turn 仅出现在 `running`，不计入未读。`PUT .../read` 接收前端实际观察到的 `throughTurnNumber`，只单调推进当前用户的已读游标，且不允许超过资源当前已完成 Turn 高水位，因此活动 Turn 不能被提前标记已读。Scheduler 不参与未读计算，也不会出现在 `unread` 列表。用户通过 `POST .../messages` 发送 role 为 `user` 的消息时，服务端会自动把该资源的已读游标推进到当前最新已完成 Turn（即发消息隐式触发一次 read，新触发的 Turn 完成后重新计为 1 条未读）；Agent 消息不影响用户的已读游标。前端在 Project 或虚拟目录处于折叠状态时，会把其内部 Task 的未读数聚合到该行的未读胶囊上。个人 UI/资源状态保存在 `<control-dir>/users/{name}/ui-state.json`；公共 Turn 编号高水位保存在 `<control-dir>/resource-state.json`。用户级请求通过 `X-PUA-User` 指定用户，未提供时兼容使用默认 `User`。归档 Project/Task 时会同步删除所有用户的阅读状态。ui-state 还保存侧栏虚拟目录（`folders` 与 `folderOrder`）：虚拟目录是纯 UI 层的 Task 分组，只挂在 Project 下、不支持嵌套，不影响磁盘上的真实任务目录；`taskOrder` 中混合记录项目根级的 Task 与目录 ID。归档 Task 时会将其从所属目录移除，归档 Project 时会连带删除其目录。
+`GET /api/workspaces/{workspaceId}/tree` 还会返回由服务端计算的 `activity`，其中 `running`、`unread` 和 `problems` 是相互独立的三个列表，同一资源可同时出现在多个列表。资源树快照包含当前用户的 `userState.readTurnNumber`、`latestTurnNumber` 与 `unreadCount`；其中 `latestTurnNumber` 只表示最新已完成 Turn，活动 Turn 仅出现在 `running`，不计入未读。`PUT .../read` 接收前端实际观察到的 `throughTurnNumber`，只单调推进当前用户的已读游标，且不允许超过资源当前已完成 Turn 高水位，因此活动 Turn 不能被提前标记已读。Scheduler 不参与未读计算，也不会出现在 `unread` 列表。用户聊天不推进执行事件的已读游标，Agent 消息同样不影响用户阅读状态。前端在 Project 或虚拟目录处于折叠状态时，会把其内部 Task 的未读数聚合到该行的未读胶囊上。个人 UI/资源状态保存在 `<control-dir>/users/{name}/ui-state.json`；公共 Turn 编号高水位保存在 `<control-dir>/resource-state.json`。用户级请求通过 `X-PUA-User` 指定用户，未提供时要求用户先选择身份。归档 Project/Task 时会同步删除所有用户的阅读状态。ui-state 还保存侧栏虚拟目录（`folders` 与 `folderOrder`）：虚拟目录是纯 UI 层的 Task 分组，只挂在 Project 下、不支持嵌套，不影响磁盘上的真实任务目录；`taskOrder` 中混合记录项目根级的 Task 与目录 ID。归档 Task 时会将其从所属目录移除，归档 Project 时会连带删除其目录。
 
 用户名只允许 ASCII 字母、数字、下划线和减号，最长 80 个字符；`workspace`、`scheduler`、`project`、`task` 以及 `projectN`、`taskN` 这类与稳定资源 ID 相同或近似的名字（不区分大小写）被保留，不能注册为用户名，避免 `pua message send --to=` 目标产生歧义。`POST .../users` 显式注册用户，`PUT .../users/{name}` 接收 `{ "preference": "..." }`，删除用户会级联删除该用户目录，但不会改写历史消息中的 sender。用户只是 Workspace 范围的身份标记，不构成认证或权限边界。
 
-用户收件箱是资源 mailbox 的外向对应物：Agent 通过 `POST .../users/{name}/messages`（携带稳定 sender 资源 ID 与匹配的 Workspace instance ID 作为来源证明）把消息持久化到 `<control-dir>/users/{name}/inbox.json`；投递在用户在 Web GUI 的 Inbox 面板中阅读时完成（`PUT .../read` 逐条标记已读并保留首个已读时间戳）。用户的回复由 `POST .../reply` 转换为对来源资源的普通 role=user mailbox 消息（正文以 `[Reply to your Inbox message <id>]` 加原文引用开头，引用超过 1KB 截断，Agent 据此识别回复对象），投递、generation 唤醒与 steer/enqueue 处理完全复用现有 mailbox 管线；回复成功后 inbox 条目记录 `repliedAt` 并同时视为已读。`DELETE` 按消息 ID 删除 inbox 条目，无论已读或未回复均可删除。inbox 最多保留 200 条，超出时优先淘汰最旧的已读消息，未读消息不因保留策略丢失。
+用户聊天由 `<control-dir>/chats/{chatId}.json` 保存，与 AgentHub 事件独立。一资源一用户一条长期聊天，内部通道仍使用稳定资源 ID，交流通道使用独立的 `dialogue-{chatId}` 运行分区，分别拥有 controller、mailbox 和 generation。此地址不是 Workspace 资源；公开入口为资源下的 `/chat/runtime/...`，不提供直接访问私有运行地址的路由。旧 generation 不改变归属，继续出现在执行事件中。
+
+`GET .../resources/{id}/chat` 读取当前用户聊天，`POST .../chat/open|close|messages|read|binding` 管理聊天；`GET .../chats` 返回该用户的聊天列表和未读数。公开消息仅来自用户输入或交流 Agent 的显式发布，不自动复制 Turn final。消息和派工使用稳定 ID；接受用户消息和保存交流 outbox 在同一次原子写入中完成，后台以固定 mailbox ID 重试投递。关闭保留历史，停止交流通道并撤销旧代次资格；已持久派工仍投递内部通道。重开同一聊天时增加 epoch，旧 generation 完成停止和归档后才能接入新的交流代次。Workspace 聊天始终开启。
+
+交流 Agent 通过 `pua chat show|notes|publish|dispatch|timer` 工作。发布、派工、笔记和定时器入口校验 Session 注入的聊天身份、代次凭据和当前 generation；CLI 限制交流角色的资源修改命令，执行修改交由内部通道。这里是可信本地 Workspace 内的角色及生命周期约束，不是操作系统级沙箱或新的用户认证系统。交流 generation 不触发 Task 的状态收口。模型切换复用现有安全 Turn 边界；关闭状态下修改交流绑定不会启动 Session。
+
+定时器只保存聊天级检查间隔和下次时间，不保存关注资源、观察订阅、任务与聊天绑定或父级交接关系。交流 Agent 在自己的持久笔记中记录关注范围和通知进度，按需查询资源 History、状态和产物。默认不自动轮询，Agent 可以设置 60 至 86400 秒间隔，设为 0 关闭；已有待投递输入或运行 Turn 时合并定时检查。浏览器轮询只刷新展示，不驱动模型。
+
+Inbox 路由统一返回 410，旧 `users/*/inbox.json` 在取得 Workspace 所有权后删除，后台也重试清理，不导入聊天。旧 CLI 用户目标明确报移除错误，不能成为内部 Agent 直接发言的旁路。原 History UI 被执行事件和交流事件两个只读 Tab 替代，历史 API/CLI 和已有引用保留。两个事件 Tab 支持各自的模型绑定；审批和停止控件在聊天面板独立展示。
 
 `PUT .../generation-policy` 更新 `workspace.json` 中统一覆盖 Workspace、Project、Task 和 Scheduler 的自动轮换策略。策略有两个独立开关：usage-based rotation 默认在 20 个已结束 Turn 或累计 120 分钟 Turn wall-clock 的 OR 阈值后轮换，Turn 之间的 idle 不计时；inactivity-based rotation 默认在 AgentHub Session 最后一次语义 Turn 活动距今达到 1440 分钟后轮换。两者都只在下一条 queued input 即将开始新 Turn 时检查，活动 Turn 的 steer 不检查。旧 `enabled` 配置迁移时同时控制两个新开关，设置页可分别关闭并保留阈值。
 

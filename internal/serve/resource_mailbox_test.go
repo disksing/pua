@@ -878,27 +878,21 @@ func TestUserMessageSendMarksResourceRead(t *testing.T) {
 		t.Fatalf("agent message moved the read cursor: %#v", state)
 	}
 
-	// A user message marks the resource read through the latest completed Turn.
+	// User messages no longer enter the execution mailbox or alter its read cursor.
 	userRecorder := httptest.NewRecorder()
-	userRequest := httptest.NewRequest(http.MethodPost, "/api/workspaces/"+workspace.ID+"/resources/project1.task1/messages", strings.NewReader(`{"text":"hello","role":"user","sender":{"name":"User"}}`))
+	userRequest := httptest.NewRequest(http.MethodPost, "/api/workspaces/"+workspace.ID+"/resources/project1.task1/messages", strings.NewReader(`{"text":"hello","role":"user"}`))
 	userRequest.Header.Set(workspaceUserHeader, app.LegacyDefaultUserName)
 	manager.server.handleWorkspace(userRecorder, userRequest)
-	if userRecorder.Code != http.StatusAccepted {
-		t.Fatalf("user send failed: %d %s", userRecorder.Code, userRecorder.Body.String())
+	if userRecorder.Code != http.StatusGone {
+		t.Fatalf("legacy user input returned %d", userRecorder.Code)
 	}
-	state, err = manager.server.resourceUserStateForResource(workspace.Path, "project1.task1", app.LegacyDefaultUserName)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if state.ReadTurnNumber == nil || *state.ReadTurnNumber != 2 {
-		t.Fatalf("user message did not mark the resource read: %#v", state)
-	}
-	tree, err = manager.server.treeAt(context.Background(), workspace.Path, app.LegacyDefaultUserName)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if task := tree.Projects[0].Children[0]; task.UnreadCount != 0 || len(tree.Activity.Unread) != 0 {
-		t.Fatalf("resource stayed unread after user send: task=%#v unread=%#v", task, tree.Activity.Unread)
+	// Explicitly viewing execution events still permits marking that history read.
+	readRequest := httptest.NewRequest(http.MethodPut, "/api/workspaces/"+workspace.ID+"/resources/project1.task1/read", strings.NewReader(`{"throughTurnNumber":2}`))
+	readRequest.Header.Set(workspaceUserHeader, app.LegacyDefaultUserName)
+	readRecorder := httptest.NewRecorder()
+	manager.server.handleWorkspace(readRecorder, readRequest)
+	if readRecorder.Code != http.StatusOK {
+		t.Fatal(readRecorder.Body.String())
 	}
 
 	// The Turn the sends triggered becomes the next unread one once done.
@@ -1005,8 +999,8 @@ func TestResourceServerAPIStructuredErrors(t *testing.T) {
 		name, method, path, body, code string
 		status                         int
 	}{
-		{name: "invalid request", method: http.MethodPost, path: "/api/workspaces/" + workspace.ID + "/resources/project1.task1/messages", body: `{"text":"hello","mode":"later"}`, code: "invalid_request", status: http.StatusBadRequest},
-		{name: "missing resource", method: http.MethodPost, path: "/api/workspaces/" + workspace.ID + "/resources/project9.task9/messages", body: `{"text":"hello"}`, code: "resource_not_found", status: http.StatusNotFound},
+		{name: "invalid request", method: http.MethodPost, path: "/api/workspaces/" + workspace.ID + "/resources/project1.task1/messages", body: `{"text":"hello","mode":"later","role":"agent"}`, code: "invalid_request", status: http.StatusBadRequest},
+		{name: "missing resource", method: http.MethodPost, path: "/api/workspaces/" + workspace.ID + "/resources/project9.task9/messages", body: `{"text":"hello","role":"agent"}`, code: "resource_not_found", status: http.StatusNotFound},
 		{name: "missing message", method: http.MethodGet, path: "/api/workspaces/" + workspace.ID + "/messages/msg-missing", code: "message_not_found", status: http.StatusNotFound},
 		{name: "steer missing message", method: http.MethodPost, path: "/api/workspaces/" + workspace.ID + "/messages/msg-missing/steer", code: "message_not_found", status: http.StatusNotFound},
 		{name: "workspace not owned", method: http.MethodGet, path: "/api/workspaces/not-owned/resources/workspace/status", code: "workspace_not_owned", status: http.StatusNotFound},

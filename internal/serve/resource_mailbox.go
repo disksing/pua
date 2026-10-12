@@ -209,11 +209,12 @@ type resourceGenerationStatus struct {
 }
 
 type resourceSessionStatus struct {
-	ID                string                    `json:"id,omitempty"`
-	State             string                    `json:"state,omitempty"`
-	StopReason        string                    `json:"stopReason,omitempty"`
-	CurrentTurnID     string                    `json:"currentTurnId,omitempty"`
-	InputCapabilities agentHubInputCapabilities `json:"inputCapabilities"`
+	PendingApprovalIDs []string                  `json:"pendingApprovalIds,omitempty"`
+	ID                 string                    `json:"id,omitempty"`
+	State              string                    `json:"state,omitempty"`
+	StopReason         string                    `json:"stopReason,omitempty"`
+	CurrentTurnID      string                    `json:"currentTurnId,omitempty"`
+	InputCapabilities  agentHubInputCapabilities `json:"inputCapabilities"`
 }
 
 type resourceStatusResponse struct {
@@ -628,6 +629,14 @@ func markResourceMailboxArchived(workspacePath, resourceID string) error {
 
 func resourceExistsAndArchived(workspacePath, resourceID string) (bool, bool, app.AgentBinding, error) {
 	resourceID = normalizedResourceID(resourceID)
+	if strings.HasPrefix(resourceID, dialoguePrefix) {
+		c, err := loadDialogue(workspacePath, resourceID)
+		if err != nil {
+			return false, false, app.AgentBinding{}, err
+		}
+		exists, archived, _, err := resourceExistsAndArchived(workspacePath, c.ResourceID)
+		return exists, archived || !c.Open, c.Binding, err
+	}
 	puaWorkspace, err := app.OpenWorkspace(workspacePath)
 	if err != nil {
 		return false, false, app.AgentBinding{}, err
@@ -768,7 +777,8 @@ func (m *agentManager) resourceStatus(ctx context.Context, workspace serveWorksp
 	}
 	status.Session = &resourceSessionStatus{
 		ID: session.ID, State: session.State, StopReason: session.StopReason, CurrentTurnID: session.CurrentTurnID,
-		InputCapabilities: session.InputCapabilities,
+		InputCapabilities:  session.InputCapabilities,
+		PendingApprovalIDs: session.PendingApprovalIDs,
 	}
 	status.Generation.Resumable = session.State == "stopped" && !record.SessionResumeUnavailable && !record.ReplacementPending && !record.ArchivedTaskStopRequested
 	status.CanSteerWaiting = !archived && !record.ReplacementPending && (session.State == "running" || session.State == "waiting_approval") && session.InputCapabilities.Steer
@@ -926,7 +936,20 @@ func (m *agentManager) ensureMailboxGeneration(ctx context.Context, workspace se
 		if cfgErr != nil {
 			return record, nil, nil, cfgErr
 		}
-		return record, m.ensureRuntime(workspace, record, client), client, nil
+		rt := m.ensureRuntime(workspace, record, client)
+		if strings.HasPrefix(resourceID, dialoguePrefix) {
+			c, chatErr := loadDialogue(workspace.Path, resourceID)
+			if chatErr != nil {
+				return record, rt, client, chatErr
+			}
+			if !c.Open || c.Epoch != record.ChatEpoch {
+				record, err = rt.mutateGeneration(func(current *generationRecord) { current.ArchivedTaskStopRequested = true })
+				if err != nil {
+					return record, rt, client, err
+				}
+			}
+		}
+		return record, rt, client, nil
 	}
 	cfg, client, err := m.agentHubRuntimeConfig()
 	if err != nil {
@@ -1737,6 +1760,15 @@ func (m *agentManager) handleResourceMessages(w http.ResponseWriter, r *http.Req
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil {
 		writeError(w, &resourceAPIError{Code: "invalid_request", Message: err.Error()}, http.StatusBadRequest)
+		return
+	}
+	role, roleErr := normalizeResourceMessageRole(request.Role)
+	if roleErr != nil {
+		writeError(w, roleErr, http.StatusBadRequest)
+		return
+	}
+	if role == "user" {
+		writeError(w, &resourceAPIError{Code: "chat_required", Message: "user messages must use resource chat"}, http.StatusGone)
 		return
 	}
 	resourceID = normalizedResourceID(resourceID)

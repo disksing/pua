@@ -28,6 +28,10 @@ import (
 // generation. ID is an implementation key only; resource APIs address
 // records by GenerationID.
 type generationRecord struct {
+	RuntimeChannel     string `json:"runtimeChannel,omitempty"`
+	ChatToken          string `json:"chatToken,omitempty"`
+	OwnerResourceID    string `json:"ownerResourceId,omitempty"`
+	ChatEpoch          uint64 `json:"chatEpoch,omitempty"`
 	ID                 string `json:"id"`
 	WorkspaceID        string `json:"workspaceId"`
 	ResourceID         string `json:"resourceId,omitempty"`
@@ -417,6 +421,13 @@ func generationMatchesResource(record generationRecord, resourceID string) bool 
 }
 
 func (m *agentManager) generationCwd(ctx context.Context, workspace serveWorkspace, resourceID, requested string) (string, error) {
+	if strings.HasPrefix(resourceID, dialoguePrefix) {
+		c, err := loadDialogue(workspace.Path, resourceID)
+		if err != nil {
+			return "", err
+		}
+		resourceID = c.ResourceID
+	}
 	if strings.TrimSpace(requested) != "" {
 		return agentCwd(workspace.Path, requested)
 	}

@@ -496,6 +496,10 @@ func (s *server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := parts[0]
+	if r.Header.Get("X-PUA-Chat-Token") != "" && r.Method != http.MethodGet && !(len(parts) >= 4 && parts[1] == "resources" && parts[3] == "chat") {
+		writeError(w, errors.New("dialogue mutations must use the chat API"), http.StatusForbidden)
+		return
+	}
 	if len(parts) == 1 {
 		if r.Method == http.MethodPut {
 			var body struct {
@@ -586,7 +590,18 @@ func (s *server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, tree)
+	case "chats":
+		s.agents.handleChats(w, r, id)
+		return
 	case "resources":
+		if len(parts) > 2 && strings.HasPrefix(parts[2], dialoguePrefix) {
+			http.NotFound(w, r)
+			return
+		}
+		if len(parts) >= 4 && parts[3] == "chat" {
+			s.agents.handleChat(w, r, id, parts[2], parts[4:])
+			return
+		}
 		if len(parts) == 4 && parts[3] == "documents" {
 			s.saveResourceMarkdownFile(w, r, id, parts[2])
 			return

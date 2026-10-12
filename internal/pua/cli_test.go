@@ -328,26 +328,11 @@ func TestMessageSendToUserTarget(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		sent := run(t, "message", "send", "--to=disksing", "hello user")
-		if !strings.Contains(sent, `"messageId": "umsg-test"`) {
-			t.Fatalf("unexpected user send response: %s", sent)
+		if _, err := runErr(t, "message", "send", "--to=disksing", "hello user"); err == nil || !strings.Contains(err.Error(), "Inbox was removed") {
+			t.Fatalf("legacy user delivery: %v", err)
 		}
-		if requestBody["text"] != "hello user" {
-			t.Fatalf("unexpected user message request: %#v", requestBody)
-		}
-		if _, exists := requestBody["mode"]; exists {
-			t.Fatalf("user target carried resource mailbox mode: %#v", requestBody)
-		}
-		sender, _ := requestBody["sender"].(map[string]any)
-		if sender["id"] != "project1.task1" {
-			t.Fatalf("sender provenance did not use current resource: %#v", sender)
-		}
-		var config app.Config
-		if err := readJSON(filepath.Join(root, testConfigFile), &config); err != nil {
-			t.Fatal(err)
-		}
-		if requestBody["senderWorkspaceInstanceId"] != config.InstanceID {
-			t.Fatalf("sender Workspace provenance = %#v, want %q", requestBody["senderWorkspaceInstanceId"], config.InstanceID)
+		if requestBody != nil {
+			t.Fatal("legacy command sent an Inbox request")
 		}
 
 		if _, err := runErr(t, "message", "send", "--to=disksing", "--mode=enqueue", "hello"); err == nil || !strings.Contains(err.Error(), "--mode applies only to resource targets") {

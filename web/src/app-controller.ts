@@ -3,7 +3,7 @@ import type { ToastModel } from "./models/common";
 import type { CreateDialogModel, TaskTemplate } from "./models/create";
 import type { DetailPanelModel } from "./models/detail";
 import type { SettingsModel } from "./models/settings";
-import type { AppShellModel, DoctorSnapshotModel, ShellActivityItem, ShellActivityLists, ShellDragTarget, ShellInboxMessage, ShellResourceItem, ShellStatusPresentation } from "./models/shell";
+import type { AppShellModel, DoctorSnapshotModel, ShellActivityItem, ShellActivityLists, ShellDragTarget, ShellResourceItem, ShellStatusPresentation } from "./models/shell";
 import type { AgentConfig, AgentProfile, DiffRecord, ResourceRecord, WorkspaceConfig, WorkspaceFileRecord, WorkspaceTree, WorkspaceUser } from "./models/workspace";
 import type { ApiErrorResponse, ArchiveResponse } from "./api/types";
 import { createAgentDraftController } from "./controllers/agent-draft-controller";
@@ -51,23 +51,11 @@ export interface PUAViewPublisher {
 let publisher: PUAViewPublisher;
 let lifecycle: ResourceScope | null = null;
 
-interface InboxMessageRecord {
-	messageId: string;
-	text: string;
-	sourceResourceId: string;
-	senderName?: string;
-	createdAt?: string;
-	readAt?: string;
-	repliedAt?: string;
-	unread?: boolean;
-}
-
 interface ControllerState {
 	config: WorkspaceConfig | null;
 	settingsRevision: string;
 	doctor: DoctorSnapshotModel;
 	tree: WorkspaceTree | null;
-	inbox: InboxMessageRecord[];
 	details: Record<string, ResourceRecord>;
 	workspaceAgents: WorkspaceFileRecord | null;
 	workspaceUsers: WorkspaceUser[];
@@ -129,7 +117,6 @@ const controllerState: ControllerState = {
 	settingsRevision: "",
 	doctor: { checking: true, complete: false, summary: { errors: 0, warnings: 0 }, workspaces: [] },
 	tree: null,
-	inbox: [] as InboxMessageRecord[],
 	details: {},
 	workspaceAgents: null,
 	workspaceUsers: [],
@@ -431,7 +418,6 @@ function beginWorkspaceUserTransition(name: string): void {
 	controllerState.detailRequestVersion++;
 	selectWorkspaceUser(name);
 	controllerState.tree = null;
-	controllerState.inbox = [];
 	clearResourceDetailState();
 	controllerState.navigationLoading = true;
 	controllerState.navigationError = "";
@@ -475,7 +461,6 @@ async function resolveWorkspaceIdentity(workspaceId = controllerState.activeWork
 	}
 	controllerState.currentUserName = "";
 	controllerState.tree = null;
-	controllerState.inbox = [];
 	clearResourceDetailState();
 	controllerState.navigationLoading = false;
 	controllerState.navigationError = "";
@@ -654,7 +639,6 @@ async function loadTree(options: LoadTreeOptions = {}) {
 	if (options.updateURL !== false) syncURL({ replace: Boolean(options.replaceURL) });
 	await refreshResourceMessageStatus(workspaceId, selectedAgentResourceId());
 	if (!isCurrentWorkspaceView(workspaceId, navigationVersion, treeRequestVersion)) return;
-	await refreshInbox(workspaceId);
 	if (!isCurrentWorkspaceView(workspaceId, navigationVersion, treeRequestVersion)) return;
 	await markSelectedResourceRead();
 	if (!isCurrentWorkspaceView(workspaceId, navigationVersion, treeRequestVersion)) return;
@@ -794,7 +778,6 @@ async function autoRefresh() {
 			if (!sameJSON(previousDetail, resourceDetailSnapshot(selectedId))) changed = true;
 		}
 		observeCompletionProjections(resourceNotificationProjections(tree));
-		if (await refreshInbox(workspaceId)) changed = true;
 		if (await refreshResourceMessageStatus(workspaceId, selectedAgentResourceId())) changed = true;
 		if (taskOperationalStateKey() !== controllerState.taskOperationalStateKey) changed = true;
 		if (changed) publishViewModels();
@@ -963,19 +946,6 @@ function appShellActivityModel(item: ResourceRecord, category: keyof ShellActivi
 		status: appShellStatusModel(state.statusPresentation)
 	};
 }
-function appShellInboxModel(message: InboxMessageRecord): ShellInboxMessage {
-	const resource = findResource(message.sourceResourceId || "");
-	return {
-		id: message.messageId,
-		resourceId: message.sourceResourceId || "",
-		resourceTitle: resource?.title || message.sourceResourceId || "",
-		senderName: String(message.senderName || message.sourceResourceId || "").trim(),
-		text: message.text || "",
-		timeLabel: relativeTime(message.createdAt),
-		unread: message.unread === true || !message.readAt,
-		replied: Boolean(message.repliedAt)
-	};
-}
 function renderAppShell() {
 	const projects = controllerState.tree ? applyCustomOrder(controllerState.tree.projects || [], controllerState.projectOrder).map((project) => appShellResourceModel(project, "project")) : [];
 	const activitySource = controllerState.tree?.activity;
@@ -984,9 +954,6 @@ function renderAppShell() {
 		unread: activitySource?.unread?.map((item) => appShellActivityModel(item, "unread")) || [],
 		problems: activitySource?.problems?.map((item) => appShellActivityModel(item, "problems")) || [],
 	};
-	// The inbox lists newest messages first; the Server returns them in
-	// acceptance order.
-	const inbox: ShellInboxMessage[] = (controllerState.inbox || []).slice().reverse().map(appShellInboxModel);
 	if (controllerState.tree) controllerState.taskOperationalStateKey = taskOperationalStateKey();
 	const workspaceState = resourceNavigationState(controllerState.tree?.workspace);
 	publisher.renderAppShell({
@@ -1010,7 +977,6 @@ function renderAppShell() {
 		projects,
 		treeEditing: controllerState.treeEditing,
 		activity,
-		inbox,
 		doctor: doctorSnapshotForWorkspace(controllerState.doctor, controllerState.activeWorkspaceId),
 		...paneLayoutController.snapshot(),
 		route: routeController.projection(),
@@ -1032,9 +998,6 @@ function renderAppShell() {
 		onRenameFolder: (id, name) => renameFolder(id, name),
 		onDeleteFolder: (id) => deleteFolder(id),
 		onToggleFolder: (id) => toggleFolder(id),
-		onOpenInboxMessage: (id) => openInboxMessage(id),
-		onReplyInboxMessage: (id, text) => replyInboxMessage(id, text),
-		onDeleteInboxMessage: (id) => deleteInboxMessage(id),
 		onPanePreview: (name, value) => setPaneSize(name, value),
 		onPaneCommit: (name) => savePaneSize(name),
 		onPaneViewport: () => syncPaneViewport(),
@@ -1063,7 +1026,6 @@ async function switchWorkspace(id: string): Promise<void> {
 	controllerState.activeWorkspaceId = id;
 	controllerState.selectedId = "workspace";
 	controllerState.tree = null;
-	controllerState.inbox = [];
 	controllerState.treeEditing = false;
 	controllerState.navigationLoading = true;
 	controllerState.navigationError = "";
@@ -1518,61 +1480,7 @@ async function fetchCurrentTree(workspaceId = controllerState.activeWorkspaceId)
 	}
 	return isCurrentWorkspaceView(workspaceId, navigationVersion, requestVersion) ? tree : null;
 }
-// refreshInbox loads the current user's durable agent-to-user inbox. The
-// inbox is Workspace-scoped but user-specific; fetch failures are silent so a
-// missing user profile never breaks the surrounding refresh cycle.
-async function refreshInbox(workspaceId = controllerState.activeWorkspaceId): Promise<boolean> {
-	if (!workspaceId) return false;
-	try {
-		const response = await api<{ messages?: InboxMessageRecord[] }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/users/${encodeURIComponent(currentUserName())}/messages`);
-		if (workspaceId !== controllerState.activeWorkspaceId) return false;
-		const messages = Array.isArray(response.messages) ? response.messages : [];
-		if (sameJSON(controllerState.inbox, messages)) return false;
-		controllerState.inbox = messages;
-		return true;
-	} catch (err) {
-		console.warn("inbox refresh failed", err);
-		return false;
-	}
-}
-async function openInboxMessage(messageId: string): Promise<void> {
-	const workspaceId = controllerState.activeWorkspaceId;
-	const message = controllerState.inbox.find((item) => item.messageId === messageId);
-	if (!workspaceId || !message) return;
-	if (message.unread || !message.readAt) {
-		try {
-			await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/users/${encodeURIComponent(currentUserName())}/messages/${encodeURIComponent(messageId)}/read`, { method: "PUT" });
-		} catch (err) {
-			console.warn("failed to mark inbox message read", err);
-		}
-	}
-	if (message.sourceResourceId) await selectResource(message.sourceResourceId);
-	await refreshInbox(workspaceId);
-	publishViewModels();
-}
-async function replyInboxMessage(messageId: string, text: string): Promise<void> {
-	const workspaceId = controllerState.activeWorkspaceId;
-	const message = controllerState.inbox.find((item) => item.messageId === messageId);
-	if (!workspaceId || !message || !text.trim()) return;
-	await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/users/${encodeURIComponent(currentUserName())}/messages/${encodeURIComponent(messageId)}/reply`, {
-		method: "POST", body: JSON.stringify({ text: text.trim() })
-	});
-	await refreshInbox(workspaceId);
-	if (message.sourceResourceId && message.sourceResourceId === selectedAgentResourceId()) {
-		await refreshResourceMessageStatus(workspaceId, message.sourceResourceId);
-	}
-	publishViewModels();
-	toast("Reply sent.");
-}
-async function deleteInboxMessage(messageId: string): Promise<void> {
-	const workspaceId = controllerState.activeWorkspaceId;
-	if (!workspaceId) return;
-	const confirmed = await confirmDialog({ title: "Delete message", message: "Delete this inbox message? This cannot be undone.", confirmLabel: "Delete", danger: true });
-	if (!confirmed) return;
-	await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/users/${encodeURIComponent(currentUserName())}/messages/${encodeURIComponent(messageId)}`, { method: "DELETE" });
-	await refreshInbox(workspaceId);
-	publishViewModels();
-}
+
 async function refreshTreeAfterResourceMutation(): Promise<void> {
 	if (!controllerState.activeWorkspaceId || !controllerState.tree) return;
 	const tree = await fetchCurrentTree(controllerState.activeWorkspaceId);

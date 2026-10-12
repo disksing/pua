@@ -207,13 +207,21 @@ EOF
 
 Turn 结束后，PUA 会自动把 final response 投递给开启 Turn 的 Agent，不要再用 pua message send 发送同一结果。收到自动投递的 Turn result 时，应把它视为此前请求的答复，不要仅为确认收到而回复；只有出现新工作或确需澄清时才发送新消息。开启方不需要结果时使用 --subscribe-result=false。消息可能重复投递，发送方和接收方都应结合 message ID 或业务状态避免重复操作。
 
-需要直接联系用户时，把 --to 换成已注册的 Workspace 用户名而不是资源 ID：
+用户聊天与执行历史分开。内部 Agent 在资源文档和 History 中记录进展，不直接发布用户消息；Inbox 和用户名消息目标已移除。交流 Agent 拉取相关状态后统一向用户说明。
+
+当 PUA_CHANNEL=dialogue 时，只查询资源并使用以下交流命令，不运行 Task 状态收口指令，不直接实现工作。关注哪些任务、已通知哪些结果，由交流 Agent 在自己的持久笔记中记录；PUA 不维护关注列表。
 
 ~~~sh
-pua message send --to=<username> '<message>'
+pua chat show
+pua chat notes
+pua chat notes '<更新后的笔记>'
+pua chat dispatch --id=<稳定操作ID> --to=<资源> '<工作指令>'
+pua chat publish --id=<稳定消息ID> '<给用户的消息>'
+pua chat timer 60
+pua chat timer 0
 ~~~
 
-消息会出现在 Web GUI 的用户 Inbox 面板中；用户的回复会作为普通的 role=user 消息送达当前资源。适合主动提问或用户不应错过的结果；例行的 Turn 输出仍写在普通的 final response 中。
+只有显式 publish 的内容进入用户聊天；普通输出和系统触发保留在事件记录。重试时复用操作 ID。关闭聊天撤销公开发布与新派工资格、保留历史，已交办工作继续运行。定时器只唤醒当前聊天，不追踪具体任务；无需跟进时设为 0。
 
 ## 7. Scheduler
 

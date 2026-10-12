@@ -182,6 +182,13 @@ func TestAcceptedMessageDoesNotBlockAnotherWorkspaceStatus(t *testing.T) {
 	}
 	messageStarted := make(chan struct{})
 	releaseMessage := make(chan struct{})
+	defer func() {
+		select {
+		case <-releaseMessage:
+		default:
+			close(releaseMessage)
+		}
+	}()
 	fake.messageHook = func(sessionID string, message agentHubInboundMessage) {
 		payload, ok := decodePUAMessagePayload(message.Payload)
 		if sessionID != recordA.AgentHubSessionID || !ok || payload.Text != "blocked A" {
@@ -192,7 +199,7 @@ func TestAcceptedMessageDoesNotBlockAnotherWorkspaceStatus(t *testing.T) {
 	}
 	fake.mu.Unlock()
 
-	sendRequest := httptest.NewRequest(http.MethodPost, "/api/workspaces/"+workspaceA.ID+"/resources/project1.task1/messages", strings.NewReader(`{"text":"blocked A","mode":"enqueue"}`))
+	sendRequest := httptest.NewRequest(http.MethodPost, "/api/workspaces/"+workspaceA.ID+"/resources/project1.task1/messages", strings.NewReader(`{"text":"blocked A","mode":"enqueue","role":"agent"}`))
 	sendRecorder := httptest.NewRecorder()
 	sendDone := make(chan struct{})
 	go func() {
@@ -239,7 +246,7 @@ func TestAcceptedMessageDoesNotBlockAnotherWorkspaceStatus(t *testing.T) {
 	go func() {
 		manager.server.handleWorkspace(bSendRecorder, httptest.NewRequest(http.MethodPost,
 			"/api/workspaces/"+workspaceB.ID+"/resources/project1.task1/messages",
-			strings.NewReader(`{"text":"independent B","mode":"enqueue"}`)))
+			strings.NewReader(`{"text":"independent B","mode":"enqueue","role":"agent"}`)))
 		close(bSendDone)
 	}()
 	select {
@@ -276,7 +283,7 @@ func TestAcceptedMessageRemainsAcceptedWhenBackgroundDeliveryFails(t *testing.T)
 	recorder := httptest.NewRecorder()
 	manager.server.handleWorkspace(recorder, httptest.NewRequest(http.MethodPost,
 		"/api/workspaces/"+workspace.ID+"/resources/project1.task1/messages",
-		strings.NewReader(`{"text":"will fail after acceptance","mode":"enqueue"}`)))
+		strings.NewReader(`{"text":"will fail after acceptance","mode":"enqueue","role":"agent"}`)))
 	if recorder.Code != http.StatusAccepted {
 		t.Fatalf("background delivery failure changed acceptance response to %d: %s", recorder.Code, recorder.Body.String())
 	}

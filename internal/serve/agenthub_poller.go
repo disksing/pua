@@ -55,6 +55,15 @@ func (m *agentManager) pollAgentHubSessions(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	var failures []string
+	for _, workspace := range cfg.Workspaces {
+		if !m.server.ownsWorkspace(workspace.Path) {
+			continue
+		}
+		if err := m.reconcileWorkspaceChats(ctx, workspace); err != nil {
+			failures = append(failures, fmt.Sprintf("%s chats: %v", workspace.ID, err))
+		}
+	}
 	sessions, err := client.ListSessions(ctx, agentHubSessionFilter{
 		SourceApp: agentHubSourceApp,
 	})
@@ -69,7 +78,6 @@ func (m *agentManager) pollAgentHubSessions(ctx context.Context) error {
 			byExternalID[sourceLookupKey(session.Source.InstanceID, session.Source.ExternalID)] = session
 		}
 	}
-	var failures []string
 	for _, workspace := range cfg.Workspaces {
 		// Reconciliation only manages sessions in owned Workspaces.
 		if !m.server.ownsWorkspace(workspace.Path) {
@@ -93,7 +101,10 @@ func (m *agentManager) pollAgentHubSessions(ctx context.Context) error {
 			resourceID := strings.TrimSpace(record.ResourceID)
 			archiveState, isTask := taskArchiveStates[resourceID]
 			archiveManaged := resourceID != "" && resourceID != "workspace" && resourceID != app.SchedulerResourceID
-			if !isTask && archiveManaged {
+			if strings.HasPrefix(resourceID, dialoguePrefix) {
+				_, archived, _, resourceErr := resourceExistsAndArchived(workspace.Path, resourceID)
+				archiveState = taskArchiveState{archived: archived || record.ArchivedTaskStopRequested, err: resourceErr}
+			} else if !isTask && archiveManaged {
 				resource, resourceErr := puaWorkspace.ResourceValue(resourceID)
 				archiveState = taskArchiveState{archived: resource.Archived, err: resourceErr}
 			}
@@ -216,8 +227,13 @@ func (m *agentManager) stopAgentHubSessionForArchivedResource(ctx context.Contex
 		case GenerationOperationFinalizeArchivedMailbox:
 			_ = markResourceMailboxArchived(workspace.Path, record.ResourceID)
 			return true
-		case GenerationOperationWaitForTurnTerminal, GenerationOperationWaitForSession,
-			GenerationOperationWaitForMessageReceipt, GenerationOperationRetireGeneration:
+		case GenerationOperationWaitForTurnTerminal:
+			if record.ChatEpoch == 0 {
+				return true
+			}
+		case GenerationOperationRetireGeneration:
+			return record.ChatEpoch == 0
+		case GenerationOperationWaitForSession, GenerationOperationWaitForMessageReceipt:
 			return true
 		case GenerationOperationNone:
 			return false
@@ -232,7 +248,7 @@ func (m *agentManager) stopAgentHubSessionForArchivedResource(ctx context.Contex
 		}
 		return true
 	}
-	if session.State == "running" || session.State == "waiting_approval" {
+	if record.ChatEpoch == 0 && (session.State == "running" || session.State == "waiting_approval") {
 		// An archive performed outside this Server may race an active Turn. Do
 		// not silently interrupt it: the reconciler waits for the natural Turn
 		// boundary, then the next poll performs Stop -> stopped -> Archive.

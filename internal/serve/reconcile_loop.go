@@ -345,6 +345,9 @@ func (m *agentManager) reconcileOwnedWorkspaceMailboxes(ctx context.Context) err
 	var failures []string
 	for _, workspace := range cfg.Workspaces {
 		if m.server.ownsWorkspace(workspace.Path) {
+			if err := m.reconcileWorkspaceChats(ctx, workspace); err != nil {
+				failures = append(failures, fmt.Sprintf("%s chats: %v", workspace.ID, err))
+			}
 			if err := m.reconcileWorkspaceMailboxes(ctx, workspace); err != nil {
 				failures = append(failures, fmt.Sprintf("%s: %v", workspace.ID, err))
 			}

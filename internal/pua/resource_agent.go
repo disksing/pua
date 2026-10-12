@@ -311,6 +311,11 @@ func (client *resourceServerClient) request(ctx context.Context, method, path st
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
+	if os.Getenv("PUA_CHANNEL") == "dialogue" {
+		request.Header.Set("X-PUA-Chat", os.Getenv("PUA_CHAT_ID"))
+		request.Header.Set("X-PUA-Chat-Token", os.Getenv("PUA_CHAT_TOKEN"))
+		request.Header.Set("X-PUA-Chat-Generation", os.Getenv("PUA_CHAT_GENERATION"))
+	}
 	response, err := client.http.Do(request)
 	if err != nil {
 		return fmt.Errorf("contact PUA Server %s: %w; verify the owner is running or use --server=<url>", client.baseURL, err)
@@ -486,6 +491,9 @@ func runMessageSend(args []string) error {
 		options.Text = text
 	}
 	warnLiteralEscapeSequences(options.Text)
+	if os.Getenv("PUA_CHANNEL") == "dialogue" {
+		return errors.New("use pua chat dispatch or pua chat publish in a dialogue Session")
+	}
 	senderID, senderInstanceID, err := resolveMessageSender()
 	if err != nil {
 		return err
@@ -570,13 +578,11 @@ func numberedResourcePart(value, prefix string) bool {
 	return true
 }
 
-// runUserMessageSend delivers an agent-to-user message into the target user's
-// durable inbox. Mode and result subscription are resource mailbox concepts
-// and do not apply to user delivery.
-func runUserMessageSend(client *resourceServerClient, options resourceServerOptions, senderID, senderInstanceID string) error {
-	userName := options.ID
-	if err := app.ValidateUserName(userName); err != nil {
-		return fmt.Errorf("invalid user target %q: %w", userName, err)
+// Legacy user targets are rejected explicitly; execution Agents must leave
+// queryable progress for dialogue Agents instead of publishing to an Inbox.
+func runUserMessageSend(_ *resourceServerClient, options resourceServerOptions, _, _ string) error {
+	if err := app.ValidateUserName(options.ID); err != nil {
+		return fmt.Errorf("invalid user target %q: %w", options.ID, err)
 	}
 	if options.ModeSet {
 		return errors.New("--mode applies only to resource targets")
@@ -584,17 +590,7 @@ func runUserMessageSend(client *resourceServerClient, options resourceServerOpti
 	if options.SubscribeResult != nil {
 		return errors.New("--subscribe-result applies only to resource targets")
 	}
-	body := map[string]any{
-		"text":                      options.Text,
-		"sender":                    map[string]string{"id": senderID, "name": senderID},
-		"senderWorkspaceInstanceId": senderInstanceID,
-	}
-	var response map[string]any
-	path := fmt.Sprintf("/api/workspaces/%s/users/%s/messages", url.PathEscape(client.workspaceID), url.PathEscape(userName))
-	if err := client.request(context.Background(), http.MethodPost, path, body, &response); err != nil {
-		return err
-	}
-	return printJSON(response)
+	return errors.New("Inbox was removed; record execution progress for the dialogue Agent to query. Only dialogue Sessions can use pua chat publish")
 }
 
 func resolveMessageSender() (string, string, error) {

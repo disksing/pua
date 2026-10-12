@@ -71,7 +71,17 @@ func (m *agentManager) resolveResourceAgent(workspace serveWorkspace, resourceID
 	if err != nil {
 		return resolvedResourceAgent{}, err
 	}
-	binding, err := puaWorkspace.ResourceAgentBinding(resourceID)
+	var binding app.AgentBinding
+	if strings.HasPrefix(resourceID, dialoguePrefix) {
+		chat, chatErr := loadDialogue(workspace.Path, resourceID)
+		if chatErr != nil {
+			return resolvedResourceAgent{}, chatErr
+		}
+		resourceID = chat.ResourceID
+		binding = chat.Binding
+	} else {
+		binding, err = puaWorkspace.ResourceAgentBinding(resourceID)
+	}
 	if err != nil {
 		return resolvedResourceAgent{}, err
 	}
@@ -160,6 +170,15 @@ func nextResourceGeneration(workspacePath, resourceID string) (int, error) {
 
 func resourceGenerationTitle(workspace serveWorkspace, resourceID string, generation int) (string, error) {
 	resourceID = normalizedResourceID(resourceID)
+	dialogue := false
+	if strings.HasPrefix(resourceID, dialoguePrefix) {
+		c, err := loadDialogue(workspace.Path, resourceID)
+		if err != nil {
+			return "", err
+		}
+		resourceID = c.ResourceID
+		dialogue = true
+	}
 	title := strings.TrimSpace(workspace.Name)
 	if resourceID == app.SchedulerResourceID {
 		title = "Scheduler"
@@ -185,6 +204,9 @@ func resourceGenerationTitle(workspace serveWorkspace, resourceID string, genera
 		} else {
 			title = resourceID
 		}
+	}
+	if dialogue {
+		title += " · Dialogue"
 	}
 	return fmt.Sprintf("%s (gen #%d)", title, generation), nil
 }
@@ -234,6 +256,7 @@ func (m *agentManager) createResourceGeneration(ctx context.Context, workspace s
 	now := time.Now().Format(time.RFC3339Nano)
 	providerID, providerName, model := snapshotAgentHubAgent(ctx, client, resolved.AgentName)
 	record := generationRecord{
+		RuntimeChannel:     "internal",
 		ID:                 newGenerationRecordID(),
 		WorkspaceID:        workspace.ID,
 		ResourceID:         strings.TrimSpace(resourceID),
@@ -252,6 +275,16 @@ func (m *agentManager) createResourceGeneration(ctx context.Context, workspace s
 		Status:    "starting",
 		CreatedAt: now,
 		UpdatedAt: now,
+	}
+	if strings.HasPrefix(resourceID, dialoguePrefix) {
+		c, err := loadDialogue(workspace.Path, resourceID)
+		if err != nil {
+			return generationRecord{}, err
+		}
+		record.RuntimeChannel = "dialogue"
+		record.ChatEpoch = c.Epoch
+		record.ChatToken = c.Token
+		record.OwnerResourceID = c.ResourceID
 	}
 	resourceKey := record.ResourceID
 	if resourceKey == "" {
@@ -281,10 +314,10 @@ func (m *agentManager) createResourceGeneration(ctx context.Context, workspace s
 			"profileRevision": record.ProfileRevision,
 		},
 	}
-	launchEnvironment := map[string]string{
-		"PUA_WORKSPACE_ROOT":        workspace.Path,
-		"PUA_WORKSPACE_INSTANCE_ID": record.SourceInstanceID,
-		"PUA_RESOURCE_ID":           resourceKey,
+	launchEnvironment := generationLaunchEnvironment(workspace, record)
+	if record.ChatEpoch > 0 {
+		source.Metadata["channel"] = "dialogue"
+		source.Metadata["ownerResourceId"] = record.OwnerResourceID
 	}
 	session, err := m.findOrCreateAgentHubSession(ctx, client, source, agentHubCreateSessionRequest{
 		Title: record.Title, Cwd: record.Cwd, AgentName: record.AgentHubAgentName,
@@ -739,4 +772,26 @@ func (m *agentManager) retireResourceGenerationLocked(ctx context.Context, rt *a
 		replacementRuntime.addPUANotice(m, "warning", "resource/message", "Workspace mailbox delivery remains queued: "+err.Error())
 	}
 	rt.addPUANotice(m, "info", "resource/replacement", "Started replacement resource generation "+replacement.GenerationID)
+}
+
+func generationLaunchEnvironment(workspace serveWorkspace, record generationRecord) map[string]string {
+	env := map[string]string{
+		"PUA_WORKSPACE_ROOT":        workspace.Path,
+		"PUA_WORKSPACE_INSTANCE_ID": record.SourceInstanceID,
+		"PUA_RESOURCE_ID":           normalizedResourceID(record.ResourceID),
+	}
+	// Old pending creations used exactly these three entries. Preserve their
+	// idempotency fingerprint when recovering across the upgrade.
+	if record.RuntimeChannel != "" {
+		env["PUA_CHANNEL"] = record.RuntimeChannel
+		env["PUA_CHAT_ID"], env["PUA_CHAT_TOKEN"], env["PUA_CHAT_GENERATION"] = "", "", ""
+	}
+	if record.ChatEpoch > 0 {
+		env["PUA_RESOURCE_ID"] = record.OwnerResourceID
+		env["PUA_CHANNEL"] = "dialogue"
+		env["PUA_CHAT_ID"] = strings.TrimPrefix(record.ResourceID, dialoguePrefix)
+		env["PUA_CHAT_TOKEN"] = record.ChatToken
+		env["PUA_CHAT_GENERATION"] = record.GenerationID
+	}
+	return env
 }

@@ -3,6 +3,7 @@ package pua
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/disksing/pua/internal/app"
@@ -29,6 +30,9 @@ type taskListOptions struct {
 }
 
 func Run(args []string) error {
+	if os.Getenv("PUA_CHANNEL") == "dialogue" && !dialogueCommandAllowed(args) {
+		return errors.New("dialogue Sessions can query resources and use pua chat; delegate execution changes with pua chat dispatch")
+	}
 	if len(args) == 0 {
 		printUsage()
 		return nil
@@ -67,6 +71,8 @@ func Run(args []string) error {
 		return runAgent(args[1:])
 	case "user":
 		return runUser(args[1:])
+	case "chat":
+		return runChat(args[1:])
 	case "message":
 		return runMessage(args[1:])
 	case "history":
@@ -294,6 +300,7 @@ Usage:
   pua agent <command>
   pua user <command>
   pua workspace <command>
+  pua chat show|notes|publish|dispatch|timer
   pua message <command>
   pua history <command>
   pua serve [--addr=<address>] [--workspace=<path>] [--version]
@@ -391,6 +398,8 @@ func runHelp(args []string) error {
 		printUserHelp()
 	case "workspace":
 		printWorkspaceHelp()
+	case "chat":
+		fmt.Println(chatUsage)
 	case "message":
 		printMessageHelp()
 	case "history":
@@ -671,11 +680,8 @@ Commands:
     standard input, for example:
       pua message send --to=project1.task2 - <<'EOF'
 
-    When --to is a registered user name, durably append the message to that
-    user's inbox for display in the Web GUI. The user reads it in the Inbox
-    panel and may reply; the reply arrives as an ordinary role=user resource
-    mailbox message addressed to the sending resource. --mode and
-    --subscribe-result apply only to resource targets.
+    User Inbox delivery has been removed. Dialogue Sessions publish public
+    messages with pua chat publish --id=<stable-id> <text>.
 
   pua message show --id=<message-id> [--server=<url>]
     Query the current delivery record for a stable mailbox message id. Status

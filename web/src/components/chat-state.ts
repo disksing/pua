@@ -166,6 +166,20 @@ export class ChatSessionController {
     if (contextChanged || generationChanged) this.emit();
   }
 
+  async refresh(): Promise<void> {
+    const context = this.activeContext();
+    if (!context) return;
+    await this.refreshHead(context);
+    if (this.activeContext() !== context) return;
+    // Read-only event panes still refresh an expanded, unfinished Turn.
+    // Closed history stays cached; only live snapshots need a new detail read.
+    for (const [reference, detail] of [...context.details]) {
+      if (detail.turn.closed || !context.expandedTurns.has(reference)) continue;
+      context.details.delete(reference);
+      await this.loadTurn(reference);
+    }
+  }
+
   async loadOlder(): Promise<boolean> {
     const context = this.activeContext();
     if (!context || context.loadingOlder || !context.hasMoreBefore || !context.nextCursor) return false;

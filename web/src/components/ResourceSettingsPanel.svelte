@@ -307,7 +307,7 @@
       </div>
       <div class="resource-settings-list">
         <div class="resource-settings-row resource-settings-user-controls">
-          <label class="resource-settings-row-label" for="workspaceCurrentUser"><strong>Current user</strong><span>Controls personal read state, preferences, and inbox in this browser.</span></label>
+          <label class="resource-settings-row-label" for="workspaceCurrentUser"><strong>Current user</strong><span>Controls personal read state, preferences, and chats in this browser.</span></label>
           <select id="workspaceCurrentUser" value={model.currentUserName} disabled={Boolean(pending)} onchange={(event) => switchUser((event.currentTarget as HTMLSelectElement).value)}>
             {#each model.workspaceUsers as user (user.name)}<option value={user.name}>{user.name}</option>{/each}
           </select>

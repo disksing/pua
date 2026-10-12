@@ -58,7 +58,7 @@ func (s *server) handleUsers(w http.ResponseWriter, r *http.Request, workspaceID
 		return
 	}
 	if len(parts) >= 2 && parts[0] != "" && parts[1] == "messages" {
-		s.agents.handleUserMessages(w, r, workspaceID, parts[0], parts[2:])
+		writeError(w, errors.New("Inbox was removed; use resource chat"), http.StatusGone)
 		return
 	}
 	if len(parts) == 0 {

@@ -8,7 +8,7 @@ import ProjectTree from "../../src/components/ProjectTree.svelte";
 import PaneResizeHandle from "../../src/components/PaneResizeHandle.svelte";
 import SchedulerNav from "../../src/components/SchedulerNav.svelte";
 import WorkspaceSwitcher from "../../src/components/WorkspaceSwitcher.svelte";
-import type { ShellActivityItem, ShellInboxMessage, ShellResourceItem, ShellStatusPresentation } from "../../src/components/models";
+import type { ShellActivityItem, ShellResourceItem, ShellStatusPresentation } from "../../src/components/models";
 
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -65,18 +65,7 @@ function loadVendor<T>(relativePath: string, globalName: string): T {
   return new Function("window", "globalThis", `const module=undefined,exports=undefined,define=undefined;${source}\nreturn globalThis[${JSON.stringify(globalName)}];`)(window, window) as T;
 }
 
-function inboxPanelProps(overrides: Record<string, unknown> = {}) {
-  return {
-    activity: { running: [], unread: [], problems: [] },
-    inbox: [],
-    onSelect: vi.fn(async () => undefined),
-    onOpenInboxMessage: vi.fn(async () => undefined),
-    onReplyInboxMessage: vi.fn(async () => undefined),
-    onDeleteInboxMessage: vi.fn(async () => undefined),
-    onToast: vi.fn(),
-    ...overrides,
-  };
-}
+
 
 describe("AppShell responsibility components", () => {
   it("MobileToolbar owns navigation and backdrop actions", async () => {
@@ -606,112 +595,6 @@ describe("AppShell responsibility components", () => {
     expect(document.activeElement).toBe(row);
   });
 
-  it("ActivityPanel inbox lists messages, opens them, and sends inline replies", async () => {
-    const onOpenInboxMessage = vi.fn(async () => undefined);
-    const onReplyInboxMessage = vi.fn(async () => undefined);
-    const onDeleteInboxMessage = vi.fn(async () => undefined);
-    const inbox: ShellInboxMessage[] = [
-      { id: "umsg-1", resourceId: "project1.task1", resourceTitle: "Task One", senderName: "project1.task1", text: "Build finished.", timeLabel: "2m ago", unread: true, replied: false },
-      { id: "umsg-2", resourceId: "project1.task2", resourceTitle: "Task Two", senderName: "project1.task2", text: "Need input.", timeLabel: "5m ago", unread: false, replied: true },
-    ];
-    const target = document.body.appendChild(document.createElement("div"));
-    const component = mount(ActivityPanel, {
-      target,
-      props: {
-        activity: { running: [], unread: [], problems: [] },
-        inbox,
-        onSelect: vi.fn(async () => undefined),
-        onOpenInboxMessage,
-        onReplyInboxMessage,
-        onDeleteInboxMessage,
-        onToast: vi.fn(),
-      },
-    });
-    cleanups.push(() => unmount(component));
-    await tick();
-
-    // The inbox tab counts only unread messages.
-    expect(target.querySelector('[role="tab"]:last-child')?.textContent?.trim()).toBe("Inbox 1");
-    target.querySelector<HTMLElement>('[role="tab"]:last-child')!.click();
-    await tick();
-
-    const rows = target.querySelectorAll(".inbox-row");
-    expect(rows.length).toBe(2);
-    expect(rows[0].classList.contains("unread")).toBe(true);
-    expect(rows[1].classList.contains("unread")).toBe(false);
-    expect(rows[1].querySelector(".inbox-replied-badge")?.textContent).toBe("Replied");
-    // The sender resource id leads; the resource title is secondary context.
-    expect(rows[0].querySelector(".inbox-source strong")?.textContent).toBe("project1.task1");
-    expect(rows[0].querySelector(".inbox-context")?.textContent).toContain("Task One");
-
-    // Clicking a row opens the message (marks read and navigates).
-    (rows[0] as HTMLElement).click();
-    await vi.waitFor(() => expect(onOpenInboxMessage).toHaveBeenCalledWith("umsg-1"));
-
-    // The reply affordance expands an inline form and posts the draft.
-    const replyButton = rows[1].querySelector<HTMLElement>(".inbox-actions .inbox-action:nth-child(2)")!;
-    replyButton.click();
-    await tick();
-    const input = target.querySelector<HTMLTextAreaElement>(".inbox-reply-input")!;
-    input.value = "on it";
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    await tick();
-    target.querySelector<HTMLElement>(".inbox-send")!.click();
-    await vi.waitFor(() => expect(onReplyInboxMessage).toHaveBeenCalledWith("umsg-2", "on it"));
-    expect(onOpenInboxMessage).toHaveBeenCalledTimes(1);
-
-    // The delete affordance asks the controller to remove the message.
-    const deleteButton = rows[1].querySelector<HTMLElement>(".inbox-delete")!;
-    deleteButton.click();
-    await vi.waitFor(() => expect(onDeleteInboxMessage).toHaveBeenCalledWith("umsg-2"));
-    expect(onOpenInboxMessage).toHaveBeenCalledTimes(1);
-  });
-
-  it("ActivityPanel inbox renders message text as markdown and follows resource links", async () => {
-    window.marked = loadVendor<NonNullable<Window["marked"]>>("../../static/vendor/marked/marked.min.js", "marked");
-    window.DOMPurify = loadVendor<NonNullable<Window["DOMPurify"]>>("../../static/vendor/dompurify/purify.min.js", "DOMPurify");
-    cleanups.push(async () => { delete window.marked; delete window.DOMPurify; });
-
-    const onOpenInboxMessage = vi.fn(async () => undefined);
-    const onNavigate = vi.fn();
-    const inbox: ShellInboxMessage[] = [
-      { id: "umsg-md", resourceId: "project1.task1", resourceTitle: "Task One", senderName: "project1.task1", text: "**Done** with [[project1.task2]].\n\n- one\n- two", timeLabel: "1m ago", unread: false, replied: false },
-    ];
-    const target = document.body.appendChild(document.createElement("div"));
-    const component = mount(ActivityPanel, {
-      target,
-      props: inboxPanelProps({
-        inbox,
-        workspaceId: "workspace-a",
-        resolveResourceTitle: (resourceId: string) => (resourceId === "project1.task2" ? "Second task" : null),
-        onNavigate,
-        onOpenInboxMessage,
-      }),
-    });
-    cleanups.push(() => unmount(component));
-    await tick();
-
-    target.querySelector<HTMLElement>('[role="tab"]:last-child')!.click();
-    await tick();
-
-    const text = target.querySelector<HTMLElement>(".inbox-text.markdown-rendered")!;
-    expect(text.querySelector("strong")?.textContent).toBe("Done");
-    expect(text.querySelectorAll("li").length).toBe(2);
-    const link = text.querySelector<HTMLAnchorElement>("a[data-pua-resource-id]")!;
-    expect(link.textContent).toBe("Second task");
-
-    // A resource link navigates to the linked resource without triggering the
-    // row's open action.
-    link.click();
-    await tick();
-    expect(onNavigate).toHaveBeenCalledWith("project1.task2");
-    expect(onOpenInboxMessage).not.toHaveBeenCalled();
-
-    // A plain click on the message body still opens the message.
-    text.click();
-    await vi.waitFor(() => expect(onOpenInboxMessage).toHaveBeenCalledWith("umsg-md"));
-  });
-
   it("ActivityPanel shows tab counts without a dismiss control", async () => {
     const onSelect = vi.fn(async () => undefined);
     const item: ShellActivityItem = {
@@ -724,11 +607,11 @@ describe("AppShell responsibility components", () => {
     };
     const target = document.body.appendChild(document.createElement("div"));
     const activity = { running: [activeItem], unread: [activeItem, item], problems: [] };
-    const component = mount(ActivityPanel, { target, props: { activity, inbox: [], onSelect, onOpenInboxMessage: vi.fn(async () => undefined), onReplyInboxMessage: vi.fn(async () => undefined), onDeleteInboxMessage: vi.fn(async () => undefined), onToast: vi.fn() } });
+    const component = mount(ActivityPanel, { target, props: { activity, onSelect, onToast: vi.fn() } });
     cleanups.push(() => unmount(component));
     await tick();
 
-    expect([...target.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent?.trim())).toEqual(["Running 1", "Unread 2", "Issues 0", "Inbox 0"]);
+    expect([...target.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent?.trim())).toEqual(["Running 1", "Unread 2", "Issues 0"]);
     const activeRow = target.querySelector<HTMLElement>('[aria-label^="Task B."]')!;
     expect(activeRow.classList.contains("selected")).toBe(false);
     expect(activeRow.getAttribute("data-active-turn")).toBe("true");

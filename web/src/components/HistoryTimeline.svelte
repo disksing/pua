@@ -2,9 +2,9 @@
   import "./HistoryTimeline.css";
 
   import { onMount } from "svelte";
+  import { ApiClient } from "../api/client";
 
   import ActivityGroup from "./ActivityGroup.svelte";
-  import ApprovalCard from "./ApprovalCard.svelte";
   import { ChatSessionController } from "./chat-state";
   import Icon from "./Icon.svelte";
   import LifecycleNotice from "./LifecycleNotice.svelte";
@@ -15,7 +15,9 @@
   import type { ConversationBlock, FileTreeModel, TimelineItem, ChatContextSnapshot } from "./models";
   import type { ResourceTitleResolver } from "./markdown";
 
-  let { workspaceId, resourceId, artifacts = [], resolveResourceTitle, onNavigate, onOpenFile, onOpenLegacy }: {
+  let { workspaceId, resourceId, userName = "", dialogue = false, artifacts = [], resolveResourceTitle, onNavigate, onOpenFile, onOpenLegacy }: {
+    userName?: string;
+    dialogue?: boolean;
     workspaceId: string;
     resourceId: string;
     artifacts?: FileTreeModel[];
@@ -32,12 +34,20 @@
   const legacyArtifact = $derived(findArtifact(artifacts, "legacy-log.md"));
 
   onMount(() => {
-    controller = new ChatSessionController({ realtime: false });
+    const base = `/api/workspaces/${encodeURIComponent(workspaceId)}/resources/${encodeURIComponent(resourceId)}`;
+    const api = new ApiClient((input, init) => {
+      const path = String(input);
+      const headers = new Headers(init?.headers); headers.set("X-PUA-User", userName);
+      return fetch(dialogue ? path.replace(base, `${base}/chat/runtime`) : path, { ...init, headers });
+    });
+    controller = new ChatSessionController({ realtime: false, api });
     const unsubscribe = controller.subscribe((next) => {
       snapshot = next;
     });
     controller.activate(workspaceId, resourceId, null);
+    const timer = setInterval(() => void controller?.refresh(), 3000);
     return () => {
+      clearInterval(timer);
       unsubscribe();
       controller?.dispose();
       controller = undefined;
@@ -146,9 +156,7 @@
     return controller?.expandRange(item.generationId, item.rangeStartEventId, item.rangeEndEventId);
   }
 
-  function readOnlyApproval(): Promise<void> {
-    return Promise.reject(new Error("This is a read-only History view. Answer pending approvals from the Chat tab."));
-  }
+
 
   function turnKey(block: ConversationBlock): string {
     return block.turn?.reference || block.key;
@@ -257,7 +265,7 @@
                       {:else if item.kind === "activity"}
                         <ActivityGroup {item} onExpand={() => expandCompact(item)} />
                       {:else if item.kind === "approval"}
-                        <ApprovalCard {item} generationId={block.generation.generationId} contextIdentity={snapshot.identity} onApproval={readOnlyApproval} onToast={(message) => (notice = message)} />
+                        <TimelineNotice title={item.title || "Approval"} text={[item.question, item.detail, item.status, item.reply].filter(Boolean).join("\n")} />
                       {:else if item.kind === "lifecycle"}
                         <LifecycleNotice {item} />
                       {:else if item.kind === "error"}

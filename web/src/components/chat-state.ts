@@ -80,6 +80,7 @@ export interface ChatSessionControllerOptions {
   eventSourceFactory?: EventSourceFactory;
   onEvent?: (workspaceId: string, resourceId: string, event: AgentEvent) => void;
   onNotice?: (workspaceId: string, resourceId: string, notice: AgentNotice) => void;
+  onStatus?: (workspaceId: string, resourceId: string, status: ResourceMessageStatus) => void;
   streamBatchWindowMs?: number;
   statusSyncIntervalMs?: number;
   terminalRetryDelaysMs?: number[];
@@ -96,6 +97,7 @@ export class ChatSessionController {
   private readonly listeners = new Set<SnapshotListener>();
   private readonly onEvent?: ChatSessionControllerOptions["onEvent"];
   private readonly onNotice?: ChatSessionControllerOptions["onNotice"];
+  private readonly onStatus?: ChatSessionControllerOptions["onStatus"];
   private readonly streamBatchWindowMs: number;
   private readonly statusSyncIntervalMs: number;
   private readonly terminalRetryDelaysMs: number[];
@@ -109,6 +111,7 @@ export class ChatSessionController {
     this.eventSourceFactory = options.eventSourceFactory ?? ((url) => new EventSource(url));
     this.onEvent = options.onEvent;
     this.onNotice = options.onNotice;
+    this.onStatus = options.onStatus;
     this.streamBatchWindowMs = Math.max(0, options.streamBatchWindowMs ?? STREAM_BATCH_WINDOW_MS);
     this.statusSyncIntervalMs = Math.max(1, options.statusSyncIntervalMs ?? STATUS_SYNC_INTERVAL_MS);
     this.terminalRetryDelaysMs = (options.terminalRetryDelaysMs ?? TERMINAL_RETRY_DELAYS_MS).map((value) => Math.max(0, value));
@@ -561,6 +564,7 @@ export class ChatSessionController {
     try {
       const status = await this.api.latest<ResourceMessageStatus>(`${resourceBase(context)}/status`, { scope: requestScope(context, "status") });
       if (!this.isCurrent(context, generation) || !status.generation?.generationId) return;
+      this.onStatus?.(context.workspaceId, context.resourceId, status);
       const nextGeneration = String(status.generation.generationId);
       if (nextGeneration !== context.generationId && (context.generationId || context.loaded)) {
         this.activate(context.workspaceId, context.resourceId, status);

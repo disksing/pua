@@ -345,3 +345,9 @@
 :where([data-component-owner="detail-panel"]) .template-row small {
   color: var(--muted);
 }
+
+:where([data-component-owner="detail-panel"]) .details-content.details-events {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}

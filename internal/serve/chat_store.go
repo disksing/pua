@@ -73,7 +73,7 @@ func loadChatLocked(root, id string) (resourceChat, error) {
 	if err = json.Unmarshal(data, &c); err != nil {
 		return c, err
 	}
-	if c.Version != 1 || c.ID != id || c.ID != chatID(c.ResourceID, c.User) {
+	if (c.Version != 1 && c.Version != 2) || c.ID != id || c.ID != chatID(c.ResourceID, c.User) {
 		return c, errors.New("invalid chat record")
 	}
 	if c.Messages == nil {
@@ -82,6 +82,7 @@ func loadChatLocked(root, id string) (resourceChat, error) {
 	return c, nil
 }
 func saveChatLocked(root string, c resourceChat) error {
+	c.Version = 2
 	return saveJSONStateFile(chatPath(root, c.ID), ".chat-*.tmp", c)
 }
 func loadDialogue(root, address string) (resourceChat, error) {
@@ -98,7 +99,7 @@ func ensureChatLocked(root, resourceID, user string) (resourceChat, error) {
 	if !os.IsNotExist(err) {
 		return c, err
 	}
-	c = resourceChat{Version: 1, ID: id, ResourceID: normalizedResourceID(resourceID), User: user, Messages: []chatMessage{}, Binding: app.AgentBinding{Kind: "profile", Name: "default"}}
+	c = resourceChat{Version: 2, ID: id, ResourceID: normalizedResourceID(resourceID), User: user, Messages: []chatMessage{}, Binding: app.AgentBinding{Kind: "profile", Name: "default"}}
 	return c, saveChatLocked(root, c)
 }
 func (c resourceChat) address() string { return dialoguePrefix + c.ID }
@@ -111,7 +112,9 @@ func (c resourceChat) public() any {
 		Binding         app.AgentBinding `json:"binding"`
 		Messages        []chatMessage    `json:"messages"`
 		IntervalSeconds int              `json:"intervalSeconds"`
-	}{c.ID, c.ResourceID, c.Open, c.Epoch, c.Binding, c.Messages, c.IntervalSeconds}
+		NextCheckAt     string           `json:"nextCheckAt,omitempty"`
+		TimerMode       string           `json:"timerMode"`
+	}{c.ID, c.ResourceID, c.Open, c.Epoch, c.Binding, c.Messages, c.IntervalSeconds, c.NextCheckAt, "once"}
 }
 func (c *resourceChat) appendMessage(id, role, text string) error {
 	if strings.TrimSpace(id) == "" || len(id) > 200 || strings.TrimSpace(text) == "" {
@@ -141,7 +144,7 @@ func (c *resourceChat) queue(id, target, text string) error {
 	return nil
 }
 func (c resourceChat) prompt(text string) string {
-	return fmt.Sprintf(`You are the dialogue Agent for resource %s and user %s. This is a separate communication channel, not the execution Agent. Read the resource instructions and user preferences for context, but do not run its Task state completion hooks. Discuss requirements, query resource status/history/artifacts, and delegate actual work using pua chat dispatch. Do not do long execution work here. Only pua chat publish writes to the user's chat; your ordinary final/analysis and tools are private events. Use pua chat show to read the durable chat and pua chat notes to read/update your own persistent notes. Maintain tasks you care about and notification decisions in those notes; PUA has no watch list. Use pua chat timer <seconds> to schedule follow-up checks (0 disables, minimum 60). Avoid duplicate notifications; disable the timer when no follow-up remains. All publish and dispatch calls require a stable --id for retry safety. Reuse that id when retrying. You may query any authorized resource, but do not assume a task has completed without evidence.
+	return fmt.Sprintf(`You are the dialogue Agent for resource %s and user %s. This is a separate communication channel, not the execution Agent. Read the resource instructions and user preferences for context, but do not run its Task state completion hooks. Discuss requirements, query resource status/history/artifacts, and delegate actual work using pua chat dispatch. Do not do long execution work here. Only pua chat publish writes to the user's chat; your ordinary final/analysis and tools are private events. Use pua chat show to read the durable chat and pua chat notes to read/update your own persistent notes. Maintain tasks you care about and notification decisions in those notes; PUA has no watch list. Timers are OFF by default; opening or resuming chat is not a reason to schedule one. Use pua chat timer <seconds> only for a concrete user-requested follow-up (0 cancels, 60..86400 seconds). Each timer is ONE-SHOT and turns off when its check is queued, including timers saved by older versions. Read your notes and reassess whether another check is necessary; do not blindly renew a fixed one-minute loop. Choose a delay based on expected progress or the next known schedule, and back off when nothing changes. A long-term request for updates alone does not justify checking idle daily/weekly tasks every minute. Cancel with pua chat timer 0 when no follow-up remains. Avoid duplicate notifications. All publish and dispatch calls require a stable --id for retry safety. Reuse that id when retrying. You may query any authorized resource, but do not assume a task has completed without evidence.
 
 Trigger:
 %s`, c.ResourceID, c.User, text)

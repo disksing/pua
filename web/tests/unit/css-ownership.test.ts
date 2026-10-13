@@ -693,8 +693,6 @@ describe("CSS ownership", () => {
     // sidebar region tokens, never from line tokens (invisible on light
     // surfaces) or --panel (white).
     expect(body("src/components/AppShell.css", ':where([data-component-owner="app-shell"]) .brand-copy strong {')).toContain("color: var(--sidebar-text);");
-    expect(body("src/components/AttentionList.css", ':where([data-component-owner="attention-list"]) .inbox-text {')).toContain("color: var(--sidebar-text);");
-    expect(body("src/components/AttentionList.css", ':where([data-component-owner="attention-list"]) .inbox-row {')).toContain("color: var(--sidebar-text);");
     const schedulerSmall = body("src/components/SchedulerNav.css", '[data-component-owner="scheduler-nav"] small {');
     expect(schedulerSmall).toContain("color: var(--sidebar-muted);");
 

@@ -390,7 +390,7 @@ describe("DetailPanel", () => {
     await tick();
 
     const tabs = Array.from(target.querySelectorAll<HTMLButtonElement>("[role=tab]"));
-    expect(tabs.map((tab) => tab.textContent?.trim())).toEqual(["AGENTS.md", "Wiki", "Execution events", "Dialogue events", "Settings"]);
+    expect(tabs.map((tab) => tab.textContent?.trim())).toEqual(["AGENTS.md", "Wiki", "Execution events", "Dialog events", "Settings"]);
     expect(target.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain("AGENTS.md");
     // The managed block is no longer hidden from the rendered document.
     expect(target.querySelector('[data-doc-file="AGENTS.md"]')).not.toBeNull();

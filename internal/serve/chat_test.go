@@ -209,6 +209,19 @@ func TestChatCreatesIndependentRuntimeAndClosesOnlyDialogue(t *testing.T) {
 	if internal.AgentHubSessionID == dialogue.AgentHubSessionID {
 		t.Fatal("channels share Session")
 	}
+	// The browser's native SSE request uses query-based user selection and
+	// must resolve only this user's dialogue generation, never execution.
+	streamPath := "/api/workspaces/" + w.ID + "/resources/" + resource + "/chat/runtime/stream?user=disksing&generationId="
+	stream := httptest.NewRecorder()
+	m.server.handleWorkspace(stream, httptest.NewRequest(http.MethodGet, streamPath+dialogue.GenerationID, nil))
+	if stream.Code != 200 || !strings.Contains(stream.Body.String(), dialogue.AgentHubSessionID) || strings.Contains(stream.Body.String(), internal.AgentHubSessionID) {
+		t.Fatalf("dialogue stream crossed channels: %d %s", stream.Code, stream.Body.String())
+	}
+	wrongChannel := httptest.NewRecorder()
+	m.server.handleWorkspace(wrongChannel, httptest.NewRequest(http.MethodGet, streamPath+internal.GenerationID, nil))
+	if wrongChannel.Code != 409 {
+		t.Fatalf("execution generation accepted by dialogue stream: %d", wrongChannel.Code)
+	}
 	fake.mu.Lock()
 	launch := fake.sessions[dialogue.AgentHubSessionID].LaunchEnvironment
 	fake.mu.Unlock()
@@ -342,5 +355,126 @@ func TestDeletingUserDisablesTheirDialogue(t *testing.T) {
 	}
 	if c.Open || c.Token != "" || c.IntervalSeconds != 0 {
 		t.Fatal("deleted user retains active dialogue")
+	}
+}
+
+func TestChatTimerOneShotMigrationAndBusyDeferral(t *testing.T) {
+	m, w := chatTestManager(t)
+	resource := "project1.task1"
+	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "open", chatRequest{}, false))
+	c, err := loadDialogue(w.Path, dialoguePrefix+chatID(resource, "disksing"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := generationRecord{ID: "one-shot", GenerationID: "one-shot", Generation: 1, WorkspaceID: w.ID, ResourceID: c.address(), ChatEpoch: c.Epoch, Status: "running"}
+	if err := saveGenerationRecord(w.Path, rec); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate an on-disk v1 timer created before this upgrade, without using
+	// the current writer (which always persists v2).
+	c.Version = 1
+	c.IntervalSeconds = 60
+	c.NextCheckAt = "2020-01-01T00:00:00Z"
+	data, _ := json.Marshal(c)
+	if err := os.WriteFile(chatPath(w.Path, c.ID), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		if err := m.reconcileWorkspaceChats(context.Background(), w); err != nil {
+			t.Fatal(err)
+		}
+	}
+	current, _ := loadDialogue(w.Path, c.address())
+	if current.Version != 2 || current.NextCheckAt != c.NextCheckAt || len(current.Outbox) != 0 {
+		t.Fatalf("busy legacy timer changed or queued: %+v", current.public())
+	}
+	rec.Status = "idle"
+	if err := saveGenerationRecord(w.Path, rec); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		if err := m.reconcileWorkspaceChats(context.Background(), w); err != nil {
+			t.Fatal(err)
+		}
+	}
+	current, _ = loadDialogue(w.Path, c.address())
+	if current.IntervalSeconds != 0 || current.NextCheckAt != "" || len(current.Outbox) != 1 {
+		t.Fatalf("one-shot not consumed exactly once: %+v", current.public())
+	}
+	if !strings.Contains(current.Outbox[0].Text, "This timer is now off") {
+		t.Fatal("timer policy missing from legacy wakeup")
+	}
+	// The appointment remains consumed across manager restarts / disk reads,
+	// even after the old mailbox delivery no longer blocks another wakeup.
+	if err := markResourceMailboxArchived(w.Path, c.address()); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		if err := m.reconcileWorkspaceChats(context.Background(), w); err != nil {
+			t.Fatal(err)
+		}
+	}
+	current, _ = loadDialogue(w.Path, c.address())
+	if len(current.Outbox) != 1 || current.NextCheckAt != "" {
+		t.Fatal("timer automatically repeated")
+	}
+	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "timer", chatRequest{Seconds: 600}, true))
+	current, _ = loadDialogue(w.Path, c.address())
+	if current.IntervalSeconds != 600 || current.NextCheckAt == "" {
+		t.Fatal("explicit rearm failed")
+	}
+	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "timer", chatRequest{Seconds: 0}, true))
+	current, _ = loadDialogue(w.Path, c.address())
+	if current.IntervalSeconds != 0 || current.NextCheckAt != "" {
+		t.Fatal("cancel failed")
+	}
+}
+
+func TestChatReadOpenAndReconcileNeverScheduleChecks(t *testing.T) {
+	m, w := chatTestManager(t)
+	for _, resource := range []string{"workspace", "project1.task1"} {
+		mustChatOK(t, chatCall(t, m, w, resource, "disksing", "", nil, false))
+		mustChatOK(t, chatCall(t, m, w, resource, "disksing", "open", chatRequest{}, false))
+		for range 3 {
+			mustChatOK(t, chatCall(t, m, w, resource, "disksing", "runtime/history/turns", nil, false))
+			mustChatOK(t, chatCall(t, m, w, resource, "disksing", "runtime/status", nil, false))
+			if err := m.reconcileWorkspaceChats(context.Background(), w); err != nil {
+				t.Fatal(err)
+			}
+		}
+		c, err := loadDialogue(w.Path, dialoguePrefix+chatID(resource, "disksing"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.IntervalSeconds != 0 || c.NextCheckAt != "" || len(c.Outbox) != 0 {
+			t.Fatal("display/open created model work")
+		}
+		if _, found, err := currentResourceGeneration(w.Path, c.address()); err != nil || found {
+			t.Fatalf("read/open created generation: %v %v", found, err)
+		}
+	}
+}
+
+func TestChatStreamUserSelectionIsScopedAndValidated(t *testing.T) {
+	m, w := chatTestManager(t)
+	for _, test := range []struct {
+		path, header string
+		want         int
+	}{
+		{"runtime/stream?user=disksing", "", 409}, // valid selection, no generation
+		{"runtime/stream?user=missing", "", 400},
+		{"runtime/stream?user=missing", "disksing", 409}, // header wins
+		{"runtime/history/turns?user=disksing", "", 400},
+		{"runtime/status?user=disksing", "", 400},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/api/workspaces/"+w.ID+"/resources/project1.task1/chat/"+test.path, nil)
+		if test.header != "" {
+			req.Header.Set(workspaceUserHeader, test.header)
+		}
+		out := httptest.NewRecorder()
+		m.server.handleWorkspace(out, req)
+		if out.Code != test.want {
+			t.Errorf("%s: %d %s", test.path, out.Code, out.Body.String())
+		}
 	}
 }

@@ -64,6 +64,12 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 			return
 		}
 	} else {
+		// Native EventSource cannot set X-PUA-User. Accept the selected user
+		// only on this read-only stream, with the same validation as headers.
+		if r.Method == http.MethodGet && len(parts) == 2 && parts[0] == "runtime" && parts[1] == "stream" && r.Header.Get(workspaceUserHeader) == "" {
+			r = r.Clone(r.Context())
+			r.Header.Set(workspaceUserHeader, r.URL.Query().Get("user"))
+		}
 		user, err = m.server.workspaceUserName(r, workspace.Path)
 		if err != nil {
 			writeError(w, err, 400)
@@ -321,6 +327,9 @@ func (m *agentManager) reconcileWorkspaceChats(ctx context.Context, workspace se
 			return loadErr
 		}
 		before, _ := json.Marshal(c)
+		// Version 1 repeating timers retain their next appointment, but are
+		// consumed once under the new semantics; no blanket model wakeup.
+		c.Version = 2
 		if !registered[c.User] {
 			c.Open = false
 			c.Token = ""
@@ -349,11 +358,18 @@ func (m *agentManager) reconcileWorkspaceChats(ctx context.Context, workspace se
 						pending = true
 					}
 				}
-				rec, found, _ := currentResourceGeneration(workspace.Path, c.address())
-				if !pending && (!found || (rec.Status != "running" && rec.Status != "waiting_approval" && rec.Status != "starting")) {
-					_ = c.queue("tick-"+c.NextCheckAt, c.address(), c.prompt("Scheduled check. Read your notes, query relevant work, publish only useful new information. Update notes and disable the timer when finished."))
+				rec, found, generationErr := currentResourceGeneration(workspace.Path, c.address())
+				if generationErr != nil {
+					chatMu.Unlock()
+					return generationErr
 				}
-				c.NextCheckAt = time.Now().Add(time.Duration(c.IntervalSeconds) * time.Second).UTC().Format(time.RFC3339Nano)
+				if !pending && (!found || (rec.Status != "running" && rec.Status != "waiting_approval" && rec.Status != "starting")) {
+					_ = c.queue("tick-"+c.NextCheckAt, c.address(), c.prompt("Scheduled one-time check. This timer is now off. Read your notes, query relevant work, and publish only useful new information. Arrange another check only if a concrete follow-up remains, choosing a delay based on expected progress. Otherwise leave the timer off."))
+					c.IntervalSeconds = 0
+					c.NextCheckAt = ""
+				}
+				// Keep a due appointment while busy; retry after the Turn/input
+				// finishes instead of repeatedly adding steer messages.
 			}
 		}
 		for i := range c.Outbox {

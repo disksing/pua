@@ -217,11 +217,11 @@ pua chat notes
 pua chat notes '<updated notes>'
 pua chat dispatch --id=<stable-operation-id> --to=<resource> '<instruction>'
 pua chat publish --id=<stable-message-id> '<user-facing message>'
-pua chat timer 60
+pua chat timer <seconds>
 pua chat timer 0
 ~~~
 
-Only explicit publish calls appear in user chat. Ordinary Agent output and system triggers remain in the event record. Reuse operation IDs on retries. Closing chat revokes publication and new dispatch, keeps history, and leaves previously dispatched execution running. Timers are chat-level wakeups; disable them when no follow-up is needed.
+Only explicit publish calls appear in user chat. Ordinary Agent output and system triggers remain in the event record. Reuse operation IDs on retries. Closing chat revokes publication and new dispatch, keeps history, and leaves previously dispatched execution running. Timers are off by default and opening/resuming chat never enables them. `timer <seconds>` schedules one check (60..86400 seconds); it turns off when queued. Arrange another only for a concrete user-requested follow-up, with a delay based on expected progress or the next known schedule. Back off when nothing changes; a long-term updates request does not justify a fixed one-minute loop for idle daily/weekly tasks. Use `timer 0` when no follow-up remains. Keep this policy even if old notes describe a repeating timer.
 
 ## 7. Scheduler
 

@@ -92,7 +92,7 @@
 	  { id: "agents", label: "AGENTS.md", icon: "file-text" },
 	  { id: "wiki", label: "Wiki", icon: "book-open" },
 	  { id: "execution-events", label: "Execution events", icon: "history" },
-      { id: "dialogue-events", label: "Dialogue events", icon: "message-square" },
+      { id: "dialogue-events", label: "Dialog events", icon: "message-square" },
       { id: "settings", label: "Settings", icon: "settings" }
 	];
     if (!model.detail) return [];
@@ -100,13 +100,13 @@
 	  { id: "schedules", label: "Schedules", icon: "calendar-clock" },
 	  { id: "context", label: "Context", icon: "file-text" },
 	  { id: "execution-events", label: "Execution events", icon: "history" },
-      { id: "dialogue-events", label: "Dialogue events", icon: "message-square" },
+      { id: "dialogue-events", label: "Dialog events", icon: "message-square" },
       { id: "settings", label: "Settings", icon: "settings" }
 	];
     const result: Array<{ id: string; label: string; icon: string }> = [];
     if (model.resourceType === "project") result.push({ id: "project", label: "Project", icon: "file-text" });
     if (model.resourceType === "task") result.push({ id: "task", label: "Task", icon: "file-text" });
-    result.push({ id: "execution-events", label: "Execution events", icon: "history" }, { id: "dialogue-events", label: "Dialogue events", icon: "message-square" }, { id: "artifacts", label: "Artifacts", icon: "paperclip" });
+    result.push({ id: "execution-events", label: "Execution events", icon: "history" }, { id: "dialogue-events", label: "Dialog events", icon: "message-square" }, { id: "artifacts", label: "Artifacts", icon: "paperclip" });
     if (model.resourceType === "task") result.push({ id: "worktrees", label: "Worktrees", icon: "folder-git-2" });
     result.push({ id: "settings", label: "Settings", icon: "settings" });
     return result;
@@ -212,7 +212,7 @@
   <div class="details-tabs" role="tablist" aria-label="Workspace details">
     {#each tabs as tab (tab.id)}<button type="button" class:active={activeTab === tab.id} class="details-tab" role="tab" aria-selected={activeTab === tab.id} onclick={() => selectTab(tab.id)}><Icon name={tab.icon} /><span>{tab.label}</span></button>{/each}
   </div>
-  <div id="detailsContent" class="details-content">
+  <div id="detailsContent" class="details-content" class:details-events={activeTab === "execution-events" || activeTab === "dialogue-events"}>
     <div hidden={activeTab !== "agents"}>
       {#if agentsFile}<MarkdownDocument file={agentsFile} workspaceId={model.workspaceId} editable={true} resolveResourceTitle={model.resolveResourceTitle} onNavigate={model.onNavigate} onOpenFile={openLinkedFile} onEdit={openEditor} onAnnotate={openAnnotator} />
       {:else if model.workspaceAgents?.error}<div class="content-section"><div class="file-modal-empty error-preview wiki-status"><Icon name="triangle-alert" /><strong>AGENTS.md unavailable</strong><span>{model.workspaceAgents.error}</span></div></div>
@@ -239,7 +239,7 @@
     <div class="details-tabs" role="tablist" aria-label="Resource details">
       {#each tabs as tab (tab.id)}<button type="button" class:active={activeTab === tab.id} class="details-tab" role="tab" aria-selected={activeTab === tab.id} onclick={() => selectTab(tab.id)}><Icon name={tab.icon} /><span>{tab.label}</span></button>{/each}
     </div>
-    <div id="detailsContent" class="details-content">
+    <div id="detailsContent" class="details-content" class:details-events={activeTab === "execution-events" || activeTab === "dialogue-events"}>
       {#each files as file (file.path || file.name)}<div hidden={activeTab !== documentTab(file)}><MarkdownDocument {file} workspaceId={model.workspaceId} editable={!model.detail.archived && (model.resourceType === "project" || model.resourceType === "task")} resolveResourceTitle={model.resolveResourceTitle} onNavigate={model.onNavigate} onOpenFile={openLinkedFile} onEdit={openEditor} onAnnotate={openAnnotator} /></div>{/each}
       {#if model.resourceType === "project" && !fileNames.has("project.md")}<div class="content-section" hidden={activeTab !== "project"}><div class="file-modal-empty detail-missing"><Icon name="file-text" /><strong>Project brief is missing</strong><span>project.md was not found in this project directory.</span></div></div>{/if}
       {#if model.resourceType === "task" && !fileNames.has("task.md")}<div class="content-section" hidden={activeTab !== "task"}><div class="file-modal-empty detail-missing"><Icon name="file-text" /><strong>Task brief is missing</strong><span>task.md was not found in this task directory.</span></div></div>{/if}

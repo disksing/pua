@@ -6,7 +6,7 @@
   import { ApiClient } from "../api/client";
   import ActivityGroup from "./ActivityGroup.svelte";
   import ApprovalCard from "./ApprovalCard.svelte";
-  import { ChatSessionController, turnIsCollapsedByPolicy } from "./chat-state";
+  import { ChatSessionController, turnIsCollapsedByPolicy, type ChatSessionControllerOptions } from "./chat-state";
   import { effectiveGenerationStatus } from "./generation-status";
   import FilePreviewModal from "./FilePreviewModal.svelte";
   import LifecycleNotice from "./LifecycleNotice.svelte";
@@ -18,7 +18,7 @@
   import { formatClock, groupTimelineActivities, markTurnAgentRuns, markTurnFinalAssistant } from "./timeline-events";
   import UnknownEvent from "./UnknownEvent.svelte";
 
-  let { channel }: { channel: ModelChannel<EventTimelineModel> } = $props();
+  let { channel, readOnly = false, controllerOptions = {} }: { channel: ModelChannel<EventTimelineModel>; readOnly?: boolean; controllerOptions?: ChatSessionControllerOptions } = $props();
   // svelte-ignore state_referenced_locally
   let model = $state(channel.current());
   // svelte-ignore state_referenced_locally
@@ -62,6 +62,11 @@
     });
     if (scroll && followResize) followResize.observe(scroll);
     controller = new ChatSessionController({
+      ...controllerOptions,
+      onStatus: (workspaceId, resourceId, status) => {
+        if (model.workspaceId === workspaceId && model.resourceId === resourceId) model = { ...model, status };
+        controllerOptions.onStatus?.(workspaceId, resourceId, status);
+      },
       onEvent: (workspaceId, resourceId, event) => model.onEvent(workspaceId, resourceId, event),
       onNotice: (workspaceId, resourceId, notice) => model.onNotice(workspaceId, resourceId, notice),
     });
@@ -456,7 +461,7 @@
               {:else if item.kind === "activity"}
                 <ActivityGroup {item} onExpand={() => expandCompact(item)} />
               {:else if item.kind === "approval"}
-                <ApprovalCard {item} generationId={block.generation.generationId} contextIdentity={snapshot.identity} onApproval={model.onApproval} onToast={model.onToast} />
+                {#if readOnly}<TimelineNotice title="Approval" text={item.text || item.approvalId || "Approval requested"} />{:else}<ApprovalCard {item} generationId={block.generation.generationId} contextIdentity={snapshot.identity} onApproval={model.onApproval} onToast={model.onToast} />{/if}
               {:else if item.kind === "lifecycle"}
                 <LifecycleNotice {item} />
               {:else if item.kind === "error"}
@@ -484,7 +489,7 @@
       </div>
     {/if}
     {#if snapshot.loading && !snapshot.blocks.length}<div class="chat-timeline-empty"><Icon name="loader-circle" /><strong>Loading resource history</strong></div>{/if}
-    {#if snapshot.loaded && !snapshot.loading && !snapshot.blocks.length && !snapshot.notices.length && !turnIsWorking(model.status)}<div class="chat-timeline-empty"><Icon name="bot" /><strong>No conversation yet</strong><span>Send a message to start this resource's conversation.</span></div>{/if}
+    {#if snapshot.loaded && !snapshot.loading && !snapshot.blocks.length && !snapshot.notices.length && !turnIsWorking(model.status)}<div class="chat-timeline-empty"><Icon name="bot" /><strong>{readOnly ? "No session events yet" : "No conversation yet"}</strong>{#if !readOnly}<span>Send a message to start this resource's conversation.</span>{/if}</div>{/if}
   {:else}
     <div class="chat-timeline-empty"><Icon name="bot" /><strong>No resource selected</strong></div>
   {/if}

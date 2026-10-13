@@ -455,7 +455,9 @@
   display: inline-flex;
   align-items: center;
   align-self: center;
-  flex: 0 0 auto;
+  grid-column: -3 / -1;
+  justify-self: end;
+  white-space: nowrap;
   gap: 3px;
 }
 :where([data-component-owner="project-tree"]) .chat-open-icon { display: inline-flex; color: var(--sidebar-muted); }

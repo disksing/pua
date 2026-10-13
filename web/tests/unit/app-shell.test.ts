@@ -428,7 +428,7 @@ describe("AppShell", () => {
   });
 });
 
-it("shows live chat state beside resource titles without a separate chat list", async () => {
+it("shows live chat state in the trailing resource row slot without a separate chat list", async () => {
  const project = {...resource("project-a", "Project A"),chatOpen:true,unreadCount:2};
  const channel=createModelChannel(model({projects:[project]}));
  const target=document.body.appendChild(document.createElement("div"));
@@ -436,8 +436,8 @@ it("shows live chat state beside resource titles without a separate chat list", 
  cleanups.push(()=>unmount(component));
  await tick();
  const title=target.querySelector('.name-text')!;
- expect(title.nextElementSibling?.classList.contains('resource-chat-status')).toBe(true);
- expect(title.nextElementSibling?.textContent?.trim()).toBe('2');
+ expect(title.parentElement?.nextElementSibling?.classList.contains('resource-chat-status')).toBe(true);
+ expect(title.parentElement?.nextElementSibling?.textContent?.trim()).toBe('2');
  expect(target.querySelector('.chat-open-icon')).not.toBeNull();
  expect(target.querySelector('.chat-list,[aria-label="Chats"]')).toBeNull();
  channel.publish(model({projects:[{...project,unreadCount:0}]}));await tick();

@@ -396,7 +396,8 @@
           {:else}
             <Icon name="folder" className="tree-icon" />
           {/if}
-          <span class="name"><span class="name-text">{project.title}</span>{@render chatIndicator(project)}<span class="resource-ref">{project.ref}</span>{#if !editing && project.summary && !project.expanded}<span class="project-task-summary" aria-hidden="true"><span class="project-task-summary-count">{project.summary.taskLabel}</span><span class="project-task-summary-separator">·</span><span class="project-task-summary-running">{project.summary.runningLabel}</span></span>{/if}</span>
+          <span class="name"><span class="name-text">{project.title}</span><span class="resource-ref">{project.ref}</span>{#if !editing && project.summary && !project.expanded}<span class="project-task-summary" aria-hidden="true"><span class="project-task-summary-count">{project.summary.taskLabel}</span><span class="project-task-summary-separator">·</span><span class="project-task-summary-running">{project.summary.runningLabel}</span></span>{/if}</span>
+          {@render chatIndicator(project)}
           {#if editing}
             <!-- svelte-ignore a11y_no_static_element_interactions -->
             <span class="row-actions"><span class="row-action-button" role="button" tabindex="0" aria-label={`New folder in ${project.title}`} title="New folder" onclick={(event) => addFolder(event, project)} onkeydown={(event) => actionKeydown(event, (e) => void addFolder(e, project))}><Icon name="folder-plus" /></span></span>
@@ -466,7 +467,8 @@
       <!-- svelte-ignore a11y_click_events_have_key_events -->
       <span class="task-state-icon" onclick={(event) => toggleStateTooltip(event, task)}><StatusPresentation status={task.status} /></span>
     {/if}
-    <span class="name"><span class="name-text">{task.title}</span>{@render chatIndicator(task)}<span class="resource-ref">{task.ref}</span></span>
+    <span class="name"><span class="name-text">{task.title}</span><span class="resource-ref">{task.ref}</span></span>
+    {@render chatIndicator(task)}
     {#if editing}
       <span class="row-actions"></span>
       <!-- svelte-ignore a11y_no_static_element_interactions -->

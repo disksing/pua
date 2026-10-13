@@ -1222,9 +1222,9 @@ test("keeps public chat unread and both event cursors independent in the resourc
   await expect(page.locator('.chat-list,[aria-label="Chats"]')).toHaveCount(0);
   const position=await row.evaluate(el=>{
     const title=el.querySelector('.name-text')!,icon=el.querySelector('.chat-open-icon')!,badge=el.querySelector('.unread-badge')!;
-    return {adjacent:title.nextElementSibling?.classList.contains('resource-chat-status'),gap:badge.getBoundingClientRect().left-icon.getBoundingClientRect().right};
+    return {trailing:title.parentElement?.nextElementSibling?.classList.contains('resource-chat-status'),gap:badge.getBoundingClientRect().left-icon.getBoundingClientRect().right};
   });
-  expect(position.adjacent).toBe(true);expect(position.gap).toBeLessThan(6);
+  expect(position.trailing).toBe(true);expect(position.gap).toBeLessThan(6);
   state('User','project1.task1').unread=3;
   await expect(row.locator('.unread-badge')).toHaveText('3',{timeout:10_000});
   await page.screenshot({path:testInfo.outputPath('unread-tree.png')});
@@ -2970,3 +2970,50 @@ test("resource event tabs show isolated live timelines without model input", asy
   await page.getByRole("button",{name:"Reopen chat",exact:true}).click();
   await expect(page.getByText("Public conversation remains separate",{exact:true})).toBeVisible();
 });
+
+for (const sidebarWidth of [280, 220]) {
+  test(`aligns resource chat markers at the right edge in a ${sidebarWidth}px sidebar`, async ({ page }, testInfo) => {
+    await installMockApi(page, "project1.task2");
+    await page.addInitScript(width => localStorage.setItem("pua.web.paneSizes", JSON.stringify({sidebarWidth:width,chatWidth:420,sidebarAttentionHeight:210})), sidebarWidth);
+    await page.route("**/api/workspaces/ws-test/**", async route => {
+      const path = new URL(route.request().url()).pathname;
+      if (path.endsWith("/ui-state")) return json(route, {version:2,expandedProjects:["project1"],lastResourceId:"project1.task2",folders:[{id:"vf-layout",projectId:"project1",name:"Nested tasks",expanded:true}],taskOrder:{project1:["project1.task1","project1.task2","vf-layout"]},folderOrder:{"vf-layout":["project1.task3"]}});
+      if (path.endsWith("/tree")) return json(route, {
+        projects:[{...project,title:"A project with a long descriptive title",chat:{open:true,unreadCount:5},children:[
+          {...project.children[0],title:"A very long task title that must truncate before the chat markers",chat:{open:true,unreadCount:120}},
+          {...project.children[1],title:"Short",chat:{open:true,unreadCount:0}},
+          {...project.children[0],id:"project1.task3",title:"Nested task with another very long title",chat:{open:true,unreadCount:3}},
+        ]}],workspace:{id:"workspace",type:"workspace",title:"Isolated E2E"},activity:{running:[],unread:[],problems:[]},
+      });
+      if (path.endsWith("/chat")) return json(route,{id:"layout-chat",open:true,epoch:1,unreadCount:0,messages:[],binding:{kind:"profile",name:"default"}});
+      return route.fallback();
+    });
+    await page.goto("/w/ws-test/r/project1.task2");
+    const markers = page.locator('#projectTree .resource-chat-status');
+    await expect(markers).toHaveCount(4);
+    const geometry = await markers.evaluateAll(elements => elements.map(group => {
+      const row=group.parentElement!,name=row.querySelector('.name')!,title=name.querySelector('.name-text')!,icon=group.querySelector('.chat-open-icon')!,badge=group.querySelector('.unread-badge');
+      return {right:group.getBoundingClientRect().right,rowRight:row.getBoundingClientRect().right-parseFloat(getComputedStyle(row).paddingRight),left:group.getBoundingClientRect().left,nameRight:name.getBoundingClientRect().right,
+        gap:badge?badge.getBoundingClientRect().left-icon.getBoundingClientRect().right:0,truncated:title.scrollWidth>title.clientWidth,overflow:row.scrollWidth-row.clientWidth};
+    }));
+    for(const g of geometry) {
+      expect(Math.abs(g.right-g.rowRight)).toBeLessThan(1);
+      expect(Math.abs(g.right-geometry[0].right)).toBeLessThan(1);
+      expect(g.nameRight).toBeLessThanOrEqual(g.left-5);
+      expect(g.gap).toBeGreaterThanOrEqual(0);expect(g.gap).toBeLessThanOrEqual(4);
+      expect(g.overflow).toBeLessThanOrEqual(1);
+    }
+    expect(geometry[1].truncated).toBe(true);expect(geometry[3].truncated).toBe(true);
+    await expect(page.locator('[data-task-id="project1.task1"] .unread-badge')).toHaveText('99+');
+    await expect(page.locator('[data-task-id="project1.task2"] .unread-badge')).toHaveCount(0);
+    await page.screenshot({path:testInfo.outputPath(`chat-markers-${sidebarWidth}.png`)});
+    await page.locator('#treeEditButton').click();
+    await expect(markers).toHaveCount(0);
+    const overlaps=await page.locator('#projectTree .tree-item').evaluateAll(rows=>rows.some(row=>{
+      const name=row.querySelector('.name')!,actions=row.querySelector('.row-actions'),drag=row.querySelector('.drag-handle');
+      return (actions && name.getBoundingClientRect().right>actions.getBoundingClientRect().left+1)||(drag && drag.getBoundingClientRect().right>row.getBoundingClientRect().right+1);
+    }));
+    expect(overlaps).toBe(false);
+    await page.locator('#treeEditButton').click();await expect(markers).toHaveCount(4);
+  });
+}

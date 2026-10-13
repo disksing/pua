@@ -429,8 +429,8 @@ describe("AppShell responsibility components", () => {
     expect(badges[0].getAttribute("aria-label")).toBe("2 unread chat messages");
     expect(badges[1].textContent).toBe("99+");
     expect(badges[1].getAttribute("aria-label")).toBe("120 unread chat messages");
-    expect(target.querySelector(".project-tree > .tree-item .name-text + .resource-chat-status .unread-badge")).toBe(badges[0]);
-    expect(target.querySelector(".task-item .name-text + .resource-chat-status .unread-badge")).toBe(badges[1]);
+    expect(target.querySelector(".project-tree > .tree-item .name + .resource-chat-status .unread-badge")).toBe(badges[0]);
+    expect(target.querySelector(".task-item .name + .resource-chat-status .unread-badge")).toBe(badges[1]);
   });
 
   it("ProjectTree replaces the Task file icon with exactly one workflow state icon", async () => {

@@ -178,12 +178,18 @@
     return block.generation.agentName || block.generation.resolvedProfile || block.generation.binding?.name || model.agentName || "Agent";
   }
 
+  // Keep viewport loading, digest rendering and controller projection on the
+  // same policy so a terminal update cannot hide an event pane's messages.
+  function isTurnCollapsed(turn: ResourceHistoryTurnSummary): boolean {
+    return turnIsCollapsedByPolicy(turn, controllerOptions.collapseNonUserTurns !== false);
+  }
+
   // autoExpandReference feeds the visibility observer: only Turns that may
   // expand on scroll return their reference; collapsed-by-policy Turns return
   // an empty reference so the observer never requests their details.
   function autoExpandReference(block: ConversationBlock): string {
     const turn = block.turn;
-    if (!turn || turnIsCollapsedByPolicy(turn)) return "";
+    if (!turn || isTurnCollapsed(turn)) return "";
     return turn.reference || "";
   }
 
@@ -266,7 +272,7 @@
       const block = snapshot.blocks[index];
       if (block.kind !== "turn" || !block.turn?.reference) continue;
       // Collapsed-by-policy (non-user) Turns expand only on explicit click.
-      if (turnIsCollapsedByPolicy(block.turn)) continue;
+      if (isTurnCollapsed(block.turn)) continue;
       if (block.items || block.events || block.loading || block.error) continue;
       return block.turn.reference;
     }
@@ -402,7 +408,7 @@
       {:else}
         <section class="conversation-turn" class:conversation-turn-loading={block.loading} data-timeline-key={block.key} use:observeTurn={autoExpandReference(block)}>
           {#if block.turn && !block.items && !block.events}
-            {#if turnIsCollapsedByPolicy(block.turn)}
+            {#if isTurnCollapsed(block.turn)}
               <!-- Non-user-triggered Turns (agent messages, scheduler and system
                    notifications) render as a two-message conversation digest:
                    the trigger message and the final reply keep the normal
@@ -471,7 +477,7 @@
               {/if}
             </div>
           {/each}
-          {#if block.turn && turnIsCollapsedByPolicy(block.turn) && (block.items?.length || block.events?.length)}
+          {#if block.turn && isTurnCollapsed(block.turn) && (block.items?.length || block.events?.length)}
             <button type="button" class="turn-collapse-again" onclick={() => collapseExpandedTurn(block)}><Icon name="chevron-up" /><span>Collapse turn</span></button>
           {/if}
           {#if block.loading && !block.items && !block.events}<div class="turn-loading"><Icon name="loader-circle" /><span>Loading turn details</span></div>{/if}

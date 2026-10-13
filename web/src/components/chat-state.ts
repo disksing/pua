@@ -86,6 +86,8 @@ export interface ChatSessionControllerOptions {
   terminalRetryDelaysMs?: number[];
   noticeTimeoutMs?: number;
   realtime?: boolean;
+  /** Event audit panes disable role-based Turn folding, including terminal updates. */
+  collapseNonUserTurns?: boolean;
 }
 
 // The public name is retained to avoid churn in embedders. Its identity and
@@ -103,6 +105,7 @@ export class ChatSessionController {
   private readonly terminalRetryDelaysMs: number[];
   private readonly noticeTimeoutMs: number;
   private readonly realtime: boolean;
+  private readonly collapseNonUserTurns: boolean;
   private activeKey = "";
   private disposed = false;
 
@@ -117,6 +120,7 @@ export class ChatSessionController {
     this.terminalRetryDelaysMs = (options.terminalRetryDelaysMs ?? TERMINAL_RETRY_DELAYS_MS).map((value) => Math.max(0, value));
     this.noticeTimeoutMs = Math.max(0, options.noticeTimeoutMs ?? NOTICE_TIMEOUT_MS);
     this.realtime = options.realtime !== false;
+    this.collapseNonUserTurns = options.collapseNonUserTurns !== false;
   }
 
   subscribe(listener: SnapshotListener): () => void {
@@ -448,10 +452,10 @@ export class ChatSessionController {
       for (const turn of [...(segment.turns || [])].sort((left, right) => left.startEventId - right.startEventId)) {
         const detail = context.details.get(turn.reference);
         const live = context.liveEvents.get(turn.reference);
-        // Closed non-user Turns stay as summary cards until the user expands
+        // When enabled, closed non-user Turns stay as cards until the user expands
         // them; loaded details and leftover live events stay attached to the
         // context but out of the projection. Open Turns always stream live.
-        const collapsed = turnIsCollapsedByPolicy(turn) && !context.expandedTurns.has(turn.reference);
+        const collapsed = turnIsCollapsedByPolicy(turn, this.collapseNonUserTurns) && !context.expandedTurns.has(turn.reference);
         generationBlocks.push({
           kind: "turn", key: `${segment.generation.generationId}:${turn.turnId}`, generation: segment.generation, turn,
           items: !collapsed && detail && !live ? compactTurnItems(detail, segment.generation.generationId) : undefined,
@@ -886,9 +890,9 @@ export class ChatSessionController {
 // timeline renders as summary cards until the user expands them. Turns with
 // an empty trigger role predate role tracking and keep the legacy
 // auto-expanding behavior; open Turns always render live.
-export function turnIsCollapsedByPolicy(turn: Pick<ResourceHistoryTurnSummary, "closed" | "triggerRole">): boolean {
+export function turnIsCollapsedByPolicy(turn: Pick<ResourceHistoryTurnSummary, "closed" | "triggerRole">, collapseNonUserTurns = true): boolean {
   const role = String(turn.triggerRole || "").toLowerCase();
-  return turn.closed && role !== "" && role !== "user";
+  return collapseNonUserTurns && turn.closed && role !== "" && role !== "user";
 }
 
 function compactTurnItems(detail: ResourceHistoryTurnDetail, generationId: string): TimelineItem[] {

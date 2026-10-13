@@ -140,3 +140,64 @@ it('cleans up the real detail tabs when switching resource, user or channel',asy
   expect(target.textContent).toContain('Allow once');
   expect(target.querySelector('input,button,form')).toBeNull();
  });
+
+it.each([
+ {dialogue:false,role:'user'}, {dialogue:false,role:'system'}, {dialogue:false,role:'agent'},
+ {dialogue:true,role:'user'}, {dialogue:true,role:'system'}, {dialogue:true,role:'agent'},
+])('shows full $role history and completed live Turns in dialogue=$dialogue without expanding a digest', async ({dialogue,role}) => {
+ const channel = dialogue ? 'dialogue' : 'execution';
+ const generation = {generation:1,generationId:`gen-${channel}`,status:'running',createdAt:'2026-10-13T00:00:00Z'};
+ let closed = false;
+ const historical = {reference:'ref-history',turnId:'turn-history',closed:true,status:'completed',triggerRole:role,triggerPreview:'Historical digest trigger',finalReplyPreview:'Historical digest reply',startEventId:1,lastEventId:3,endEventId:3,generation};
+ const live = () => ({reference:'ref-live',turnId:'turn-1',closed,status:closed?'completed':'active',triggerRole:role,triggerPreview:'Live digest trigger',finalReplyPreview:'Live digest reply',startEventId:4,lastEventId:closed?7:5,endEventId:closed?7:undefined,generation});
+ const terminalReads: string[] = [];
+ vi.stubGlobal('EventSource',FakeEventSource);
+ vi.stubGlobal('fetch',vi.fn(async (input) => {
+  const path=String(input);
+  if(path.endsWith('/chat')) return response({binding:{kind:'profile',name:'default'}});
+  if(path.endsWith('/status')) return response({generation,sessionState:'working',session:{id:`session-${channel}`,state:'running',currentTurnId:'turn-1'}});
+  if(path.includes('/history/turns?')) return response({segments:[{generation,turns:[historical,live()]}],page:{hasMore:false}});
+  if(path.includes('/history/turns/ref-history')) return response({turn:historical,latestEventId:3,items:[
+   {type:'message',role,text:`Historical full input ${role}`,startEventId:1,endEventId:1},
+   {type:'message',role:'assistant',text:`Historical middle details ${role}`,startEventId:2,endEventId:2},
+   {type:'tool',count:1,startEventId:3,endEventId:3},
+  ]});
+  if(path.includes('/history/turns/ref-live') || path.includes('/history/turns/by-id?')) {
+   if(path.includes('/by-id?')) terminalReads.push(path);
+   return response({turn:live(),latestEventId:closed?7:5,items:[{type:'message',role:'assistant',text:closed?`Canonical completed details ${role}`:`Active details ${role}`,startEventId:4,endEventId:closed?7:5}]});
+  }
+  if(path.includes('/events?')) return response({schema:'agenthub.semantic-events.v1',frames:[{
+   schema:'agenthub.semantic-events.v1',cursor:5,mode:'replace',source:{eventId:5,type:'message.assistant.delta',sessionId:`session-${channel}`,turnId:'turn-1'},
+   events:[{id:'sem_5_0',sourceEventId:5,index:0,type:'message.assistant.delta',sessionId:`session-${channel}`,turnId:'turn-1',data:{text:`Active details ${role}`}}],
+  }],latestCursor:5,page:{hasMore:false,nextAfter:5}});
+  throw new Error(`unexpected request ${path}`);
+ }));
+ const {target}=setup(dialogue);
+ const messages=()=>[...target.querySelectorAll('.agent-message-bubble')].map(node=>node.textContent).join('\n');
+ await vi.waitFor(()=>{
+  expect(messages()).toContain(`Historical full input ${role}`);
+  expect(messages()).toContain(`Historical middle details ${role}`);
+  expect(messages()).toContain(`Active details ${role}`);
+  expect(FakeEventSource.instances).toHaveLength(1);
+ });
+ expect(target.querySelector('.turn-collapsed-digest,.turn-collapsed-gap,.turn-collapse-again')).toBeNull();
+ // Individual tool groups keep their existing click-to-expand interaction.
+ expect(target.querySelector('details.agent-activity-group')).not.toBeNull();
+ expect(target.querySelector('details.agent-activity-group')?.hasAttribute('open')).toBe(false);
+ const stream=FakeEventSource.instances[0];
+ stream.emit(6,'message.assistant.delta',{text:`Live update ${role}`});
+ await vi.waitFor(()=>expect(messages()).toContain(`Live update ${role}`));
+ closed=true;
+ stream.emit(7,'turn.completed',{});
+ await vi.waitFor(()=>{
+  expect(terminalReads.length).toBeGreaterThan(0);
+  expect(messages()).toContain(`Canonical completed details ${role}`);
+ });
+ // Replayed terminal frames / refreshed closed summaries cannot restore the
+ // old role-based digest or hide already-loaded historical messages.
+ stream.emit(7,'turn.completed',{});
+ await tick();
+ expect(messages()).toContain(`Historical middle details ${role}`);
+ expect(messages()).toContain(`Canonical completed details ${role}`);
+ expect(target.querySelector('.turn-collapsed-digest,.turn-collapsed-gap,.turn-collapse-again')).toBeNull();
+});

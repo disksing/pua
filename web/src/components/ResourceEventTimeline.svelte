@@ -23,6 +23,7 @@
   });
   const controllerOptions = {
     api,
+    collapseNonUserTurns: false,
     eventSourceFactory: (path: string) => {
       const url = new URL(route(path), window.location.href);
       // EventSource has no custom headers. Only the dialogue GET stream

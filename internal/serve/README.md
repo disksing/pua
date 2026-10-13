@@ -91,7 +91,7 @@ DELETE /api/workspaces/{workspaceId}/users/{name}
 
 定时器只保存聊天级检查间隔和下次时间，不保存关注资源、观察订阅、任务与聊天绑定或父级交接关系。交流 Agent 在自己的持久笔记中记录关注范围和通知进度，按需查询资源 History、状态和产物。默认关闭；Agent 可以预约 60 至 86400 秒后的一次检查，设为 0 取消。入队后自动清空 timer，已有待投递输入或活动 Turn 时保留到期预约、延后检查，避免重复插入。Agent 必须按实际跟进事项和预计进展决定是否重新预约，不得机械续订一分钟循环。v1 遗留重复 timer 保留下一次预约，按一次性规则消费并持久升级到 v2；不批量唤醒、不开启原本关闭的 timer。`intervalSeconds` 为兼容保留的预约延迟字段，公开数据增加 `timerMode: "once"` 和 `nextCheckAt`。浏览器 SSE 与状态读取只刷新展示，不驱动模型。
 
-Inbox 路由统一返回 410，旧 `users/*/inbox.json` 在取得 Workspace 所有权后删除，后台也重试清理，不导入聊天。旧 CLI 用户目标明确报移除错误，不能成为内部 Agent 直接发言的旁路。原 History UI 被执行事件和交流事件两个只读 Tab 替代，历史 API/CLI 和已有引用保留。两个事件 Tab 复用原 EventTimeline 聊天式展示和 ChatSessionController SSE/状态同步，切换资源、用户或通道销毁旧控制器和请求。交流流使用 `/chat/runtime/stream?user=...` 选择用户（仅 GET stream 接受此参数，仍校验已注册用户，其他操作仍需用户头）；两通道事件只在本地投影，不能写入聊天或互相更新状态。两个事件 Tab 支持各自的模型绑定；审批和停止控件在聊天面板独立展示。
+Inbox 路由统一返回 410，旧 `users/*/inbox.json` 在取得 Workspace 所有权后删除，后台也重试清理，不导入聊天。旧 CLI 用户目标明确报移除错误，不能成为内部 Agent 直接发言的旁路。原 History UI 被执行事件和交流事件两个只读 Tab 替代，历史 API/CLI 和已有引用保留。两个事件 Tab 复用原 EventTimeline 聊天式展示和 ChatSessionController SSE/状态同步；user、system、agent 发起的 Turn 一律直接展示，历史记录和实时结束的轮次均不按角色折叠，单个工具详情仍可点击展开。切换资源、用户或通道销毁旧控制器和请求。交流流使用 `/chat/runtime/stream?user=...` 选择用户（仅 GET stream 接受此参数，仍校验已注册用户，其他操作仍需用户头）；两通道事件只在本地投影，不能写入聊天或互相更新状态。两个事件 Tab 支持各自的模型绑定；审批和停止控件在聊天面板独立展示。
 
 `PUT .../generation-policy` 更新 `workspace.json` 中统一覆盖 Workspace、Project、Task 和 Scheduler 的自动轮换策略。策略有两个独立开关：usage-based rotation 默认在 20 个已结束 Turn 或累计 120 分钟 Turn wall-clock 的 OR 阈值后轮换，Turn 之间的 idle 不计时；inactivity-based rotation 默认在 AgentHub Session 最后一次语义 Turn 活动距今达到 1440 分钟后轮换。两者都只在下一条 queued input 即将开始新 Turn 时检查，活动 Turn 的 steer 不检查。旧 `enabled` 配置迁移时同时控制两个新开关，设置页可分别关闭并保留阈值。
 

@@ -1173,36 +1173,90 @@ test("keeps a newly created task Activity row aligned when its first turn starts
   expect(Math.abs(layout.titleTop - layout.statusTop)).toBeLessThan(2);
 });
 
-test("does not count a running Turn as unread, then clears it after completion when clicked again", async ({ page }) => {
-  const harness = await installMockApi(page, "project1.task1");
-  await page.goto("/w/ws-test/r/project1.task1");
-
-  const taskRow = page.locator("#projectTree .task-item", { hasText: "Infrastructure task" });
-  await expect(taskRow.locator(".unread-badge")).toHaveCount(0);
-
-  await page.locator("#chatInput").fill("Start a new turn while this task stays selected");
-  await page.locator("#chatInput").press("Enter");
-  await expect.poll(() => harness.inputBodies.length).toBe(1);
-  await expect(page.getByRole("tab", { name: "Running 1", exact: true })).toBeVisible();
-  await expect(page.getByRole("tab", { name: "Unread 0", exact: true })).toBeVisible();
-  await expect(taskRow.locator(".unread-badge")).toHaveCount(0);
-  expect(harness.resourceStateBodies.filter((entry) => entry.path.endsWith("/read"))).toHaveLength(0);
-
-  harness.finishTurn();
-  await expect(taskRow.locator(".unread-badge")).toHaveText("1", { timeout: 8_000 });
-  await expect(page.getByRole("tab", { name: "Running 0", exact: true })).toBeVisible();
-  await expect(page.getByRole("tab", { name: "Unread 1", exact: true })).toBeVisible();
-
-  await taskRow.click();
-  await expect(taskRow.locator(".unread-badge")).toHaveCount(0);
-  await expect(page.getByRole("tab", { name: "Unread 0", exact: true })).toBeVisible();
-  expect(harness.resourceStateBodies.filter((entry) => entry.path.endsWith("/read"))).toEqual([
-    {
-      method: "PUT",
-      path: "/api/workspaces/ws-test/resources/project1.task1/read",
-      body: { throughTurnNumber: 1 },
-    },
-  ]);
+test("keeps public chat unread and both event cursors independent in the resource tree", async ({ page }, testInfo) => {
+  test.setTimeout(60_000);
+  await installMockApi(page, "project1.task2");
+  const writes: Array<{ user: string; resource: string; op: string; through?: number }> = [];
+  const states = new Map<string, { open: boolean; unread: number; execution: number; dialogue: number; readExecution: number; readDialogue: number }>();
+  const state = (user: string, resource: string) => {
+    const key = `${user}:${resource}`;
+    if (!states.has(key)) states.set(key, { open: user === "User" && resource === "project1.task1", unread: user === "User" && resource === "project1.task1" ? 2 : 0, execution: 3, dialogue: 4, readExecution: 0, readDialogue: 0 });
+    return states.get(key)!;
+  };
+  await page.route("**/api/workspaces/ws-test/**", async route => {
+    const req = route.request(), path = new URL(req.url()).pathname, user = req.headers()["x-pua-user"] || "User";
+    if (path.endsWith("/users")) return json(route, { users: [{ name: "User", version: 1 }, { name: "Other", version: 1 }] });
+    if (path.endsWith("/tree")) {
+      const item = (resource: MockResource) => {
+        const s = state(user,resource.id);
+        return { ...resource, latestTurnNumber:s.execution, unreadCount:s.execution-s.readExecution, userState:{readTurnNumber:s.readExecution},
+          ...(s.open || s.unread ? {chat:{open:s.open,unreadCount:s.unread}} : {}),
+          dialogueEvents:{latestTurnNumber:s.dialogue,readTurnNumber:s.readDialogue,unreadCount:s.dialogue-s.readDialogue} };
+      };
+      return json(route, { projects:[{...item(project),children:project.children.map(item)}], workspace:{id:"workspace",type:"workspace",title:"Isolated E2E"}, activity:{running:[],unread:[],problems:[]} });
+    }
+    const match = path.match(/\/resources\/([^/]+)(\/chat\/runtime)?\/(.*)$/);
+    if (!match) return route.fallback();
+    const resource=match[1], dialogue=Boolean(match[2]), op=match[3], s=state(user,resource);
+    const chat = () => ({id:`${user}-${resource}`,resourceId:resource,open:s.open,epoch:resource==="project1.task1"&&user==="User"?1:0,unreadCount:s.unread,binding:{kind:"profile",name:"default"},messages:resource==="project1.task1"&&user==="User"?[{id:"public-1",role:"agent",text:"Public history preserved",createdAt:now}]:[]});
+    if (op==="chat") return json(route,chat());
+    if (op==="chat/read") {writes.push({user,resource,op});s.unread=0;return json(route,chat());}
+    if (op==="chat/open"||op==="chat/close") {s.open=op.endsWith("open");return json(route,chat());}
+    const count=dialogue?s.dialogue:s.execution;
+    const channel=dialogue?"dialogue":"execution";
+    const generation={generation:1,generationId:`gen-${channel}-${resource}`,status:"idle",turnNumber:count,createdAt:now};
+    const turn={reference:`ref-${channel}-${count}`,turnId:`turn-${count}`,closed:true,status:"completed",triggerRole:"system",startEventId:1,lastEventId:2,generation};
+    if(op==="status")return json(route,{resourceId:resource,generation,sessionState:"idle",session:{state:"idle"},waitingMessages:[]});
+    if(op==="history/turns")return json(route,{resourceId:resource,completedTurnNumber:count,segments:[{generation,turns:[turn]}],page:{hasMore:false}});
+    if(op.startsWith("history/turns/"))return json(route,{turn,latestEventId:2,items:[{type:"message",role:"assistant",text:`${channel} completed ${count}`,startEventId:1,endEventId:2}]});
+    if(op==="read") {const through=req.postDataJSON().throughTurnNumber;writes.push({user,resource,op:dialogue?"dialogue-read":"execution-read",through});if(dialogue)s.readDialogue=through;else s.readExecution=through;return json(route,{readTurnNumber:through});}
+    if(op==="stream")return route.fulfill({status:200,contentType:"text/event-stream",body:"retry: 1000\n\n"});
+    if(op==="events")return json(route,{schema:"agenthub.semantic-events.v1",frames:[],page:{hasMore:false}});
+    return route.fallback();
+  });
+  await page.goto("/w/ws-test/r/project1.task2");
+  await page.getByRole("button",{name:"U User No preference set",exact:true}).click();
+  const row=page.locator('#projectTree [data-task-id="project1.task1"]');
+  await expect(row.locator('.unread-badge')).toHaveText('2');
+  await expect(row.locator('.chat-open-icon')).toBeVisible();
+  await expect(page.locator('.chat-list,[aria-label="Chats"]')).toHaveCount(0);
+  const position=await row.evaluate(el=>{
+    const title=el.querySelector('.name-text')!,icon=el.querySelector('.chat-open-icon')!,badge=el.querySelector('.unread-badge')!;
+    return {adjacent:title.nextElementSibling?.classList.contains('resource-chat-status'),gap:badge.getBoundingClientRect().left-icon.getBoundingClientRect().right};
+  });
+  expect(position.adjacent).toBe(true);expect(position.gap).toBeLessThan(6);
+  state('User','project1.task1').unread=3;
+  await expect(row.locator('.unread-badge')).toHaveText('3',{timeout:10_000});
+  await page.screenshot({path:testInfo.outputPath('unread-tree.png')});
+  await row.click();
+  const details=page.locator('#detailsPanel');
+  const execution=details.getByRole('tab',{name:/^Execution events/}),dialogue=details.getByRole('tab',{name:/^Dialog events/});
+  await expect(row.locator('.unread-badge')).toHaveCount(0);
+  await expect(execution).toContainText('3');await expect(dialogue).toContainText('4');
+  expect(writes.filter(w=>w.op.endsWith('-read'))).toHaveLength(0);
+  await execution.click();await expect(details).toContainText('execution completed 3');
+  await expect(execution.locator('.event-unread-count')).toHaveCount(0);await expect(dialogue).toContainText('4');
+  await dialogue.click();await expect(details).toContainText('dialogue completed 4');
+  await expect(dialogue.locator('.event-unread-count')).toHaveCount(0);
+  state('User','project1.task1').dialogue=5;state('User','project1.task1').execution=4;
+  await expect(details).toContainText('dialogue completed 5',{timeout:10_000});
+  await expect(execution).toContainText('1',{timeout:10_000});
+  expect(state('User','project1.task1').readExecution).toBe(3);
+  await page.getByRole('button',{name:'Close chat',exact:true}).click();
+  await expect(row.locator('.chat-open-icon')).toHaveCount(0);
+  await expect(page.locator('#chatTimeline')).toContainText('Public history preserved');
+  await page.getByRole('button',{name:'Reopen chat',exact:true}).click();
+  await expect(row.locator('.chat-open-icon')).toBeVisible();
+  await page.screenshot({path:testInfo.outputPath('unread-channels.png')});
+  await details.getByRole('tab',{name:'Task',exact:true}).click();
+  await page.locator('#workspaceOpen').click();
+  await details.getByRole('tab',{name:'Settings',exact:true}).click();
+  await page.locator('#workspaceCurrentUser').selectOption('Other');
+  await expect(row.locator('.chat-open-icon')).toHaveCount(0);
+  await row.click();
+  await expect(execution).toContainText('3');await expect(dialogue).toContainText('4');
+  await expect(page.locator('#chatTimeline')).not.toContainText('Public history preserved');
+  expect(writes.filter(w=>w.user==='Other'&&w.op.endsWith('-read'))).toHaveLength(0);
 });
 
 test("manages natural-language schedules from the fixed Scheduler resource", async ({ page }) => {

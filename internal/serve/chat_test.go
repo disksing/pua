@@ -478,3 +478,100 @@ func TestChatStreamUserSelectionIsScopedAndValidated(t *testing.T) {
 		}
 	}
 }
+
+func TestChatAndEventReadCursorsRemainIndependentPerUser(t *testing.T) {
+	m, w := chatTestManager(t)
+	resource := "project1.task1"
+	c := resourceChat{ID: chatID(resource, "disksing"), ResourceID: resource, User: "disksing", Open: true, Epoch: 1,
+		Messages: []chatMessage{{ID: "a", Role: "agent", Text: "first"}, {ID: "u", Role: "user", Text: "mine"}, {ID: "b", Role: "agent", Text: "second"}}}
+	if err := saveChatLocked(w.Path, c); err != nil {
+		t.Fatal(err)
+	}
+	records := []generationRecord{}
+	for i, id := range []string{resource, c.address()} {
+		generation := fmt.Sprintf("gen-read-%d", i)
+		records = append(records, generationRecord{ID: generation, GenerationID: generation, WorkspaceID: w.ID, ResourceID: id, Generation: 1, AgentHubSessionID: "session-" + generation, Status: "idle", TurnNumber: 3 + i, Cwd: w.Path})
+	}
+	if err := rewriteTestGenerationRecords(w.Path, records); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := func(user string) resourceSnapshot {
+		t.Helper()
+		tree, err := m.server.treeAt(context.Background(), w.Path, user)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range tree.Projects {
+			for _, task := range p.Children {
+				if task.ID == resource {
+					return task
+				}
+			}
+		}
+		t.Fatal("task missing")
+		return resourceSnapshot{}
+	}
+	assertCounts := func(chat, execution, dialogue int) {
+		t.Helper()
+		item := snapshot("disksing")
+		if item.Chat == nil || item.Chat.UnreadCount != chat || item.UnreadCount != execution || item.DialogueEvents == nil || item.DialogueEvents.UnreadCount != dialogue {
+			t.Fatalf("chat=%+v execution=%d dialogue=%+v", item.Chat, item.UnreadCount, item.DialogueEvents)
+		}
+	}
+	read := func(user, suffix string, through, wantStatus int) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPut, "/api/workspaces/"+w.ID+"/resources/"+resource+suffix, strings.NewReader(fmt.Sprintf(`{"throughTurnNumber":%d}`, through)))
+		req.Header.Set(workspaceUserHeader, user)
+		out := httptest.NewRecorder()
+		m.server.handleWorkspace(out, req)
+		if out.Code != wantStatus {
+			t.Fatalf("read %s status=%d body=%s", suffix, out.Code, out.Body.String())
+		}
+	}
+	assertCounts(2, 3, 4)
+	other := snapshot("other")
+	if other.Chat != nil || other.DialogueEvents != nil || other.UnreadCount != 3 {
+		t.Fatalf("user state leaked: %+v", other)
+	}
+	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "read", chatRequest{ID: "a"}, false))
+	assertCounts(1, 3, 4)
+	read("disksing", "/chat/runtime/read", 4, 200)
+	assertCounts(1, 3, 0)
+	read("other", "/chat/runtime/read", 4, 400)
+	read("disksing", "/read", 2, 200)
+	assertCounts(1, 1, 0)
+	read("disksing", "/read", 1, 200)
+	assertCounts(1, 1, 0)
+	// An active Turn must not move the completed read boundary forward.
+	records[0].Status = "running"
+	records[0].CurrentTurnID = "active"
+	records[0].TurnNumber = 4
+	if err := rewriteTestGenerationRecords(w.Path, records); err != nil {
+		t.Fatal(err)
+	}
+	read("disksing", "/read", 4, 400)
+	assertCounts(1, 1, 0)
+	c, err := loadChatLocked(w.Path, c.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Open = false
+	if err := saveChatLocked(w.Path, c); err != nil {
+		t.Fatal(err)
+	}
+	item := snapshot("disksing")
+	if item.Chat.Open || item.Chat.UnreadCount != 1 {
+		t.Fatalf("closing lost history/unread: %+v", item.Chat)
+	}
+	if snapshot("other").UnreadCount != 3 {
+		t.Fatal("execution read leaked to other user")
+	}
+	// Reloading user state retains both independent runtime cursors.
+	state, err := loadUIStateFile(userUIStatePath(w.Path, "disksing"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *state.ResourceStates[resource].ReadTurnNumber != 2 || *state.ResourceStates[c.address()].ReadTurnNumber != 4 {
+		t.Fatalf("persisted cursors: %+v", state.ResourceStates)
+	}
+}

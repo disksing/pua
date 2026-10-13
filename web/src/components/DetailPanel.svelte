@@ -210,7 +210,7 @@
 {:else if model.resourceType === "workspace"}
   <div class="details-header"><h1 class="details-title">{model.workspaceName}</h1></div>
   <div class="details-tabs" role="tablist" aria-label="Workspace details">
-    {#each tabs as tab (tab.id)}<button type="button" class:active={activeTab === tab.id} class="details-tab" role="tab" aria-selected={activeTab === tab.id} onclick={() => selectTab(tab.id)}><Icon name={tab.icon} /><span>{tab.label}</span></button>{/each}
+    {#each tabs as tab (tab.id)}<button type="button" class:active={activeTab === tab.id} class="details-tab" role="tab" aria-selected={activeTab === tab.id} onclick={() => selectTab(tab.id)}><Icon name={tab.icon} /><span>{tab.label}</span>{#if tab.id === "execution-events" && model.executionUnreadCount}<span class="event-unread-count" aria-label={`${model.executionUnreadCount} unread execution Turns`}>{model.executionUnreadCount}</span>{:else if tab.id === "dialogue-events" && model.dialogueUnreadCount}<span class="event-unread-count" aria-label={`${model.dialogueUnreadCount} unread dialogue Turns`}>{model.dialogueUnreadCount}</span>{/if}</button>{/each}
   </div>
   <div id="detailsContent" class="details-content" class:details-events={activeTab === "execution-events" || activeTab === "dialogue-events"}>
     <div hidden={activeTab !== "agents"}>
@@ -237,7 +237,7 @@
   {#if model.loading || !model.detail}<div id="detailsContent" class="details-content"><div class="empty-state"><Icon name="loader-circle" className="empty-state-icon" /><strong>Loading details...</strong></div></div>
   {:else}
     <div class="details-tabs" role="tablist" aria-label="Resource details">
-      {#each tabs as tab (tab.id)}<button type="button" class:active={activeTab === tab.id} class="details-tab" role="tab" aria-selected={activeTab === tab.id} onclick={() => selectTab(tab.id)}><Icon name={tab.icon} /><span>{tab.label}</span></button>{/each}
+      {#each tabs as tab (tab.id)}<button type="button" class:active={activeTab === tab.id} class="details-tab" role="tab" aria-selected={activeTab === tab.id} onclick={() => selectTab(tab.id)}><Icon name={tab.icon} /><span>{tab.label}</span>{#if tab.id === "execution-events" && model.executionUnreadCount}<span class="event-unread-count" aria-label={`${model.executionUnreadCount} unread execution Turns`}>{model.executionUnreadCount}</span>{:else if tab.id === "dialogue-events" && model.dialogueUnreadCount}<span class="event-unread-count" aria-label={`${model.dialogueUnreadCount} unread dialogue Turns`}>{model.dialogueUnreadCount}</span>{/if}</button>{/each}
     </div>
     <div id="detailsContent" class="details-content" class:details-events={activeTab === "execution-events" || activeTab === "dialogue-events"}>
       {#each files as file (file.path || file.name)}<div hidden={activeTab !== documentTab(file)}><MarkdownDocument {file} workspaceId={model.workspaceId} editable={!model.detail.archived && (model.resourceType === "project" || model.resourceType === "task")} resolveResourceTitle={model.resolveResourceTitle} onNavigate={model.onNavigate} onOpenFile={openLinkedFile} onEdit={openEditor} onAnnotate={openAnnotator} /></div>{/each}

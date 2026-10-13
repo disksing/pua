@@ -34,6 +34,7 @@ interface EventPage {
 }
 
 interface ResourceChatContext {
+  completedTurnNumber?: number;
   key: string;
   workspaceId: string;
   resourceId: string;
@@ -88,6 +89,7 @@ export interface ChatSessionControllerOptions {
   realtime?: boolean;
   /** Event audit panes disable role-based Turn folding, including terminal updates. */
   collapseNonUserTurns?: boolean;
+  trackReadState?: boolean;
 }
 
 // The public name is retained to avoid churn in embedders. Its identity and
@@ -106,6 +108,7 @@ export class ChatSessionController {
   private readonly noticeTimeoutMs: number;
   private readonly realtime: boolean;
   private readonly collapseNonUserTurns: boolean;
+  private readonly trackReadState: boolean;
   private activeKey = "";
   private disposed = false;
 
@@ -121,6 +124,7 @@ export class ChatSessionController {
     this.noticeTimeoutMs = Math.max(0, options.noticeTimeoutMs ?? NOTICE_TIMEOUT_MS);
     this.realtime = options.realtime !== false;
     this.collapseNonUserTurns = options.collapseNonUserTurns !== false;
+    this.trackReadState = options.trackReadState === true;
   }
 
   subscribe(listener: SnapshotListener): () => void {
@@ -326,6 +330,7 @@ export class ChatSessionController {
     const context = this.activeContext();
     if (!context) return emptySnapshot();
     return {
+      completedTurnNumber: context.completedTurnNumber,
       identity: context.key,
       workspaceId: context.workspaceId,
       resourceId: context.resourceId,
@@ -380,6 +385,7 @@ export class ChatSessionController {
       context.expandedTurns.clear();
       context.liveEvents.clear();
       context.orphanEvents.clear();
+      context.completedTurnNumber = page.completedTurnNumber;
       this.mergePage(context, page);
       context.loaded = true;
       this.connect(context);
@@ -576,8 +582,12 @@ export class ChatSessionController {
       }
       const previousGenerationId = context.generationId;
       const previousSessionId = String(context.status?.session?.id || "");
+      const completedStateChanged = context.status?.generation?.turnNumber !== status.generation?.turnNumber
+        || context.status?.generation?.status !== status.generation?.status
+        || context.status?.generation?.completionState !== status.generation?.completionState;
       context.status = status;
       context.generationId = nextGeneration;
+      if (completedStateChanged && context.loaded && this.trackReadState) void this.refreshHead(context);
       const nextSessionId = String(status.session?.id || "");
       const nextGenerationStatus = String(status.generation?.status || "");
       if (context.stream && (!isStreamable(status) || (previousSessionId && previousSessionId !== nextSessionId))) this.closeStream(context);
@@ -660,6 +670,7 @@ export class ChatSessionController {
           context.liveEvents.delete(detail.turn.reference);
           this.clearTerminalErrorIfHealed(context);
           this.emit();
+          if (this.trackReadState) void this.refreshHead(context);
           return;
         } catch (error) {
           if (error instanceof StaleResponseError || !this.isCurrent(context, generation)) return;
@@ -708,6 +719,7 @@ export class ChatSessionController {
     try {
       const page = await this.api.latest<ResourceHistoryPage>(historyPath(context), { scope: requestScope(context, "stream-head") });
       if (this.isCurrent(context, generation)) {
+        context.completedTurnNumber = page.completedTurnNumber;
         this.mergePage(context, page);
         this.retryPendingTerminals(context);
         this.emit();

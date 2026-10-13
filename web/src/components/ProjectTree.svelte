@@ -396,7 +396,7 @@
           {:else}
             <Icon name="folder" className="tree-icon" />
           {/if}
-          <span class="name"><span class="name-text">{project.title}</span><span class="resource-ref">{project.ref}</span>{#if !editing && project.summary && !project.expanded}<span class="project-task-summary" aria-hidden="true"><span class="project-task-summary-count">{project.summary.taskLabel}</span><span class="project-task-summary-separator">·</span><span class="project-task-summary-running">{project.summary.runningLabel}</span></span>{/if}{#if !editing && project.unreadCount > 0}<span class="unread-badge" aria-label={`${project.unreadCount} unread ${project.unreadCount === 1 ? "Turn" : "Turns"}`}>{project.unreadCount > 99 ? "99+" : project.unreadCount}</span>{/if}</span>
+          <span class="name"><span class="name-text">{project.title}</span>{@render chatIndicator(project)}<span class="resource-ref">{project.ref}</span>{#if !editing && project.summary && !project.expanded}<span class="project-task-summary" aria-hidden="true"><span class="project-task-summary-count">{project.summary.taskLabel}</span><span class="project-task-summary-separator">·</span><span class="project-task-summary-running">{project.summary.runningLabel}</span></span>{/if}</span>
           {#if editing}
             <!-- svelte-ignore a11y_no_static_element_interactions -->
             <span class="row-actions"><span class="row-action-button" role="button" tabindex="0" aria-label={`New folder in ${project.title}`} title="New folder" onclick={(event) => addFolder(event, project)} onkeydown={(event) => actionKeydown(event, (e) => void addFolder(e, project))}><Icon name="folder-plus" /></span></span>
@@ -418,7 +418,7 @@
                   {#if renamingId === child.id}
                     <span class="name"><input class="folder-rename-input" data-folder-rename={child.id} bind:value={renameDraft} maxlength="80" placeholder="Folder name" aria-label={`Rename ${child.title}`} onclick={(event) => event.stopPropagation()} onkeydown={(event) => renameKeydown(event, child)} onblur={() => void commitRename(child)} /></span>
                   {:else}
-                    <span class="name"><span class="name-text">{child.title}</span><span class="folder-count" aria-hidden="true">{child.children.length}</span>{#if !editing && child.unreadCount > 0}<span class="unread-badge" aria-label={`${child.unreadCount} unread ${child.unreadCount === 1 ? "Turn" : "Turns"}`}>{child.unreadCount > 99 ? "99+" : child.unreadCount}</span>{/if}</span>
+                    <span class="name"><span class="name-text">{child.title}</span><span class="folder-count" aria-hidden="true">{child.children.length}</span></span>
                   {/if}
                   {#if editing}
                     <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -466,11 +466,20 @@
       <!-- svelte-ignore a11y_click_events_have_key_events -->
       <span class="task-state-icon" onclick={(event) => toggleStateTooltip(event, task)}><StatusPresentation status={task.status} /></span>
     {/if}
-    <span class="name"><span class="name-text">{task.title}</span><span class="resource-ref">{task.ref}</span>{#if !editing && task.unreadCount > 0}<span class="unread-badge" aria-label={`${task.unreadCount} unread ${task.unreadCount === 1 ? "Turn" : "Turns"}`}>{task.unreadCount > 99 ? "99+" : task.unreadCount}</span>{/if}</span>
+    <span class="name"><span class="name-text">{task.title}</span>{@render chatIndicator(task)}<span class="resource-ref">{task.ref}</span></span>
     {#if editing}
       <span class="row-actions"></span>
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <span class="drag-handle" draggable="true" title="Drag to reorder" ondragstart={(event) => beginDrag(event, { kind: "task", id: task.id, projectId: project.id, containerId })} ondragend={finishDrag}><Icon name="grip-vertical" className="drag-handle-icon" /></span>
     {/if}
   </button>
+{/snippet}
+
+{#snippet chatIndicator(item: ShellResourceItem)}
+  {#if !editing && (item.chatOpen || item.unreadCount > 0)}
+    <span class="resource-chat-status">
+      {#if item.chatOpen}<span class="chat-open-icon" aria-label="Chat open" title="Chat open"><Icon name="messages-square" /></span>{/if}
+      {#if item.unreadCount > 0}<span class="unread-badge" aria-label={`${item.unreadCount} unread chat ${item.unreadCount === 1 ? "message" : "messages"}`}>{item.unreadCount > 99 ? "99+" : item.unreadCount}</span>{/if}
+    </span>
+  {/if}
 {/snippet}

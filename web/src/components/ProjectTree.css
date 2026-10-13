@@ -450,3 +450,12 @@
     padding: 0 10px;
   }
 }
+
+:where([data-component-owner="project-tree"]) .resource-chat-status {
+  display: inline-flex;
+  align-items: center;
+  align-self: center;
+  flex: 0 0 auto;
+  gap: 3px;
+}
+:where([data-component-owner="project-tree"]) .chat-open-icon { display: inline-flex; color: var(--sidebar-muted); }

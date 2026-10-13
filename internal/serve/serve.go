@@ -137,6 +137,8 @@ type resourceSnapshot struct {
 	LatestTurnAt     string                     `json:"latestTurnAt,omitempty"`
 	LatestAgentName  string                     `json:"latestAgentName,omitempty"`
 	UnreadCount      int                        `json:"unreadCount,omitempty"`
+	Chat             *chatSnapshot              `json:"chat,omitempty"`
+	DialogueEvents   *sessionReadSnapshot       `json:"dialogueEvents,omitempty"`
 	Children         []resourceSnapshot         `json:"children,omitempty"`
 }
 

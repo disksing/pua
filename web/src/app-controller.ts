@@ -245,7 +245,6 @@ interface UploadContext { workspaceId?: string; resourceId?: string }
 const {
 	applyCustomOrder,
 	archiveRedirectTarget,
-	aggregatedUnreadCount,
 	moveIdInList,
 	projectTaskSummary,
 	resourceRefText,
@@ -640,7 +639,6 @@ async function loadTree(options: LoadTreeOptions = {}) {
 	await refreshResourceMessageStatus(workspaceId, selectedAgentResourceId());
 	if (!isCurrentWorkspaceView(workspaceId, navigationVersion, treeRequestVersion)) return;
 	if (!isCurrentWorkspaceView(workspaceId, navigationVersion, treeRequestVersion)) return;
-	await markSelectedResourceRead();
 	if (!isCurrentWorkspaceView(workspaceId, navigationVersion, treeRequestVersion)) return;
 	establishNotificationBaseline();
 	controllerState.navigationLoading = false;
@@ -825,12 +823,8 @@ function appShellResourceModel(item: ResourceRecord, kind: "project" | "task", p
 	const expanded = kind === "project" && isProjectExpanded(item.id);
 	const summary = kind === "project" ? projectTaskSummary(item) : null;
 	const title = item.title || item.id;
-	// A collapsed Project aggregates its Tasks' unread Turns into its own
-	// badge; expanded Projects show only their own because each visible Task
-	// renders its own badge.
-	const unreadCount = kind === "project"
-		? aggregatedUnreadCount(Number(item.unreadCount) || 0, item.children || [], expanded)
-		: Number(item.unreadCount) || 0;
+	// Each resource owns its public chat; child chats are never aggregated.
+	const unreadCount = Number(item.chat?.unreadCount) || 0;
 	return {
 		id: item.id,
 		type: kind,
@@ -842,7 +836,7 @@ function appShellResourceModel(item: ResourceRecord, kind: "project" | "task", p
 			title,
 			summary?.ariaLabel,
 			taskState.label,
-			unreadCount ? `${unreadCount} unread ${unreadCount === 1 ? "Turn" : "Turns"}` : ""
+			unreadCount ? `${unreadCount} unread chat ${unreadCount === 1 ? "message" : "messages"}` : ""
 		].filter(Boolean).join(". "),
 		statusLabel: taskState.label || "",
 		status: appShellStatusModel(taskState.statusPresentation),
@@ -853,6 +847,7 @@ function appShellResourceModel(item: ResourceRecord, kind: "project" | "task", p
 		} : null,
 		children: kind === "project" ? appShellProjectChildrenModel(item) : [],
 		projectId,
+		chatOpen: Boolean(item.chat?.open),
 		unreadCount
 	};
 }
@@ -888,8 +883,7 @@ function appShellFolderModel(folder: SidebarFolder, project: ResourceRecord, tas
 	);
 	const children = taskIds.map((id) => taskById.get(id)).filter((task): task is ResourceRecord => Boolean(task)).map((task) => appShellResourceModel(task, "task", project.id));
 	const title = folder.name || SIDEBAR_FOLDER_DEFAULT_NAME;
-	// A collapsed folder aggregates the unread Turns of the Tasks it hides.
-	const unreadCount = aggregatedUnreadCount(0, children, folder.expanded);
+	const unreadCount = 0;
 	return {
 		id: folder.id,
 		type: "folder",
@@ -900,7 +894,7 @@ function appShellFolderModel(folder: SidebarFolder, project: ResourceRecord, tas
 		ariaLabel: [
 			`Folder ${title}`,
 			`${children.length} ${children.length === 1 ? "task" : "tasks"}`,
-			unreadCount ? `${unreadCount} unread ${unreadCount === 1 ? "Turn" : "Turns"}` : ""
+			unreadCount ? `${unreadCount} unread chat ${unreadCount === 1 ? "message" : "messages"}` : ""
 		].filter(Boolean).join(". "),
 		statusLabel: "",
 		status: appShellStatusModel(noTaskOperationalState().statusPresentation),
@@ -1203,14 +1197,13 @@ async function selectResource(id: string, options: SelectResourceOptions = {}): 
 	);
 	await detailPromise;
 	if (!isCurrentWorkspaceView(controllerState.activeWorkspaceId, controllerState.navigationVersion)) return;
-	// Details are independent of the status/read side effects below. Render
+	// Details are independent of the status request below. Render
 	// them immediately so selection remains usable when the status endpoint is
 	// delayed by resource reconciliation.
 	renderSelectionPanels();
 	const statusResult = await statusPromise;
 	if (!statusResult.ok) throw statusResult.error;
 	if (!isCurrentWorkspaceView(controllerState.activeWorkspaceId, controllerState.navigationVersion)) return;
-	await markSelectedResourceRead();
 	renderSelectionPanels();
 }
 async function toggleProject(id: string): Promise<void> {
@@ -1228,7 +1221,24 @@ async function toggleProject(id: string): Promise<void> {
 }
 function detailPanelModel(): DetailPanelModel {
 	const workspaceId = controllerState.activeWorkspaceId || "";
+	const resourceId = controllerState.selectedId || "";
+	const userName = currentUserName();
+	const unreadResource = findTreeResource(resourceId);
 	const base: DetailPanelModel = {
+		executionUnreadCount: unreadResource?.unreadCount || 0,
+		dialogueUnreadCount: unreadResource?.dialogueEvents?.unreadCount || 0,
+		onChatState: (chat) => {
+			if (workspaceId !== controllerState.activeWorkspaceId || userName !== currentUserName()) return;
+			const item = findTreeResource(resourceId);
+			if (!item || (!item.chat && !chat.open && !chat.unreadCount) || sameJSON(item.chat, chat)) return;
+			controllerState.treeRequestVersion++;
+			item.chat = chat;
+			renderAppShell();
+		},
+		onSessionRead: () => {
+			if (workspaceId !== controllerState.activeWorkspaceId || userName !== currentUserName()) return;
+			void refreshTreeAfterResourceMutation().then(() => publishViewModels()).catch(err => console.warn("read state refresh failed", err));
+		},
 		identity: workspaceId ? `${workspaceId}:${controllerState.selectedId || "workspace"}` : "empty",
 		workspaceId,
 		workspaceName: workspaceName(),
@@ -1485,45 +1495,6 @@ async function refreshTreeAfterResourceMutation(): Promise<void> {
 	if (!controllerState.activeWorkspaceId || !controllerState.tree) return;
 	const tree = await fetchCurrentTree(controllerState.activeWorkspaceId);
 	if (tree) controllerState.tree = tree;
-}
-async function markSelectedResourceRead(): Promise<boolean> {
-	const workspaceId = controllerState.activeWorkspaceId;
-	const resourceId = selectedAgentResourceId();
-	if (!workspaceId || !resourceId || !controllerState.tree) return false;
-	const item = findTreeResource(resourceId);
-	if (!item) return false;
-	const turnNumber = Number(item.latestTurnNumber) || 0;
-	const readTurnNumber = Number(item.userState?.readTurnNumber) || 0;
-	if (turnNumber <= 0 || turnNumber <= readTurnNumber) return false;
-	const navigationVersion = controllerState.navigationVersion;
-	const userState = await api<{ readTurnNumber?: number }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/resources/${encodeURIComponent(resourceId)}/read`, {
-		method: "PUT",
-		body: JSON.stringify({ throughTurnNumber: turnNumber })
-	});
-	if (!isCurrentWorkspaceView(workspaceId, navigationVersion) || selectedAgentResourceId() !== resourceId) return false;
-	updateResourceReadState(resourceId, userState);
-	return true;
-}
-
-function updateResourceReadState(resourceId: string, userState: { readTurnNumber?: number }): void {
-	const tree = controllerState.tree;
-	if (!tree) return;
-	const update = (item: ResourceRecord | null | undefined): void => {
-		if (!item || item.id !== resourceId) return;
-		item.userState = userState;
-		item.unreadCount = Math.max(0, (Number(item.latestTurnNumber) || 0) - (Number(userState.readTurnNumber) || 0));
-	};
-	update(tree.workspace);
-	update(tree.scheduler);
-	for (const project of tree.projects || []) {
-		update(project);
-		for (const task of project.children || []) update(task);
-	}
-	if (!tree.activity) return;
-	for (const items of Object.values(tree.activity)) {
-		for (const item of items) update(item);
-	}
-	tree.activity.unread = tree.activity.unread.filter((item) => item.id !== resourceId);
 }
 async function refreshResourceMessageStatus(workspaceId = controllerState.activeWorkspaceId, resourceId = selectedAgentResourceId()): Promise<boolean> {
 	if (!workspaceId || !resourceId) return false;

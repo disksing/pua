@@ -201,3 +201,38 @@ it.each([
  expect(messages()).toContain(`Canonical completed details ${role}`);
  expect(target.querySelector('.turn-collapsed-digest,.turn-collapsed-gap,.turn-collapse-again')).toBeNull();
 });
+
+it.each([false,true])('marks only the visible event channel read after history loads (dialogue=%s)',async dialogue=>{
+ installFetch();
+ const original=globalThis.fetch;
+ let completed=3;
+ const reads: Array<{path:string;body:unknown;user:string|null}>=[];
+ vi.stubGlobal('fetch',vi.fn(async(input,init)=>{
+  const path=String(input);
+  if(path.endsWith('/read')) {
+   reads.push({path,body:JSON.parse(String(init?.body)),user:new Headers(init?.headers).get('X-PUA-User')});
+   return response({readTurnNumber:completed});
+  }
+  if(path.includes('/history/turns/by-id')) {
+   const channel=dialogue?'dialogue':'execution';
+   return response({turn:{reference:`ref-${channel}`,turnId:'turn-1',closed:true,status:'completed',startEventId:1,lastEventId:4,generation:{generation:1,generationId:`gen-${channel}`,status:'idle'}},items:[{type:'message',role:'assistant',text:'finished update',startEventId:2,endEventId:4}],latestEventId:4});
+  }
+  const result=await original(input,init);
+  if(path.includes('/history/turns?')) {
+   const page=await result.json();
+   page.completedTurnNumber=completed;
+   return response(page);
+  }
+  return result;
+ }));
+ const pane=setup(dialogue);
+ const expected=`/api/workspaces/w/resources/project1.task1${dialogue?'/chat/runtime':''}/read`;
+ await vi.waitFor(()=>expect(reads).toEqual([{path:expected,body:{throughTurnNumber:3},user:'disksing'}]));
+ completed=4;
+ FakeEventSource.instances[0].emit(4,'turn.completed',{});
+ await vi.waitFor(()=>expect(reads).toHaveLength(2));
+ expect(reads[1]).toEqual({path:expected,body:{throughTurnNumber:4},user:'disksing'});
+ await pane.dispose();cleanups.pop();
+ FakeEventSource.instances[0].emit(5,'turn.completed',{});
+ await tick();expect(reads).toHaveLength(2);
+});

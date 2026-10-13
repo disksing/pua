@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/disksing/pua/internal/app"
+	"github.com/disksing/pua/internal/workspacepath"
 )
 
 // resourceAttentionState is the version 1 persisted shape. It is read only
@@ -428,6 +429,15 @@ func (s *server) handleResourceRead(w http.ResponseWriter, r *http.Request, work
 		writeError(w, err, http.StatusBadRequest)
 		return
 	}
+	s.handleSessionRead(w, r, workspace.Path, resourceID, userName)
+}
+
+// Callers validate the owning resource and current user before choosing a runtime partition.
+func (s *server) handleSessionRead(w http.ResponseWriter, r *http.Request, workspacePath, resourceID, userName string) {
+	if r.Method != http.MethodPut {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
 	var body struct {
 		ThroughTurnNumber *int `json:"throughTurnNumber"`
 	}
@@ -444,7 +454,7 @@ func (s *server) handleResourceRead(w http.ResponseWriter, r *http.Request, work
 		writeError(w, errors.New("throughTurnNumber must not be negative"), http.StatusBadRequest)
 		return
 	}
-	currentTurnNumber, err := s.currentCompletedResourceTurnNumber(workspace.Path, resourceID)
+	currentTurnNumber, err := s.currentCompletedResourceTurnNumber(workspacePath, resourceID)
 	if err != nil {
 		writeError(w, err, http.StatusInternalServerError)
 		return
@@ -453,7 +463,7 @@ func (s *server) handleResourceRead(w http.ResponseWriter, r *http.Request, work
 		writeError(w, fmt.Errorf("throughTurnNumber %d exceeds current completed Turn %d", *body.ThroughTurnNumber, currentTurnNumber), http.StatusBadRequest)
 		return
 	}
-	resourceState, err := s.mutateResourceUserStateAtPath(workspace.Path, resourceID, func(state *resourceUserState) {
+	resourceState, err := s.mutateResourceUserStateAtPath(workspacePath, resourceID, func(state *resourceUserState) {
 		if state.ReadTurnNumber == nil || *state.ReadTurnNumber < *body.ThroughTurnNumber {
 			state.ReadTurnNumber = cloneIntPointer(body.ThroughTurnNumber)
 		}
@@ -642,10 +652,39 @@ func (s *server) enrichTreeResourceActivity(workspacePath string, tree *workspac
 	if err != nil {
 		return fmt.Errorf("load resource generations for activity: %w", err)
 	}
+	chats := make(map[string]resourceChat)
+	// Read only this user's resource chats; tree reads never create chats or wake models.
+	chatMu.Lock()
+	paths, chatErr := filepath.Glob(filepath.Join(workspacepath.ControlDir(workspacePath), "chats", "*.json"))
+	if chatErr == nil {
+		for _, path := range paths {
+			c, err := loadChatLocked(workspacePath, strings.TrimSuffix(filepath.Base(path), ".json"))
+			if err != nil {
+				chatErr = err
+				break
+			}
+			if c.User == selectedUserName(userNames) && c.Epoch > 0 {
+				chats[c.ResourceID] = c
+			}
+		}
+	}
+	chatMu.Unlock()
+	if chatErr != nil {
+		return chatErr
+	}
 	latestCompletedTurns := latestCompletedTurnByResource(records)
 	var applyState func(*resourceSnapshot)
 	applyState = func(item *resourceSnapshot) {
 		resourceID := normalizedResourceID(item.ID)
+		if c, ok := chats[resourceID]; ok {
+			item.Chat = c.snapshot()
+			latest := latestCompletedTurns[c.address()].TurnNumber
+			read := 0
+			if cursor := resourceStates[c.address()].ReadTurnNumber; cursor != nil {
+				read = *cursor
+			}
+			item.DialogueEvents = &sessionReadSnapshot{LatestTurnNumber: latest, ReadTurnNumber: read, UnreadCount: max(0, latest-read)}
+		}
 		state, hasState := resourceStates[resourceID]
 		if hasState {
 			item.UserState = resourceUserStateSnapshotForState(state)
@@ -663,9 +702,7 @@ func (s *server) enrichTreeResourceActivity(workspacePath string, tree *workspac
 		if state.ReadTurnNumber != nil {
 			readTurnNumber = *state.ReadTurnNumber
 		}
-		// The Scheduler is an automation entry point rather than a
-		// conversation the user reads, so it never counts as unread.
-		if resourceID != app.SchedulerResourceID && item.LatestTurnNumber > readTurnNumber {
+		if item.LatestTurnNumber > readTurnNumber {
 			item.UnreadCount = item.LatestTurnNumber - readTurnNumber
 		}
 		for i := range item.Children {

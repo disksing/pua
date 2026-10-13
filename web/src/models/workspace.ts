@@ -28,6 +28,8 @@ export interface ResourceRecord {
   latestTurnAt?: string;
   latestAgentName?: string;
   unreadCount?: number;
+  chat?: { open: boolean; unreadCount: number };
+  dialogueEvents?: { latestTurnNumber: number; readTurnNumber: number; unreadCount: number };
 }
 
 export interface ResourceUserState {

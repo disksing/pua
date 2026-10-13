@@ -113,6 +113,8 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 			return
 		}
 		switch parts[1] {
+		case "read":
+			m.server.handleSessionRead(w, r, workspace.Path, c.address(), user)
 		case "history":
 			m.handleResourceHistory(w, r, workspaceID, c.address(), parts[2:])
 		case "status":

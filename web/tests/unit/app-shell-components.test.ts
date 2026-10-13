@@ -238,7 +238,7 @@ describe("AppShell responsibility components", () => {
     expect(folderRow.querySelector(".drag-handle")).toBeNull();
   });
 
-  it("ProjectTree shows an aggregated unread badge only on collapsed folders", async () => {
+  it("ProjectTree never assigns resource chat badges to virtual folders", async () => {
     const collapsed: ShellResourceItem = { ...resource("vf-1"), type: "folder", expanded: false, unreadCount: 5, children: [resource("task-a", "task")] };
     const expandedFolder: ShellResourceItem = { ...resource("vf-2"), type: "folder", expanded: true, unreadCount: 0, children: [{ ...resource("task-b", "task"), unreadCount: 2 }] };
     const project = { ...resource("project-a"), expanded: true, children: [collapsed, expandedFolder] };
@@ -254,12 +254,7 @@ describe("AppShell responsibility components", () => {
 
     const rows = target.querySelectorAll<HTMLElement>(".folder-item");
     expect(rows).toHaveLength(2);
-    // The aggregated badge follows the folder's task count.
-    const collapsedBadge = rows[0].querySelector<HTMLElement>(".folder-count + .unread-badge");
-    expect(collapsedBadge?.textContent).toBe("5");
-    expect(collapsedBadge?.getAttribute("aria-label")).toBe("5 unread Turns");
-    // An expanded folder carries no aggregate badge; its visible Tasks render
-    // their own badges inside the task group instead of the folder row.
+    expect(rows[0].querySelector(".unread-badge")).toBeNull();
     expect(rows[1].querySelector(".unread-badge")).toBeNull();
     expect(target.querySelector(".folder-task-group .task-item .unread-badge")?.textContent).toBe("2");
   });
@@ -431,11 +426,11 @@ describe("AppShell responsibility components", () => {
     const badges = target.querySelectorAll<HTMLElement>(".unread-badge");
     expect(badges).toHaveLength(2);
     expect(badges[0].textContent).toBe("2");
-    expect(badges[0].getAttribute("aria-label")).toBe("2 unread Turns");
+    expect(badges[0].getAttribute("aria-label")).toBe("2 unread chat messages");
     expect(badges[1].textContent).toBe("99+");
-    expect(badges[1].getAttribute("aria-label")).toBe("120 unread Turns");
-    expect(target.querySelector(".project-tree > .tree-item .resource-ref + .unread-badge")).toBe(badges[0]);
-    expect(target.querySelector(".task-item .resource-ref + .unread-badge")).toBe(badges[1]);
+    expect(badges[1].getAttribute("aria-label")).toBe("120 unread chat messages");
+    expect(target.querySelector(".project-tree > .tree-item .name-text + .resource-chat-status .unread-badge")).toBe(badges[0]);
+    expect(target.querySelector(".task-item .name-text + .resource-chat-status .unread-badge")).toBe(badges[1]);
   });
 
   it("ProjectTree replaces the Task file icon with exactly one workflow state icon", async () => {

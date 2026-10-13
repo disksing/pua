@@ -189,7 +189,7 @@ func TestActiveTurnDoesNotCountAsUnreadAndCannotBeMarkedRead(t *testing.T) {
 	}
 }
 
-func TestSchedulerNeverCountsAsUnread(t *testing.T) {
+func TestSchedulerCountsUnreadInEventTabs(t *testing.T) {
 	server, workspace := attentionTestServer(t)
 	now := "2026-08-13T00:00:00Z"
 	if err := rewriteTestGenerationRecords(workspace, []generationRecord{
@@ -210,11 +210,11 @@ func TestSchedulerNeverCountsAsUnread(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tree.Scheduler.UnreadCount != 0 || tree.Scheduler.LatestTurnNumber != 3 {
-		t.Fatalf("scheduler must not count unread Turns: %#v", tree.Scheduler)
+	if tree.Scheduler.UnreadCount != 3 || tree.Scheduler.LatestTurnNumber != 3 {
+		t.Fatalf("scheduler must count unread event Turns: %#v", tree.Scheduler)
 	}
-	if len(tree.Activity.Unread) != 1 || tree.Activity.Unread[0].ID != "project1" {
-		t.Fatalf("scheduler leaked into the unread list: %#v", tree.Activity.Unread)
+	if len(tree.Activity.Unread) != 2 {
+		t.Fatalf("missing unread event activity: %#v", tree.Activity.Unread)
 	}
 }
 

@@ -96,6 +96,10 @@ export interface DetailPanelModel {
   workspaceDefaults: { project: ResourceAgentBindingModel; task: ResourceAgentBindingModel };
   workspaceUsers: WorkspaceUser[];
   currentUserName: string;
+  executionUnreadCount?: number;
+  dialogueUnreadCount?: number;
+  onChatState?: (chat: { open: boolean; unreadCount: number }) => void;
+  onSessionRead?: () => void;
   generationPolicy: GenerationPolicyRecord;
   stallWatchdogPolicy: StallWatchdogPolicyRecord;
   agentBinding: ResourceAgentBindingModel;

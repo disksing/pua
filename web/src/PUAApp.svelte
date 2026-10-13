@@ -3,7 +3,6 @@
   import ConfirmDialog from "./components/ConfirmDialog.svelte";
   import CreateDialog from "./components/CreateDialog.svelte";
   import DetailPanel from "./components/DetailPanel.svelte";
-  import ChatList from "./components/ChatList.svelte";
   import PersistentChat from "./components/PersistentChat.svelte";
   import SettingsModal from "./components/SettingsModal.svelte";
   import Toast from "./components/Toast.svelte";
@@ -15,7 +14,6 @@
 </script>
 
 <AppShell channel={channels.appShell}>
-  {#snippet chats()}<ChatList channel={channels.detail} />{/snippet}
   {#snippet details()}<DetailPanel channel={channels.detail} />{/snippet}
   {#snippet timeline()}<PersistentChat channel={channels.detail} />{/snippet}
   {#snippet composer()}{/snippet}

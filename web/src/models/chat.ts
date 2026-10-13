@@ -205,6 +205,7 @@ export interface ResourceHistorySegment {
 }
 
 export interface ResourceHistoryPage {
+  completedTurnNumber?: number;
   resourceId: string;
   segments: ResourceHistorySegment[];
   page: { limit: number; nextCursor?: string; hasMore: boolean };
@@ -281,6 +282,7 @@ export interface TimelineItem {
 }
 
 export interface ChatContextSnapshot {
+  completedTurnNumber?: number;
   identity: string;
   workspaceId: string;
   resourceId: string;

@@ -50,3 +50,40 @@ it("retries an uncertain send with the same id and never uses the execution mail
  button(target, "Send").click(); await vi.waitFor(() => expect(ids).toHaveLength(2)); expect(ids[0]).toBe(ids[1]);
  expect(fetch.mock.calls.filter(([path]) => String(path).endsWith("/messages")).every(([path]) => String(path).includes("/chat/messages"))).toBe(true);
 });
+
+it("publishes chat counts and marks public messages read without touching either event cursor",async()=>{
+ const reads:string[]=[];
+ let unreadCount=2;
+ vi.stubGlobal('fetch',vi.fn(async(input,init)=>{
+  const path=String(input);
+  if(path.endsWith('/status'))return response({sessionState:'idle'});
+  if(init?.method==='POST'){reads.push(path);unreadCount=0;}
+  return response({id:'c',open:true,epoch:1,unreadCount,messages:[{id:'last',role:'agent',text:'Public unread',createdAt:'2026-10-14T00:00:00Z'}]});
+ }));
+ const {channel}=setup();const onChatState=vi.fn();
+ channel.publish({...channel.current(),onChatState});
+ await vi.waitFor(()=>expect(onChatState).toHaveBeenLastCalledWith({open:true,unreadCount:0}));
+ expect(onChatState).toHaveBeenCalledWith({open:true,unreadCount:2});
+ expect(reads).toEqual(['/api/workspaces/w/resources/project1.task1/chat/read']);
+});
+
+it("ignores a pending old user's chat read after switching user",async()=>{
+ let release: (value:Response)=>void=()=>{};
+ const pendingRead=new Promise<Response>(resolve=>release=resolve);
+ const fetch=vi.fn(async(input,init)=>{
+  const path=String(input),user=new Headers(init?.headers).get('X-PUA-User');
+  if(path.endsWith('/status'))return response({sessionState:'idle'});
+  if(path.endsWith('/read'))return pendingRead;
+  return response({id:user,open:user==='disksing',epoch:1,unreadCount:user==='disksing'?1:0,messages:user==='disksing'?[{id:'old',role:'agent',text:'old user history',createdAt:'2026-10-14T00:00:00Z'}]:[]});
+ });
+ vi.stubGlobal('fetch',fetch);
+ const {channel,target}=setup();const onChatState=vi.fn();
+ channel.publish({...channel.current(),onChatState});
+ await vi.waitFor(()=>expect(fetch.mock.calls.some(([path])=>String(path).endsWith('/read'))).toBe(true));
+ channel.publish({...channel.current(),currentUserName:'other'});
+ await vi.waitFor(()=>expect(onChatState).toHaveBeenLastCalledWith({open:false,unreadCount:0}));
+ const count=onChatState.mock.calls.length;
+ release(response({id:'disksing',open:true,unreadCount:0,messages:[]}));await tick();
+ expect(onChatState).toHaveBeenCalledTimes(count);
+ expect(target.textContent).not.toContain('old user history');
+});

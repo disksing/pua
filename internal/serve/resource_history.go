@@ -128,9 +128,10 @@ type resourceHistorySegment struct {
 }
 
 type resourceHistoryPage struct {
-	ResourceID string                   `json:"resourceId"`
-	Segments   []resourceHistorySegment `json:"segments"`
-	Page       struct {
+	CompletedTurnNumber int                      `json:"completedTurnNumber"`
+	ResourceID          string                   `json:"resourceId"`
+	Segments            []resourceHistorySegment `json:"segments"`
+	Page                struct {
 		Limit      int    `json:"limit"`
 		NextCursor string `json:"nextCursor,omitempty"`
 		HasMore    bool   `json:"hasMore"`
@@ -345,6 +346,7 @@ func (m *agentManager) resourceHistoryPage(ctx context.Context, workspace serveW
 		return resourceHistoryPage{}, &resourceAPIError{Code: "history_index_corrupt", Message: err.Error()}
 	}
 	page := resourceHistoryPage{ResourceID: resourceID, Segments: []resourceHistorySegment{}}
+	page.CompletedTurnNumber = latestCompletedTurnByResource(records)[resourceID].TurnNumber
 	page.Page.Limit = limit
 	if len(records) == 0 {
 		return page, nil

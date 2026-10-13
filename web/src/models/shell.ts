@@ -35,6 +35,7 @@ export interface ShellResourceItem {
   children: ShellResourceItem[];
   projectId?: string;
   unreadCount: number;
+  chatOpen?: boolean;
 }
 
 export interface ShellActivityItem {

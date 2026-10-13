@@ -8,7 +8,7 @@
   let { channel }: { channel: ModelChannel<DetailPanelModel> } = $props();
   // svelte-ignore state_referenced_locally
   let model = $state(channel.current());
-  type Chat = { id: string; open: boolean; epoch: number; messages: Array<{ id: string; role: string; text: string; createdAt: string }> };
+  type Chat = { id: string; open: boolean; epoch: number; unreadCount: number; messages: Array<{ id: string; role: string; text: string; createdAt: string }> };
   let chat = $state<Chat | null>(null);
   let root: HTMLElement;
   let followTail = true;
@@ -34,8 +34,14 @@
       if (loading) return; loading = true; const revision = mutationRevision;
       try { const next = await client.request<Chat>(path, { headers: userHeaders }); if (!disposed && key === identity && revision === mutationRevision && !pending) {
         chat = next;
+        model.onChatState?.({ open: next.open, unreadCount: next.unreadCount || 0 });
+        await tick();
+        if (disposed || key !== identity || revision !== mutationRevision) return;
         const last=next.messages.at(-1);
-        if (last && document.visibilityState !== "hidden" && followTail) await client.request(`${path}/read`, { method:"POST", headers:{...userHeaders,"Content-Type":"application/json"}, body:JSON.stringify({id:last.id}) });
+        if (last && next.unreadCount > 0 && document.visibilityState !== "hidden" && followTail) {
+          const read = await client.request<Chat>(`${path}/read`, { method:"POST", headers:{...userHeaders,"Content-Type":"application/json"}, body:JSON.stringify({id:last.id}) });
+          if (!disposed && key === identity && revision === mutationRevision) model.onChatState?.({ open: read.open, unreadCount: read.unreadCount || 0 });
+        }
       } }
       catch (e) { if (!disposed) error = String(e); }
       finally { loading = false; }
@@ -61,6 +67,7 @@
     try {
       const next = await client.request<Chat>(`${base}/${operation}`, { method: "POST", headers, body: JSON.stringify(body) });
       if (key !== identity) return; chat = next;
+      model.onChatState?.({ open: next.open, unreadCount: next.unreadCount || 0 });
       if (operation === "messages") { draft = ""; requestID = ""; }
     } catch (e) { if (key === identity) error = String(e); }
     finally { if (key === identity) pending = false; }

@@ -103,6 +103,28 @@ func ensureChatLocked(root, resourceID, user string) (resourceChat, error) {
 	return c, saveChatLocked(root, c)
 }
 func (c resourceChat) address() string { return dialoguePrefix + c.ID }
+
+type chatSnapshot struct {
+	Open        bool `json:"open"`
+	UnreadCount int  `json:"unreadCount"`
+}
+
+type sessionReadSnapshot struct {
+	LatestTurnNumber int `json:"latestTurnNumber"`
+	ReadTurnNumber   int `json:"readTurnNumber"`
+	UnreadCount      int `json:"unreadCount"`
+}
+
+func (c resourceChat) snapshot() *chatSnapshot {
+	unread := 0
+	for i, message := range c.Messages {
+		if i >= c.ReadThrough && message.Role == "agent" {
+			unread++
+		}
+	}
+	return &chatSnapshot{Open: c.Open, UnreadCount: unread}
+}
+
 func (c resourceChat) public() any {
 	return struct {
 		ID              string           `json:"id"`
@@ -114,7 +136,8 @@ func (c resourceChat) public() any {
 		IntervalSeconds int              `json:"intervalSeconds"`
 		NextCheckAt     string           `json:"nextCheckAt,omitempty"`
 		TimerMode       string           `json:"timerMode"`
-	}{c.ID, c.ResourceID, c.Open, c.Epoch, c.Binding, c.Messages, c.IntervalSeconds, c.NextCheckAt, "once"}
+		UnreadCount     int              `json:"unreadCount"`
+	}{c.ID, c.ResourceID, c.Open, c.Epoch, c.Binding, c.Messages, c.IntervalSeconds, c.NextCheckAt, "once", c.snapshot().UnreadCount}
 }
 func (c *resourceChat) appendMessage(id, role, text string) error {
 	if strings.TrimSpace(id) == "" || len(id) > 200 || strings.TrimSpace(text) == "" {

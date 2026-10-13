@@ -21,9 +21,29 @@
     headers.set("X-PUA-User", selected.currentUserName);
     return fetch(route(String(input)), { ...init, headers });
   });
+  let disposed = false;
+  let readThrough = 0;
+  let desiredRead = 0;
+  let reading = false;
+  async function viewed(snapshot: import("./models").ChatContextSnapshot) {
+    desiredRead = Math.max(desiredRead, snapshot.completedTurnNumber || 0);
+    if (disposed || reading || desiredRead <= readThrough) return;
+    reading = true;
+    try {
+      while (!disposed && desiredRead > readThrough) {
+        const through = desiredRead;
+        await api.latest(`${base}/read`, { scope: "read", method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ throughTurnNumber: through }) });
+        if (disposed) return;
+        readThrough = through;
+        selected.onSessionRead?.();
+      }
+    } catch { /* A later history snapshot retries without clearing unread state. */ }
+    finally { reading = false; }
+  }
   const controllerOptions = {
     api,
     collapseNonUserTurns: false,
+    trackReadState: true,
     eventSourceFactory: (path: string) => {
       const url = new URL(route(path), window.location.href);
       // EventSource has no custom headers. Only the dialogue GET stream
@@ -46,8 +66,8 @@
     void api.latest<ResourceMessageStatus>(`${base}/status`, { scope: "initial-status" })
       .then(status => channel.publish({ ...channel.current(), status }))
       .catch(() => { /* The controller's status sync retries transient failures. */ });
-    return () => api.dispose();
+    return () => { disposed = true; api.dispose(); };
   });
 </script>
 
-<EventTimeline {channel} {controllerOptions} readOnly />
+<EventTimeline {channel} {controllerOptions} onViewed={viewed} readOnly />

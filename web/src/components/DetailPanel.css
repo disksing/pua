@@ -166,6 +166,24 @@
   font-weight: 700;
 }
 
+/* Keep unread badges blue and legible independently of the active tab accent. */
+:where([data-component-owner="detail-panel"]) .event-unread-count {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 18px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--blue-line);
+  color: var(--ink-deep);
+  font-size: calc(11px * var(--details-font-scale, 1));
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
 :where([data-component-owner="detail-panel"]) .details-tab-count {
   display: inline-block;
   padding: 0 6px;

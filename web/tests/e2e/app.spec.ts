@@ -2816,3 +2816,103 @@ test("keeps Workspace settings card actions inside a 440px mobile viewport witho
     }
   }
 });
+
+test("resource event tabs show isolated live timelines without model input", async ({ page }, testInfo) => {
+  const harness = await installMockApi(page);
+  let revision = 10;
+  let open = true;
+  let running = true;
+  let dialogueBinding = { kind: "profile", name: "default" };
+  const writes: string[] = [];
+  const streams: string[] = [];
+  await page.addInitScript(() => {
+    const NativeEventSource = window.EventSource;
+    const records: Array<{ url: string; closed: boolean }> = [];
+    (window as unknown as { eventStreams: typeof records }).eventStreams = records;
+    window.EventSource = class extends NativeEventSource {
+      record: { url: string; closed: boolean };
+      constructor(url: string | URL, init?: EventSourceInit) {
+        super(url, init);
+        this.record = { url: String(url), closed: false }; records.push(this.record);
+      }
+      close() { this.record.closed = true; super.close(); }
+    };
+  });
+  await page.route("**/api/workspaces/ws-test/**", async route => {
+    const req = route.request(), url = new URL(req.url()), path = url.pathname;
+    if (req.method() !== "GET") writes.push(path);
+    if (path.endsWith("/chats")) return json(route, { chats: [] });
+    const match = path.match(/\/resources\/([^/]+)(\/chat\/runtime)?\/(.*)$/);
+    if (!match) return route.fallback();
+    const resourceId = decodeURIComponent(match[1]), dialogue = Boolean(match[2]), op = match[3];
+    const channel = dialogue ? "dialogue" : "execution";
+    const generationId = `gen-${channel}-${resourceId}`, sessionId = `session-${channel}-${resourceId}`;
+    const generation = { generation: 1, generationId, status: running ? "running" : "idle", agentName: "test-agent", createdAt: now };
+    const turn = { reference: `ref-${channel}`, turnId: "turn-1", closed: false, status: "active", startEventId: 1, lastEventId: 3, startedAt: now, generation };
+    const chat = () => ({id:"chat-test",resourceId,open,epoch:1,binding:dialogueBinding,intervalSeconds:0,messages:[{id:"public-1",role:"agent",text:"Public conversation remains separate",createdAt:now}]});
+    if (op === "chat") return json(route, chat());
+    if (op === "chat/read") return json(route, chat());
+    if (op === "chat/close" || op === "chat/open") { open = op.endsWith("open"); return json(route,chat()); }
+    if (op === "chat/binding") { dialogueBinding=req.postDataJSON().binding;return json(route,chat()); }
+    if (op === "status") return json(route,{resourceId,generation,sessionState:running?"working":"idle",session:{id:sessionId,state:running?"running":"idle",currentTurnId:running?"turn-1":""},waitingMessages:[],acceptsMessages:true});
+    if (op === "history/turns") return json(route,{resourceId,segments:[{generation,turns:[turn]}],page:{hasMore:false}});
+    if (op.startsWith("history/turns/ref-")) return json(route,{turn,latestEventId:3,items:[
+      {type:"message",role:"user",text:`${channel} trigger for ${resourceId}`,startEventId:1,endEventId:1},
+      {type:"message",role:"assistant",text:Array.from({length:20},(_,i)=>`${channel} history paragraph ${i+1}`).join("\n\n"),startEventId:2,endEventId:2},
+      {type:"tool",callId:"tool-1",name:"Command",summary:`echo ${channel}`,status:"completed",startEventId:3,endEventId:3},
+    ]});
+    if (op === "events") {
+      const events = [
+        {id:1,type:"message.user",data:{role:"user",text:`${channel} trigger for ${resourceId}`}},
+        {id:2,type:"message.assistant.delta",data:{role:"assistant",text:Array.from({length:20},(_,i)=>`${channel} history paragraph ${i+1}`).join("\n\n")}},
+        {id:3,type:"tool.call",data:{schemaVersion:1,callId:"tool-1",operation:"finish",toolKind:"command",name:"Command",summary:`echo ${channel}`,status:"completed",output:{text:"tool output verified",mode:"replace"}}},
+      ];
+      const frames=events.filter(e=>e.id>Number(url.searchParams.get("after")||0)).map(e=>({schema:"agenthub.semantic-events.v1",cursor:e.id,mode:"replace",source:{eventId:e.id,type:e.type,sessionId,turnId:"turn-1",time:now},events:[{id:`sem_${e.id}_0`,sourceEventId:e.id,index:0,type:e.type,sessionId,turnId:"turn-1",time:now,data:e.data}]}));
+      return json(route,{schema:"agenthub.semantic-events.v1",frames,latestCursor:3,page:{hasMore:false,nextAfter:3}});
+    }
+    if (op === "stream") {
+      streams.push(req.url());
+      const type="message.assistant.delta";
+      const frame={schema:"agenthub.semantic-events.v1",cursor:revision,mode:"replace",source:{eventId:revision,type,sessionId,turnId:"turn-1",time:now},events:[{id:`sem_${revision}_0`,sourceEventId:revision,index:0,type,sessionId,turnId:"turn-1",time:now,data:{role:"assistant",text:`${channel} live revision ${revision}`}}]};
+      return route.fulfill({status:200,contentType:"text/event-stream",body:`retry: 200\nid: ${revision}\ndata: ${JSON.stringify(frame)}\n\n`});
+    }
+    return route.fallback();
+  });
+  await page.goto("/w/ws-test/r/project1.task1");
+  const details=page.locator("#detailsPanel");
+  await details.getByRole("tab",{name:"Execution events",exact:true}).click();
+  await expect(details).toContainText("execution live revision 10");
+  await expect(details.locator('[data-component-owner="event-timeline"]').first()).toBeVisible();
+  await expect(details.locator("textarea,input")).toHaveCount(0);
+  await expect(details.getByRole("button",{name:"Execution model",exact:true})).toBeVisible();
+  await expect(details.locator(".agent-message-row")).toContainText(["execution trigger", "execution history paragraph", "execution live revision"]);
+  const geometry=await details.locator(".channel-timeline").evaluate(el=>({client:el.clientHeight,scroll:el.scrollHeight,overflow:getComputedStyle(el).overflowY}));
+  expect(geometry.client).toBeGreaterThan(100);expect(geometry.scroll).toBeGreaterThan(geometry.client);expect(geometry.overflow).toBe("auto");
+  revision=11;
+  await expect(details).toContainText("execution live revision 11");
+  await details.locator(".agent-activity-group > summary").click();
+  await details.locator(".agent-tool-item > summary").click();
+  await expect(details.getByText("tool output verified",{exact:true})).toBeVisible();
+  await page.screenshot({path:testInfo.outputPath("execution-events.png")});
+  await details.getByRole("tab",{name:"Dialog events",exact:true}).click();
+  await expect(details).toContainText("dialogue live revision 11");
+  await expect(details).not.toContainText("execution live revision");
+  expect(streams.some(s=>s.includes("/chat/runtime/stream") && new URL(s).searchParams.get("user")==="User")).toBe(true);
+  expect(await page.evaluate(()=> (window as unknown as {eventStreams:Array<{url:string;closed:boolean}>}).eventStreams.filter(s=>!s.url.includes('/chat/runtime')).every(s=>s.closed))).toBe(true);
+  await expect(details.locator("textarea,input")).toHaveCount(0);
+  await details.getByRole("button",{name:"Dialogue model",exact:true}).click();
+  await details.locator('[role="option"][data-binding="profile:review"]').click();
+  await expect.poll(()=>dialogueBinding.name).toBe("review");
+  await expect(details.getByRole("button",{name:"Dialogue model",exact:true})).toContainText("review");
+  expect(harness.bindingBodies).toHaveLength(0);
+  await page.screenshot({path:testInfo.outputPath("dialog-events.png")});
+  running=false;
+  await expect(details.locator(".turn-working-indicator")).toHaveCount(0);
+  expect(writes.filter(p=>/\/(timer|messages|approval)$/.test(p))).toEqual([]);
+  expect(harness.inputBodies).toHaveLength(0);
+  await page.getByRole("button",{name:"Close chat",exact:true}).click();
+  await expect(page.getByText("Public conversation remains separate",{exact:true})).toBeVisible();
+  await expect(details).toContainText("dialogue history paragraph");
+  await page.getByRole("button",{name:"Reopen chat",exact:true}).click();
+  await expect(page.getByText("Public conversation remains separate",{exact:true})).toBeVisible();
+});

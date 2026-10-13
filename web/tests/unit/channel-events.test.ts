@@ -1,5 +1,6 @@
 import { mount, tick, unmount } from "svelte";
 import { afterEach, expect, it, vi } from "vitest";
+import ApprovalCard from "../../src/components/ApprovalCard.svelte";
 import ChannelEvents from "../../src/components/ChannelEvents.svelte";
 import { MemoryStorage } from "../fixtures/memory-storage";
 import DetailPanel from "../../src/components/DetailPanel.svelte";
@@ -59,10 +60,10 @@ it('renders both original timelines live, read-only, through isolated transports
  const dialogueStream=FakeEventSource.instances.find(s=>s.url.includes('/chat/runtime'))!;
  expect(new URL(dialogueStream.url,'http://localhost').searchParams.get('user')).toBe('disksing');
  expect(executionStream.url).not.toContain('user=');
- dialogueStream.emit(3,'message.delta',{text:'dialogue live reply',role:'assistant'});
+ dialogueStream.emit(3,'message.assistant.delta',{text:'dialogue live reply',role:'assistant'});
  executionStream.emit(3,'tool.call',{schemaVersion:1,callId:'tool-1',operation:'start',toolKind:'command',name:'Command',summary:'echo execution',status:'running'});
  await vi.waitFor(()=>{
-  expect(dialogue.target.textContent).toContain('dialogue live reply');
+  expect(dialogue.target.querySelector('.agent-message-row')?.parentElement?.textContent).toContain('dialogue live reply');
   expect(execution.target.querySelector('.agent-activity-group')).not.toBeNull();
  });
  expect(execution.target.textContent).not.toContain('dialogue live reply');
@@ -85,7 +86,7 @@ it('closes subscriptions on tab replacement and ignores frames from the old pane
  const dialogue=setup(true);
  await vi.waitFor(()=>expect(dialogue.target.textContent).toContain('dialogue history'));
  const requestCount=requests.length;
- old.emit(9,'message.delta',{text:'stale execution output',role:'assistant'});
+ old.emit(9,'message.assistant.delta',{text:'stale execution output',role:'assistant'});
  await tick();
  expect(dialogue.target.textContent).not.toContain('stale execution output');
  expect(requests).toHaveLength(requestCount);
@@ -123,7 +124,19 @@ it('cleans up the real detail tabs when switching resource, user or channel',asy
  expect(third.closed).toBe(true);
  tab('Dialog events').click();
  await vi.waitFor(()=>expect(FakeEventSource.instances.at(-1)?.url).toContain('/project1.task2/chat/runtime/'));
- first.emit(99,'message.delta',{text:'late old-resource event',role:'assistant'});
+ first.emit(99,'message.assistant.delta',{text:'late old-resource event',role:'assistant'});
  await tick();
  expect(target.textContent).not.toContain('late old-resource event');
 });
+
+ it('retains approval details and decisions without an action or reply input', async () => {
+  const target = document.body.appendChild(document.createElement('div'));
+  const component = mount(ApprovalCard, {target,props:{readOnly:true,generationId:'gen',contextIdentity:'dialogue',onApproval:vi.fn(),onToast:vi.fn(),item:{kind:'approval',approvalId:'a1',status:'pending',title:'Command approval',question:'Run this command?',detail:'echo inspection',options:[{optionId:'yes',name:'Allow once'}]}}});
+  cleanups.push(()=>unmount(component));
+  await tick();
+  expect(target.textContent).toContain('Run this command?');
+  expect(target.textContent).toContain('echo inspection');
+  expect(target.textContent).toContain('Pending');
+  expect(target.textContent).toContain('Allow once');
+  expect(target.querySelector('input,button,form')).toBeNull();
+ });

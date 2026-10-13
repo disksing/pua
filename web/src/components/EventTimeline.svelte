@@ -461,7 +461,7 @@
               {:else if item.kind === "activity"}
                 <ActivityGroup {item} onExpand={() => expandCompact(item)} />
               {:else if item.kind === "approval"}
-                {#if readOnly}<TimelineNotice title="Approval" text={item.text || item.approvalId || "Approval requested"} />{:else}<ApprovalCard {item} generationId={block.generation.generationId} contextIdentity={snapshot.identity} onApproval={model.onApproval} onToast={model.onToast} />{/if}
+                <ApprovalCard {item} {readOnly} generationId={block.generation.generationId} contextIdentity={snapshot.identity} onApproval={model.onApproval} onToast={model.onToast} />
               {:else if item.kind === "lifecycle"}
                 <LifecycleNotice {item} />
               {:else if item.kind === "error"}

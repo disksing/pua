@@ -504,6 +504,10 @@ func TestChatAndEventReadCursorsRemainIndependentPerUser(t *testing.T) {
 		for _, p := range tree.Projects {
 			for _, task := range p.Children {
 				if task.ID == resource {
+					wantActivity := task.Chat != nil && task.Chat.UnreadCount > 0
+					if (len(tree.Activity.Unread) == 1) != wantActivity {
+						t.Fatalf("chat activity does not follow chat cursor: %+v", tree.Activity.Unread)
+					}
 					return task
 				}
 			}

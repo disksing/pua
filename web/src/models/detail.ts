@@ -82,6 +82,7 @@ export interface WorkspaceAgentsModel extends Partial<FilePreviewModel> {
 }
 
 export interface DetailPanelModel {
+  chatFocusRequest?: number;
   identity: string;
   workspaceId: string;
   workspaceName: string;

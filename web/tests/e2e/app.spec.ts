@@ -72,6 +72,7 @@ type MockActivityResource = {
   userState?: { readTurnNumber?: number };
   latestTurnNumber?: number;
   unreadCount?: number;
+  chat?: { open: boolean; unreadCount: number };
   runtime?: { activeTurn?: boolean; [key: string]: unknown };
 };
 
@@ -315,7 +316,7 @@ async function installMockApi(page: Page, lastResourceId = "project1.task1", wit
       const activityCandidates: MockActivityResource[] = [projectSnapshot, ...projectSnapshot.children].map((item) => ({ ...item, children: undefined }));
       const activity = {
         running: activityCandidates.filter((item) => item.runtime?.activeTurn),
-        unread: activityCandidates.filter((item) => Number(item.unreadCount || 0) > 0),
+        unread: activityCandidates.filter((item) => Number(item.chat?.unreadCount || 0) > 0),
         problems: activityCandidates.filter((item) => item.type === "task" && (item.state === "blocked" || item.state === "error")),
       };
       return json(route, {
@@ -3017,3 +3018,94 @@ for (const sidebarWidth of [280, 220]) {
     await page.locator('#treeEditButton').click();await expect(markers).toHaveCount(4);
   });
 }
+
+test("Activity Unread opens closed chat history without reading remembered event tabs", async ({ page }, testInfo) => {
+  test.setTimeout(60_000);
+  await installMockApi(page, "project1.task2");
+  const writes: Array<{ user: string; resource: string; op: string; through?: number }> = [];
+  const states = new Map<string, { open: boolean; unread: number; execution: number; dialogue: number; readExecution: number; readDialogue: number }>();
+  const state = (user: string, resource: string) => {
+    const key = `${user}:${resource}`;
+    if (!states.has(key)) states.set(key, { open: user === "User" && resource === "project1.task1", unread: user === "User" && resource === "project1.task1" ? 2 : 0, execution: 3, dialogue: 4, readExecution: 0, readDialogue: 0 });
+    return states.get(key)!;
+  };
+  await page.route("**/api/workspaces/ws-test/**", async route => {
+    const req = route.request(), path = new URL(req.url()).pathname, user = req.headers()["x-pua-user"] || "User";
+    if (path.endsWith("/users")) return json(route, { users: [{ name: "User", version: 1 }, { name: "Other", version: 1 }] });
+    if (path.endsWith("/tree")) {
+      const item = (resource: MockResource) => {
+        const s = state(user,resource.id);
+        return { ...resource, latestTurnNumber:s.execution, unreadCount:s.execution-s.readExecution, userState:{readTurnNumber:s.readExecution},
+          ...(s.open || s.unread ? {chat:{open:s.open,unreadCount:s.unread}} : {}),
+          dialogueEvents:{latestTurnNumber:s.dialogue,readTurnNumber:s.readDialogue,unreadCount:s.dialogue-s.readDialogue} };
+      };
+      return json(route, { projects:[{...item(project),children:project.children.map(item)}], workspace:{id:"workspace",type:"workspace",title:"Isolated E2E"}, activity:{
+        running:[{...item(project.children[1]), runtime:{activeTurn:true,turnNumber:7,turnStartedAt:now}}],
+        unread:[item(project),...project.children.map(item)].filter(r=>(r.chat?.unreadCount||0)>0),
+        problems:[{...item(project.children[1]),state:"blocked",stateNote:"Needs review"}]
+      } });
+    }
+    const match = path.match(/\/resources\/([^/]+)(\/chat\/runtime)?\/(.*)$/);
+    if (!match) return route.fallback();
+    const resource=match[1], dialogue=Boolean(match[2]), op=match[3], s=state(user,resource);
+    if (/chat\/(open|close|messages|timer)$/.test(op)) writes.push({user,resource,op});
+    const chat = () => ({id:`${user}-${resource}`,resourceId:resource,open:s.open,epoch:resource==="project1.task1"&&user==="User"?1:0,unreadCount:s.unread,binding:{kind:"profile",name:"default"},messages:resource==="project1.task1"&&user==="User"?[{id:"public-1",role:"agent",text:"Public history preserved",createdAt:now}]:[]});
+    if (op==="chat") return json(route,chat());
+    if (op==="chat/read") {writes.push({user,resource,op});s.unread=0;return json(route,chat());}
+    if (op==="chat/open"||op==="chat/close") {s.open=op.endsWith("open");return json(route,chat());}
+    const count=dialogue?s.dialogue:s.execution;
+    const channel=dialogue?"dialogue":"execution";
+    const generation={generation:1,generationId:`gen-${channel}-${resource}`,status:"idle",turnNumber:count,createdAt:now};
+    const turn={reference:`ref-${channel}-${count}`,turnId:`turn-${count}`,closed:true,status:"completed",triggerRole:"system",startEventId:1,lastEventId:2,generation};
+    if(op==="status")return json(route,{resourceId:resource,generation,sessionState:"idle",session:{state:"idle"},waitingMessages:[]});
+    if(op==="history/turns")return json(route,{resourceId:resource,completedTurnNumber:count,segments:[{generation,turns:[turn]}],page:{hasMore:false}});
+    if(op.startsWith("history/turns/"))return json(route,{turn,latestEventId:2,items:[{type:"message",role:"assistant",text:`${channel} completed ${count}`,startEventId:1,endEventId:2}]});
+    if(op==="read") {const through=req.postDataJSON().throughTurnNumber;writes.push({user,resource,op:dialogue?"dialogue-read":"execution-read",through});if(dialogue)s.readDialogue=through;else s.readExecution=through;return json(route,{readTurnNumber:through});}
+    if(op==="stream")return route.fulfill({status:200,contentType:"text/event-stream",body:"retry: 1000\n\n"});
+    if(op==="events")return json(route,{schema:"agenthub.semantic-events.v1",frames:[],page:{hasMore:false}});
+    return route.fallback();
+  });
+  await page.goto("/w/ws-test/r/project1.task2");
+  await page.getByRole("button",{name:"U User No preference set",exact:true}).click();
+  const activity=page.locator('.attention-section');
+  await expect(activity.getByRole('tab',{name:'Running 1',exact:true})).toBeVisible();
+  await expect(activity.locator('.activity-meta')).toContainText('Turn 7');
+  await activity.getByRole('tab',{name:'Issues 1',exact:true}).click();
+  await expect(activity.locator('.activity-meta')).toContainText('Turn 3');
+  await activity.getByRole('tab',{name:'Unread 1',exact:true}).click();
+  await expect(activity.locator('.activity-meta')).toContainText('2 unread chat messages');
+  await expect(activity.locator('.activity-meta')).not.toContainText('Turn');
+  await activity.locator('button.activity-row').click();
+  const chat=page.getByRole('region',{name:'Resource chat',exact:true});
+  await expect(chat).toBeFocused();
+  await expect(activity.getByRole('tab',{name:'Unread 0',exact:true})).toBeVisible();
+  await expect(activity).toContainText('All chat messages have been read.');
+  expect(writes.filter(w=>w.op.endsWith('-read'))).toHaveLength(0);
+  const details=page.locator('#detailsPanel');
+  await details.getByRole('tab',{name:/^Execution events/}).click();
+  await expect.poll(()=>state('User','project1.task1').readExecution).toBe(3);
+  await page.locator('#projectTree [data-task-id="project1.task2"]').click();
+  const target=state('User','project1.task1');
+  target.open=false;target.unread=2;target.execution=4;
+  await expect(activity.getByRole('tab',{name:'Unread 1',exact:true})).toBeVisible({timeout:10_000});
+  await expect(activity.locator('button.activity-row')).toHaveCount(1);
+  await expect(activity.locator('.activity-meta')).toContainText('2 unread chat messages');
+  await page.screenshot({path:testInfo.outputPath('activity-chat-unread.png')});
+  const readCount=writes.filter(w=>w.op.endsWith('-read')).length;
+  await activity.locator('button.activity-row').click();
+  await expect(chat).toBeFocused();
+  await expect(chat).toContainText('Public history preserved');
+  await expect(chat.getByRole('button',{name:'Reopen chat',exact:true})).toBeVisible();
+  await expect(details.getByRole('tab',{name:'Task',exact:true})).toHaveAttribute('aria-selected','true');
+  await expect(details.getByRole('tab',{name:/^Execution events/})).toContainText('1');
+  await expect(details.getByRole('tab',{name:/^Dialog events/})).toContainText('4');
+  await expect(activity.getByRole('tab',{name:'Unread 0',exact:true})).toBeVisible();
+  expect(writes.filter(w=>w.op.endsWith('-read'))).toHaveLength(readCount);
+  expect(writes.filter(w=>/chat\/(open|close|messages|timer)$/.test(w.op))).toEqual([]);
+  expect(target.open).toBe(false);
+  await activity.getByRole('tab',{name:'Running 1',exact:true}).click();
+  await expect(activity.locator('.activity-meta')).toContainText('Turn 7');
+  await activity.getByRole('tab',{name:'Issues 1',exact:true}).click();
+  await expect(activity.locator('.activity-meta')).toContainText('Turn 3');
+  await page.screenshot({path:testInfo.outputPath('activity-chat-focus.png')});
+});

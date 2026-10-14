@@ -136,6 +136,7 @@ export interface AppShellModel {
   onRefreshDoctor: () => Promise<void>;
   onToggleProject: (id: string) => Promise<void>;
   onSelectResource: (id: string) => Promise<void>;
+  onSelectChat?: (id: string) => Promise<void>;
   onReorder: (drag: ShellDragTarget, target: ShellDragTarget, after: boolean) => Promise<void>;
   onDragState: (drag: ShellDragTarget | null) => void;
   onToggleTreeEditing: () => void;

@@ -49,6 +49,18 @@
     void refresh(); const timer = setInterval(refresh, 2000);
     return () => { disposed = true; clearInterval(timer); };
   });
+  let lastFocusRequest = 0;
+  $effect(() => {
+    const request = model.chatFocusRequest;
+    if (!request || request === lastFocusRequest) return;
+    lastFocusRequest = request;
+    const key = identity;
+    void tick().then(() => {
+      if (key !== identity) return;
+      root?.focus({ preventScroll: true });
+      root?.scrollIntoView({ block: "nearest" });
+    });
+  });
   function trackScroll(element: HTMLElement) {
     root = element;
     const container = element.closest<HTMLElement>("#chatTimeline");
@@ -98,7 +110,7 @@
     void act("messages", { id: requestID, text: sentText });
   }
 </script>
-<section use:trackScroll class="persistent-chat" aria-label="Resource chat">
+<section tabindex="-1" use:trackScroll class="persistent-chat" aria-label="Resource chat">
   <header><strong>Chat</strong><span>{model.resourceTitle}</span>{#if chat?.open && model.resourceId !== "workspace" && !model.detail?.archived}<button disabled={pending} onclick={() => act("close")}>Close chat</button>{/if}</header>
   {#if chat}<SessionControls {model} />{#if chat.open}<SessionControls {model} dialogue={true} />{:else}<small>Dialogue: closed</small>{/if}{/if}
   <div class="public-messages" aria-live="polite">

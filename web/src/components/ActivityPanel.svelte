@@ -12,6 +12,7 @@
     resolveResourceTitle = () => null,
     onNavigate = () => {},
     onSelect,
+    onSelectChat,
     onToast,
   }: {
     activity: ShellActivityLists;
@@ -19,6 +20,7 @@
     resolveResourceTitle?: ResourceTitleResolver;
     onNavigate?: (resourceId: string) => void;
     onSelect: (id: string) => Promise<void>;
+    onSelectChat?: (id: string) => Promise<void>;
     onToast: (message: string) => void;
   } = $props();
 
@@ -48,6 +50,7 @@
   }
 
   function metadata(item: ShellActivityItem): string {
+    if (activeTab === "unread") return `${item.ref || item.id} · ${item.unreadCount} unread chat message${item.unreadCount === 1 ? "" : "s"}`;
     return [
       item.ref || item.id,
       item.agentName ? `Agent ${item.agentName}` : "",
@@ -57,14 +60,14 @@
   }
 
   function emptyMessage(tab: ActivityTab): string {
-    if (tab === "unread") return "All resource Turns have been read.";
+    if (tab === "unread") return "All chat messages have been read.";
     if (tab === "problems") return "No blocked or error Tasks.";
     return "No resources are currently running.";
   }
 
   async function select(item: ShellActivityItem): Promise<void> {
     try {
-      await onSelect(item.id);
+      await (activeTab === "unread" ? onSelectChat || onSelect : onSelect)(item.id);
     } catch (reason) {
       onToast(reason instanceof Error ? reason.message : String(reason));
     }

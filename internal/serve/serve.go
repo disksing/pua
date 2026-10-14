@@ -122,24 +122,25 @@ type fileTreeEntry struct {
 }
 
 type resourceSnapshot struct {
-	ID               string                     `json:"id"`
-	Type             string                     `json:"type"`
-	Title            string                     `json:"title"`
-	Path             string                     `json:"path"`
-	Archived         bool                       `json:"archived"`
-	AgentBinding     app.AgentBinding           `json:"agentBinding"`
-	State            app.TaskState              `json:"state,omitempty"`
-	StateNote        string                     `json:"stateNote,omitempty"`
-	StateUpdatedAt   string                     `json:"stateUpdatedAt,omitempty"`
-	Runtime          *resourceRuntimeSnapshot   `json:"runtime,omitempty"`
-	UserState        *resourceUserStateSnapshot `json:"userState,omitempty"`
-	LatestTurnNumber int                        `json:"latestTurnNumber,omitempty"`
-	LatestTurnAt     string                     `json:"latestTurnAt,omitempty"`
-	LatestAgentName  string                     `json:"latestAgentName,omitempty"`
-	UnreadCount      int                        `json:"unreadCount,omitempty"`
-	Chat             *chatSnapshot              `json:"chat,omitempty"`
-	DialogueEvents   *sessionReadSnapshot       `json:"dialogueEvents,omitempty"`
-	Children         []resourceSnapshot         `json:"children,omitempty"`
+	ID                 string                     `json:"id"`
+	Type               string                     `json:"type"`
+	Title              string                     `json:"title"`
+	Path               string                     `json:"path"`
+	Archived           bool                       `json:"archived"`
+	AgentBinding       app.AgentBinding           `json:"agentBinding"`
+	State              app.TaskState              `json:"state,omitempty"`
+	StateNote          string                     `json:"stateNote,omitempty"`
+	StateUpdatedAt     string                     `json:"stateUpdatedAt,omitempty"`
+	Runtime            *resourceRuntimeSnapshot   `json:"runtime,omitempty"`
+	UserState          *resourceUserStateSnapshot `json:"userState,omitempty"`
+	LatestTurnNumber   int                        `json:"latestTurnNumber,omitempty"`
+	LatestUnreadChatAt string                     `json:"latestUnreadChatAt,omitempty"`
+	LatestTurnAt       string                     `json:"latestTurnAt,omitempty"`
+	LatestAgentName    string                     `json:"latestAgentName,omitempty"`
+	UnreadCount        int                        `json:"unreadCount,omitempty"`
+	Chat               *chatSnapshot              `json:"chat,omitempty"`
+	DialogueEvents     *sessionReadSnapshot       `json:"dialogueEvents,omitempty"`
+	Children           []resourceSnapshot         `json:"children,omitempty"`
 }
 
 type filePreview struct {

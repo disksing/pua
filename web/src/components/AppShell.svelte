@@ -128,7 +128,7 @@
   {#if !model.userGate?.mode}
     <ProjectTree identity={model.identity} loading={model.loading} error={model.error} projects={model.projects} editing={model.treeEditing} onCreate={model.onCreateProject} onToggle={model.onToggleProject} onSelect={model.onSelectResource} onReorder={model.onReorder} onDragState={model.onDragState} onToggleEditing={model.onToggleTreeEditing} onCreateFolder={model.onCreateFolder} onRenameFolder={model.onRenameFolder} onDeleteFolder={model.onDeleteFolder} onToggleFolder={model.onToggleFolder} onToast={model.onToast} />
     <PaneResizeHandle id="activityResize" kind="sidebarAttentionHeight" className="horizontal-resize sidebar-activity-resize" label="Resize activity panel" onPreview={model.onPanePreview} onCommit={model.onPaneCommit} />
-    <ActivityPanel activity={model.activity} workspaceId={model.activeWorkspaceId} resolveResourceTitle={model.resolveResourceTitle} onNavigate={(id) => { void model.onSelectResource(id); }} onSelect={model.onSelectResource} onToast={model.onToast} />
+    <ActivityPanel onSelectChat={model.onSelectChat} activity={model.activity} workspaceId={model.activeWorkspaceId} resolveResourceTitle={model.resolveResourceTitle} onNavigate={(id) => { void model.onSelectResource(id); }} onSelect={model.onSelectResource} onToast={model.onToast} />
   {/if}
 </aside>
 <PaneResizeHandle id="sidebarResize" kind="sidebarWidth" className="sidebar-resize" label="Resize sidebar" onPreview={model.onPanePreview} onCommit={model.onPaneCommit} />

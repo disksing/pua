@@ -602,7 +602,8 @@ describe("AppShell responsibility components", () => {
     };
     const target = document.body.appendChild(document.createElement("div"));
     const activity = { running: [activeItem], unread: [activeItem, item], problems: [] };
-    const component = mount(ActivityPanel, { target, props: { activity, onSelect, onToast: vi.fn() } });
+    const onSelectChat = vi.fn(async () => undefined);
+    const component = mount(ActivityPanel, { target, props: { activity, onSelect, onSelectChat, onToast: vi.fn() } });
     cleanups.push(() => unmount(component));
     await tick();
 
@@ -614,7 +615,16 @@ describe("AppShell responsibility components", () => {
 
     target.querySelector<HTMLElement>('[role="tab"]:nth-child(2)')!.click();
     await tick();
+    expect(target.querySelector(".activity-title")?.textContent).toContain("#2 · 1 unread chat message");
+    expect(target.querySelector('[role="tabpanel"]')?.textContent).not.toContain("Turn");
+    target.querySelector<HTMLElement>('[aria-label^="Project A."]')!.click();
+    await vi.waitFor(() => expect(onSelectChat).toHaveBeenCalledWith("project-a"));
+    expect(onSelect).not.toHaveBeenCalled();
+    target.querySelector<HTMLElement>('[role="tab"]:nth-child(1)')!.click();
+    await tick();
     expect(target.querySelector(".activity-title")?.textContent).toContain("#2 · Agent Codex · Turn 3 · Resource working");
+    target.querySelector<HTMLElement>('[aria-label^="Task B."]')!.click();
+    await vi.waitFor(() => expect(onSelect).toHaveBeenCalledWith("task-b"));
   });
 
   it("PaneResizeHandle resizes and commits the Activity panel height", async () => {

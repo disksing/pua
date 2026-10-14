@@ -84,6 +84,7 @@ interface ControllerState {
 	autoRefreshVersion: number;
 	treeRequestVersion: number;
 	navigationVersion: number;
+	chatFocusRequest: number;
 	detailRequestVersion: number;
 	workspaceAgentsRequestVersion: number;
 	diffRequestVersion: number;
@@ -151,6 +152,7 @@ const controllerState: ControllerState = {
 	autoRefreshVersion: 0,
 	treeRequestVersion: 0,
 	navigationVersion: 0,
+	chatFocusRequest: 0,
 	detailRequestVersion: 0,
 	workspaceAgentsRequestVersion: 0,
 	diffRequestVersion: 0,
@@ -239,7 +241,7 @@ interface LoadTreeOptions { updateURL?: boolean; replaceURL?: boolean }
 interface LoadDetailOptions { force?: boolean }
 interface FetchDetailOptions {}
 interface WorkspaceAgentsOptions { force?: boolean }
-interface SelectResourceOptions { clearUnread?: boolean; forceDetail?: boolean }
+interface SelectResourceOptions { clearUnread?: boolean; forceDetail?: boolean; focusChat?: boolean }
 interface RenderOptions { skipDraftSync?: boolean }
 interface UploadContext { workspaceId?: string; resourceId?: string }
 const {
@@ -933,10 +935,10 @@ function appShellActivityModel(item: ResourceRecord, category: keyof ShellActivi
 		ref: type === "project" || type === "task" ? resourceRefText(item.id) : "",
 		selected: controllerState.selectedId === item.id,
 		activeTurn: Boolean(item.runtime?.activeTurn),
-		unreadCount: Number(item.unreadCount) || 0,
+		unreadCount: Number(category === "unread" ? item.chat?.unreadCount : item.unreadCount) || 0,
 		turnNumber: category === "running" ? Number(item.runtime?.turnNumber) || 0 : Number(item.latestTurnNumber) || 0,
 		agentName: String(item.runtime?.agentName || item.latestAgentName || "").trim(),
-		statusLabel: state.label || (category === "unread" ? `${Number(item.unreadCount) || 0} unread` : "Active turn"),
+		statusLabel: category === "unread" ? `${Number(item.chat?.unreadCount) || 0} unread chat messages` : state.label || "Active turn",
 		status: appShellStatusModel(state.statusPresentation)
 	};
 }
@@ -983,6 +985,7 @@ function renderAppShell() {
 		onRefreshDoctor: requestDoctorRefresh,
 		onToggleProject: (id) => toggleProject(id),
 		onSelectResource: (id) => selectResource(id),
+		onSelectChat: (id) => selectResource(id, { focusChat: true, clearUnread: false }),
 		onReorder: (drag, target, after) => commitListDrag(drag, target, after),
 		onDragState: (drag) => {
 			controllerState.listDrag = drag;
@@ -1155,6 +1158,7 @@ async function toggleFolder(id: string): Promise<void> {
 	});
 }
 async function selectResource(id: string, options: SelectResourceOptions = {}): Promise<void> {
+	if (options.focusChat) controllerState.chatFocusRequest++;
 	const selectionChanged = controllerState.selectedId !== id;
 	if (options.clearUnread !== false) clearUnreadForResource(id);
 	const forceDetail = selectionChanged || Boolean(options.forceDetail);
@@ -1225,6 +1229,7 @@ function detailPanelModel(): DetailPanelModel {
 	const userName = currentUserName();
 	const unreadResource = findTreeResource(resourceId);
 	const base: DetailPanelModel = {
+		chatFocusRequest: controllerState.chatFocusRequest,
 		executionUnreadCount: unreadResource?.unreadCount || 0,
 		dialogueUnreadCount: unreadResource?.dialogueEvents?.unreadCount || 0,
 		onChatState: (chat) => {
@@ -1233,7 +1238,13 @@ function detailPanelModel(): DetailPanelModel {
 			if (!item || (!item.chat && !chat.open && !chat.unreadCount) || sameJSON(item.chat, chat)) return;
 			controllerState.treeRequestVersion++;
 			item.chat = chat;
+			if (controllerState.tree?.activity) {
+				controllerState.tree.activity.unread = controllerState.tree.activity.unread.filter(entry => entry.id !== resourceId || chat.unreadCount > 0);
+				const entry = controllerState.tree.activity.unread.find(entry => entry.id === resourceId);
+				if (entry) entry.chat = chat;
+			}
 			renderAppShell();
+			void refreshTreeAfterResourceMutation().then(() => publishViewModels()).catch(err => console.warn("chat state refresh failed", err));
 		},
 		onSessionRead: () => {
 			if (workspaceId !== controllerState.activeWorkspaceId || userName !== currentUserName()) return;

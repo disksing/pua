@@ -27,6 +27,7 @@
   const tabMemory = new Map<string, string>();
   const client = new ApiClient();
   let refreshVersion = 0;
+  let chatFocusRequest = 0;
 
   type PreviewScrollState = { key: string; scrollTop: number; scrollLeft: number };
 
@@ -58,6 +59,12 @@
       if (content) content.scrollTop = 0;
     } else if (tabs.length && !tabs.some((tab) => tab.id === activeTab)) {
       activeTab = tabs[0].id;
+    }
+    if (next.chatFocusRequest && next.chatFocusRequest !== chatFocusRequest) {
+      chatFocusRequest = next.chatFocusRequest;
+      // Chat navigation must not mount a remembered event tab and mark it read.
+      activeTab = next.resourceType ? initialTab(next) : "task";
+      tabMemory.set(identity, activeTab);
     }
     void tick().then(() => {
       if (currentRefreshVersion === refreshVersion) restorePreviewScrollState(previewScrollState);

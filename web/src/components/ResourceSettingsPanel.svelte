@@ -15,6 +15,7 @@
   let pending = $state("");
   let interval = $state(30);
   let conditionMaxChars = $state(128);
+  let descriptionMaxChars = $state(32);
   let generationBudgetEnabled = $state(true);
   let generationMaxTurns = $state(20);
   let generationMaxMinutes = $state(120);
@@ -38,6 +39,9 @@
     conditionMaxChars = model.detail?.scheduler?.conditionMaxChars ?? 128;
   });
   $effect(() => {
+    descriptionMaxChars = model.detail?.scheduler?.descriptionMaxChars ?? 32;
+  });
+  $effect(() => {
     generationBudgetEnabled = model.generationPolicy.budgetEnabled;
     generationMaxTurns = model.generationPolicy.maxTurns;
     generationMaxMinutes = model.generationPolicy.maxAccumulatedTurnMinutes;
@@ -58,6 +62,8 @@
   const schedulerConfig = $derived(model.detail?.scheduler);
   const schedulerIntervalValid = $derived(Number.isInteger(interval) && interval >= 1 && interval <= 10080);
   const schedulerConditionLimitValid = $derived(Number.isInteger(conditionMaxChars) && conditionMaxChars >= 1 && conditionMaxChars <= 65536);
+  const schedulerDescriptionLimitValid = $derived(Number.isInteger(descriptionMaxChars) && descriptionMaxChars >= 1 && descriptionMaxChars <= 65536);
+  const savedDescriptionLimit = $derived(schedulerConfig?.descriptionMaxChars ?? 32);
   const taskDefault = $derived<ResourceAgentBindingModel>(model.detail?.taskDefault?.name ? { kind: model.detail.taskDefault.kind, name: model.detail.taskDefault.name } : { kind: "profile", name: "" });
   const description = $derived(model.detail?.description || "");
 
@@ -202,13 +208,24 @@
     }
   }
 
+  function schedulerSettingsBody(overrides: { wakeIntervalMinutes?: number; conditionMaxChars?: number; descriptionMaxChars?: number } = {}) {
+    const config = schedulerConfig;
+    if (!config) return null;
+    return {
+      agentBinding: config.agentBinding,
+      wakeIntervalMinutes: overrides.wakeIntervalMinutes ?? config.wakeIntervalMinutes,
+      conditionMaxChars: overrides.conditionMaxChars ?? config.conditionMaxChars,
+      descriptionMaxChars: overrides.descriptionMaxChars ?? config.descriptionMaxChars ?? 32,
+    };
+  }
+
   function saveSchedulerInterval(): void {
     const config = schedulerConfig;
     if (!config || !schedulerIntervalValid) return;
     void run("interval", async () => {
       await client.request(`/api/workspaces/${encodeURIComponent(model.workspaceId)}/scheduler/settings`, {
         method: "PUT",
-        body: JSON.stringify({ agentBinding: config.agentBinding, wakeIntervalMinutes: interval, conditionMaxChars: config.conditionMaxChars }),
+        body: JSON.stringify(schedulerSettingsBody({ wakeIntervalMinutes: interval })),
       });
       await model.onRefreshScheduler?.();
       model.onToast("Scheduler interval saved.");
@@ -221,10 +238,23 @@
     void run("conditionLimit", async () => {
       await client.request(`/api/workspaces/${encodeURIComponent(model.workspaceId)}/scheduler/settings`, {
         method: "PUT",
-        body: JSON.stringify({ agentBinding: config.agentBinding, wakeIntervalMinutes: config.wakeIntervalMinutes, conditionMaxChars }),
+        body: JSON.stringify(schedulerSettingsBody({ conditionMaxChars })),
       });
       await model.onRefreshScheduler?.();
       model.onToast("Scheduler condition limit saved.");
+    });
+  }
+
+  function saveSchedulerDescriptionLimit(): void {
+    const config = schedulerConfig;
+    if (!config || !schedulerDescriptionLimitValid) return;
+    void run("descriptionLimit", async () => {
+      await client.request(`/api/workspaces/${encodeURIComponent(model.workspaceId)}/scheduler/settings`, {
+        method: "PUT",
+        body: JSON.stringify(schedulerSettingsBody({ descriptionMaxChars })),
+      });
+      await model.onRefreshScheduler?.();
+      model.onToast("Scheduler description limit saved.");
     });
   }
 </script>
@@ -368,6 +398,14 @@
               <label><input type="number" min="1" max="65536" step="1" bind:value={conditionMaxChars} disabled={Boolean(pending)} aria-label="Scheduler condition character limit" aria-invalid={schedulerConditionLimitValid ? undefined : "true"} aria-describedby={schedulerConditionLimitValid ? undefined : "schedulerConditionLimitError"} /><span>characters</span></label>
               <button type="button" class="secondary-button" disabled={Boolean(pending) || !schedulerConditionLimitValid || conditionMaxChars === schedulerConfig.conditionMaxChars} onclick={saveSchedulerConditionLimit}><Icon name="save" /><span>Save</span></button>
               {#if !schedulerConditionLimitValid}<span id="schedulerConditionLimitError" class="resource-settings-field-error" role="alert">Enter a whole number between 1 and 65536 characters.</span>{/if}
+            </div>
+          </div>
+          <div class="resource-settings-row">
+            <div class="resource-settings-row-label"><strong>Description character limit</strong><span>Maximum characters when adding or changing a description. Existing descriptions are preserved.</span></div>
+            <div class="resource-settings-interval resource-settings-description-limit">
+              <label><input type="number" min="1" max="65536" step="1" bind:value={descriptionMaxChars} disabled={Boolean(pending)} aria-label="Scheduler description character limit" aria-invalid={schedulerDescriptionLimitValid ? undefined : "true"} aria-describedby={schedulerDescriptionLimitValid ? undefined : "schedulerDescriptionLimitError"} /><span>characters</span></label>
+              <button type="button" class="secondary-button" disabled={Boolean(pending) || !schedulerDescriptionLimitValid || descriptionMaxChars === savedDescriptionLimit} onclick={saveSchedulerDescriptionLimit}><Icon name="save" /><span>Save</span></button>
+              {#if !schedulerDescriptionLimitValid}<span id="schedulerDescriptionLimitError" class="resource-settings-field-error" role="alert">Enter a whole number between 1 and 65536 characters.</span>{/if}
             </div>
           </div>
         </div>

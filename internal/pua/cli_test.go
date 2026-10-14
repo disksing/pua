@@ -91,6 +91,18 @@ func TestSchedulerCommandsManageNaturalLanguageSchedules(t *testing.T) {
 				t.Fatalf("oversized CLI condition error = %v", err)
 			}
 		}
+		tooLongDescription := strings.Repeat("😀", 33)
+		for _, args := range [][]string{
+			{"scheduler", "add", "--description=" + tooLongDescription, "--condition=now", "--target=workspace"},
+			{"scheduler", "update", "--id=" + created.ID, "--description=" + tooLongDescription},
+		} {
+			if _, err := runErr(t, args...); err == nil || !strings.Contains(err.Error(), "at most 32 characters (got 33)") {
+				t.Fatalf("oversized CLI description error = %v", err)
+			}
+		}
+		if _, err := runErr(t, "scheduler", "add", "--description=   ", "--condition=now", "--target=workspace"); err == nil {
+			t.Fatal("blank description was accepted")
+		}
 		removed := run(t, "scheduler", "remove", "--id="+created.ID)
 		if !strings.Contains(removed, created.ID) || strings.TrimSpace(run(t, "scheduler", "list")) != "" {
 			t.Fatalf("remove result = %s", removed)

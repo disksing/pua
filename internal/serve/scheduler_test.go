@@ -46,10 +46,10 @@ func TestSchedulerHTTPAPIUsesApplicationStore(t *testing.T) {
 	if updatedResponse.Code != http.StatusOK || updatedErr != nil || updated.Target != app.SchedulerResourceID {
 		t.Fatalf("update schedule = %d %s", updatedResponse.Code, updatedResponse.Body.String())
 	}
-	settingsResponse := request(http.MethodPut, "/api/workspaces/workspace-scheduler/scheduler/settings", `{"agentBinding":{"kind":"agent","name":"cheap-scheduler"},"wakeIntervalMinutes":60,"conditionMaxChars":16}`)
+	settingsResponse := request(http.MethodPut, "/api/workspaces/workspace-scheduler/scheduler/settings", `{"agentBinding":{"kind":"agent","name":"cheap-scheduler"},"wakeIntervalMinutes":60,"conditionMaxChars":16,"descriptionMaxChars":8}`)
 	var settings app.SchedulerConfig
 	settingsErr := json.Unmarshal(settingsResponse.Body.Bytes(), &settings)
-	if settingsResponse.Code != http.StatusOK || settingsErr != nil || settings.WakeIntervalMinutes != 60 || settings.ConditionMaxChars != 16 {
+	if settingsResponse.Code != http.StatusOK || settingsErr != nil || settings.WakeIntervalMinutes != 60 || settings.ConditionMaxChars != 16 || settings.DescriptionMaxChars != 8 {
 		t.Fatalf("update Scheduler settings = %d %s", settingsResponse.Code, settingsResponse.Body.String())
 	}
 	for _, method := range []string{http.MethodPost, http.MethodPut} {
@@ -62,12 +62,42 @@ func TestSchedulerHTTPAPIUsesApplicationStore(t *testing.T) {
 			t.Fatalf("oversized %s = %d %s", method, response.Code, response.Body.String())
 		}
 	}
+	for _, method := range []string{http.MethodPost, http.MethodPut} {
+		path := "/api/workspaces/workspace-scheduler/scheduler"
+		if method == http.MethodPut {
+			path += "/" + created.ID
+		}
+		response := request(method, path, `{"description":"`+strings.Repeat("😀", 9)+`","condition":"now","target":"workspace"}`)
+		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "description must be at most 8 characters (got 9)") {
+			t.Fatalf("oversized description %s = %d %s", method, response.Code, response.Body.String())
+		}
+	}
+	// Raise the description limit, store an oversized value, then lower it again.
+	if response := request(http.MethodPut, "/api/workspaces/workspace-scheduler/scheduler/settings", `{"agentBinding":{"kind":"agent","name":"cheap-scheduler"},"wakeIntervalMinutes":60,"descriptionMaxChars":12}`); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"conditionMaxChars": 16`) {
+		t.Fatalf("omitted condition limit = %d %s", response.Code, response.Body.String())
+	}
+	longDescription := strings.Repeat("\u4e2d", 12)
+	if response := request(http.MethodPut, "/api/workspaces/workspace-scheduler/scheduler/"+created.ID, `{"description":"`+longDescription+`"}`); response.Code != http.StatusOK {
+		t.Fatalf("raise description = %d %s", response.Code, response.Body.String())
+	}
+	if response := request(http.MethodPut, "/api/workspaces/workspace-scheduler/scheduler/settings", `{"agentBinding":{"kind":"agent","name":"cheap-scheduler"},"wakeIntervalMinutes":60,"descriptionMaxChars":4}`); response.Code != http.StatusOK {
+		t.Fatalf("lower description limit = %d %s", response.Code, response.Body.String())
+	}
+	otherFields := request(http.MethodPut, "/api/workspaces/workspace-scheduler/scheduler/"+created.ID, `{"condition":"next month","target":"workspace"}`)
+	var preserved app.Schedule
+	if err := json.Unmarshal(otherFields.Body.Bytes(), &preserved); err != nil || otherFields.Code != http.StatusOK || preserved.Description != longDescription || preserved.Condition != "next month" {
+		t.Fatalf("update other fields with long description = %d %s", otherFields.Code, otherFields.Body.String())
+	}
 	invalidSettings := request(http.MethodPut, "/api/workspaces/workspace-scheduler/scheduler/settings", `{"agentBinding":{"kind":"profile","name":"default"},"wakeIntervalMinutes":30,"conditionMaxChars":0}`)
 	if invalidSettings.Code != http.StatusBadRequest {
 		t.Fatalf("invalid limit = %d %s", invalidSettings.Code, invalidSettings.Body.String())
 	}
+	invalidDescriptionLimit := request(http.MethodPut, "/api/workspaces/workspace-scheduler/scheduler/settings", `{"agentBinding":{"kind":"profile","name":"default"},"wakeIntervalMinutes":30,"descriptionMaxChars":0}`)
+	if invalidDescriptionLimit.Code != http.StatusBadRequest {
+		t.Fatalf("invalid description limit = %d %s", invalidDescriptionLimit.Code, invalidDescriptionLimit.Body.String())
+	}
 	legacySettings := request(http.MethodPut, "/api/workspaces/workspace-scheduler/scheduler/settings", `{"agentBinding":{"kind":"profile","name":"default"},"wakeIntervalMinutes":45}`)
-	if legacySettings.Code != http.StatusOK || !strings.Contains(legacySettings.Body.String(), `"conditionMaxChars": 16`) {
+	if legacySettings.Code != http.StatusOK || !strings.Contains(legacySettings.Body.String(), `"conditionMaxChars": 16`) || !strings.Contains(legacySettings.Body.String(), `"descriptionMaxChars": 4`) {
 		t.Fatalf("omitted limit = %d %s", legacySettings.Code, legacySettings.Body.String())
 	}
 	readResponse := request(http.MethodGet, "/api/workspaces/workspace-scheduler/scheduler", "")

@@ -22,6 +22,7 @@ const config: SchedulerConfigRecord = {
   agentBinding: { kind: "profile", name: "default" },
   wakeIntervalMinutes: 30,
   conditionMaxChars: 128,
+  descriptionMaxChars: 32,
   schedules: [],
 };
 
@@ -243,6 +244,44 @@ describe("SchedulerPanel validation", () => {
     expect(target.querySelector<HTMLTextAreaElement>("textarea")?.value).toBe("long condition");
     expect(target.querySelector<HTMLButtonElement>(".schedule-editor > button")?.disabled).toBe(true);
     inputValue(target.querySelector<HTMLTextAreaElement>("textarea")!, "ok");
+    await tick();
+    expect(target.querySelector<HTMLButtonElement>(".schedule-editor > button")?.disabled).toBe(false);
+  });
+
+  it("counts Unicode characters and blocks oversized descriptions using the configured limit", async () => {
+    const fetch = vi.fn(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetch);
+    const target = mountPanel({ ...config, descriptionMaxChars: 2 });
+    await openAdd(target);
+    const description = target.querySelector<HTMLInputElement>('input[aria-label="Description"]')!;
+    const save = target.querySelector<HTMLButtonElement>(".schedule-editor > button")!;
+    inputValue(target.querySelector<HTMLTextAreaElement>("textarea")!, "ok");
+    inputValue(description, "\u4e2d😀\u4e2d");
+    await tick();
+    expect(description.getAttribute("aria-invalid")).toBe("true");
+    expect(target.querySelector("#schedule-description-error")?.textContent).toContain("at most 2 characters");
+    expect(save.disabled).toBe(true);
+    save.click();
+    expect(fetch).not.toHaveBeenCalled();
+    inputValue(description, " \u4e2d😀 ");
+    await tick();
+    expect(target.textContent).toContain("Description (2/2)");
+    expect(description.getAttribute("aria-invalid")).toBe("false");
+    expect(save.disabled).toBe(false);
+    save.click();
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+  });
+
+  it("requires an existing oversized description to be shortened before saving an edit", async () => {
+    const target = mountPanel({ ...config, descriptionMaxChars: 2, schedules: [{
+      id: "schedule-legacy", description: "Legacy", condition: "ok", target: "workspace", createdAt: "", updatedAt: "",
+    }] });
+    await tick();
+    Array.from(target.querySelectorAll<HTMLButtonElement>(".schedule-list button")).find((button) => button.textContent?.includes("Edit"))!.click();
+    await tick();
+    expect(target.querySelector<HTMLInputElement>('input[aria-label="Description"]')?.value).toBe("Legacy");
+    expect(target.querySelector<HTMLButtonElement>(".schedule-editor > button")?.disabled).toBe(true);
+    inputValue(target.querySelector<HTMLInputElement>('input[aria-label="Description"]')!, "ok");
     await tick();
     expect(target.querySelector<HTMLButtonElement>(".schedule-editor > button")?.disabled).toBe(false);
   });

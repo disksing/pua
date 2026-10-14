@@ -25,6 +25,9 @@
   let editorOpen = $state(false);
   let dialog: HTMLDialogElement | undefined = $state();
   const targetError = $derived(validateTarget(target));
+  const descriptionCount = $derived(Array.from(description.trim()).length);
+  const descriptionLimit = $derived(config.descriptionMaxChars ?? 32);
+  const descriptionError = $derived(descriptionCount > descriptionLimit ? `Description must be at most ${descriptionLimit} characters.` : "");
   const conditionCount = $derived(Array.from(condition.trim()).length);
   const conditionLimit = $derived(config.conditionMaxChars ?? 128);
   const conditionError = $derived(conditionCount > conditionLimit ? `Condition must be at most ${conditionLimit} characters.` : "");
@@ -76,7 +79,7 @@
   }
 
   async function saveSchedule(): Promise<void> {
-    if (!description.trim() || !condition.trim() || conditionError || targetError || saving) return;
+    if (!description.trim() || !condition.trim() || descriptionError || conditionError || targetError || saving) return;
     saving = true;
     saveError = "";
     const wasEditing = Boolean(editingId);
@@ -146,11 +149,11 @@
 {#if editorOpen}
 <div class="schedule-editor">
   <div class="schedule-editor-heading"><div><strong>{editingId ? "Edit schedule" : "Add schedule"}</strong><span>Conditions are natural language interpreted by the Scheduler Agent.</span></div><button type="button" class="secondary-button" disabled={saving} onclick={closeEditor}>Cancel</button></div>
-  <label><span>Description</span><input bind:value={description} disabled={saving} placeholder="What should the Scheduler understand?" /></label>
+  <label><span>Description ({descriptionCount}/{descriptionLimit})</span><input bind:value={description} disabled={saving} placeholder="What should the Scheduler understand?" aria-label="Description" aria-invalid={Boolean(descriptionError)} aria-describedby={descriptionError ? "schedule-description-error" : undefined} />{#if descriptionError}<small id="schedule-description-error" class="schedule-field-error" role="alert">{descriptionError}</small>{/if}</label>
   <label><span>Condition ({conditionCount}/{conditionLimit})</span><textarea bind:value={condition} disabled={saving} rows="3" aria-label="Condition" placeholder="For example: when the release branch is green after 09:00 Shanghai time" aria-invalid={Boolean(conditionError)} aria-describedby={conditionError ? "schedule-condition-error" : undefined}></textarea>{#if conditionError}<small id="schedule-condition-error" class="schedule-field-error" role="alert">{conditionError}</small>{/if}</label>
   <label><span>Target resource ID</span><input bind:value={target} disabled={saving} placeholder="workspace, scheduler, project1, or project1.task1" aria-invalid={Boolean(targetError)} aria-describedby={targetError ? "schedule-target-error" : undefined} />{#if targetError}<small id="schedule-target-error" class="schedule-field-error" role="alert">{targetError}</small>{/if}</label>
   {#if saveError}<small class="schedule-field-error" role="alert">{saveError}</small>{/if}
-  <button type="button" class="primary-button" class:busy={saving} class:editing={Boolean(editingId)} disabled={saving || !description.trim() || !condition.trim() || Boolean(conditionError) || Boolean(targetError)} onclick={saveSchedule}><span class="schedule-icon schedule-icon-busy"><Icon name="loader-circle" /></span><span class="schedule-icon schedule-icon-editing"><Icon name="save" /></span><span class="schedule-icon schedule-icon-add"><Icon name="plus" /></span><span>{editingId ? "Update schedule" : "Add schedule"}</span></button>
+  <button type="button" class="primary-button" class:busy={saving} class:editing={Boolean(editingId)} disabled={saving || !description.trim() || !condition.trim() || Boolean(descriptionError) || Boolean(conditionError) || Boolean(targetError)} onclick={saveSchedule}><span class="schedule-icon schedule-icon-busy"><Icon name="loader-circle" /></span><span class="schedule-icon schedule-icon-editing"><Icon name="save" /></span><span class="schedule-icon schedule-icon-add"><Icon name="plus" /></span><span>{editingId ? "Update schedule" : "Add schedule"}</span></button>
 </div>
 
 {/if}

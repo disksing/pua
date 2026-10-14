@@ -210,6 +210,7 @@ async function installMockApi(page: Page, lastResourceId = "project1.task1", wit
     agentBinding: { kind: "profile" as const, name: "fast" },
     wakeIntervalMinutes: 30,
     conditionMaxChars: 128,
+    descriptionMaxChars: 32,
     schedules: [] as Array<{
       id: string;
       description: string;
@@ -366,6 +367,7 @@ async function installMockApi(page: Page, lastResourceId = "project1.task1", wit
         agentBinding: body.agentBinding as typeof schedulerConfig.agentBinding,
         wakeIntervalMinutes: Number(body.wakeIntervalMinutes),
         conditionMaxChars: Number(body.conditionMaxChars ?? schedulerConfig.conditionMaxChars),
+        descriptionMaxChars: Number(body.descriptionMaxChars ?? schedulerConfig.descriptionMaxChars),
       };
       return json(route, schedulerConfig);
     }
@@ -491,6 +493,9 @@ async function installMockApi(page: Page, lastResourceId = "project1.task1", wit
         });
       }
       const resourceId = decodeURIComponent(resourceMatch[1]);
+      // Chat and runtime subpaths are not resource documents. Returning 404
+      // avoids failing the route handler while the details UI still loads.
+      if (resourceId.includes("/")) return json(route, { error: "not found" }, 404);
       const value = createdProject?.id === resourceId
         ? resourceDetail(createdProject)
         : createdTask?.id === resourceId
@@ -1267,12 +1272,12 @@ test("manages natural-language schedules from the fixed Scheduler resource", asy
   await page.locator('[data-component-owner="scheduler-nav"] button').click();
   await expect(page).toHaveURL(/\/w\/ws-test\/r\/scheduler$/);
   await expect(page.getByRole("heading", { name: /Scheduler/ }).first()).toBeVisible();
-  await expect(page.locator(".details-tabs [role=\"tab\"]")).toHaveText(["Schedules", "Context", "Settings"]);
+  await expect(page.locator(".details-tabs [role=\"tab\"]")).toHaveText(["Schedules", "Context", "Execution events", "Dialog events", "Settings"]);
   await expect(page.getByRole("tab", { name: "Schedules" })).toHaveAttribute("aria-selected", "true");
   await expect(page.getByText("No schedules. The Server will not create empty Scheduler Turns.")).toBeVisible();
 
   await page.locator(".schedule-list-heading").getByRole("button", { name: "Add schedule" }).click();
-  await page.getByLabel("Description").fill("Notify when the release is ready");
+  await page.getByLabel("Description", { exact: true }).fill("Notify when the release is ready");
   await page.getByLabel("Condition", { exact: true }).fill("When the release branch is green after 09:00 Shanghai time");
   const target = page.getByLabel("Target resource ID");
   const addSchedule = page.getByRole("dialog").getByRole("button", { name: "Add schedule", exact: true });
@@ -1292,21 +1297,21 @@ test("manages natural-language schedules from the fixed Scheduler resource", asy
   await page.getByRole("tab", { name: "Settings" }).click();
   const interval = page.getByLabel("Scheduler wake interval in minutes");
   await interval.fill("45");
-  await page.locator(".resource-settings-interval:not(.resource-settings-condition-limit)").getByRole("button", { name: "Save" }).click();
+  await page.locator(".resource-settings-interval:not(.resource-settings-condition-limit):not(.resource-settings-description-limit)").getByRole("button", { name: "Save" }).click();
   await expect(interval).toHaveValue("45");
   await page.getByRole("tab", { name: "Schedules" }).click();
 
   const editButton = page.locator(".schedule-table tbody tr").getByRole("button", { name: "Edit" });
   await editButton.click();
   await expect(page.getByRole("dialog", { name: "Edit schedule" })).toBeVisible();
-  await expect(page.getByLabel("Description")).toBeFocused();
+  await expect(page.getByLabel("Description", { exact: true })).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog")).not.toBeVisible();
   await expect(editButton).toBeFocused();
   await page.locator(".schedule-table tbody tr").getByRole("button", { name: "Edit" }).click();
-  await page.getByLabel("Description").fill("Notify after release verification");
+  await page.getByLabel("Description", { exact: true }).fill("Notify after verification");
   await page.getByRole("button", { name: "Update schedule" }).click();
-  await expect(page.locator(".schedule-table tbody tr")).toContainText("Notify after release verification");
+  await expect(page.locator(".schedule-table tbody tr")).toContainText("Notify after verification");
 
   await page.locator(".schedule-table tbody tr").getByRole("button", { name: "Remove" }).click();
   await page.getByRole("alertdialog", { name: "Remove schedule" }).getByRole("button", { name: "Remove" }).click();
@@ -1349,7 +1354,7 @@ test("keeps Scheduler schedules content inside a 440px viewport", async ({ page 
 
   await page.locator(".schedule-list-heading").getByRole("button", { name: "Add schedule" }).click();
   await expectNoSchedulerOverflow();
-  await page.getByLabel("Description").fill("Notify when the release is ready");
+  await page.getByLabel("Description", { exact: true }).fill("Notify when the release is ready");
   await page.getByLabel("Condition", { exact: true }).fill("When the release branch is green after 09:00 Shanghai time and the deployment checklist is complete");
   await page.getByRole("dialog").getByRole("button", { name: "Add schedule", exact: true }).click();
   await expect(page.locator(".schedule-table tbody tr")).toContainText("Notify when the release is ready");
@@ -2560,7 +2565,7 @@ test("keeps Scheduler Settings controls at a 44px touch size in a 440px viewport
   const contentBox = (await content.boundingBox())!;
   const binding = panel.getByRole("button", { name: "Scheduler Agent binding", exact: true });
   const interval = panel.getByRole("spinbutton", { name: "Scheduler wake interval in minutes" });
-  const save = panel.locator(".resource-settings-interval:not(.resource-settings-condition-limit)").getByRole("button", { name: "Save", exact: true });
+  const save = panel.locator(".resource-settings-interval:not(.resource-settings-condition-limit):not(.resource-settings-description-limit)").getByRole("button", { name: "Save", exact: true });
 
   await expect(binding).toHaveAttribute("type", "button");
   await expect(binding).toHaveAttribute("aria-haspopup", "listbox");
@@ -2574,8 +2579,12 @@ test("keeps Scheduler Settings controls at a 44px touch size in a 440px viewport
   const limitSave = panel.locator(".resource-settings-condition-limit").getByRole("button", { name: "Save", exact: true });
   await expect(conditionLimit).toHaveValue("128");
   await expect(limitSave).toBeDisabled();
+  const descriptionLimit = panel.getByRole("spinbutton", { name: "Scheduler description character limit" });
+  const descriptionSave = panel.locator(".resource-settings-description-limit").getByRole("button", { name: "Save", exact: true });
+  await expect(descriptionLimit).toHaveValue("32");
+  await expect(descriptionSave).toBeDisabled();
 
-  for (const control of [binding, interval, save, conditionLimit, limitSave]) {
+  for (const control of [binding, interval, save, conditionLimit, limitSave, descriptionLimit, descriptionSave]) {
     const box = await control.boundingBox();
     expect(box).not.toBeNull();
     expect(box!.height).toBeGreaterThanOrEqual(44);
@@ -2612,15 +2621,31 @@ test("keeps Scheduler Settings controls at a 44px touch size in a 440px viewport
   await expect(limitSave).toBeEnabled();
   await limitSave.click();
   await expect.poll(() => harness.schedulerBodies.length).toBe(2);
-  expect(harness.schedulerBodies[1].body).toMatchObject({ wakeIntervalMinutes: 45, conditionMaxChars: 2 });
+  expect(harness.schedulerBodies[1].body).toMatchObject({ wakeIntervalMinutes: 45, conditionMaxChars: 2, descriptionMaxChars: 32 });
   await expect(limitSave).toBeDisabled();
   await expect(conditionLimit).toBeEnabled();
+  await descriptionLimit.fill("0");
+  await expect(descriptionLimit).toHaveAttribute("aria-invalid", "true");
+  await expect(descriptionSave).toBeDisabled();
+  await descriptionLimit.fill("2");
+  await expect(descriptionSave).toBeEnabled();
+  await descriptionSave.click();
+  await expect.poll(() => harness.schedulerBodies.length).toBe(3);
+  expect(harness.schedulerBodies[2].body).toMatchObject({ wakeIntervalMinutes: 45, conditionMaxChars: 2, descriptionMaxChars: 2 });
+  await expect(descriptionSave).toBeDisabled();
+  await expect(descriptionLimit).toBeEnabled();
   await panel.getByRole("tab", { name: "Schedules", exact: true }).click();
+  await page.locator(".schedule-list-heading").getByRole("button", { name: "Add schedule" }).click();
+  const addSchedule = page.getByRole("dialog").getByRole("button", { name: "Add schedule", exact: true });
   await page.getByLabel("Description", { exact: true }).fill("Check");
   await page.getByLabel("Condition", { exact: true }).fill("\u4e2d😀\u4e2d");
-  await expect(page.getByRole("button", { name: "Add schedule", exact: true })).toBeDisabled();
+  await expect(addSchedule).toBeDisabled();
   await page.getByLabel("Condition", { exact: true }).fill("\u4e2d😀");
-  await expect(page.getByRole("button", { name: "Add schedule", exact: true })).toBeEnabled();
+  await expect(addSchedule).toBeDisabled();
+  await page.getByLabel("Description", { exact: true }).fill(" \u4e2d😀 ");
+  await expect(page.getByRole("dialog").getByText("Description (2/2)")).toBeVisible();
+  await expect(addSchedule).toBeEnabled();
+  await page.getByRole("dialog").getByRole("button", { name: "Cancel", exact: true }).click();
   await panel.getByRole("tab", { name: "Settings", exact: true }).click();
   const detailsSize = await content.evaluate((node) => ({ clientWidth: node.clientWidth, scrollWidth: node.scrollWidth }));
   expect(detailsSize.scrollWidth).toBeLessThanOrEqual(detailsSize.clientWidth);

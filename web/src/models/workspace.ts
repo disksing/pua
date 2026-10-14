@@ -71,6 +71,7 @@ export interface SchedulerConfigRecord {
   agentBinding: { kind: "profile" | "agent"; name: string };
   wakeIntervalMinutes: number;
   conditionMaxChars: number;
+  descriptionMaxChars: number;
   schedules: ScheduleRecord[];
 }
 

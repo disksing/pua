@@ -411,3 +411,133 @@ func TestSchedulerConditionLimitSettingsAndLegacySchedules(t *testing.T) {
 		t.Fatalf("legacy removal = %#v, %v", config, err)
 	}
 }
+
+func TestScheduleDescriptionCharacterLimit(t *testing.T) {
+	workspace, err := app.Initialize(t.TempDir(), "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := workspace.Scheduler()
+	if err != nil || config.DescriptionMaxChars != 32 {
+		t.Fatalf("default limit = %#v, %v", config, err)
+	}
+	if _, err := workspace.AddSchedule(app.CreateScheduleInput{Description: " \n\t ", Condition: "now", Target: "workspace"}); err == nil || !strings.Contains(err.Error(), "required") {
+		t.Fatalf("blank description error = %v", err)
+	}
+	for _, character := range []string{"a", "\u4e2d", "😀"} {
+		t.Run(character, func(t *testing.T) {
+			description := strings.Repeat(character, 32)
+			created, err := workspace.AddSchedule(app.CreateScheduleInput{Description: " \n" + description + "\t ", Condition: "now", Target: "workspace"})
+			if err != nil || created.Description != description {
+				t.Fatalf("32-character description = %#v, %v", created, err)
+			}
+			before, err := os.ReadFile(filepath.Join(workspace.Root(), "scheduler", "scheduler.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			tooLong := description + character
+			if _, err := workspace.AddSchedule(app.CreateScheduleInput{Description: tooLong, Condition: "now", Target: "workspace"}); err == nil || !strings.Contains(err.Error(), "at most 32 characters (got 33)") {
+				t.Fatalf("oversized add error = %v", err)
+			}
+			if _, err := workspace.UpdateSchedule(app.UpdateScheduleInput{ID: created.ID, Description: &tooLong}); err == nil || !strings.Contains(err.Error(), "at most 32 characters (got 33)") {
+				t.Fatalf("oversized update error = %v", err)
+			}
+			after, err := os.ReadFile(filepath.Join(workspace.Root(), "scheduler", "scheduler.json"))
+			if err != nil || string(before) != string(after) {
+				t.Fatalf("rejected writes changed scheduler.json: %v", err)
+			}
+		})
+	}
+}
+
+func TestSchedulerDescriptionLimitSettingsAndLegacySchedules(t *testing.T) {
+	workspace, err := app.Initialize(t.TempDir(), "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	setLimit := func(limit int) (app.SchedulerConfig, error) {
+		return workspace.SetSchedulerSettings(app.SchedulerSettingsInput{
+			AgentBinding: app.AgentBinding{Kind: "profile", Name: "default"}, WakeIntervalMinutes: 30, DescriptionMaxChars: &limit,
+		})
+	}
+	for _, limit := range []int{0, -1, 65537} {
+		if _, err := setLimit(limit); err == nil {
+			t.Fatalf("invalid limit %d accepted", limit)
+		}
+	}
+	if config, err := workspace.Scheduler(); err != nil || config.DescriptionMaxChars != 32 || config.ConditionMaxChars != 128 {
+		t.Fatalf("rejected settings changed limits: %#v, %v", config, err)
+	}
+	if config, err := setLimit(64); err != nil || config.DescriptionMaxChars != 64 || config.ConditionMaxChars != 128 {
+		t.Fatalf("configured limit = %#v, %v", config, err)
+	}
+	long := strings.Repeat("\u4e2d", 64)
+	created, err := workspace.AddSchedule(app.CreateScheduleInput{Description: long, Condition: "now", Target: "workspace"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := setLimit(1); err != nil {
+		t.Fatal(err)
+	}
+	condition := "later"
+	target := "scheduler"
+	updated, err := workspace.UpdateSchedule(app.UpdateScheduleInput{ID: created.ID, Condition: &condition, Target: &target})
+	if err != nil || updated.Description != long || updated.Condition != condition || updated.Target != target {
+		t.Fatalf("unrelated update of long description failed: %#v, %v", updated, err)
+	}
+	short := "😀"
+	if _, err := workspace.UpdateSchedule(app.UpdateScheduleInput{ID: created.ID, Description: &short}); err != nil {
+		t.Fatalf("single character update failed: %v", err)
+	}
+	tooLong := "😀😀"
+	if _, err := workspace.UpdateSchedule(app.UpdateScheduleInput{ID: created.ID, Description: &tooLong}); err == nil || !strings.Contains(err.Error(), "at most 1 characters (got 2)") {
+		t.Fatalf("configured limit was ignored: %v", err)
+	}
+	config, err := workspace.SetSchedulerSettings(app.SchedulerSettingsInput{
+		AgentBinding: app.AgentBinding{Kind: "profile", Name: "fast"}, WakeIntervalMinutes: 45, ConditionMaxChars: intPtr(16),
+	})
+	if err != nil || config.DescriptionMaxChars != 1 || config.ConditionMaxChars != 16 || config.WakeIntervalMinutes != 45 {
+		t.Fatalf("omitted description limit did not preserve setting: %#v, %v", config, err)
+	}
+	if _, err := setLimit(65536); err != nil {
+		t.Fatal(err)
+	}
+	created, err = workspace.AddSchedule(app.CreateScheduleInput{Description: strings.Repeat("😀", 65536), Condition: "now", Target: "workspace"})
+	if err != nil || created.Description != strings.Repeat("😀", 65536) {
+		t.Fatalf("maximum description = %d, %v", utf8RuneCount(created.Description), err)
+	}
+	path := filepath.Join(workspace.Root(), "scheduler", "scheduler.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	delete(raw, "descriptionMaxChars")
+	data, err = json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := workspace.Migrate(""); err != nil {
+		t.Fatal(err)
+	}
+	config, err = workspace.Scheduler()
+	if err != nil || config.DescriptionMaxChars != 32 || config.ConditionMaxChars != 16 || len(config.Schedules) != 2 {
+		t.Fatalf("legacy read = %#v, %v", config, err)
+	}
+	if config.Schedules[1].Description != strings.Repeat("😀", 65536) {
+		t.Fatalf("legacy oversized description was truncated: %d", utf8RuneCount(config.Schedules[1].Description))
+	}
+	if _, err := workspace.RemoveSchedule(created.ID); err != nil {
+		t.Fatalf("legacy oversized schedule removal failed: %v", err)
+	}
+}
+
+func intPtr(value int) *int { return &value }
+
+func utf8RuneCount(value string) int { return len([]rune(value)) }

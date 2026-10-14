@@ -243,8 +243,8 @@ You may also message the Scheduler agent directly:
 pua message send --to=scheduler '<request>'
 ~~~
 
-Keep condition concise: its character limit is conditionMaxChars in scheduler/scheduler.json (128 by default). Put detailed context in description.
+Keep condition concise: its character limit is conditionMaxChars in scheduler/scheduler.json (128 by default). Keep description to a short label: its character limit is descriptionMaxChars in scheduler/scheduler.json (32 by default). Schedules do not need detailed notes; write those in the target Task's task.md or the Project's project.md, not in the schedule description.
 
-The description says what should happen. The condition says when to trigger, including timezone, repetition, and stopping behavior when relevant. The target is a stable PUA resource id.
+description is only a short label. condition says when to trigger, including timezone, repetition, and stopping behavior when relevant. The target is a stable PUA resource id.
 
 When a condition is met, Scheduler sends the target a normal message with the schedule id and trigger reason. Scheduled messages may repeat, so the target agent should avoid duplicate work.

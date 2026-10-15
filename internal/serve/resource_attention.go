@@ -33,7 +33,7 @@ type resourceUserStateSnapshot struct {
 
 type resourceActivityLists struct {
 	Running  []resourceSnapshot `json:"running"`
-	Unread   []resourceSnapshot `json:"unread"`
+	Unread   []resourceSnapshot `json:"unread"` // Legacy wire key for all current-user chats.
 	Problems []resourceSnapshot `json:"problems"`
 }
 
@@ -733,7 +733,7 @@ func (s *server) enrichTreeResourceActivity(workspacePath string, tree *workspac
 		if item.Runtime != nil && item.Runtime.ActiveTurn {
 			tree.Activity.Running = append(tree.Activity.Running, item)
 		}
-		if item.Chat != nil && item.Chat.UnreadCount > 0 {
+		if item.Chat != nil {
 			unreadItem := item
 			chat := chats[normalizedResourceID(item.ID)]
 			for i, message := range chat.Messages {

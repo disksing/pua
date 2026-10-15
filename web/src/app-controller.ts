@@ -1239,7 +1239,6 @@ function detailPanelModel(): DetailPanelModel {
 			controllerState.treeRequestVersion++;
 			item.chat = chat;
 			if (controllerState.tree?.activity) {
-				controllerState.tree.activity.unread = controllerState.tree.activity.unread.filter(entry => entry.id !== resourceId || chat.unreadCount > 0);
 				const entry = controllerState.tree.activity.unread.find(entry => entry.id === resourceId);
 				if (entry) entry.chat = chat;
 			}

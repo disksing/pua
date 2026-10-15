@@ -30,12 +30,12 @@
   // full name stays available via tooltip (title) and the tabpanel aria-label.
   const tabs: Array<{ key: ActivityTab; label: string; fullLabel: string }> = [
     { key: "running", label: "Running", fullLabel: "Running" },
-    { key: "unread", label: "Unread", fullLabel: "Unread" },
+    { key: "unread", label: "Chat", fullLabel: "Chat" },
     { key: "problems", label: "Issues", fullLabel: "Problems" },
   ];
 
   function tabCount(tab: ActivityTab): number {
-    return activity[tab].length;
+    return tab === "unread" ? activity.unread.filter((item) => item.unreadCount > 0).length : activity[tab].length;
   }
 
   function statusClass(status: ShellStatusPresentation): string {
@@ -60,7 +60,7 @@
   }
 
   function emptyMessage(tab: ActivityTab): string {
-    if (tab === "unread") return "All chat messages have been read.";
+    if (tab === "unread") return "No chats yet.";
     if (tab === "problems") return "No blocked or error Tasks.";
     return "No resources are currently running.";
   }
@@ -91,7 +91,10 @@
               <span class="activity-status-fallback-slot" hidden={item.status.hasTaskState}><Icon name={iconName(item)} className="activity-status-fallback" /></span>
               <span class="activity-status-runtime-slot" hidden={!item.status.hasTaskState}><StatusPresentation status={item.status} className="activity-status-icon" /></span>
             </span>
-            <span class="activity-title"><strong>{item.title}</strong><span class="activity-meta">{metadata(item)}</span></span>
+            <span class="activity-title"><strong>{item.title}</strong><span class="activity-meta">{activeTab === "unread" ? item.ref || item.id : metadata(item)}</span></span>
+            {#if activeTab === "unread" && item.unreadCount > 0}
+              <span class="activity-chat-unread-count" aria-hidden="true">{item.unreadCount}</span>
+            {/if}
           </button>
         {/each}
       {/if}

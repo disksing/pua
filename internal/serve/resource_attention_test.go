@@ -403,7 +403,7 @@ func intPointer(value int) *int {
 	return &value
 }
 
-func TestActivityUnreadUsesOwnUserChatMessages(t *testing.T) {
+func TestActivityChatIncludesReadAndClosedChatsForCurrentUser(t *testing.T) {
 	s, workspace := attentionTestServer(t)
 	user := app.LegacyDefaultUserName
 	ids := []string{"workspace", "scheduler", "project1", "project1.task1"}
@@ -422,6 +422,7 @@ func TestActivityUnreadUsesOwnUserChatMessages(t *testing.T) {
 		c := resourceChat{ID: chatID(id, user), ResourceID: id, User: user, Epoch: 1, Open: true,
 			Messages: []chatMessage{{ID: "mine", Role: "user"}}}
 		if id == "project1.task3" {
+			c.Open = false
 			c.Messages[0].Role = "agent"
 			c.ReadThrough = 1
 		}
@@ -455,11 +456,11 @@ func TestActivityUnreadUsesOwnUserChatMessages(t *testing.T) {
 	got := []string{}
 	for _, item := range tree.Activity.Unread {
 		got = append(got, item.ID)
-		if item.Chat.UnreadCount != 1 || item.LatestUnreadChatAt == "" {
+		if item.Chat.UnreadCount > 0 && item.LatestUnreadChatAt == "" {
 			t.Fatalf("invalid chat activity: %+v", item)
 		}
 	}
-	if !slices.Equal(got, []string{"project1.task1", "project1", "scheduler", "workspace"}) {
+	if !slices.Equal(got, []string{"project1.task1", "project1", "scheduler", "workspace", "project1.task2", "project1.task3"}) {
 		t.Fatalf("chat order/membership: %v", got)
 	}
 	if tree.Projects[0].Children[1].DialogueEvents.UnreadCount != 5 {
@@ -495,7 +496,12 @@ func TestActivityUnreadUsesOwnUserChatMessages(t *testing.T) {
 	if err := s.enrichTreeResourceActivity(workspace, &tree, user); err != nil {
 		t.Fatal(err)
 	}
-	if len(tree.Activity.Unread) != 0 || len(tree.Activity.Running) != 1 || len(tree.Activity.Problems) != 1 {
-		t.Fatal("reading chat must only remove unread chat activity")
+	if len(tree.Activity.Unread) != 6 || len(tree.Activity.Running) != 1 || len(tree.Activity.Problems) != 1 {
+		t.Fatal("reading chat must preserve all chat activity")
+	}
+	for _, item := range tree.Activity.Unread {
+		if item.Chat.UnreadCount != 0 {
+			t.Fatalf("read chat still has unread messages: %+v", item)
+		}
 	}
 }

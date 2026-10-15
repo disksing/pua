@@ -317,7 +317,7 @@ async function installMockApi(page: Page, lastResourceId = "project1.task1", wit
       const activityCandidates: MockActivityResource[] = [projectSnapshot, ...projectSnapshot.children].map((item) => ({ ...item, children: undefined }));
       const activity = {
         running: activityCandidates.filter((item) => item.runtime?.activeTurn),
-        unread: activityCandidates.filter((item) => Number(item.chat?.unreadCount || 0) > 0),
+        unread: activityCandidates.filter((item) => item.chat),
         problems: activityCandidates.filter((item) => item.type === "task" && (item.state === "blocked" || item.state === "error")),
       };
       return json(route, {
@@ -1094,7 +1094,7 @@ test("always shows all Activity tab counts and supports resizing the panel", asy
   await page.goto("/w/ws-test/r/project1");
 
   await expect(page.getByRole("tab", { name: "Running 0", exact: true })).toBeVisible();
-  await expect(page.getByRole("tab", { name: "Unread 0", exact: true })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Chat 0", exact: true })).toBeVisible();
   await expect(page.getByRole("tab", { name: "Issues 0", exact: true })).toBeVisible();
   await expect(page.getByRole("tab", { name: "Inbox 0", exact: true })).toBeVisible();
 
@@ -3044,14 +3044,14 @@ for (const sidebarWidth of [280, 220]) {
   });
 }
 
-test("Activity Unread opens closed chat history without reading remembered event tabs", async ({ page }, testInfo) => {
+test("Activity Chat keeps read and closed chats with unread message pills and independent event cursors", async ({ page }, testInfo) => {
   test.setTimeout(60_000);
   await installMockApi(page, "project1.task2");
   const writes: Array<{ user: string; resource: string; op: string; through?: number }> = [];
   const states = new Map<string, { open: boolean; unread: number; execution: number; dialogue: number; readExecution: number; readDialogue: number }>();
   const state = (user: string, resource: string) => {
     const key = `${user}:${resource}`;
-    if (!states.has(key)) states.set(key, { open: user === "User" && resource === "project1.task1", unread: user === "User" && resource === "project1.task1" ? 2 : 0, execution: 3, dialogue: 4, readExecution: 0, readDialogue: 0 });
+    if (!states.has(key)) states.set(key, { open: user === "User" && resource === "project1.task1", unread: user === "User" ? resource === "project1.task1" ? 2 : resource === "project1" ? 5 : 0 : 0, execution: 3, dialogue: 4, readExecution: 0, readDialogue: 0 });
     return states.get(key)!;
   };
   await page.route("**/api/workspaces/ws-test/**", async route => {
@@ -3061,12 +3061,12 @@ test("Activity Unread opens closed chat history without reading remembered event
       const item = (resource: MockResource) => {
         const s = state(user,resource.id);
         return { ...resource, latestTurnNumber:s.execution, unreadCount:s.execution-s.readExecution, userState:{readTurnNumber:s.readExecution},
-          ...(s.open || s.unread ? {chat:{open:s.open,unreadCount:s.unread}} : {}),
+          ...(user === "User" ? {chat:{open:s.open,unreadCount:s.unread}} : {}),
           dialogueEvents:{latestTurnNumber:s.dialogue,readTurnNumber:s.readDialogue,unreadCount:s.dialogue-s.readDialogue} };
       };
       return json(route, { projects:[{...item(project),children:project.children.map(item)}], workspace:{id:"workspace",type:"workspace",title:"Isolated E2E"}, activity:{
         running:[{...item(project.children[1]), runtime:{activeTurn:true,turnNumber:7,turnStartedAt:now}}],
-        unread:[item(project),...project.children.map(item)].filter(r=>(r.chat?.unreadCount||0)>0),
+        unread:[item(project),...project.children.map(item)].filter(r=>r.chat),
         problems:[{...item(project.children[1]),state:"blocked",stateNote:"Needs review"}]
       } });
     }
@@ -3097,14 +3097,17 @@ test("Activity Unread opens closed chat history without reading remembered event
   await expect(activity.locator('.activity-meta')).toContainText('Turn 7');
   await activity.getByRole('tab',{name:'Issues 1',exact:true}).click();
   await expect(activity.locator('.activity-meta')).toContainText('Turn 3');
-  await activity.getByRole('tab',{name:'Unread 1',exact:true}).click();
-  await expect(activity.locator('.activity-meta')).toContainText('2 unread chat messages');
-  await expect(activity.locator('.activity-meta')).not.toContainText('Turn');
-  await activity.locator('button.activity-row').click();
+  await activity.getByRole('tab',{name:'Chat 2',exact:true}).click();
+  await expect(activity.locator('button.activity-row')).toHaveCount(3);
+  await expect(activity.locator('.activity-chat-unread-count')).toHaveText(['5', '2']);
+  await expect(activity.locator('.activity-meta').first()).not.toContainText('Turn');
+  await expect(activity.locator('button.activity-row').nth(2).locator('.activity-chat-unread-count')).toHaveCount(0);
+  await activity.locator('button.activity-row').nth(1).click();
   const chat=page.getByRole('region',{name:'Resource chat',exact:true});
   await expect(chat).toBeFocused();
-  await expect(activity.getByRole('tab',{name:'Unread 0',exact:true})).toBeVisible();
-  await expect(activity).toContainText('All chat messages have been read.');
+  await expect(activity.getByRole('tab',{name:'Chat 1',exact:true})).toBeVisible();
+  await expect(activity.locator('button.activity-row')).toHaveCount(3);
+  await expect(activity.locator('.activity-chat-unread-count')).toHaveText(['5']);
   expect(writes.filter(w=>w.op.endsWith('-read'))).toHaveLength(0);
   const details=page.locator('#detailsPanel');
   await details.getByRole('tab',{name:/^Execution events/}).click();
@@ -3112,19 +3115,36 @@ test("Activity Unread opens closed chat history without reading remembered event
   await page.locator('#projectTree [data-task-id="project1.task2"]').click();
   const target=state('User','project1.task1');
   target.open=false;target.unread=2;target.execution=4;
-  await expect(activity.getByRole('tab',{name:'Unread 1',exact:true})).toBeVisible({timeout:10_000});
-  await expect(activity.locator('button.activity-row')).toHaveCount(1);
-  await expect(activity.locator('.activity-meta')).toContainText('2 unread chat messages');
-  await page.screenshot({path:testInfo.outputPath('activity-chat-unread.png')});
+  await expect(activity.getByRole('tab',{name:'Chat 2',exact:true})).toBeVisible({timeout:10_000});
+  await expect(activity.locator('button.activity-row')).toHaveCount(3);
+  await expect(activity.locator('.activity-chat-unread-count')).toHaveText(['5', '2']);
+  await page.screenshot({path:testInfo.outputPath('chat-list-unread.png')});
+  const originalTitle=project.title;
+  project.title="A long chat title that must truncate while keeping the unread badge visible";
+  state('User','project1').unread=12345;
+  await expect(activity.locator('.activity-chat-unread-count').first()).toHaveText('12345',{timeout:10_000});
+  for (const theme of ['default','slate','riso']) {
+    await page.evaluate(({theme})=>{document.documentElement.dataset.theme=theme;document.documentElement.style.setProperty('--sidebar-width','220px');},{theme});
+    const pill=activity.locator('.activity-chat-unread-count').first();
+    await expect(pill).toHaveCSS('border-radius','999px');
+    const fits=await pill.evaluate(el=>{const row=el.closest('button')!;return el.getBoundingClientRect().right<=row.getBoundingClientRect().right && el.scrollWidth<=el.clientWidth;});
+    expect(fits).toBe(true);
+    await activity.screenshot({path:testInfo.outputPath(`chat-list-${theme}-220.png`)});
+  }
+  project.title=originalTitle;
+  state('User','project1').unread=0;
+  await expect(activity.getByRole('tab',{name:'Chat 1',exact:true})).toBeVisible({timeout:10_000});
   const readCount=writes.filter(w=>w.op.endsWith('-read')).length;
-  await activity.locator('button.activity-row').click();
+  await activity.locator('button.activity-row').nth(1).click();
   await expect(chat).toBeFocused();
   await expect(chat).toContainText('Public history preserved');
   await expect(chat.getByRole('button',{name:'Reopen chat',exact:true})).toBeVisible();
   await expect(details.getByRole('tab',{name:'Task',exact:true})).toHaveAttribute('aria-selected','true');
   await expect(details.getByRole('tab',{name:/^Execution events/})).toContainText('1');
   await expect(details.getByRole('tab',{name:/^Dialog events/})).toContainText('4');
-  await expect(activity.getByRole('tab',{name:'Unread 0',exact:true})).toBeVisible();
+  await expect(activity.getByRole('tab',{name:'Chat 0',exact:true})).toBeVisible();
+  await expect(activity.locator('button.activity-row')).toHaveCount(3);
+  await expect(activity.locator('.activity-chat-unread-count')).toHaveCount(0);
   expect(writes.filter(w=>w.op.endsWith('-read'))).toHaveLength(readCount);
   expect(writes.filter(w=>/chat\/(open|close|messages|timer)$/.test(w.op))).toEqual([]);
   expect(target.open).toBe(false);
@@ -3132,5 +3152,5 @@ test("Activity Unread opens closed chat history without reading remembered event
   await expect(activity.locator('.activity-meta')).toContainText('Turn 7');
   await activity.getByRole('tab',{name:'Issues 1',exact:true}).click();
   await expect(activity.locator('.activity-meta')).toContainText('Turn 3');
-  await page.screenshot({path:testInfo.outputPath('activity-chat-focus.png')});
+  await page.screenshot({path:testInfo.outputPath('chat-list-focus.png')});
 });

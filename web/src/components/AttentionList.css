@@ -185,6 +185,23 @@
   font-weight: 600;
 }
 
+/* Match the event tab pill, scaled to the sidebar typography. */
+:where([data-component-owner="attention-list"]) .activity-chat-unread-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 18px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--blue-line);
+  color: var(--ink-deep);
+  font-size: calc(11px * var(--sidebar-font-scale, 1));
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
 :where([data-component-owner="attention-list"]) .empty-attention {
   grid-template-columns: 16px minmax(0, 1fr);
   cursor: default;

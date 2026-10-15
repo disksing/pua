@@ -590,7 +590,7 @@ describe("AppShell responsibility components", () => {
     expect(document.activeElement).toBe(row);
   });
 
-  it("ActivityPanel shows tab counts without a dismiss control", async () => {
+  it("ActivityPanel counts unread chats and keeps read chats without badges", async () => {
     const onSelect = vi.fn(async () => undefined);
     const item: ShellActivityItem = {
       id: "project-a", type: "project", title: "Project A", ref: "#1", selected: true, activeTurn: false, unreadCount: 2,
@@ -601,13 +601,14 @@ describe("AppShell responsibility components", () => {
       turnNumber: 3, agentName: "Codex", statusLabel: "Resource working", status: emptyStatus,
     };
     const target = document.body.appendChild(document.createElement("div"));
-    const activity = { running: [activeItem], unread: [activeItem, item], problems: [] };
+    const readItem = { ...item, id: "task-read", title: "Read chat", unreadCount: 0 };
+    const activity = { running: [activeItem], unread: [activeItem, item, readItem], problems: [] };
     const onSelectChat = vi.fn(async () => undefined);
     const component = mount(ActivityPanel, { target, props: { activity, onSelect, onSelectChat, onToast: vi.fn() } });
     cleanups.push(() => unmount(component));
     await tick();
 
-    expect([...target.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent?.trim())).toEqual(["Running 1", "Unread 2", "Issues 0"]);
+    expect([...target.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent?.trim())).toEqual(["Running 1", "Chat 2", "Issues 0"]);
     const activeRow = target.querySelector<HTMLElement>('[aria-label^="Task B."]')!;
     expect(activeRow.classList.contains("selected")).toBe(false);
     expect(activeRow.getAttribute("data-active-turn")).toBe("true");
@@ -615,7 +616,10 @@ describe("AppShell responsibility components", () => {
 
     target.querySelector<HTMLElement>('[role="tab"]:nth-child(2)')!.click();
     await tick();
-    expect(target.querySelector(".activity-title")?.textContent).toContain("#2 · 1 unread chat message");
+    expect(target.querySelectorAll("button.activity-row")).toHaveLength(3);
+    expect([...target.querySelectorAll(".activity-chat-unread-count")].map((badge) => badge.textContent)).toEqual(["1", "2"]);
+    expect(target.querySelector('[aria-label^="Read chat."] .activity-chat-unread-count')).toBeNull();
+    expect(target.querySelector('[aria-label^="Task B."]')?.getAttribute("aria-label")).toContain("1 unread chat message");
     expect(target.querySelector('[role="tabpanel"]')?.textContent).not.toContain("Turn");
     target.querySelector<HTMLElement>('[aria-label^="Project A."]')!.click();
     await vi.waitFor(() => expect(onSelectChat).toHaveBeenCalledWith("project-a"));

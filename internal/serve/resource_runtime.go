@@ -245,6 +245,9 @@ func (rt *agentRuntime) deliverPendingResourceMessages(ctx context.Context, m *a
 // inputs remain owned by the Workspace mailbox; generation creation never
 // transfers or rewrites them.
 func (m *agentManager) createResourceGeneration(ctx context.Context, workspace serveWorkspace, resourceID, cwd string, cfg config, client *agentHubClient, resolved resolvedResourceAgent) (generationRecord, error) {
+	if strings.HasPrefix(resourceID, dialoguePrefix) {
+		return generationRecord{}, errors.New("independent dialogue runtime has been retired")
+	}
 	generation, err := nextResourceGeneration(workspace.Path, resourceID)
 	if err != nil {
 		return generationRecord{}, err

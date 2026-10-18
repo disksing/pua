@@ -31,7 +31,7 @@ type taskListOptions struct {
 
 func Run(args []string) error {
 	if os.Getenv("PUA_CHANNEL") == "dialogue" && !dialogueCommandAllowed(args) {
-		return errors.New("dialogue Sessions can query resources and use pua chat; delegate execution changes with pua chat dispatch")
+		return errors.New("dialogue Sessions are retired and may only query historical resources")
 	}
 	if len(args) == 0 {
 		printUsage()

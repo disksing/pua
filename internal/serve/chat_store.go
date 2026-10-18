@@ -16,9 +16,8 @@ import (
 	"github.com/disksing/pua/internal/workspacepath"
 )
 
-// A dialogue address is a runtime partition, never a workspace resource.
-// Keeping it distinct lets the existing durable controllers and mailboxes
-// order each channel independently without running Task workflow hooks.
+// Legacy dialogue addresses remain stable for history and migration only.
+// They are never destinations for new user input or runnable resources.
 const dialoguePrefix = "dialogue-"
 
 var chatMu sync.Mutex
@@ -36,6 +35,11 @@ type chatDelivery struct {
 	Accepted bool   `json:"accepted"`
 	Epoch    uint64 `json:"epoch"`
 }
+
+func (d chatDelivery) userInput() bool {
+	return strings.HasPrefix(d.ID, "input-") || strings.HasPrefix(d.ID, "migrated-input-")
+}
+
 type resourceChat struct {
 	ReadThrough     int              `json:"readThrough"`
 	Version         int              `json:"version"`
@@ -73,7 +77,7 @@ func loadChatLocked(root, id string) (resourceChat, error) {
 	if err = json.Unmarshal(data, &c); err != nil {
 		return c, err
 	}
-	if (c.Version != 1 && c.Version != 2) || c.ID != id || c.ID != chatID(c.ResourceID, c.User) {
+	if (c.Version < 1 || c.Version > 3) || c.ID != id || c.ID != chatID(c.ResourceID, c.User) {
 		return c, errors.New("invalid chat record")
 	}
 	if c.Messages == nil {
@@ -82,7 +86,7 @@ func loadChatLocked(root, id string) (resourceChat, error) {
 	return c, nil
 }
 func saveChatLocked(root string, c resourceChat) error {
-	c.Version = 2
+	c.Version = 3
 	return saveJSONStateFile(chatPath(root, c.ID), ".chat-*.tmp", c)
 }
 func loadDialogue(root, address string) (resourceChat, error) {
@@ -96,10 +100,13 @@ func loadDialogue(root, address string) (resourceChat, error) {
 func ensureChatLocked(root, resourceID, user string) (resourceChat, error) {
 	id := chatID(resourceID, user)
 	c, err := loadChatLocked(root, id)
+	if err == nil && c.Version < 3 {
+		err = migrateChatLocked(root, &c)
+	}
 	if !os.IsNotExist(err) {
 		return c, err
 	}
-	c = resourceChat{Version: 2, ID: id, ResourceID: normalizedResourceID(resourceID), User: user, Messages: []chatMessage{}, Binding: app.AgentBinding{Kind: "profile", Name: "default"}}
+	c = resourceChat{Version: 3, ID: id, ResourceID: normalizedResourceID(resourceID), User: user, Messages: []chatMessage{}, Binding: app.AgentBinding{Kind: "profile", Name: "default"}}
 	return c, saveChatLocked(root, c)
 }
 func (c resourceChat) address() string { return dialoguePrefix + c.ID }
@@ -166,9 +173,64 @@ func (c *resourceChat) queue(id, target, text string) error {
 	c.Outbox = append(c.Outbox, chatDelivery{ID: id, Target: target, Text: text, Epoch: c.Epoch})
 	return nil
 }
-func (c resourceChat) prompt(text string) string {
-	return fmt.Sprintf(`You are the dialogue Agent for resource %s and user %s. This is a separate communication channel, not the execution Agent. Read the resource instructions and user preferences for context, but do not run its Task state completion hooks. Discuss requirements, query resource status/history/artifacts, and delegate actual work using pua chat dispatch. Do not do long execution work here. Only pua chat publish writes to the user's chat; your ordinary final/analysis and tools are private events. Use pua chat show to read the durable chat and pua chat notes to read/update your own persistent notes. Maintain tasks you care about and notification decisions in those notes; PUA has no watch list. Timers are OFF by default; opening or resuming chat is not a reason to schedule one. Use pua chat timer <seconds> only for a concrete user-requested follow-up (0 cancels, 60..86400 seconds). Each timer is ONE-SHOT and turns off when its check is queued, including timers saved by older versions. Read your notes and reassess whether another check is necessary; do not blindly renew a fixed one-minute loop. Choose a delay based on expected progress or the next known schedule, and back off when nothing changes. A long-term request for updates alone does not justify checking idle daily/weekly tasks every minute. Cancel with pua chat timer 0 when no follow-up remains. Avoid duplicate notifications. All publish and dispatch calls require a stable --id for retry safety. Reuse that id when retrying. You may query any authorized resource, but do not assume a task has completed without evidence.
 
-Trigger:
-%s`, c.ResourceID, c.User, text)
+// The reply capability is scoped to one resource/user/open epoch. Carry it in
+// each input rather than session environment: a busy execution session may
+// receive inputs from multiple users and survives chat close/reopen.
+func (c resourceChat) prompt(text string) string {
+	return fmt.Sprintf(`User Chat input for resource %s, user %s. You are this resource's execution Agent: handle the request directly and follow its normal work/state instructions. This routing replaces legacy instructions that prohibit execution Agents from publishing or require a dialogue relay. This user may be inserting a message into an existing Turn; keep each user's reply target separate.
+Only explicit publish writes to Chat. Ordinary final, commentary, tools, internal collaboration and system notifications are execution events, NEVER automatic public replies. Before finishing, publish the answer to this input using the command below, even if it opened the Turn. Do not delegate to a dialogue Agent. Reuse a stable --id when retrying; do not publish the same answer twice. Do not expose the reply capability in public messages. Closure revokes it; if publication is rejected, retain the result in execution history and do not redirect to another chat.
+Read this user's history: pua chat show --reply-to=%s.%s
+Reply: pua chat publish --reply-to=%s.%s --id=reply-%s '<answer>'
+
+%s`, c.ResourceID, c.User, c.ID, c.Token, c.ID, c.Token, chatID(c.ID, text), text)
+}
+
+// Retire legacy dialogue inputs without replaying work already delivered to a
+// provider. A queued, never-attempted input is safe to move to execution. Old
+// mailbox entries and outbox records remain available for audit.
+func migrateChatLocked(root string, c *resourceChat) error {
+	if c.Version >= 3 {
+		return nil
+	}
+	mailbox, err := loadResourceMailboxForResource(root, c.address())
+	if err != nil {
+		return err
+	}
+	c.Token = ""
+	if c.Open {
+		c.Token = newGenerationRecordID()
+	}
+	c.IntervalSeconds, c.NextCheckAt = 0, ""
+	var migrated []chatDelivery
+	for i := range c.Outbox {
+		d := &c.Outbox[i]
+		if d.Target != c.address() {
+			continue
+		}
+		safe := !d.Accepted
+		for _, message := range mailbox.Messages {
+			if message.ID == "chat-"+chatID(c.ID, d.ID) {
+				// Retirement may have reached this mailbox before a failed
+				// migration write was retried. Never-attempted cancellation
+				// is still safe; delivery_unknown is deliberately excluded.
+				safe = message.AttemptCount == 0 && (message.Status == resourceMessageQueued ||
+					(message.Status == resourceMessageUndeliverable && message.LastErrorCode == "resource_archived"))
+				break
+			}
+		}
+		if safe && c.Open && d.Epoch == c.Epoch && strings.HasPrefix(d.ID, "input-") {
+			for _, message := range c.Messages {
+				if message.Role == "user" && "input-"+message.ID == d.ID {
+					migrated = append(migrated, chatDelivery{ID: "migrated-input-" + chatID(c.ID, message.ID), Target: c.ResourceID, Text: c.prompt("User message " + message.ID + " from " + c.User + ":\n" + message.Text), Epoch: c.Epoch})
+					break
+				}
+			}
+		}
+		d.Accepted = true
+	}
+	c.Outbox = append(c.Outbox, migrated...)
+
+	c.Version = 3
+	return saveChatLocked(root, *c)
 }

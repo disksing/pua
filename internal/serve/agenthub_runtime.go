@@ -529,6 +529,10 @@ func (m *agentManager) recoverAgentHubGenerations(ctx context.Context) error {
 		if !m.server.ownsWorkspace(workspace.Path) {
 			continue
 		}
+		if chatErr := m.reconcileWorkspaceChats(ctx, workspace); chatErr != nil {
+			failures = append(failures, fmt.Sprintf("%s chats: %v", workspace.ID, chatErr))
+			continue
+		}
 		if _, mailboxErr := rebuildResourceMailboxHotIndex(workspace.Path); mailboxErr != nil {
 			failures = append(failures, fmt.Sprintf("%s mailbox hot index: %v", workspace.ID, mailboxErr))
 			continue
@@ -556,6 +560,14 @@ func (m *agentManager) recoverAgentHubGeneration(ctx context.Context, cfg config
 }
 
 func (m *agentManager) recoverAgentHubGenerationLocked(ctx context.Context, cfg config, client *agentHubClient, workspace serveWorkspace, record generationRecord, candidates []agentHubSession) error {
+	if strings.HasPrefix(record.ResourceID, dialoguePrefix) {
+		// Legacy history remains readable. The poller reclaims any bound
+		// session; startup must never recreate a missing dialogue session.
+		if len(candidates) == 0 && record.AgentHubSessionID == "" {
+			return retireGenerationWithoutSession(m.ensureRuntime(workspace, record, client), "dialogue_retired")
+		}
+		return nil
+	}
 	source := agentHubSource{App: agentHubSourceApp, InstanceID: generationSourceInstanceID(cfg, record), ExternalID: record.SourceExternalID}
 	live := isLiveAgentStatus(record.Status)
 	if len(candidates) == 0 && strings.TrimSpace(record.AgentHubSessionID) != "" {

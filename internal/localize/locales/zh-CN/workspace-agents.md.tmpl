@@ -207,21 +207,11 @@ EOF
 
 Turn 结束后，PUA 会自动把 final response 投递给开启 Turn 的 Agent，不要再用 pua message send 发送同一结果。收到自动投递的 Turn result 时，应把它视为此前请求的答复，不要仅为确认收到而回复；只有出现新工作或确需澄清时才发送新消息。开启方不需要结果时使用 --subscribe-result=false。消息可能重复投递，发送方和接收方都应结合 message ID 或业务状态避免重复操作。
 
-用户聊天与执行历史分开。内部 Agent 在资源文档和 History 中记录进展，不直接发布用户消息；Inbox 和用户名消息目标已移除。交流 Agent 拉取相关状态后统一向用户说明。
+用户 Chat 独立保存，直接交给资源原执行 Agent。执行 Agent 负责实际工作、用户回复和正常 Task 状态收口，不再使用独立交流 Session 或要求转述。Inbox 和用户名消息目标仍已移除。
 
-当 PUA_CHANNEL=dialogue 时，只查询资源并使用以下交流命令，不运行 Task 状态收口指令，不直接实现工作。关注哪些任务、已通知哪些结果，由交流 Agent 在自己的持久笔记中记录；PUA 不维护关注列表。
+每条 Chat 输入提供限定资源、用户及本次开启周期的 `--reply-to` 凭据和准确的 `pua chat publish` 命令。结束前须显式发布答复，忙碌 Turn 中插入的用户消息也一样。使用 `pua chat show --reply-to=<凭据>` 读取该用户的持久历史；重试复用稳定 `--id`，不同用户的回复目标不得混用，不把凭据写入公开回复。关闭聊天撤销发布资格；发布被拒绝时保留执行记录，不改投其他用户或资源。
 
-~~~sh
-pua chat show
-pua chat notes
-pua chat notes '<更新后的笔记>'
-pua chat dispatch --id=<稳定操作ID> --to=<资源> '<工作指令>'
-pua chat publish --id=<稳定消息ID> '<给用户的消息>'
-pua chat timer <seconds>
-pua chat timer 0
-~~~
-
-只有显式 publish 的内容进入用户聊天；普通输出和系统触发保留在事件记录。重试时复用操作 ID。关闭聊天撤销公开发布与新派工资格、保留历史，已交办工作继续运行。定时器默认关闭，开启或恢复聊天不会启用它。`timer <seconds>` 只预约一次检查（60..86400 秒），入队后自动关闭；有明确的用户要求跟进事项时才再次安排。根据预计进展或下次已知调度选择间隔，无变化时延长；长期接收更新的要求不代表需要每分钟检查空闲的日常或每周任务。无需跟进时用 `timer 0` 取消。旧笔记中记录的循环定时策略也应按此规则重新判断。
+只有显式 publish 进入 Chat。普通 final、过程输出、工具、Agent 协作、系统通知和调度工作均留在执行历史，不自动转为聊天。用户开启的 Turn 也必须显式 publish，final 不会再公开一次。内部 Agent 开启的 Turn 仍以 final 返回发起方。旧交流 timer、dispatch 和运行控件已停用，旧历史及笔记保留审计。PUA 不维护请求台账、自动补发或关注列表。
 
 ## 7. Scheduler
 

@@ -1373,7 +1373,9 @@ func TestNormalizeAgentHubApprovalReply(t *testing.T) {
 
 func waitForRuntimeTest(t *testing.T, condition func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	// Race instrumentation and durable filesystem writes can exceed two
+	// seconds on busy hosts. Keep these assertions about convergence.
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if condition() {
 			return

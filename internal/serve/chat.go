@@ -6,13 +6,11 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/disksing/pua/internal/app"
 	"github.com/disksing/pua/internal/workspacepath"
@@ -50,7 +48,7 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 	if agent {
 		c, loadErr := loadDialogue(workspace.Path, dialoguePrefix+r.Header.Get("X-PUA-Chat"))
 		if loadErr != nil || c.ResourceID != normalizedResourceID(resourceID) {
-			writeError(w, errors.New("invalid dialogue identity"), 403)
+			writeError(w, errors.New("invalid chat identity"), 403)
 			return
 		}
 		user = c.User
@@ -84,10 +82,9 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 		return
 	}
 	if agent {
-		rec, found, loadErr := currentResourceGeneration(workspace.Path, c.address())
-		if loadErr != nil || !found || !c.Open || archived || rec.ChatEpoch != c.Epoch || rec.GenerationID != r.Header.Get("X-PUA-Chat-Generation") || subtle.ConstantTimeCompare([]byte(c.Token), []byte(r.Header.Get("X-PUA-Chat-Token"))) != 1 {
+		if !c.Open || archived || c.Token == "" || r.Header.Get("X-PUA-Chat-Generation") != "" || subtle.ConstantTimeCompare([]byte(c.Token), []byte(r.Header.Get("X-PUA-Chat-Token"))) != 1 {
 			chatMu.Unlock()
-			writeError(w, errors.New("dialogue is closed or generation has changed"), 409)
+			writeError(w, errors.New("chat is closed or reply capability has expired"), 409)
 			return
 		}
 	}
@@ -104,8 +101,8 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 	}
 	if operation == "runtime" {
 		chatMu.Unlock()
-		if agent && r.Method != http.MethodGet {
-			writeError(w, errors.New("runtime controls require a user"), 403)
+		if r.Method != http.MethodGet && !(len(parts) == 2 && parts[1] == "read") {
+			writeError(w, errors.New("legacy dialogue runtime is read-only"), 403)
 			return
 		}
 		if len(parts) < 2 {
@@ -209,50 +206,23 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 			err = errors.New("chat is closed")
 			break
 		}
+		duplicate := false
+		for _, message := range c.Messages {
+			if message.ID == body.ID {
+				duplicate = true
+				break
+			}
+		}
 		err = c.appendMessage(body.ID, "user", body.Text)
-		if err == nil {
-			err = c.queue("input-"+body.ID, c.address(), c.prompt("User message "+body.ID+" from "+c.User+":\n"+body.Text))
+		if err == nil && !duplicate {
+			err = c.queue("input-"+body.ID, c.ResourceID, c.prompt("User message "+body.ID+" from "+c.User+":\n"+body.Text))
 		}
 	case "publish":
 		err = c.appendMessage(body.ID, "agent", body.Text)
-	case "dispatch":
-		target := normalizedResourceID(body.Target)
-		if body.Target == "" {
-			target = c.ResourceID
-		}
-		if strings.HasPrefix(target, dialoguePrefix) {
-			err = errors.New("dispatch requires an execution resource")
-			break
-		}
-		var ok, closed bool
-		ok, closed, _, err = resourceExistsAndArchived(workspace.Path, target)
-		if err == nil && (!ok || closed) {
-			err = errors.New("target is unavailable")
-		}
-		if err == nil && (body.ID == "" || strings.TrimSpace(body.Text) == "") {
-			err = errors.New("id and text are required")
-		}
-		if err == nil {
-			err = c.queue("dispatch-"+body.ID, target, fmt.Sprintf("Work relayed by the dialogue Agent for %s, user %s. Preserve the user's scope and constraints.\n\n%s", c.ResourceID, c.User, body.Text))
-		}
 	case "notes":
 		c.Notes = body.Text
-	case "timer":
-		if body.Seconds != 0 && (body.Seconds < 60 || body.Seconds > 86400) {
-			err = errors.New("timer must be 0 or 60..86400 seconds")
-			break
-		}
-		c.IntervalSeconds = body.Seconds
-		c.NextCheckAt = ""
-		if body.Seconds > 0 {
-			c.NextCheckAt = time.Now().Add(time.Duration(body.Seconds) * time.Second).UTC().Format(time.RFC3339Nano)
-		}
-	case "binding":
-		var binding app.AgentBinding
-		binding, err = app.NormalizeAgentBinding(body.Binding)
-		if err == nil {
-			c.Binding = binding
-		}
+	case "dispatch", "timer", "binding":
+		err = errors.New("independent dialogue runtime has been retired")
 
 	default:
 		err = errors.New("unknown chat operation")
@@ -260,22 +230,14 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 	if err == nil {
 		err = saveChatLocked(workspace.Path, c)
 	}
-	if err == nil && operation == "close" {
-		err = markResourceMailboxArchived(workspace.Path, c.address())
-	}
 	chatMu.Unlock()
 	if err != nil {
 		writeError(w, err, 409)
 		return
 	}
 	// All effects are replayed from durable state by the reconciler. Closing
-	// revokes publication before the provider can observe the stop request.
+	// revokes publication without interrupting execution.
 	m.requestReconcile(reconcileMailboxes | reconcileAgentHub)
-	if operation == "binding" {
-		_ = m.enqueueResourceController(workspace, c.address(), func() error {
-			return m.resourceBindingChangedLocked(context.Background(), workspace, c.address(), c.Binding)
-		})
-	}
 	writeJSON(w, c.public())
 }
 
@@ -329,9 +291,12 @@ func (m *agentManager) reconcileWorkspaceChats(ctx context.Context, workspace se
 			return loadErr
 		}
 		before, _ := json.Marshal(c)
-		// Version 1 repeating timers retain their next appointment, but are
-		// consumed once under the new semantics; no blanket model wakeup.
-		c.Version = 2
+		if loadErr = migrateChatLocked(workspace.Path, &c); loadErr != nil {
+			chatMu.Unlock()
+			return loadErr
+		}
+		c.IntervalSeconds, c.NextCheckAt = 0, ""
+
 		if !registered[c.User] {
 			c.Open = false
 			c.Token = ""
@@ -343,49 +308,22 @@ func (m *agentManager) reconcileWorkspaceChats(ctx context.Context, workspace se
 			chatMu.Unlock()
 			return loadErr
 		}
-		if c.Open && !archived && c.IntervalSeconds > 0 && c.NextCheckAt != "" {
-			due, parseErr := time.Parse(time.RFC3339Nano, c.NextCheckAt)
-			if parseErr != nil {
-				chatMu.Unlock()
-				return parseErr
-			}
-			if !time.Now().Before(due) {
-				pending, pendingErr := mailboxPendingForResource(workspace.Path, c.address())
-				if pendingErr != nil {
-					chatMu.Unlock()
-					return pendingErr
-				}
-				for _, d := range c.Outbox {
-					if d.Target == c.address() && !d.Accepted && d.Epoch == c.Epoch {
-						pending = true
-					}
-				}
-				rec, found, generationErr := currentResourceGeneration(workspace.Path, c.address())
-				if generationErr != nil {
-					chatMu.Unlock()
-					return generationErr
-				}
-				if !pending && (!found || (rec.Status != "running" && rec.Status != "waiting_approval" && rec.Status != "starting")) {
-					_ = c.queue("tick-"+c.NextCheckAt, c.address(), c.prompt("Scheduled one-time check. This timer is now off. Read your notes, query relevant work, and publish only useful new information. Arrange another check only if a concrete follow-up remains, choosing a delay based on expected progress. Otherwise leave the timer off."))
-					c.IntervalSeconds = 0
-					c.NextCheckAt = ""
-				}
-				// Keep a due appointment while busy; retry after the Turn/input
-				// finishes instead of repeatedly adding steer messages.
-			}
-		}
 		for i := range c.Outbox {
 			d := &c.Outbox[i]
 			if d.Accepted {
 				continue
 			}
 			// Work durably dispatched before closure still belongs to execution.
-			if d.Target == c.address() && (!c.Open || archived || d.Epoch != c.Epoch) {
+			if d.Target == c.address() || (d.userInput() && (!c.Open || archived || d.Epoch != c.Epoch)) {
 				d.Accepted = true
 				continue
 			}
+			messageType := "chat_input"
+			if d.userInput() {
+				messageType = "user_chat_input"
+			}
 			sum := chatID(c.ID, d.ID)
-			_, err = acceptGeneratedMailboxMessage(workspace.Path, resourceMailboxMessage{ID: "chat-" + sum, ResourceID: d.Target, Text: d.Text, Type: "chat_input", RequestedMode: resourceMessageModeSteer, Causation: &resourceMessageCausation{Type: "chat", SourceResourceID: c.ResourceID, MessageID: d.ID}})
+			_, err = acceptGeneratedMailboxMessage(workspace.Path, resourceMailboxMessage{ID: "chat-" + sum, ResourceID: d.Target, Text: d.Text, Type: messageType, RequestedMode: resourceMessageModeSteer, Causation: &resourceMessageCausation{Type: "chat", SourceResourceID: c.ResourceID, MessageID: d.ID}})
 			if err != nil {
 				chatMu.Unlock()
 				return err
@@ -400,43 +338,17 @@ func (m *agentManager) reconcileWorkspaceChats(ctx context.Context, workspace se
 		if err != nil {
 			return err
 		}
-		// Once queued, join this short controller operation even on shutdown.
-		// The effects still use ctx for network cancellation; returning before
-		// the closure finishes would leave untracked writes after shutdown.
-		if err = m.withResourceController(context.WithoutCancel(ctx), workspace, c.address(), func() error {
-			latest, loadErr := loadDialogue(workspace.Path, c.address())
-			if loadErr != nil {
-				return loadErr
-			}
-			rec, found, loadErr := currentResourceGeneration(workspace.Path, c.address())
-			if loadErr != nil || !found {
-				return loadErr
-			}
-			if latest.Open && !archived && rec.ChatEpoch == latest.Epoch {
-				return nil
-			}
-			cfg, client, cfgErr := m.agentHubRuntimeConfig()
-			if cfgErr != nil {
-				return cfgErr
-			}
-			rt := m.ensureRuntime(workspace, rec, client)
-			updated, persistErr := rt.mutateGeneration(func(record *generationRecord) { record.ArchivedTaskStopRequested = true })
-			if persistErr != nil {
-				return persistErr
-			}
-			if updated.AgentHubSessionID != "" {
-				session, fetchErr := client.GetSession(ctx, updated.AgentHubSessionID)
-				if fetchErr != nil {
-					return fetchErr
-				}
-				m.stopAgentHubSessionForArchivedResource(ctx, cfg, workspace, updated, session, client)
-			}
-			return nil
-		}); err != nil {
-			return err
+		// The normal AgentHub poller sees every legacy dialogue address as
+		// archived and stops only its bound session. Chat migration never
+		// waits on that network operation or touches the execution session.
+		pending, pendingErr := mailboxPendingForResource(workspace.Path, c.address())
+		if pendingErr != nil {
+			return pendingErr
 		}
-		if !c.Open || archived {
-			_ = markResourceMailboxArchived(workspace.Path, c.address())
+		if pending {
+			if err = markResourceMailboxArchived(workspace.Path, c.address()); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

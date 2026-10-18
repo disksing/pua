@@ -8,19 +8,19 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 )
 
-const chatUsage = "usage: pua chat show|notes [text]|publish --id=<stable-id> <text>|dispatch --id=<stable-id> [--to=<resource>] <text>|timer <seconds>"
+const chatUsage = "usage: pua chat <show|notes|publish> --reply-to=<capability> [--id=<stable-id>] [text]"
 
 func runChat(args []string) error {
 	if len(args) == 0 {
 		return errors.New(chatUsage)
 	}
-	if os.Getenv("PUA_CHANNEL") != "dialogue" || os.Getenv("PUA_CHAT_ID") == "" {
-		return errors.New("chat commands require a dialogue Session")
+	if os.Getenv("PUA_CHANNEL") == "dialogue" || os.Getenv("PUA_RESOURCE_ID") == "" {
+		return errors.New("chat commands require the resource execution Agent and an explicit --reply-to capability")
 	}
+	var replyTo string
 	operation := args[0]
 	body := map[string]any{}
 	var words []string
@@ -28,8 +28,8 @@ func runChat(args []string) error {
 		switch {
 		case strings.HasPrefix(arg, "--id="):
 			body["id"] = strings.TrimPrefix(arg, "--id=")
-		case strings.HasPrefix(arg, "--to="):
-			body["target"] = strings.TrimPrefix(arg, "--to=")
+		case strings.HasPrefix(arg, "--reply-to="):
+			replyTo = strings.TrimPrefix(arg, "--reply-to=")
 		default:
 			words = append(words, arg)
 		}
@@ -53,17 +53,12 @@ func runChat(args []string) error {
 		} else {
 			body["text"] = text
 		}
-	case "publish", "dispatch":
+	case "publish":
 		if body["id"] == nil || strings.TrimSpace(text) == "" {
 			return errors.New(chatUsage)
 		}
 		body["text"] = text
-	case "timer":
-		n, err := strconv.Atoi(text)
-		if err != nil {
-			return errors.New(chatUsage)
-		}
-		body["seconds"] = n
+
 	default:
 		return errors.New(chatUsage)
 	}
@@ -71,6 +66,11 @@ func runChat(args []string) error {
 	if err != nil {
 		return err
 	}
+	capability := strings.SplitN(replyTo, ".", 2)
+	if len(capability) != 2 || capability[0] == "" || capability[1] == "" {
+		return errors.New(chatUsage)
+	}
+	client.chatID, client.chatToken = capability[0], capability[1]
 	path := fmt.Sprintf("/api/workspaces/%s/resources/%s/chat", url.PathEscape(client.workspaceID), url.PathEscape(os.Getenv("PUA_RESOURCE_ID")))
 	if operation != "" {
 		path += "/" + operation
@@ -86,8 +86,8 @@ func runChat(args []string) error {
 	return printJSON(response)
 }
 
-// These local CLI commands are observational. Dialogue side effects cross
-// the fenced chat API instead of mutating resource files directly.
+// Retired dialogue processes may only inspect historical resources. Chat
+// publication rejects their old launch context in runChat and on the server.
 func dialogueCommandAllowed(args []string) bool {
 	if len(args) == 0 {
 		return true

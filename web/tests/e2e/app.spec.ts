@@ -1238,16 +1238,16 @@ test("keeps public chat unread and both event cursors independent in the resourc
   const details=page.locator('#detailsPanel');
   const execution=details.getByRole('tab',{name:/^Execution events/}),dialogue=details.getByRole('tab',{name:/^Dialog events/});
   await expect(row.locator('.unread-badge')).toHaveCount(0);
-  await expect(execution).toContainText('3');await expect(dialogue).toContainText('4');
+  await expect(execution).toContainText('3');await expect(dialogue).toHaveCount(0);
   expect(writes.filter(w=>w.op.endsWith('-read'))).toHaveLength(0);
   await execution.click();await expect(details).toContainText('execution completed 3');
-  await expect(execution.locator('.event-unread-count')).toHaveCount(0);await expect(dialogue).toContainText('4');
-  await dialogue.click();await expect(details).toContainText('dialogue completed 4');
-  await expect(dialogue.locator('.event-unread-count')).toHaveCount(0);
+  await expect(execution.locator('.event-unread-count')).toHaveCount(0);
+  await expect(dialogue).toHaveCount(0);
+  await details.getByRole('tab',{name:'Task',exact:true}).click();
   state('User','project1.task1').dialogue=5;state('User','project1.task1').execution=4;
-  await expect(details).toContainText('dialogue completed 5',{timeout:10_000});
   await expect(execution).toContainText('1',{timeout:10_000});
   expect(state('User','project1.task1').readExecution).toBe(3);
+  expect(state('User','project1.task1').readDialogue).toBe(0);
   await page.getByRole('button',{name:'Close chat',exact:true}).click();
   await expect(row.locator('.chat-open-icon')).toHaveCount(0);
   await expect(page.locator('#chatTimeline')).toContainText('Public history preserved');
@@ -1260,7 +1260,7 @@ test("keeps public chat unread and both event cursors independent in the resourc
   await page.locator('#workspaceCurrentUser').selectOption('Other');
   await expect(row.locator('.chat-open-icon')).toHaveCount(0);
   await row.click();
-  await expect(execution).toContainText('3');await expect(dialogue).toContainText('4');
+  await expect(execution).toContainText('3');await expect(dialogue).toHaveCount(0);
   await expect(page.locator('#chatTimeline')).not.toContainText('Public history preserved');
   expect(writes.filter(w=>w.user==='Other'&&w.op.endsWith('-read'))).toHaveLength(0);
 });
@@ -1272,7 +1272,7 @@ test("manages natural-language schedules from the fixed Scheduler resource", asy
   await page.locator('[data-component-owner="scheduler-nav"] button').click();
   await expect(page).toHaveURL(/\/w\/ws-test\/r\/scheduler$/);
   await expect(page.getByRole("heading", { name: /Scheduler/ }).first()).toBeVisible();
-  await expect(page.locator(".details-tabs [role=\"tab\"]")).toHaveText(["Schedules", "Context", "Execution events", "Dialog events", "Settings"]);
+  await expect(page.locator(".details-tabs [role=\"tab\"]")).toHaveText(["Schedules", "Context", "Execution events", "Settings"]);
   await expect(page.getByRole("tab", { name: "Schedules" })).toHaveAttribute("aria-selected", "true");
   await expect(page.getByText("No schedules. The Server will not create empty Scheduler Turns.")).toBeVisible();
 
@@ -2897,7 +2897,7 @@ test("keeps Workspace settings card actions inside a 440px mobile viewport witho
   }
 });
 
-test("resource event tabs show isolated live timelines without model input", async ({ page }, testInfo) => {
+test("execution events stay live and read-only without a dialogue runtime", async ({ page }, testInfo) => {
   const harness = await installMockApi(page);
   let revision = 10;
   let open = true;
@@ -2974,25 +2974,17 @@ test("resource event tabs show isolated live timelines without model input", asy
   await details.locator(".agent-tool-item > summary").click();
   await expect(details.getByText("tool output verified",{exact:true})).toBeVisible();
   await page.screenshot({path:testInfo.outputPath("execution-events.png")});
-  await details.getByRole("tab",{name:"Dialog events",exact:true}).click();
-  await expect(details).toContainText("dialogue live revision 11");
-  await expect(details).not.toContainText("execution live revision");
-  expect(streams.some(s=>s.includes("/chat/runtime/stream") && new URL(s).searchParams.get("user")==="User")).toBe(true);
-  expect(await page.evaluate(()=> (window as unknown as {eventStreams:Array<{url:string;closed:boolean}>}).eventStreams.filter(s=>!s.url.includes('/chat/runtime')).every(s=>s.closed))).toBe(true);
-  await expect(details.locator("textarea,input")).toHaveCount(0);
-  await details.getByRole("button",{name:"Dialogue model",exact:true}).click();
-  await details.locator('[role="option"][data-binding="profile:review"]').click();
-  await expect.poll(()=>dialogueBinding.name).toBe("review");
-  await expect(details.getByRole("button",{name:"Dialogue model",exact:true})).toContainText("review");
-  expect(harness.bindingBodies).toHaveLength(0);
-  await page.screenshot({path:testInfo.outputPath("dialog-events.png")});
+  await expect(details.getByRole("tab",{name:"Dialog events",exact:true})).toHaveCount(0);
+  expect(streams.some(s=>s.includes("/chat/runtime/"))).toBe(false);
+  await expect(page.getByLabel("Dialogue controls")).toHaveCount(0);
+  await expect(page.getByLabel("Execution controls")).toBeVisible();
   running=false;
   await expect(details.locator(".turn-working-indicator")).toHaveCount(0);
   expect(writes.filter(p=>/\/(timer|messages|approval)$/.test(p))).toEqual([]);
   expect(harness.inputBodies).toHaveLength(0);
   await page.getByRole("button",{name:"Close chat",exact:true}).click();
   await expect(page.getByText("Public conversation remains separate",{exact:true})).toBeVisible();
-  await expect(details).toContainText("dialogue history paragraph");
+  await expect(details).toContainText("execution history paragraph");
   await page.getByRole("button",{name:"Reopen chat",exact:true}).click();
   await expect(page.getByText("Public conversation remains separate",{exact:true})).toBeVisible();
 });
@@ -3141,7 +3133,7 @@ test("Activity Chat keeps read and closed chats with unread message pills and in
   await expect(chat.getByRole('button',{name:'Reopen chat',exact:true})).toBeVisible();
   await expect(details.getByRole('tab',{name:'Task',exact:true})).toHaveAttribute('aria-selected','true');
   await expect(details.getByRole('tab',{name:/^Execution events/})).toContainText('1');
-  await expect(details.getByRole('tab',{name:/^Dialog events/})).toContainText('4');
+  await expect(details.getByRole('tab',{name:/^Dialog events/})).toHaveCount(0);
   await expect(activity.getByRole('tab',{name:'Chat 0',exact:true})).toBeVisible();
   await expect(activity.locator('button.activity-row')).toHaveCount(3);
   await expect(activity.locator('.activity-chat-unread-count')).toHaveCount(0);

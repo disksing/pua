@@ -51,10 +51,8 @@ func chatCall(t *testing.T, m *agentManager, w serveWorkspace, resource, user, o
 		if err != nil {
 			t.Fatal(err)
 		}
-		rec, _, _ := currentResourceGeneration(w.Path, c.address())
 		req.Header.Set("X-PUA-Chat", c.ID)
 		req.Header.Set("X-PUA-Chat-Token", c.Token)
-		req.Header.Set("X-PUA-Chat-Generation", rec.GenerationID)
 	}
 	out := httptest.NewRecorder()
 	m.server.handleWorkspace(out, req)
@@ -82,19 +80,28 @@ func TestChatLifecycleIsolationAndOutboxReplay(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	mailbox, err := loadResourceMailboxForResource(w.Path, c.address())
+	mailbox, err := loadResourceMailboxForResource(w.Path, resource)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(mailbox.Messages) != 1 {
 		t.Fatalf("outbox replay created %d messages", len(mailbox.Messages))
 	}
-	internal, err := loadResourceMailboxForResource(w.Path, resource)
+	internal, err := loadResourceMailboxForResource(w.Path, c.address())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(internal.Messages) != 0 {
-		t.Fatal("user input leaked to execution")
+		t.Fatal("user input created a dialogue mailbox")
+	}
+	addresses, err := listResourceMailboxResourceIDs(w.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, address := range addresses {
+		if strings.HasPrefix(address, dialoguePrefix) {
+			t.Fatal("chat polling created legacy transport state")
+		}
 	}
 	other := chatCall(t, m, w, resource, "other", "", nil, false)
 	mustChatOK(t, other)
@@ -107,45 +114,70 @@ func TestChatLifecycleIsolationAndOutboxReplay(t *testing.T) {
 	}
 	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "open", chatRequest{}, false))
 	reopened, _ := loadDialogue(w.Path, c.address())
+	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "messages", body, false))
 	if reopened.Epoch != c.Epoch+1 || reopened.Token == c.Token || len(reopened.Messages) != 1 {
 		t.Fatal("reopen lost history or reused authority")
 	}
 }
-func TestChatAgentFenceAndDispatch(t *testing.T) {
+func TestChatAgentReplyCapabilityAndIsolation(t *testing.T) {
 	m, w := chatTestManager(t)
 	resource := "project1.task1"
 	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "open", chatRequest{}, false))
 	c, _ := loadDialogue(w.Path, dialoguePrefix+chatID(resource, "disksing"))
-	record := generationRecord{ID: "chat-test-gen", GenerationID: "chat-test-gen", Generation: 1, WorkspaceID: w.ID, ResourceID: c.address(), OwnerResourceID: resource, ChatEpoch: c.Epoch, Status: "idle"}
-	if err := saveGenerationRecord(w.Path, record); err != nil {
-		t.Fatal(err)
-	}
-	publish := chatRequest{ID: "reply-1", Text: "I have delegated the work."}
+	publish := chatRequest{ID: "reply-1", Text: "Work completed."}
 	if r := chatCall(t, m, w, resource, "disksing", "publish", publish, false); r.Code != 403 {
-		t.Fatalf("user published as agent: %d", r.Code)
+		t.Fatal(r.Code)
 	}
 	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "publish", publish, true))
 	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "publish", publish, true))
-	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "dispatch", chatRequest{ID: "work-1", Text: "Implement the agreed change."}, true))
+	call := func(target, token, generation string) int {
+		data, _ := json.Marshal(chatRequest{ID: "new", Text: "answer"})
+		req := httptest.NewRequest("POST", "/api/workspaces/"+w.ID+"/resources/"+target+"/chat/publish", bytes.NewReader(data))
+		req.Header.Set("X-PUA-Chat", c.ID)
+		req.Header.Set("X-PUA-Chat-Token", token)
+		req.Header.Set("X-PUA-Chat-Generation", generation)
+		out := httptest.NewRecorder()
+		m.server.handleWorkspace(out, req)
+		return out.Code
+	}
+	if call("project1", c.Token, "") != 403 {
+		t.Fatal("cross-resource capability accepted")
+	}
+	if call(resource, "wrong", "") != 409 {
+		t.Fatal("wrong capability accepted")
+	}
+	if call(resource, c.Token, "legacy-dialogue-generation") != 409 {
+		t.Fatal("legacy dialogue published")
+	}
+	mustChatOK(t, chatCall(t, m, w, resource, "other", "open", chatRequest{}, false))
+	other := chatCall(t, m, w, resource, "other", "", nil, false)
+	if strings.Contains(other.Body.String(), publish.Text) {
+		t.Fatal("reply leaked across users")
+	}
 	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "close", chatRequest{}, false))
+	if call(resource, c.Token, "") != 409 {
+		t.Fatal("closed publication")
+	}
 	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "open", chatRequest{}, false))
-	if r := chatCall(t, m, w, resource, "disksing", "publish", chatRequest{ID: "stale", Text: "old turn"}, true); r.Code != 409 {
-		t.Fatalf("stale generation published: %d", r.Code)
+	if call(resource, c.Token, "") != 409 {
+		t.Fatal("stale publication after reopen")
 	}
-	if err := m.reconcileWorkspaceChats(context.Background(), w); err != nil {
-		t.Fatal(err)
+	current, _ := loadDialogue(w.Path, c.address())
+	if len(current.Messages) != 1 {
+		t.Fatal("reply duplicated or history lost")
 	}
-	mailbox, err := loadResourceMailboxForResource(w.Path, resource)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(mailbox.Messages) != 1 {
-		t.Fatalf("closing cancelled dispatched work: %d", len(mailbox.Messages))
+	for _, op := range []string{"dispatch", "timer", "binding"} {
+		if got := chatCall(t, m, w, resource, "disksing", op, chatRequest{ID: "legacy", Text: "do work"}, op != "binding"); got.Code != 409 {
+			t.Fatalf("%s: %d", op, got.Code)
+		}
 	}
 }
+
 func TestChatBindingDoesNotOpenAndInboxDiscarded(t *testing.T) {
 	m, w := chatTestManager(t)
-	mustChatOK(t, chatCall(t, m, w, "project1.task1", "disksing", "binding", chatRequest{Binding: app.AgentBinding{Kind: "agent", Name: "example"}}, false))
+	if got := chatCall(t, m, w, "project1.task1", "disksing", "binding", chatRequest{Binding: app.AgentBinding{Kind: "agent", Name: "example"}}, false); got.Code != 409 {
+		t.Fatal(got.Code)
+	}
 	c, _ := loadDialogue(w.Path, dialoguePrefix+chatID("project1.task1", "disksing"))
 	if c.Open || c.Epoch != 0 {
 		t.Fatal("model selection opened chat")
@@ -175,95 +207,85 @@ func TestChatBindingDoesNotOpenAndInboxDiscarded(t *testing.T) {
 	}
 }
 
-func TestChatCreatesIndependentRuntimeAndClosesOnlyDialogue(t *testing.T) {
+func TestChatUsesExecutionRuntimeWhileBusyAndAfterReopen(t *testing.T) {
 	fake := newRuntimeFakeAgentHub()
+	fake.enforceMessageIDs = true
 	hub := httptest.NewServer(fake)
 	defer hub.Close()
 	m, w, _ := newRuntimeTestManager(t, hub.URL)
-	ws, err := app.OpenWorkspace(w.Path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = ws.RegisterUser("disksing"); err != nil {
-		t.Fatal(err)
-	}
+	ws, _ := app.OpenWorkspace(w.Path)
+	_, _ = ws.RegisterUser("disksing")
 	resource := "project1.task1"
-	_ = acceptTestResourceMessage(t, m, w, resource, "execute independently", resourceMessageModeSteer, nil)
-	internal, found, err := currentResourceGeneration(w.Path, resource)
+	_ = acceptTestResourceMessage(t, m, w, resource, "internal work", resourceMessageModeSteer, nil)
+	original, found, err := currentResourceGeneration(w.Path, resource)
 	if err != nil || !found {
-		t.Fatalf("internal: %v %v", found, err)
-	}
-	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "open", chatRequest{}, false))
-	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "messages", chatRequest{ID: "first", Text: "How is it going?"}, false))
-	if err = m.reconcileWorkspaceChats(context.Background(), w); err != nil {
-		t.Fatal(err)
-	}
-	c, _ := loadDialogue(w.Path, dialoguePrefix+chatID(resource, "disksing"))
-	if err = m.withResourceController(context.Background(), w, c.address(), func() error { return m.reconcileResourceMailboxLocked(context.Background(), w, c.address()) }); err != nil {
-		t.Fatal(err)
-	}
-	dialogue, found, err := currentResourceGeneration(w.Path, c.address())
-	if err != nil || !found {
-		t.Fatalf("dialogue: %v %v", found, err)
-	}
-	if internal.AgentHubSessionID == dialogue.AgentHubSessionID {
-		t.Fatal("channels share Session")
-	}
-	// The browser's native SSE request uses query-based user selection and
-	// must resolve only this user's dialogue generation, never execution.
-	streamPath := "/api/workspaces/" + w.ID + "/resources/" + resource + "/chat/runtime/stream?user=disksing&generationId="
-	stream := httptest.NewRecorder()
-	m.server.handleWorkspace(stream, httptest.NewRequest(http.MethodGet, streamPath+dialogue.GenerationID, nil))
-	if stream.Code != 200 || !strings.Contains(stream.Body.String(), dialogue.AgentHubSessionID) || strings.Contains(stream.Body.String(), internal.AgentHubSessionID) {
-		t.Fatalf("dialogue stream crossed channels: %d %s", stream.Code, stream.Body.String())
-	}
-	wrongChannel := httptest.NewRecorder()
-	m.server.handleWorkspace(wrongChannel, httptest.NewRequest(http.MethodGet, streamPath+internal.GenerationID, nil))
-	if wrongChannel.Code != 409 {
-		t.Fatalf("execution generation accepted by dialogue stream: %d", wrongChannel.Code)
+		t.Fatalf("execution missing: %v", err)
 	}
 	fake.mu.Lock()
-	launch := fake.sessions[dialogue.AgentHubSessionID].LaunchEnvironment
+	session := fake.sessions[original.AgentHubSessionID]
+	session.State = "running"
+	session.CurrentTurnID = "active-work"
+	session.InputCapabilities.Steer = true
+	fake.sessions[session.ID] = session
+	fake.appendLocked(session.ID, "message.assistant.completed", map[string]any{"text": "private internal final"})
+	fake.appendLocked(session.ID, "tool.call", map[string]any{"summary": "private tool output"})
 	fake.mu.Unlock()
-	if launch["PUA_RESOURCE_ID"] != resource || launch["PUA_CHANNEL"] != "dialogue" || launch["PUA_CHAT_TOKEN"] != c.Token {
-		t.Fatalf("incorrect dialogue launch context: keys=%v", len(launch))
-	}
-	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "publish", chatRequest{ID: "public", Text: "Work continues."}, true))
-	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "close", chatRequest{}, false))
-	for range 5 {
+	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "open", chatRequest{}, false))
+	for _, id := range []string{"first", "second"} {
+		mustChatOK(t, chatCall(t, m, w, resource, "disksing", "messages", chatRequest{ID: id, Text: "User question " + id}, false))
 		if err = m.reconcileWorkspaceChats(context.Background(), w); err != nil {
 			t.Fatal(err)
 		}
-		if err = m.pollAgentHubSessions(context.Background()); err != nil {
+		if err = m.withResourceController(context.Background(), w, resource, func() error { return m.reconcileResourceMailboxLocked(context.Background(), w, resource) }); err != nil {
 			t.Fatal(err)
 		}
+		current, _, _ := currentResourceGeneration(w.Path, resource)
+		if current.GenerationID != original.GenerationID {
+			t.Fatal("chat replaced running execution")
+		}
+		c, _ := loadDialogue(w.Path, dialoguePrefix+chatID(resource, "disksing"))
+		if _, found, _ := currentResourceGeneration(w.Path, c.address()); found {
+			t.Fatal("dialogue generation created")
+		}
+		mailbox, _ := loadResourceMailboxForResource(w.Path, resource)
+		delivered := false
+		for _, message := range mailbox.Messages {
+			if message.Causation != nil && message.Causation.MessageID == "input-"+id {
+				delivered = message.Status == resourceMessageDelivered
+				fake.mu.Lock()
+				input := fake.messageInputs[message.ID]
+				fake.mu.Unlock()
+				if !strings.Contains(input.Text, "pua chat publish --reply-to="+c.ID+"."+c.Token) || !strings.Contains(input.Text, "NEVER automatic public replies") {
+					t.Fatal("reply instructions missing")
+				}
+				if message.ActualMode != resourceMessageModeSteer {
+					t.Fatalf("busy input not steered: %s", message.ActualMode)
+				}
+			}
+		}
+		if !delivered {
+			t.Fatal("user input not delivered")
+		}
+		mustChatOK(t, chatCall(t, m, w, resource, "disksing", "publish", chatRequest{ID: "answer-" + id, Text: "Answer " + id}, true))
+		mustChatOK(t, chatCall(t, m, w, resource, "disksing", "close", chatRequest{}, false))
+		if err = m.reconcileWorkspaceChats(context.Background(), w); err != nil {
+			t.Fatal(err)
+		}
+		fake.mu.Lock()
+		state := fake.sessions[original.AgentHubSessionID].State
+		fake.mu.Unlock()
+		if state != "running" {
+			t.Fatalf("closure interrupted execution: %s", state)
+		}
+		mustChatOK(t, chatCall(t, m, w, resource, "disksing", "open", chatRequest{}, false))
 	}
-	fake.mu.Lock()
-	internalSession := fake.sessions[internal.AgentHubSessionID]
-	dialogueSession := fake.sessions[dialogue.AgentHubSessionID]
-	fake.mu.Unlock()
-	if internalSession.State != "running" {
-		t.Fatalf("closing chat stopped execution: %s", internalSession.State)
-	}
-	if dialogueSession.State != "archived" && dialogueSession.State != "stopped" {
-		t.Fatalf("dialogue did not stop: %s", dialogueSession.State)
-	}
-	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "open", chatRequest{}, false))
-	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "messages", chatRequest{ID: "second", Text: "Continue discussion."}, false))
-	if err = m.reconcileWorkspaceChats(context.Background(), w); err != nil {
-		t.Fatal(err)
-	}
-	for range 5 {
-		_ = m.withResourceController(context.Background(), w, c.address(), func() error { return m.reconcileResourceMailboxLocked(context.Background(), w, c.address()) })
-		_ = m.pollAgentHubSessions(context.Background())
-	}
-	next, found, err := currentResourceGeneration(w.Path, c.address())
-	if err != nil || !found || next.GenerationID == dialogue.GenerationID {
-		t.Fatalf("reopen did not create successor: %v %v %s", found, err, next.GenerationID)
+	c, _ := loadDialogue(w.Path, dialoguePrefix+chatID(resource, "disksing"))
+	if len(c.Messages) != 4 {
+		t.Fatalf("internal work leaked into Chat: %d", len(c.Messages))
 	}
 }
 
-func TestChatTimerCoalescingNotesAndReadCursor(t *testing.T) {
+func TestChatNotesAndReadCursorWithoutTimer(t *testing.T) {
 	m, w := chatTestManager(t)
 	resource := "project1.task1"
 	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "open", chatRequest{}, false))
@@ -273,31 +295,10 @@ func TestChatTimerCoalescingNotesAndReadCursor(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "notes", chatRequest{Text: "Follow project1.task1; nothing published yet."}, true))
-	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "timer", chatRequest{Seconds: 60}, true))
-	for iteration := range 2 {
-		chatMu.Lock()
-		current, err := loadChatLocked(w.Path, c.ID)
-		if err != nil {
-			chatMu.Unlock()
-			t.Fatal(err)
-		}
-		current.NextCheckAt = fmt.Sprintf("2020-01-01T00:00:0%dZ", iteration)
-		if err = saveChatLocked(w.Path, current); err != nil {
-			chatMu.Unlock()
-			t.Fatal(err)
-		}
-		chatMu.Unlock()
-		if err = m.reconcileWorkspaceChats(context.Background(), w); err != nil {
-			t.Fatal(err)
-		}
+	if got := chatCall(t, m, w, resource, "disksing", "timer", chatRequest{Seconds: 60}, true); got.Code != 409 {
+		t.Fatal(got.Code)
 	}
-	mailbox, err := loadResourceMailboxForResource(w.Path, c.address())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(mailbox.Messages) != 1 {
-		t.Fatalf("timer accumulated %d wakeups", len(mailbox.Messages))
-	}
+
 	for _, id := range []string{"first", "second"} {
 		mustChatOK(t, chatCall(t, m, w, resource, "disksing", "publish", chatRequest{ID: id, Text: id}, true))
 	}
@@ -358,75 +359,113 @@ func TestDeletingUserDisablesTheirDialogue(t *testing.T) {
 	}
 }
 
-func TestChatTimerOneShotMigrationAndBusyDeferral(t *testing.T) {
+func TestChatLegacyMigrationRetiresTimerAndPreservesDispatchedWork(t *testing.T) {
 	m, w := chatTestManager(t)
 	resource := "project1.task1"
 	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "open", chatRequest{}, false))
-	c, err := loadDialogue(w.Path, dialoguePrefix+chatID(resource, "disksing"))
+	c, _ := loadDialogue(w.Path, dialoguePrefix+chatID(resource, "disksing"))
+	c.Version = 2
+	c.IntervalSeconds = 60
+	c.NextCheckAt = "2020-01-01T00:00:00Z"
+	c.Notes = "legacy audit notes"
+	for _, id := range []string{"unsent", "queued", "delivered", "uncertain"} {
+		_ = c.appendMessage(id, "user", id)
+		_ = c.queue("input-"+id, c.address(), "legacy dialogue prompt "+id)
+		if id != "unsent" {
+			c.Outbox[len(c.Outbox)-1].Accepted = true
+			_, err := acceptGeneratedMailboxMessage(w.Path, resourceMailboxMessage{ID: "chat-" + chatID(c.ID, "input-"+id), ResourceID: c.address(), Text: "legacy dialogue prompt " + id, Type: "chat_input", RequestedMode: "steer", Causation: &resourceMessageCausation{Type: "chat", MessageID: id}})
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	_, err := mutateResourceMailboxForResource(w.Path, c.address(), func(box *resourceMailbox) error {
+		for i := range box.Messages {
+			if strings.Contains(box.Messages[i].Text, "delivered") {
+				box.Messages[i].Status = resourceMessageDelivered
+				box.Messages[i].AttemptCount = 1
+			}
+			if strings.Contains(box.Messages[i].Text, "uncertain") {
+				box.Messages[i].Status = resourceMessageDelivering
+				box.Messages[i].AttemptCount = 1
+			}
+		}
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	rec := generationRecord{ID: "one-shot", GenerationID: "one-shot", Generation: 1, WorkspaceID: w.ID, ResourceID: c.address(), ChatEpoch: c.Epoch, Status: "running"}
-	if err := saveGenerationRecord(w.Path, rec); err != nil {
-		t.Fatal(err)
-	}
-	// Simulate an on-disk v1 timer created before this upgrade, without using
-	// the current writer (which always persists v2).
-	c.Version = 1
-	c.IntervalSeconds = 60
-	c.NextCheckAt = "2020-01-01T00:00:00Z"
+	_ = c.queue("tick-old", c.address(), "old timer")
+	_ = c.queue("dispatch-existing", resource, "already delegated work")
+	_ = c.appendMessage("reply", "agent", "preserved public reply")
+	c.ReadThrough = 2
 	data, _ := json.Marshal(c)
-	if err := os.WriteFile(chatPath(w.Path, c.ID), data, 0600); err != nil {
+	if err = os.WriteFile(chatPath(w.Path, c.ID), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	legacyRecord := generationRecord{ID: "legacy-missing", GenerationID: "legacy-missing", Generation: 1, ResourceID: c.address(), WorkspaceID: w.ID, RuntimeChannel: "dialogue", ChatEpoch: c.Epoch, Status: "starting", AgentHubAgentName: "fake-agent", SourceExternalID: c.address() + "/1"}
+	if err = saveGenerationRecord(w.Path, legacyRecord); err != nil {
+		t.Fatal(err)
+	}
+	m.waitBackground()
+	restarted := newAgentManager(m.server)
+	m.server.agents = restarted
+	m = restarted
+	if err = m.recoverAgentHubGenerations(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	for range 3 {
-		if err := m.reconcileWorkspaceChats(context.Background(), w); err != nil {
+		if err = m.reconcileWorkspaceChats(context.Background(), w); err != nil {
 			t.Fatal(err)
 		}
 	}
-	current, _ := loadDialogue(w.Path, c.address())
-	if current.Version != 2 || current.NextCheckAt != c.NextCheckAt || len(current.Outbox) != 0 {
-		t.Fatalf("busy legacy timer changed or queued: %+v", current.public())
+	next, _ := loadDialogue(w.Path, c.address())
+	if next.Version != 3 || next.IntervalSeconds != 0 || next.NextCheckAt != "" || next.Token == c.Token || len(next.Messages) != 5 || next.ReadThrough != 2 || next.Notes != c.Notes {
+		t.Fatal("migration lost history or retained old authority/timer")
 	}
-	rec.Status = "idle"
-	if err := saveGenerationRecord(w.Path, rec); err != nil {
+	mailbox, _ := loadResourceMailboxForResource(w.Path, resource)
+	if len(mailbox.Messages) != 3 {
+		t.Fatalf("expected two safe inputs and one dispatch, got %d", len(mailbox.Messages))
+	}
+	for _, message := range mailbox.Messages {
+		if strings.Contains(message.Text, "legacy dialogue prompt") || strings.Contains(message.Text, "old timer") {
+			t.Fatal("obsolete prompt replayed")
+		}
+	}
+	legacy, _ := loadResourceMailboxForResource(w.Path, c.address())
+	if len(legacy.Messages) != 3 {
+		t.Fatal("legacy mailbox lost")
+	}
+	for _, message := range legacy.Messages {
+		if message.Status == resourceMessageQueued || message.Status == resourceMessageDelivering {
+			t.Fatal("legacy mailbox still deliverable")
+		}
+	}
+	records, err := loadGenerationRecords(w.Path)
+	if err != nil {
 		t.Fatal(err)
 	}
-	for range 3 {
-		if err := m.reconcileWorkspaceChats(context.Background(), w); err != nil {
-			t.Fatal(err)
+	preserved := false
+	for _, record := range records {
+		if record.GenerationID == legacyRecord.GenerationID {
+			preserved = record.Retired && record.AgentHubSessionID == ""
 		}
 	}
-	current, _ = loadDialogue(w.Path, c.address())
-	if current.IntervalSeconds != 0 || current.NextCheckAt != "" || len(current.Outbox) != 1 {
-		t.Fatalf("one-shot not consumed exactly once: %+v", current.public())
+	if !preserved {
+		t.Fatal("missing dialogue generation was recreated or lost its audit record")
 	}
-	if !strings.Contains(current.Outbox[0].Text, "This timer is now off") {
-		t.Fatal("timer policy missing from legacy wakeup")
+
+	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "runtime/history/turns", nil, false))
+	if got := chatCall(t, m, w, resource, "disksing", "runtime/turn/end", chatRequest{}, false); got.Code != 403 {
+		t.Fatal("legacy controls remain enabled")
 	}
-	// The appointment remains consumed across manager restarts / disk reads,
-	// even after the old mailbox delivery no longer blocks another wakeup.
-	if err := markResourceMailboxArchived(w.Path, c.address()); err != nil {
+	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "messages", chatRequest{ID: "after-restart", Text: "new question"}, false))
+	if err = m.reconcileWorkspaceChats(context.Background(), w); err != nil {
 		t.Fatal(err)
 	}
-	for range 3 {
-		if err := m.reconcileWorkspaceChats(context.Background(), w); err != nil {
-			t.Fatal(err)
-		}
-	}
-	current, _ = loadDialogue(w.Path, c.address())
-	if len(current.Outbox) != 1 || current.NextCheckAt != "" {
-		t.Fatal("timer automatically repeated")
-	}
-	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "timer", chatRequest{Seconds: 600}, true))
-	current, _ = loadDialogue(w.Path, c.address())
-	if current.IntervalSeconds != 600 || current.NextCheckAt == "" {
-		t.Fatal("explicit rearm failed")
-	}
-	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "timer", chatRequest{Seconds: 0}, true))
-	current, _ = loadDialogue(w.Path, c.address())
-	if current.IntervalSeconds != 0 || current.NextCheckAt != "" {
-		t.Fatal("cancel failed")
+	mailbox, _ = loadResourceMailboxForResource(w.Path, resource)
+	if len(mailbox.Messages) != 4 {
+		t.Fatal("new input did not route to execution after restart")
 	}
 }
 
@@ -577,5 +616,84 @@ func TestChatAndEventReadCursorsRemainIndependentPerUser(t *testing.T) {
 	}
 	if *state.ResourceStates[resource].ReadTurnNumber != 2 || *state.ResourceStates[c.address()].ReadTurnNumber != 4 {
 		t.Fatalf("persisted cursors: %+v", state.ResourceStates)
+	}
+}
+
+func TestChatRetiresOnlyLegacySessionAndNeverResumesIt(t *testing.T) {
+	fake := newRuntimeFakeAgentHub()
+	hub := httptest.NewServer(fake)
+	defer hub.Close()
+	m, w, _ := newRuntimeTestManager(t, hub.URL)
+	ws, _ := app.OpenWorkspace(w.Path)
+	_, _ = ws.RegisterUser("disksing")
+	resource := "project1.task1"
+	_ = acceptTestResourceMessage(t, m, w, resource, "execution continues", resourceMessageModeSteer, nil)
+	execution, _, _ := currentResourceGeneration(w.Path, resource)
+	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "open", chatRequest{}, false))
+	c, _ := loadDialogue(w.Path, dialoguePrefix+chatID(resource, "disksing"))
+	legacy := execution
+	legacy.ID = "legacy-active"
+	legacy.GenerationID = "legacy-active"
+	legacy.ResourceID = c.address()
+	legacy.OwnerResourceID = resource
+	legacy.RuntimeChannel = "dialogue"
+	legacy.ChatEpoch = c.Epoch
+	legacy.SourceExternalID = c.address() + "/1"
+	cfg, client, err := m.agentHubRuntimeConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := &agentHubSource{App: agentHubSourceApp, InstanceID: legacy.SourceInstanceID, ExternalID: legacy.SourceExternalID, Metadata: map[string]string{"resourceId": c.address(), "generationId": legacy.GenerationID}}
+	session, err := client.CreateSession(context.Background(), agentHubCreateSessionRequest{AgentName: "fake-agent", Source: source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy.AgentHubSessionID = session.ID
+	if err = saveGenerationRecord(w.Path, legacy); err != nil {
+		t.Fatal(err)
+	}
+	fake.mu.Lock()
+	session = fake.sessions[session.ID]
+	session.State = "running"
+	session.CurrentTurnID = "old-dialogue-turn"
+	fake.sessions[session.ID] = session
+	fake.mu.Unlock()
+	for range 4 {
+		if err = m.pollAgentHubSessions(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fake.mu.Lock()
+	oldState := fake.sessions[session.ID].State
+	executionState := fake.sessions[execution.AgentHubSessionID].State
+	created := fake.nextSession
+	fake.mu.Unlock()
+	if oldState != "stopped" && oldState != "archived" {
+		t.Fatalf("legacy session still active: %s", oldState)
+	}
+	if executionState != "running" {
+		t.Fatalf("execution stopped: %s", executionState)
+	}
+	if _, err = m.createResourceGeneration(context.Background(), w, c.address(), w.Path, cfg, client, resolvedResourceAgent{}); err == nil {
+		t.Fatal("new dialogue generation allowed")
+	}
+	if err = m.recoverAgentHubGeneration(context.Background(), cfg, client, w, legacy, nil); err != nil {
+		t.Fatal(err)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.nextSession != created || len(fake.resumeEnvironments) != 0 {
+		t.Fatal("legacy runtime revived")
+	}
+}
+
+func TestChatInputPresentationDoesNotPromiseAutomaticFinal(t *testing.T) {
+	c := resourceChat{ID: "chat-id", Token: "capability", ResourceID: "project1.task1", User: "Ada"}
+	text := c.prompt("User question")
+	for _, steer := range []bool{false, true} {
+		got := providerMessageTextWithContext(resourceMailboxMessage{Role: "system", Type: "user_chat_input", Text: text, ProviderContext: &providerMessageContext{Language: "zh-CN", OpenerRole: "agent", OpenerResponse: providerResponseFinalOnly}}, steer)
+		if got != text || !strings.Contains(got, "pua chat publish --reply-to=chat-id.capability") {
+			t.Fatal("chat wrapped as internal message")
+		}
 	}
 }

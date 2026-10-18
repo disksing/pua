@@ -62,6 +62,8 @@ type serveLockMetadata struct {
 }
 
 type resourceServerClient struct {
+	chatID      string
+	chatToken   string
 	baseURL     string
 	workspaceID string
 	http        *http.Client
@@ -316,6 +318,10 @@ func (client *resourceServerClient) request(ctx context.Context, method, path st
 		request.Header.Set("X-PUA-Chat-Token", os.Getenv("PUA_CHAT_TOKEN"))
 		request.Header.Set("X-PUA-Chat-Generation", os.Getenv("PUA_CHAT_GENERATION"))
 	}
+	if client.chatToken != "" {
+		request.Header.Set("X-PUA-Chat", client.chatID)
+		request.Header.Set("X-PUA-Chat-Token", client.chatToken)
+	}
 	response, err := client.http.Do(request)
 	if err != nil {
 		return fmt.Errorf("contact PUA Server %s: %w; verify the owner is running or use --server=<url>", client.baseURL, err)
@@ -492,7 +498,7 @@ func runMessageSend(args []string) error {
 	}
 	warnLiteralEscapeSequences(options.Text)
 	if os.Getenv("PUA_CHANNEL") == "dialogue" {
-		return errors.New("use pua chat dispatch or pua chat publish in a dialogue Session")
+		return errors.New("dialogue Sessions are retired; send user requests through resource Chat")
 	}
 	senderID, senderInstanceID, err := resolveMessageSender()
 	if err != nil {
@@ -578,8 +584,8 @@ func numberedResourcePart(value, prefix string) bool {
 	return true
 }
 
-// Legacy user targets are rejected explicitly; execution Agents must leave
-// queryable progress for dialogue Agents instead of publishing to an Inbox.
+// Legacy user targets stay removed. User replies use the explicit Chat
+// capability carried by a user input rather than an Inbox address.
 func runUserMessageSend(_ *resourceServerClient, options resourceServerOptions, _, _ string) error {
 	if err := app.ValidateUserName(options.ID); err != nil {
 		return fmt.Errorf("invalid user target %q: %w", options.ID, err)
@@ -590,7 +596,7 @@ func runUserMessageSend(_ *resourceServerClient, options resourceServerOptions, 
 	if options.SubscribeResult != nil {
 		return errors.New("--subscribe-result applies only to resource targets")
 	}
-	return errors.New("Inbox was removed; record execution progress for the dialogue Agent to query. Only dialogue Sessions can use pua chat publish")
+	return errors.New("Inbox was removed; reply to user Chat inputs with the explicit pua chat publish command supplied in that input")
 }
 
 func resolveMessageSender() (string, string, error) {

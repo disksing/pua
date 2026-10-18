@@ -112,7 +112,7 @@
 </script>
 <section tabindex="-1" use:trackScroll class="persistent-chat" aria-label="Resource chat">
   <header><strong>Chat</strong><span>{model.resourceTitle}</span>{#if chat?.open && model.resourceId !== "workspace" && !model.detail?.archived}<button disabled={pending} onclick={() => act("close")}>Close chat</button>{/if}</header>
-  {#if chat}<SessionControls {model} />{#if chat.open}<SessionControls {model} dialogue={true} />{:else}<small>Dialogue: closed</small>{/if}{/if}
+  {#if chat}<SessionControls {model} />{/if}
   <div class="public-messages" aria-live="polite">
     {#each chat?.messages || [] as message (message.id)}
       <article class:user-message={message.role === "user"}>
@@ -120,13 +120,13 @@
         <div class="markdown-rendered" use:markdownResourceNavigation={{ resolveResourceTitle: model.resolveResourceTitle, onNavigate: model.onNavigate }}>{@html markdownHTML(message.text, { resolveResourceTitle: model.resolveResourceTitle, workspaceId: model.workspaceId })}</div>
       </article>
     {/each}
-    {#if chat && !chat.messages.length}<p class="chat-hint">Start a conversation about this resource. Execution and dialogue events are available in their own tabs.</p>{/if}
+    {#if chat && !chat.messages.length}<p class="chat-hint">Start a conversation about this resource. Execution events are available in their own tab.</p>{/if}
   </div>
   {#if error}<p role="alert">{error}</p>{/if}
   {#if chat && !model.detail?.archived}
     {#if chat.open}
       <form onsubmit={(event) => { event.preventDefault(); send(); }}>
-        <textarea aria-label="Chat message" bind:value={draft} placeholder="Message the dialogue Agent…" onkeydown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); send(); } }}></textarea>
+        <textarea aria-label="Chat message" bind:value={draft} placeholder="Message the resource Agent…" onkeydown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); send(); } }}></textarea>
         <input bind:this={fileInput} type="file" multiple hidden onchange={() => attach(fileInput?.files || null)} />
         <button type="button" disabled={pending} onclick={() => fileInput?.click()}>Attach</button>
         <button type="submit" disabled={pending || !draft.trim()}>{pending ? "Sending…" : "Send"}</button>

@@ -195,6 +195,13 @@ func providerOpenerResponse(role string, message *resourceMailboxMessage) string
 }
 
 func providerMessageTextWithContext(message resourceMailboxMessage, steer bool) string {
+	// Chat owns its explicit publication instructions, including busy-turn
+	// inserts. Do not label it as a system notification or imply that final
+	// reaches this user. The mailbox role still disables internal turn-result
+	// subscriptions; no execution output is automatically copied to Chat.
+	if message.Type == "user_chat_input" {
+		return message.Text
+	}
 	context := message.ProviderContext
 	if context == nil {
 		return providerMessageText(message.Text, message.Role, message.Sender, steer)

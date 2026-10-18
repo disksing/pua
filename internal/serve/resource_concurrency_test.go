@@ -40,7 +40,8 @@ func addRuntimeTestWorkspace(t *testing.T, manager *agentManager, id, name strin
 
 func waitForResourceMailboxMessage(t *testing.T, workspacePath, messageID string, predicate func(resourceMailboxMessage) bool) resourceMailboxMessage {
 	t.Helper()
-	deadline := time.NewTimer(2 * time.Second)
+	// Match the runtime convergence budget under race instrumentation.
+	deadline := time.NewTimer(10 * time.Second)
 	defer deadline.Stop()
 	ticker := time.NewTicker(5 * time.Millisecond)
 	defer ticker.Stop()
@@ -54,7 +55,7 @@ func waitForResourceMailboxMessage(t *testing.T, workspacePath, messageID string
 		}
 		select {
 		case <-deadline.C:
-			t.Fatalf("mailbox message %s did not reach the expected state", messageID)
+			t.Fatalf("mailbox message %s did not reach the expected state: found=%t message=%+v", messageID, found, message)
 		case <-ticker.C:
 		}
 	}

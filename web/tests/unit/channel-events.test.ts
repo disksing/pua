@@ -108,22 +108,18 @@ it('cleans up the real detail tabs when switching resource, user or channel',asy
  tab('Execution events').click();
  await vi.waitFor(()=>expect(FakeEventSource.instances).toHaveLength(1));
  const first=FakeEventSource.instances[0];
- tab('Dialog events').click();
+ expect(tab('Dialog events')).toBeUndefined();
+ channel.publish({...channel.current(),currentUserName:'other'});
  await vi.waitFor(()=>expect(FakeEventSource.instances).toHaveLength(2));
  expect(first.closed).toBe(true);
- const second=FakeEventSource.instances[1];
- channel.publish({...channel.current(),currentUserName:'other'});
- await vi.waitFor(()=>expect(FakeEventSource.instances).toHaveLength(3));
- expect(second.closed).toBe(true);
- expect(FakeEventSource.instances[2].url).toContain('user=other');
- const third=FakeEventSource.instances[2];
+ const third=FakeEventSource.instances[1];
  channel.publish({...channel.current(),identity:'w:project1.task2',resourceId:'project1.task2',detail:{...channel.current().detail!,id:'project1.task2'}});
  await tick();
  // The selected tab may reset for a new resource; either way the old stream
  // must close before a stream for the next resource can be used.
  expect(third.closed).toBe(true);
- tab('Dialog events').click();
- await vi.waitFor(()=>expect(FakeEventSource.instances.at(-1)?.url).toContain('/project1.task2/chat/runtime/'));
+ tab('Execution events').click();
+ await vi.waitFor(()=>expect(FakeEventSource.instances.at(-1)?.url).toContain('/project1.task2/'));
  first.emit(99,'message.assistant.delta',{text:'late old-resource event',role:'assistant'});
  await tick();
  expect(target.textContent).not.toContain('late old-resource event');

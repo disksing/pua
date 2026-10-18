@@ -3,11 +3,11 @@
  import { projectConversationEvents } from "./timeline-events";
  import ApprovalCard from "./ApprovalCard.svelte";
  import type { AgentEvent, DetailPanelModel, TimelineItem } from "./models";
- let { model, dialogue = false }: { model:DetailPanelModel; dialogue?:boolean } = $props();
+ let { model }: { model:DetailPanelModel } = $props();
  type Status = { sessionState:string; configError?:string; lastError?:string; generation?:{generationId:string}; session?:{pendingApprovalIds?:string[]} };
  let status = $state<Status | null>(null), approvals = $state<TimelineItem[]>([]), error = $state(""), pending = $state(false);
  const client = new ApiClient();
- const base = $derived(`/api/workspaces/${encodeURIComponent(model.workspaceId)}/resources/${encodeURIComponent(model.resourceId)}${dialogue ? "/chat/runtime" : ""}`);
+ const base = $derived(`/api/workspaces/${encodeURIComponent(model.workspaceId)}/resources/${encodeURIComponent(model.resourceId)}`);
  const user = $derived(model.currentUserName);
  $effect(() => {
   const path=base, name=user; let disposed=false, loading=false; status=null; approvals=[];
@@ -31,9 +31,9 @@
  }
  async function stop() { pending=true; error=""; try {await control("turn/end");} catch(e) {error=String(e);} finally {pending=false;} }
 </script>
-<div class="session-controls" aria-label={dialogue ? "Dialogue controls" : "Execution controls"}>
- <span>{dialogue ? "Dialogue" : "Execution"}: {status?.sessionState || "Loading…"}</span>
- {#if status?.sessionState === "working" || status?.sessionState === "attention_required"}<button disabled={pending} onclick={stop}>{dialogue ? "Stop reply" : "Stop execution"}</button>{/if}
+<div class="session-controls" aria-label="Execution controls">
+ <span>Execution: {status?.sessionState || "Loading…"}</span>
+ {#if status?.sessionState === "working" || status?.sessionState === "attention_required"}<button disabled={pending} onclick={stop}>Stop execution</button>{/if}
  {#if error || status?.configError || status?.lastError}<small role="status">{error || status?.configError || status?.lastError}</small>{/if}
  {#each approvals as item (item.approvalId)}<ApprovalCard {item} generationId={status?.generation?.generationId || ""} contextIdentity={base} onApproval={async (_generation,id,reply) => {await control("approval",{requestId:id,...reply}); approvals=approvals.filter(a => a.approvalId!==id);}} onToast={model.onToast} />{/each}
 </div>

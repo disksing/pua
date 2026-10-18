@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-func TestDialogueCLIUsesFencedChatAndRejectsDirectTaskMutation(t *testing.T) {
+func TestExecutionCLIUsesExplicitChatCapability(t *testing.T) {
 	t.Setenv("PUA_CHANNEL", "")
 	t.Setenv(puaWorkspaceRootEnvironment, "")
 	t.Setenv(puaWorkspaceInstanceEnvironment, "")
@@ -25,8 +25,8 @@ func TestDialogueCLIUsesFencedChatAndRejectsDirectTaskMutation(t *testing.T) {
 				http.NotFound(w, r)
 				return
 			}
-			if r.Header.Get("X-PUA-Chat") != "test-chat" || r.Header.Get("X-PUA-Chat-Token") != "test-token" || r.Header.Get("X-PUA-Chat-Generation") != "test-generation" {
-				t.Error("missing dialogue context")
+			if r.Header.Get("X-PUA-Chat") != "test-chat" || r.Header.Get("X-PUA-Chat-Token") != "test-token" || r.Header.Get("X-PUA-Chat-Generation") != "" {
+				t.Error("missing explicit reply capability")
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Error(err)
@@ -38,19 +38,21 @@ func TestDialogueCLIUsesFencedChatAndRejectsDirectTaskMutation(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(root, ".pua", "serve.lock"), data, 0600); err != nil {
 			t.Fatal(err)
 		}
-		t.Setenv("PUA_CHANNEL", "dialogue")
+		t.Setenv("PUA_CHANNEL", "internal")
 		t.Setenv("PUA_CHAT_ID", "test-chat")
 		t.Setenv("PUA_CHAT_TOKEN", "test-token")
 		t.Setenv("PUA_CHAT_GENERATION", "test-generation")
 		t.Setenv(puaResourceIDEnvironment, "workspace")
-		run(t, "chat", "publish", "--id=reply-1", "Hello")
+		run(t, "chat", "publish", "--reply-to=test-chat.test-token", "--id=reply-1", "Hello")
 		if body["id"] != "reply-1" || body["text"] != "Hello" {
 			t.Fatalf("unexpected publish: %#v", body)
 		}
-		for _, args := range [][]string{{"task", "state", "set", "completed"}, {"message", "send", "--to=project1", "change"}, {"project", "create", "unapproved execution"}} {
-			if _, err := runErr(t, args...); err == nil || !strings.Contains(err.Error(), "dialogue Sessions") {
-				t.Fatalf("unfenced mutation %v: %v", args, err)
-			}
+		if _, err := runErr(t, "chat", "publish", "--id=missing", "Hello"); err == nil {
+			t.Fatal("missing capability accepted")
+		}
+		t.Setenv("PUA_CHANNEL", "dialogue")
+		if _, err := runErr(t, "chat", "publish", "--reply-to=test-chat.test-token", "--id=old", "Hello"); err == nil {
+			t.Fatal("legacy dialogue can publish")
 		}
 	})
 }

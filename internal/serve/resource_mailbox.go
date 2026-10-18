@@ -634,8 +634,8 @@ func resourceExistsAndArchived(workspacePath, resourceID string) (bool, bool, ap
 		if err != nil {
 			return false, false, app.AgentBinding{}, err
 		}
-		exists, archived, _, err := resourceExistsAndArchived(workspacePath, c.ResourceID)
-		return exists, archived || !c.Open, c.Binding, err
+		exists, _, _, err := resourceExistsAndArchived(workspacePath, c.ResourceID)
+		return exists, true, c.Binding, err
 	}
 	puaWorkspace, err := app.OpenWorkspace(workspacePath)
 	if err != nil {

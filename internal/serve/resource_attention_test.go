@@ -412,7 +412,7 @@ func TestActivityChatIncludesReadAndClosedChatsForCurrentUser(t *testing.T) {
 			Messages: []chatMessage{
 				{ID: "read", Role: "agent", CreatedAt: "2099-01-01T00:00:00Z"},
 				{ID: "unread", Role: "agent", CreatedAt: fmt.Sprintf("2026-10-14T00:00:0%dZ", i)},
-				{ID: "mine", Role: "user", CreatedAt: "2099-01-02T00:00:00Z"},
+				{ID: "mine", Role: "user", CreatedAt: fmt.Sprintf("2099-01-02T00:00:0%dZ", i)},
 			}}
 		if err := saveChatLocked(workspace, c); err != nil {
 			t.Fatal(err)
@@ -503,5 +503,63 @@ func TestActivityChatIncludesReadAndClosedChatsForCurrentUser(t *testing.T) {
 		if item.Chat.UnreadCount != 0 {
 			t.Fatalf("read chat still has unread messages: %+v", item)
 		}
+	}
+}
+
+func TestActivityChatSortsByLatestMessageRegardlessOfReadState(t *testing.T) {
+	s, workspace := attentionTestServer(t)
+	user := app.LegacyDefaultUserName
+	chats := []resourceChat{
+		{ResourceID: "project1", Messages: []chatMessage{{Role: "agent", CreatedAt: "2026-10-19T01:00:00Z"}}},
+		{ResourceID: "project1.task1", ReadThrough: 1, Messages: []chatMessage{{Role: "agent", CreatedAt: "2026-10-19T01:00:02Z"}}},
+		{ResourceID: "project1.task2", Messages: []chatMessage{{Role: "user", CreatedAt: "2026-10-19T09:00:01+08:00"}}},
+		{ResourceID: "project1.task3"},
+		{ResourceID: "project1.task4", Messages: []chatMessage{{Role: "user", CreatedAt: "invalid"}}},
+	}
+	for i := range chats {
+		chats[i].ID = chatID(chats[i].ResourceID, user)
+		chats[i].User = user
+		chats[i].Epoch = 1
+		chats[i].Open = true
+		if err := saveChatLocked(workspace, chats[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check := func(want []string) {
+		t.Helper()
+		tree := workspaceTree{Projects: []resourceSnapshot{{ID: "project1", Type: "project", Children: []resourceSnapshot{
+			{ID: "project1.task1", Type: "task"}, {ID: "project1.task2", Type: "task"},
+			{ID: "project1.task3", Type: "task"}, {ID: "project1.task4", Type: "task"},
+		}}}}
+		if err := s.enrichTreeResourceActivity(workspace, &tree, user); err != nil {
+			t.Fatal(err)
+		}
+		got := []string{}
+		for _, item := range tree.Activity.Unread {
+			got = append(got, item.ID)
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("chat order = %v, want %v", got, want)
+		}
+	}
+	original := []string{"project1.task1", "project1.task2", "project1", "project1.task3", "project1.task4"}
+	check(original)
+	// Reading and closing a chat must not demote its latest message.
+	for i := range chats {
+		chats[i].ReadThrough = len(chats[i].Messages)
+		chats[i].Open = false
+		if err := saveChatLocked(workspace, chats[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check(original)
+	// Both a user input and an agent reply move the updated chat to the top.
+	for _, role := range []string{"user", "agent"} {
+		chats[0].Messages = append(chats[0].Messages, chatMessage{Role: role, CreatedAt: "2026-10-19T01:00:03Z"})
+		if err := saveChatLocked(workspace, chats[0]); err != nil {
+			t.Fatal(err)
+		}
+		check([]string{"project1", "project1.task1", "project1.task2", "project1.task3", "project1.task4"})
+		chats[0].Messages = chats[0].Messages[:1]
 	}
 }

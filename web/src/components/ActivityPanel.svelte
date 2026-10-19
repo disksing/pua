@@ -50,7 +50,6 @@
   }
 
   function metadata(item: ShellActivityItem): string {
-    if (activeTab === "unread") return `${item.ref || item.id} · ${item.unreadCount} unread chat message${item.unreadCount === 1 ? "" : "s"}`;
     return [
       item.ref || item.id,
       item.agentName ? `Agent ${item.agentName}` : "",
@@ -86,12 +85,12 @@
         <div class="activity-row empty-attention"><Icon name="message-square" /><div><strong>No items</strong><span>{emptyMessage(activeTab)}</span></div></div>
       {:else}
         {#each activity[activeTab] as item (item.id)}
-          <button type="button" class={`activity-row ${statusClass(item.status)} ${item.selected ? "selected" : ""}`} aria-current={item.selected ? "page" : undefined} data-active-turn={item.activeTurn || undefined} aria-label={`${item.title}. ${metadata(item)}`} title={item.statusLabel || undefined} onclick={() => select(item)}>
+          <button type="button" class={`activity-row ${statusClass(item.status)} ${item.selected ? "selected" : ""}`} aria-current={item.selected ? "page" : undefined} data-active-turn={item.activeTurn || undefined} aria-label={`${item.title}. ${metadata(item)}${activeTab === "unread" ? `. ${item.unreadCount} unread chat message${item.unreadCount === 1 ? "" : "s"}` : ""}`} title={metadata(item)} onclick={() => select(item)}>
             <span class="activity-status" aria-hidden="true">
               <span class="activity-status-fallback-slot" hidden={item.status.hasTaskState}><Icon name={iconName(item)} className="activity-status-fallback" /></span>
               <span class="activity-status-runtime-slot" hidden={!item.status.hasTaskState}><StatusPresentation status={item.status} className="activity-status-icon" /></span>
             </span>
-            <span class="activity-title"><strong>{item.title}</strong><span class="activity-meta">{activeTab === "unread" ? item.ref || item.id : metadata(item)}</span></span>
+            <span class="activity-title"><strong>{item.title}</strong><span class="activity-meta">{metadata(item)}</span></span>
             {#if activeTab === "unread" && item.unreadCount > 0}
               <span class="activity-chat-unread-count" aria-hidden="true">{item.unreadCount}</span>
             {/if}

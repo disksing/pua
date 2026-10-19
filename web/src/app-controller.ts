@@ -925,7 +925,7 @@ function appShellSchedulerModel(item: ResourceRecord | null | undefined): ShellR
 	};
 }
 function appShellActivityModel(item: ResourceRecord, category: keyof ShellActivityLists): ShellActivityItem {
-	const state = item.type === "task" && (item.state === "blocked" || item.state === "error") ? taskWorkflowState(item) : taskOperationalState(item);
+	const state = item.type === "task" && (category === "unread" || item.state === "blocked" || item.state === "error") ? taskWorkflowState(item) : taskOperationalState(item);
 	const type = item.type === "scheduler" || item.type === "project" || item.type === "task" ? item.type : "workspace";
 	const title = item.title || item.id;
 	return {
@@ -938,7 +938,7 @@ function appShellActivityModel(item: ResourceRecord, category: keyof ShellActivi
 		unreadCount: Number(category === "unread" ? item.chat?.unreadCount : item.unreadCount) || 0,
 		turnNumber: category === "running" ? Number(item.runtime?.turnNumber) || 0 : Number(item.latestTurnNumber) || 0,
 		agentName: String(item.runtime?.agentName || item.latestAgentName || "").trim(),
-		statusLabel: category === "unread" ? `${Number(item.chat?.unreadCount) || 0} unread chat messages` : state.label || "Active turn",
+		statusLabel: state.label || (category === "unread" ? "Idle" : "Active turn"),
 		status: appShellStatusModel(state.statusPresentation)
 	};
 }

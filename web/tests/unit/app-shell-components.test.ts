@@ -594,7 +594,7 @@ describe("AppShell responsibility components", () => {
     const onSelect = vi.fn(async () => undefined);
     const item: ShellActivityItem = {
       id: "project-a", type: "project", title: "Project A", ref: "#1", selected: true, activeTurn: false, unreadCount: 2,
-      turnNumber: 2, agentName: "Codex", statusLabel: "2 unread", status: emptyStatus,
+      turnNumber: 2, agentName: "Codex", statusLabel: "Idle", status: emptyStatus,
     };
     const activeItem: ShellActivityItem = {
       id: "task-b", type: "task", title: "Task B", ref: "#2", selected: false, activeTurn: true, unreadCount: 1,
@@ -620,7 +620,9 @@ describe("AppShell responsibility components", () => {
     expect([...target.querySelectorAll(".activity-chat-unread-count")].map((badge) => badge.textContent)).toEqual(["1", "2"]);
     expect(target.querySelector('[aria-label^="Read chat."] .activity-chat-unread-count')).toBeNull();
     expect(target.querySelector('[aria-label^="Task B."]')?.getAttribute("aria-label")).toContain("1 unread chat message");
-    expect(target.querySelector('[role="tabpanel"]')?.textContent).not.toContain("Turn");
+    expect(target.querySelector('[aria-label^="Task B."] .activity-meta')?.textContent).toBe("#2 · Agent Codex · Turn 3 · Resource working");
+    expect(target.querySelector('[aria-label^="Task B."]')?.getAttribute("title")).toBe("#2 · Agent Codex · Turn 3 · Resource working");
+    expect(target.querySelector('[aria-label^="Read chat."] .activity-meta')?.textContent).toBe("#1 · Agent Codex · Turn 2 · Idle");
     target.querySelector<HTMLElement>('[aria-label^="Project A."]')!.click();
     await vi.waitFor(() => expect(onSelectChat).toHaveBeenCalledWith("project-a"));
     expect(onSelect).not.toHaveBeenCalled();

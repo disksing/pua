@@ -3037,8 +3037,9 @@ for (const sidebarWidth of [280, 220]) {
 }
 
 test("Activity Chat keeps read and closed chats with unread message pills and independent event cursors", async ({ page }, testInfo) => {
-  test.setTimeout(60_000);
+  test.setTimeout(120_000);
   await installMockApi(page, "project1.task2");
+  let newestTaskFirst = false;
   const writes: Array<{ user: string; resource: string; op: string; through?: number }> = [];
   const states = new Map<string, { open: boolean; unread: number; execution: number; dialogue: number; readExecution: number; readDialogue: number }>();
   const state = (user: string, resource: string) => {
@@ -3052,13 +3053,13 @@ test("Activity Chat keeps read and closed chats with unread message pills and in
     if (path.endsWith("/tree")) {
       const item = (resource: MockResource) => {
         const s = state(user,resource.id);
-        return { ...resource, latestTurnNumber:s.execution, unreadCount:s.execution-s.readExecution, userState:{readTurnNumber:s.readExecution},
+        return { ...resource, latestAgentName:"Codex", latestTurnNumber:s.execution, unreadCount:s.execution-s.readExecution, userState:{readTurnNumber:s.readExecution},
           ...(user === "User" ? {chat:{open:s.open,unreadCount:s.unread}} : {}),
           dialogueEvents:{latestTurnNumber:s.dialogue,readTurnNumber:s.readDialogue,unreadCount:s.dialogue-s.readDialogue} };
       };
       return json(route, { projects:[{...item(project),children:project.children.map(item)}], workspace:{id:"workspace",type:"workspace",title:"Isolated E2E"}, activity:{
         running:[{...item(project.children[1]), runtime:{activeTurn:true,turnNumber:7,turnStartedAt:now}}],
-        unread:[item(project),...project.children.map(item)].filter(r=>r.chat),
+        unread:(newestTaskFirst ? [item(project.children[1]),item(project.children[0]),item(project)] : [item(project),...project.children.map(item)]).filter(r=>r.chat),
         problems:[{...item(project.children[1]),state:"blocked",stateNote:"Needs review"}]
       } });
     }
@@ -3092,7 +3093,9 @@ test("Activity Chat keeps read and closed chats with unread message pills and in
   await activity.getByRole('tab',{name:'Chat 2',exact:true}).click();
   await expect(activity.locator('button.activity-row')).toHaveCount(3);
   await expect(activity.locator('.activity-chat-unread-count')).toHaveText(['5', '2']);
-  await expect(activity.locator('.activity-meta').first()).not.toContainText('Turn');
+  await expect(activity.locator('.activity-meta').first()).toContainText('Turn 3');
+  await expect(activity.locator('.activity-meta').nth(1)).toContainText('Agent Codex');
+  await expect(activity.locator('.activity-meta').nth(2)).toContainText('Not started');
   await expect(activity.locator('button.activity-row').nth(2).locator('.activity-chat-unread-count')).toHaveCount(0);
   await activity.locator('button.activity-row').nth(1).click();
   const chat=page.getByRole('region',{name:'Resource chat',exact:true});
@@ -3140,6 +3143,9 @@ test("Activity Chat keeps read and closed chats with unread message pills and in
   expect(writes.filter(w=>w.op.endsWith('-read'))).toHaveLength(readCount);
   expect(writes.filter(w=>/chat\/(open|close|messages|timer)$/.test(w.op))).toEqual([]);
   expect(target.open).toBe(false);
+  newestTaskFirst = true;
+  await expect(activity.locator('.activity-title strong')).toHaveText(['Follow-up task', 'Infrastructure task', originalTitle], {timeout:10_000});
+  await expect(activity.locator('.activity-chat-unread-count')).toHaveCount(0);
   await activity.getByRole('tab',{name:'Running 1',exact:true}).click();
   await expect(activity.locator('.activity-meta')).toContainText('Turn 7');
   await activity.getByRole('tab',{name:'Issues 1',exact:true}).click();

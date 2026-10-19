@@ -737,6 +737,9 @@ func (s *server) enrichTreeResourceActivity(workspacePath string, tree *workspac
 			unreadItem := item
 			chat := chats[normalizedResourceID(item.ID)]
 			for i, message := range chat.Messages {
+				if resourceActivitySortTime(message.CreatedAt).After(resourceActivitySortTime(unreadItem.LatestChatAt)) {
+					unreadItem.LatestChatAt = message.CreatedAt
+				}
 				if i >= chat.ReadThrough && message.Role == "agent" && resourceActivitySortTime(message.CreatedAt).After(resourceActivitySortTime(unreadItem.LatestUnreadChatAt)) {
 					unreadItem.LatestUnreadChatAt = message.CreatedAt
 				}
@@ -753,7 +756,7 @@ func (s *server) enrichTreeResourceActivity(workspacePath string, tree *workspac
 		}
 		return ""
 	})
-	sortResourceActivity(tree.Activity.Unread, func(item resourceSnapshot) string { return item.LatestUnreadChatAt })
+	sortResourceActivity(tree.Activity.Unread, func(item resourceSnapshot) string { return item.LatestChatAt })
 	sortResourceActivity(tree.Activity.Problems, func(item resourceSnapshot) string { return item.StateUpdatedAt })
 	return nil
 }

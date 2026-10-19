@@ -134,6 +134,7 @@ type resourceSnapshot struct {
 	Runtime            *resourceRuntimeSnapshot   `json:"runtime,omitempty"`
 	UserState          *resourceUserStateSnapshot `json:"userState,omitempty"`
 	LatestTurnNumber   int                        `json:"latestTurnNumber,omitempty"`
+	LatestChatAt       string                     `json:"latestChatAt,omitempty"`
 	LatestUnreadChatAt string                     `json:"latestUnreadChatAt,omitempty"`
 	LatestTurnAt       string                     `json:"latestTurnAt,omitempty"`
 	LatestAgentName    string                     `json:"latestAgentName,omitempty"`

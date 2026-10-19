@@ -26,6 +26,7 @@ export interface ResourceRecord {
   userState?: ResourceUserState;
   latestTurnNumber?: number;
   latestTurnAt?: string;
+  latestChatAt?: string;
   latestUnreadChatAt?: string;
   latestAgentName?: string;
   unreadCount?: number;

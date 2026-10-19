@@ -46,8 +46,8 @@ it("retries an uncertain send with the same id and never uses the execution mail
  const { target } = setup();
  await vi.waitFor(() => expect(target.querySelector("textarea")).not.toBeNull());
  const input = target.querySelector("textarea")!; input.value = "please investigate"; input.dispatchEvent(new Event("input", { bubbles: true })); await tick();
- button(target, "Send").click(); await vi.waitFor(() => expect(target.querySelector('[role="alert"]')).not.toBeNull());
- button(target, "Send").click(); await vi.waitFor(() => expect(ids).toHaveLength(2)); expect(ids[0]).toBe(ids[1]);
+ target.querySelector<HTMLButtonElement>(".chat-send-button")!.click(); await vi.waitFor(() => expect(target.querySelector('[role="alert"]')).not.toBeNull());
+ target.querySelector<HTMLButtonElement>(".chat-send-button")!.click(); await vi.waitFor(() => expect(ids).toHaveLength(2)); expect(ids[0]).toBe(ids[1]);
  expect(fetch.mock.calls.filter(([path]) => String(path).endsWith("/messages")).every(([path]) => String(path).includes("/chat/messages"))).toBe(true);
 });
 

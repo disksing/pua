@@ -3146,3 +3146,102 @@ test("Activity Chat keeps read and closed chats with unread message pills and in
   await expect(activity.locator('.activity-meta')).toContainText('Turn 3');
   await page.screenshot({path:testInfo.outputPath('chat-list-focus.png')});
 });
+
+test("public Chat restores the upload dialog, send card and execution model selector", async ({ page }, testInfo) => {
+  test.setTimeout(120_000);
+  const harness = await installMockApi(page);
+  const chat = { id: "composer-chat", open: true, epoch: 1, unreadCount: 0, messages: [] as Array<{ id: string; role: string; text: string; createdAt: string }> };
+  let selectedBinding = { kind: "profile", name: "default" };
+  const sends: Array<{ id: string; text: string }> = [];
+  const uploads: Array<{ name: string; user: string | undefined }> = [];
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  await page.route("**/api/workspaces/ws-test/**", async route => {
+    const request = route.request(), path = new URL(request.url()).pathname;
+    if (path.endsWith("/tree")) return json(route, {
+      root: "/tmp/pua-e2e",
+      workspace: { id: "workspace", type: "workspace", title: "Isolated E2E", path: "." },
+      projects: [{ ...project, children: project.children.map(task => ({ ...task, agentBinding: selectedBinding })) }],
+      activity: { running: [], unread: [], problems: [] },
+    });
+    if (path.endsWith("/agent-binding") && request.method() === "PUT") {
+      selectedBinding = request.postDataJSON();
+      return route.fallback();
+    }
+    if (path === "/api/workspaces/ws-test/resources/project1.task1" && request.method() === "GET") {
+      return json(route, { ...resourceDetail(project.children[0]), agentBinding: selectedBinding });
+    }
+    if (path.endsWith("/chat/messages")) {
+      const body = request.postDataJSON(); sends.push(body);
+      chat.messages.push({ ...body, role: "user", createdAt: now });
+      return json(route, chat);
+    }
+    if (path.endsWith("/chat/close") || path.endsWith("/chat/open")) {
+      chat.open = path.endsWith("/open"); return json(route, chat);
+    }
+    if (path.endsWith("/chat") || path.endsWith("/chat/read")) return json(route, chat);
+    if (path.endsWith("/uploads")) {
+      const name = (request.postData() || "").match(/filename="([^"]+)"/)?.[1] || "unknown";
+      uploads.push({ name, user: request.headers()["x-pua-user"] });
+      if (name === "failed.txt") return json(route, { error: "Upload rejected" }, 400);
+      return json(route, { name, path: `artifacts/upload/${name}` }, 201);
+    }
+    return route.fallback();
+  });
+  await page.goto("/w/ws-test/r/project1.task1");
+  const input = page.getByRole("textbox", { name: "Chat message" });
+  const send = page.getByRole("button", { name: "Send input", exact: true });
+  await expect(input).toBeVisible(); await expect(send).toBeDisabled();
+  await input.fill("Please review these files");
+  await page.getByRole("button", { name: "Upload files", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Upload files" });
+  await expect(dialog.getByText("Paste files from the clipboard")).toBeVisible();
+  await page.locator("#agentUploadInput").setInputFiles([
+    { name: "notes (1).txt", mimeType: "text/plain", buffer: Buffer.from("selected") },
+    { name: "failed.txt", mimeType: "text/plain", buffer: Buffer.from("failure") },
+  ]);
+  await page.locator("#agentUploadDropZone").evaluate(element => {
+    const data = new DataTransfer(); data.items.add(new File(["dropped"], "dropped.txt", { type: "text/plain" }));
+    element.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: data }));
+    const clipboard = new DataTransfer(); clipboard.items.add(new File(["pasted"], "pasted.txt", { type: "text/plain" }));
+    document.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: clipboard }));
+  });
+  await expect(dialog.getByText("3 uploaded · 1 failed.", { exact: false })).toBeVisible();
+  await expect(dialog.getByText("Upload rejected", { exact: true })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("composer-upload.png") });
+  await dialog.getByRole("button", { name: "Done", exact: true }).click();
+  await expect(input).toHaveValue(/Please review these files\n\[notes \(1\).txt\].*notes%20%281%29.txt/);
+  await expect(input).toHaveValue(/\[dropped.txt\]/); await expect(input).toHaveValue(/\[pasted.txt\]/);
+  expect(await input.inputValue()).not.toContain("failed.txt");
+  expect(uploads.every(upload => upload.user === "User")).toBe(true);
+  await page.getByRole("button", { name: "Binding target", exact: true }).click();
+  await page.locator('[role="option"][data-binding="profile:review"]').click();
+  await expect.poll(() => harness.bindingBodies).toEqual([{ kind: "profile", name: "review" }]);
+  await expect(page.getByRole("button", { name: "Binding target", exact: true })).toContainText("review");
+  await page.screenshot({ path: testInfo.outputPath("composer-ready.png") });
+  await input.press("Enter"); expect(sends).toHaveLength(0);
+  await input.press("Control+Enter");
+  await expect.poll(() => sends.length).toBe(1); await expect(input).toHaveValue("");
+  await input.fill("Second message"); await send.click();
+  await expect.poll(() => sends.length).toBe(2); await expect(input).toHaveValue("");
+  expect(harness.inputBodies).toHaveLength(0);
+  await expect(page.getByRole("tab", { name: /Dialog events/ })).toHaveCount(0);
+  for (const theme of ["default", "slate", "riso"]) {
+    await page.evaluate(theme => {
+      document.documentElement.dataset.theme = theme;
+      const chatPanel = document.getElementById("agentPanel")!;
+      chatPanel.style.width = "260px"; chatPanel.style.minWidth = "260px";
+    }, theme);
+    await input.fill("A draft in the restored composer");
+    const bounds = await page.locator(".public-chat-composer").evaluate(element => {
+      const form = element.querySelector("form")!, send = element.querySelector(".chat-send-button")!;
+      return { overflow: form.scrollWidth - form.clientWidth, right: send.getBoundingClientRect().right, edge: element.getBoundingClientRect().right };
+    });
+    expect(bounds.overflow).toBeLessThanOrEqual(1); expect(bounds.right).toBeLessThanOrEqual(bounds.edge);
+    await page.screenshot({ path: testInfo.outputPath(`composer-${theme}-narrow.png`) });
+  }
+  await page.getByRole("button", { name: "Close chat", exact: true }).click();
+  await expect(input).toHaveCount(0); await expect(page.getByText("Second message", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Reopen chat", exact: true }).click(); await expect(input).toBeVisible();
+  expect(errors).toEqual([]);
+});

@@ -1,6 +1,10 @@
 <script lang="ts">
+  import ChatComposer from "./ChatComposer.svelte";
+  import UploadDialog from "./UploadDialog.svelte";
+  import { createModelChannel } from "./model-channel";
+  import type { ComposerModel, UploadDialogModel } from "./models";
   import SessionControls from "./SessionControls.svelte";
-  import { onMount, tick } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import { ApiClient } from "../api/client";
   import type { ModelChannel } from "./model-channel";
   import type { DetailPanelModel } from "./models";
@@ -14,7 +18,10 @@
   let followTail = true;
   let scrollIdentity = "";
   let draft = $state("");
-  let fileInput = $state<HTMLInputElement>();
+  let draftResetVersion = $state(0);
+  let uploadOpen = $state(false);
+  let uploadCycle = $state(0);
+  let bindingSaving = $state(false);
   let pending = $state(false);
   let error = $state("");
   let requestID = "", sentText = "", mutationRevision = 0;
@@ -27,7 +34,7 @@
   onMount(() => channel.subscribe(next => model = next));
   $effect(() => {
     const key = identity, path = base, userHeaders = { "X-PUA-User": userName };
-    chat = null; draft = ""; error = ""; requestID = ""; pending = false;
+    chat = null; draft = ""; error = ""; requestID = ""; pending = false; uploadOpen = false; bindingSaving = false;
     if (!canLoad) return;
     let disposed = false, loading = false;
     async function refresh() {
@@ -78,37 +85,73 @@
     const key = identity; mutationRevision++; pending = true; error = "";
     try {
       const next = await client.request<Chat>(`${base}/${operation}`, { method: "POST", headers, body: JSON.stringify(body) });
-      if (key !== identity) return; chat = next;
+      if (key !== identity) return false; chat = next;
       model.onChatState?.({ open: next.open, unreadCount: next.unreadCount || 0 });
-      if (operation === "messages") { draft = ""; requestID = ""; }
-    } catch (e) { if (key === identity) error = String(e); }
+      if (operation === "messages") {
+        if (draft === sentText) { draft = ""; draftResetVersion++; }
+        requestID = "";
+      }
+      if (!next.open) uploadOpen = false;
+      return true;
+    } catch (e) {
+      if (operation === "messages") throw e;
+      if (key === identity) error = String(e);
+      return false;
+    }
     finally { if (key === identity) pending = false; }
   }
-  async function attach(files: FileList | null) {
-    if (!files?.length) return;
+  function composerModel(): ComposerModel {
     const key = identity;
-    const path = base.replace(/\/chat$/, "/uploads");
-    const resourcePath = model.detail?.path || "";
-    const userHeaders = { "X-PUA-User": userName };
-    pending = true; error = "";
-    try {
-      for (const file of Array.from(files)) {
-        const body = new FormData(); body.append("file", file);
-        const uploaded = await client.request<{name:string; path:string}>(path, { method:"POST", headers:userHeaders, body });
-        if (key !== identity) return;
-        const link = "/" + [resourcePath, uploaded.path].filter(Boolean).join("/");
-        const label = uploaded.name.replace(/[\[\]\\]/g, "\\$&");
-        const href = encodeURI(link).replace(/\(/g, "%28").replace(/\)/g, "%29");
-        draft += `${draft ? "\n" : ""}[${label}](${href})`;
-      }
-    } catch (e) { if (key === identity) error = String(e); }
-    finally { if (key === identity) { pending = false; if (fileInput) fileInput.value = ""; } }
+    return {
+      identity: `${key}:${chat?.epoch || 0}`, workspaceId: model.workspaceId, resourceId: model.resourceId,
+      draft, draftKey: key, draftResetVersion, sending: pending,
+      unavailableReason: model.detail?.archived ? "This resource is archived." : !chat?.open ? "Chat is closed." : "",
+      agentBinding: model.agentBinding, agentProfiles: model.agentProfiles, agents: model.agents, bindingSaving,
+      // Execution controls stay in SessionControls; never project internal
+      // mailbox content into the public Chat composer.
+      canEndTurn: false, endingTurn: false, canEndGeneration: false, endingGeneration: false,
+      stopNotice: "", waitingMessages: [], canSteerWaiting: false, steeringMessageId: "",
+      onEndTurn: () => {}, onEndGeneration: () => {}, onDismissStopNotice: () => {}, onSteerWaiting: async () => {},
+      onDraft: (text) => { if (key === identity) draft = text; },
+      onSend: async (text) => {
+        if (key !== identity || pending || !chat?.open || !text.trim()) return { accepted: false, clear: false };
+        if (!requestID || sentText !== text) { requestID = crypto.randomUUID(); sentText = text; }
+        const accepted = await act("messages", { id: requestID, text: sentText });
+        return { accepted, clear: accepted };
+      },
+      onOpenUpload: () => { uploadCycle++; uploadOpen = true; },
+      onSaveAgentBinding: async (binding) => {
+        bindingSaving = true; error = "";
+        try { await model.onSaveAgentBinding(binding); }
+        catch (e) { if (key === identity) error = String(e); }
+        finally { if (key === identity) bindingSaving = false; }
+      },
+    };
   }
-  function send() {
-    if (pending || !draft.trim()) return;
-    if (!requestID || sentText !== draft) { requestID = crypto.randomUUID(); sentText = draft; }
-    void act("messages", { id: requestID, text: sentText });
+  function uploadModel(): UploadDialogModel {
+    const key = identity, resourcePath = model.detail?.path || "";
+    return {
+      open: uploadOpen && Boolean(chat?.open) && !model.detail?.archived,
+      identity: `${key}:${chat?.epoch || 0}:${Boolean(chat?.open)}:${uploadCycle}`,
+      workspaceId: model.workspaceId, resourceId: model.resourceId, currentUserName: userName,
+      onDone: (paths) => {
+        if (key !== identity || !chat?.open) return;
+        const links = paths.map(path => {
+          const label = (path.split("/").at(-1) || path).replace(/[\[\]\\]/g, "\\$&");
+          const href = encodeURI("/" + [resourcePath, path].filter(Boolean).join("/")).replace(/\(/g, "%28").replace(/\)/g, "%29");
+          return `[${label}](${href})`;
+        });
+        if (links.length) { draft += `${draft ? "\n" : ""}${links.join("\n")}`; draftResetVersion++; }
+        uploadOpen = false;
+      },
+    };
   }
+  const composer = createModelChannel<ComposerModel>(composerModel());
+  const upload = createModelChannel<UploadDialogModel>(uploadModel());
+  $effect(() => { const next = composerModel(); untrack(() => composer.publish(next)); });
+  $effect(() => { const next = uploadModel(); untrack(() => upload.publish(next)); });
+  $effect(() => { if (!chat?.open) uploadOpen = false; });
+
 </script>
 <section tabindex="-1" use:trackScroll class="persistent-chat" aria-label="Resource chat">
   <header><strong>Chat</strong><span>{model.resourceTitle}</span>{#if chat?.open && model.resourceId !== "workspace" && !model.detail?.archived}<button disabled={pending} onclick={() => act("close")}>Close chat</button>{/if}</header>
@@ -125,15 +168,13 @@
   {#if error}<p role="alert">{error}</p>{/if}
   {#if chat && !model.detail?.archived}
     {#if chat.open}
-      <form onsubmit={(event) => { event.preventDefault(); send(); }}>
-        <textarea aria-label="Chat message" bind:value={draft} placeholder="Message the resource Agent…" onkeydown={(event) => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); send(); } }}></textarea>
-        <input bind:this={fileInput} type="file" multiple hidden onchange={() => attach(fileInput?.files || null)} />
-        <button type="button" disabled={pending} onclick={() => fileInput?.click()}>Attach</button>
-        <button type="submit" disabled={pending || !draft.trim()}>{pending ? "Sending…" : "Send"}</button>
-      </form>
+      <div class="public-chat-composer" data-component-owner="chat-composer">
+        <ChatComposer channel={composer} />
+      </div>
     {:else}<div class="chat-hint"><p>Chat is closed. History is preserved; background work continues.</p><button disabled={pending} onclick={() => act("open")}>{chat.epoch ? "Reopen chat" : "Open chat"}</button></div>{/if}
   {/if}
 </section>
+<div data-component-owner="upload-dialog" style="display: contents"><UploadDialog channel={upload} /></div>
 <style>
   .persistent-chat { display:flex; flex-direction:column; min-height:100%; gap:12px; padding:16px; }
   header { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
@@ -142,8 +183,7 @@
   article { padding:12px; border:1px solid var(--border-color, #8883); border-radius:10px; overflow-wrap:anywhere; }
   .user-message { margin-left:24px; background:var(--surface-hover, #8881); }
   small,.chat-hint { opacity:.7; }
-  form { display:flex; gap:8px; align-items:flex-end; position:sticky; bottom:0; background:var(--bg, #fff); padding-top:8px; }
-  textarea { flex:1; resize:vertical; min-height:80px; padding:10px; border-radius:8px; }
+  .public-chat-composer { position:sticky; bottom:0; background:var(--panel); margin:0 -16px -16px; padding-bottom:6px; }
   button { padding:7px 12px; cursor:pointer; }
   [role="alert"] { color:var(--danger-color, #c44); }
 </style>

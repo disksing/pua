@@ -2,6 +2,7 @@ import type { AgentOption } from "./common";
 import type { ResourceAgentBindingModel, ResourceAgentProfileModel } from "./detail";
 
 export interface UploadDialogModel {
+  currentUserName?: string;
   open: boolean;
   identity: string;
   workspaceId: string;

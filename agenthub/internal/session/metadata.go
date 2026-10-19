@@ -38,6 +38,9 @@ type SessionListPage struct {
 // writes. The page is a collection of per-session snapshots, not a transaction
 // across all sessions, matching Filter's existing consistency contract.
 func (s *Store) Query(ctx context.Context, filter ListFilter, options ListOptions) (SessionListPage, error) {
+	started := time.Now()
+	s.metrics.metadataQueries.Add(1)
+	defer func() { s.metrics.metadataQueryNanos.Add(time.Since(started).Nanoseconds()) }()
 	if err := ctx.Err(); err != nil {
 		return SessionListPage{}, err
 	}

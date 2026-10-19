@@ -250,7 +250,8 @@ func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 		"sessionStore": map[string]any{
 			"path":         s.store.Root(),
 			"archivePath":  s.store.ArchiveRoot(),
-			"sessionCount": len(s.store.List(true)),
+			"sessionCount": s.store.Count(),
+			"diagnostics":  s.store.Diagnostics(),
 		},
 		"runtime": s.runtimeStatus(),
 	})
@@ -295,7 +296,7 @@ func (s *Server) runtimeStatus() any {
 	if s.runtime == nil {
 		return map[string]any{"available": false}
 	}
-	return map[string]any{"available": true, "summary": s.runtime.String()}
+	return map[string]any{"available": true, "summary": s.runtime.String(), "startupRecoveryNanos": s.runtime.StartupRecoveryNanos()}
 }
 
 func (s *Server) getConfig(w http.ResponseWriter, _ *http.Request) {

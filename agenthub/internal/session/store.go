@@ -79,6 +79,11 @@ type sessionState struct {
 	// to, which keeps Open proportional to the number of sessions instead
 	// of the total event-log size.
 	eventsLoaded bool
+	// revision advances for every durable content update, including delta
+	// merges that retain LastEventID. Projection stamps never survive Open.
+	revision               uint64
+	turnProjectionRevision uint64
+	turnProjectionFile     os.FileInfo
 	// archived reports whether the session directory lives under Archive/.
 	// It is the in-memory record of the physical location, which is the
 	// authoritative archive signal.
@@ -86,8 +91,10 @@ type sessionState struct {
 }
 
 type Store struct {
-	root     string
-	createMu sync.Mutex
+	metrics   storeMetrics
+	turnCache turnCache
+	root      string
+	createMu  sync.Mutex
 
 	mu                  sync.RWMutex
 	sessions            map[string]*sessionState
@@ -129,6 +136,7 @@ func (s *Subscription) Cancel() {
 }
 
 func Open(root string) (*Store, error) {
+	started := time.Now()
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return nil, fmt.Errorf("create session store: %w", err)
 	}
@@ -207,6 +215,7 @@ func Open(root string) (*Store, error) {
 			store.idempotencyKeys[key] = entry.Name()
 		}
 	}
+	store.metrics.openNanos.Store(time.Since(started).Nanoseconds())
 	return store, nil
 }
 
@@ -421,6 +430,9 @@ func (s *Store) appendLocked(state *sessionState, id, eventType, turnID string, 
 	}
 	state.session = projected
 	state.events = append(state.events, event)
+	state.revision++
+	s.turnCache.remove(id)
+	s.metrics.cachedEventPayloadBytes.Add(int64(len(event.Data)))
 	state.publishMetadata()
 	if err := writeJSONAtomic(s.snapshotPath(id), state.session); err != nil {
 		return Event{}, Event{}, fmt.Errorf("write session snapshot: %w", err)
@@ -543,6 +555,9 @@ func (s *Store) mergeDeltaLocked(state *sessionState, last Event, mergedData, pa
 	}
 	state.session = projected
 	state.events[len(state.events)-1] = merged
+	state.revision++
+	s.turnCache.remove(last.SessionID)
+	s.metrics.cachedEventPayloadBytes.Add(int64(len(merged.Data) - len(last.Data)))
 	state.publishMetadata()
 	if err := writeJSONAtomic(s.snapshotPath(last.SessionID), state.session); err != nil {
 		return Event{}, Event{}, true, fmt.Errorf("write session snapshot: %w", err)
@@ -912,10 +927,15 @@ func normalizeEventLimit(limit int) int {
 }
 
 func (s *Store) loadSession(dir, id string) (*sessionState, error) {
-	if snapshot, ok := loadTrustedSnapshot(dir, id); ok {
+	started := time.Now()
+	snapshot, trusted := loadTrustedSnapshot(dir, id)
+	s.metrics.snapshotCheckNanos.Add(time.Since(started).Nanoseconds())
+	if trusted {
+		s.metrics.trustedSnapshots.Add(1)
 		return &sessionState{session: snapshot}, nil
 	}
-	events, err := readEventsRepairTail(filepath.Join(dir, "events.jsonl"))
+	s.metrics.fallbackReplays.Add(1)
+	events, err := s.readHistory(filepath.Join(dir, "events.jsonl"))
 	if err != nil {
 		return nil, err
 	}
@@ -1043,7 +1063,7 @@ func (s *Store) ensureEventsLocked(state *sessionState, id string) error {
 	if state.eventsLoaded {
 		return nil
 	}
-	events, err := readEventsRepairTail(s.eventsPathFor(state, id))
+	events, err := s.readHistory(s.eventsPathFor(state, id))
 	if err != nil {
 		return err
 	}

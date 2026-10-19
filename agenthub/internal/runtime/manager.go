@@ -16,6 +16,8 @@ import (
 
 type Manager struct {
 	store *session.Store
+	// Set once by New before the Manager is exposed to API readers.
+	startupRecoveryNanos int64
 
 	mu        sync.Mutex
 	cfg       config.Config
@@ -94,6 +96,7 @@ func (a *active) finishStart(err error) {
 }
 
 func New(store *session.Store, cfg config.Config) *Manager {
+	started := time.Now()
 	manager := &Manager{
 		store: store, cfg: cfg, running: make(map[string]*active),
 		inputs: make(map[string]*sync.Mutex), retrying: make(map[string]bool), factory: provider.New,
@@ -102,7 +105,12 @@ func New(store *session.Store, cfg config.Config) *Manager {
 	for _, value := range store.List(false) {
 		manager.recover(value)
 	}
+	manager.startupRecoveryNanos = time.Since(started).Nanoseconds()
 	return manager
+}
+
+func (m *Manager) StartupRecoveryNanos() int64 {
+	return m.startupRecoveryNanos
 }
 
 func (a *active) markStopping(reason string) {

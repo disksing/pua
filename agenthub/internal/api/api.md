@@ -275,6 +275,25 @@ Daemon status, effective data paths and runtime summary.
 }
 ```
 
+`sessionStore.diagnostics` 另返回进程内聚合诊断信息：`openNanos`、
+`snapshotCheckNanos`、`trustedSnapshots`、`fallbackReplays`、`historyLoads`、
+`historyLoadErrors`、`historyLoadNanos`、`cachedEventPayloadBytes`、
+`metadataQueries`、`metadataQueryNanos`、`turnCacheHits`、`turnCacheEntries`、
+`turnCacheEstimatedBytes`、`turnCacheBudgetBytes`、`turnProjectionReads`、
+`turnBuilds`、`turnBuildNanos`、`turnRebuilds`、`turnProjectionWrites`。
+时间字段以纳秒为单位；除 `openNanos` 为本次 Store 打开总耗时，其余时间为累计耗时。
+`runtime.startupRecoveryNanos` 为本次 runtime 初始化与恢复总耗时。
+计数在进程 / Store 重建时清零，不是持久审计数据；字段为并发近似快照。
+`historyLoads` 统计向事件缓存加载历史的成功次数；`cachedEventPayloadBytes`
+仅统计已缓存 Event.Data 的长度，不包括结构体、切片容量、字符串、临时缓冲，
+不能当作 Go heap 或 RSS。Turn 缓存按保守估算的 8 MiB 总预算和最多 64 项限制；
+超限结果绕过缓存，但同一进程内已重建的内容版本仍不重复重建或写盘。
+缓存命中保留投影文件存在性、文件身份、大小与修改时间校验，以支持删除后修复。
+这些信息不包含 session ID、事件正文或环境变量；没有新增 pprof 网络入口。
+
+会话列表和 metadata GET 读取不可变的持久事件投影，不等待历史加载、Turn 重建
+或 snapshot 写盘锁。列表先筛选和分页，再复制响应行；无分页参数时仍返回完整列表。
+
   `runtime` is `{"available": false}` when the daemon runs without a
   session runtime. Such an instance also omits the runtime-backed
   capabilities described under

@@ -3,6 +3,7 @@ package session
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -15,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -67,9 +69,10 @@ func validSessionID(id string) bool {
 }
 
 type sessionState struct {
-	mu      sync.Mutex
-	session Session
-	events  []Event
+	mu       sync.Mutex
+	metadata atomic.Pointer[Session]
+	session  Session
+	events   []Event
 	// eventsLoaded reports whether events holds the full durable history.
 	// Sessions opened from a trusted session.json snapshot start unloaded
 	// and parse events.jsonl only when history is first read or appended
@@ -163,6 +166,7 @@ func Open(root string) (*Store, error) {
 				syncDir(root)
 			}
 		}
+		state.publishMetadata()
 		store.sessions[entry.Name()] = state
 		if key := strings.TrimSpace(state.session.IdempotencyKey); key != "" {
 			if previous, exists := store.idempotencyKeys[key]; exists && previous != entry.Name() {
@@ -194,6 +198,7 @@ func Open(root string) (*Store, error) {
 		// is archived even if its event log predates the archived event.
 		state.session.State = StateArchived
 		state.archived = true
+		state.publishMetadata()
 		store.sessions[entry.Name()] = state
 		if key := strings.TrimSpace(state.session.IdempotencyKey); key != "" {
 			if previous, exists := store.idempotencyKeys[key]; exists && previous != entry.Name() {
@@ -318,9 +323,11 @@ func (s *Store) Get(id string) (Session, error) {
 	if err != nil {
 		return Session{}, err
 	}
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	return cloneSession(state.session), nil
+	value := state.metadata.Load()
+	if value == nil {
+		return Session{}, ErrNotFound
+	}
+	return cloneSession(*value), nil
 }
 
 func (s *Store) List(includeArchived bool) []Session {
@@ -339,33 +346,8 @@ type ListFilter struct {
 
 // Filter returns matching sessions, most recently updated first.
 func (s *Store) Filter(filter ListFilter) []Session {
-	s.mu.RLock()
-	states := make([]*sessionState, 0, len(s.sessions))
-	for _, state := range s.sessions {
-		states = append(states, state)
-	}
-	s.mu.RUnlock()
-
-	values := make([]Session, 0, len(states))
-	for _, state := range states {
-		state.mu.Lock()
-		value := cloneSession(state.session)
-		state.mu.Unlock()
-		if !filter.IncludeArchived && value.State == StateArchived {
-			continue
-		}
-		if !matchesSource(value.Source, filter) {
-			continue
-		}
-		values = append(values, value)
-	}
-	sort.Slice(values, func(i, j int) bool {
-		if values[i].UpdatedAt.Equal(values[j].UpdatedAt) {
-			return values[i].ID > values[j].ID
-		}
-		return values[i].UpdatedAt.After(values[j].UpdatedAt)
-	})
-	return values
+	page, _ := s.Query(context.Background(), filter, ListOptions{})
+	return page.Sessions
 }
 
 func matchesSource(source *Source, filter ListFilter) bool {
@@ -439,6 +421,7 @@ func (s *Store) appendLocked(state *sessionState, id, eventType, turnID string, 
 	}
 	state.session = projected
 	state.events = append(state.events, event)
+	state.publishMetadata()
 	if err := writeJSONAtomic(s.snapshotPath(id), state.session); err != nil {
 		return Event{}, Event{}, fmt.Errorf("write session snapshot: %w", err)
 	}
@@ -560,6 +543,7 @@ func (s *Store) mergeDeltaLocked(state *sessionState, last Event, mergedData, pa
 	}
 	state.session = projected
 	state.events[len(state.events)-1] = merged
+	state.publishMetadata()
 	if err := writeJSONAtomic(s.snapshotPath(last.SessionID), state.session); err != nil {
 		return Event{}, Event{}, true, fmt.Errorf("write session snapshot: %w", err)
 	}
@@ -877,9 +861,12 @@ func (s *Store) Subscribe(id string) (*Subscription, int64, error) {
 		s.subscribers[id] = make(map[*Subscription]struct{})
 	}
 	s.subscribers[id][subscription] = struct{}{}
-	state.mu.Lock()
-	highWater := state.session.LastEventID
-	state.mu.Unlock()
+	// Never wait for history I/O while holding the store-wide subscriber lock.
+	// The immutable snapshot is published only after the log is durable.
+	highWater := int64(0)
+	if value := state.metadata.Load(); value != nil {
+		highWater = value.LastEventID
+	}
 	s.mu.Unlock()
 	subscription.cancel = func() {
 		s.mu.Lock()
@@ -1523,6 +1510,10 @@ func (s *Store) turnsPath(id string) string {
 }
 
 func cloneSession(value Session) Session {
+	if value.LastActivityAt != nil {
+		activity := *value.LastActivityAt
+		value.LastActivityAt = &activity
+	}
 	value.PendingApprovalIDs = append([]string(nil), value.PendingApprovalIDs...)
 	value.Source = cloneSource(value.Source)
 	value.LaunchEnvironment = cloneEnvironment(value.LaunchEnvironment)

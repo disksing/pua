@@ -583,35 +583,29 @@ func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
 	if query.Has("sourceExternalId") {
 		filter.SourceExternalID = stringPointer(query.Get("sourceExternalId"))
 	}
-	values := s.store.Filter(filter)
-	if archivedOnly {
-		filtered := values[:0]
-		for _, value := range values {
-			if value.State == session.StateArchived {
-				filtered = append(filtered, value)
-			}
-		}
-		values = filtered
-	}
-	if stateFilter := strings.TrimSpace(r.URL.Query().Get("state")); stateFilter != "" {
-		allowed := make(map[string]bool)
-		for _, state := range strings.Split(stateFilter, ",") {
-			allowed[strings.TrimSpace(state)] = true
-		}
-		filtered := values[:0]
-		for _, value := range values {
-			if allowed[value.State] {
-				filtered = append(filtered, value)
-			}
-		}
-		values = filtered
-	}
-	page, err := paginateSessions(values, query)
-	if err != nil {
-		writeAPIError(w, http.StatusBadRequest, err.code, err.message, nil)
+	options, queryErr := parseSessionListOptions(query)
+	if queryErr != nil {
+		writeAPIError(w, http.StatusBadRequest, queryErr.code, queryErr.message, nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"sessions": page.sessions, "page": page.metadata})
+	options.ArchivedOnly = archivedOnly
+	if stateFilter := strings.TrimSpace(query.Get("state")); stateFilter != "" {
+		for _, state := range strings.Split(stateFilter, ",") {
+			options.States = append(options.States, strings.TrimSpace(state))
+		}
+	}
+	page, err := s.store.Query(r.Context(), filter, options)
+	if err != nil || r.Context().Err() != nil {
+		return // A cancelled list must not continue copying or encoding rows.
+	}
+	metadata := sessionListPageMetadata{Limit: options.Limit, HasMore: page.HasMore}
+	if options.Limit <= 0 {
+		metadata.Limit = len(page.Sessions)
+	}
+	if page.HasMore && len(page.Sessions) > 0 {
+		metadata.NextCursor = encodeSessionListCursor(page.Sessions[len(page.Sessions)-1])
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sessions": page.Sessions, "page": metadata})
 }
 
 const (
@@ -630,11 +624,6 @@ type sessionListPageMetadata struct {
 	HasMore    bool   `json:"hasMore"`
 }
 
-type sessionListPage struct {
-	sessions []session.Session
-	metadata sessionListPageMetadata
-}
-
 type sessionListQueryError struct {
 	code    string
 	message string
@@ -642,26 +631,22 @@ type sessionListQueryError struct {
 
 func (e *sessionListQueryError) Error() string { return e.message }
 
-// paginateSessions keeps the historical unbounded response when neither
-// pagination parameter is present. New clients opt in with limit/cursor. The
-// opaque cursor is the exclusive (updatedAt, id) boundary of the last row;
-// Store.Filter sorts by the same tuple in descending order.
-func paginateSessions(values []session.Session, query url.Values) (sessionListPage, *sessionListQueryError) {
+// Keep the historical unbounded response unless a client opts into pagination.
+// The cursor is the exclusive descending (updatedAt, id) boundary used by Query.
+func parseSessionListOptions(query url.Values) (session.ListOptions, *sessionListQueryError) {
+	options := session.ListOptions{}
 	limitText := strings.TrimSpace(query.Get("limit"))
 	cursorText := strings.TrimSpace(query.Get("cursor"))
 	paginated := limitText != "" || cursorText != ""
 	if !paginated {
-		return sessionListPage{
-			sessions: values,
-			metadata: sessionListPageMetadata{Limit: len(values), HasMore: false},
-		}, nil
+		return options, nil
 	}
 
 	limit := defaultSessionListLimit
 	if limitText != "" {
 		parsed, err := strconv.Atoi(limitText)
 		if err != nil || parsed <= 0 || parsed > maximumSessionListLimit {
-			return sessionListPage{}, &sessionListQueryError{
+			return options, &sessionListQueryError{
 				code:    "invalid_session_limit",
 				message: fmt.Sprintf("limit must be between 1 and %d", maximumSessionListLimit),
 			}
@@ -669,28 +654,17 @@ func paginateSessions(values []session.Session, query url.Values) (sessionListPa
 		limit = parsed
 	}
 
-	start := 0
+	options.Limit = limit
 	if cursorText != "" {
 		cursor, err := decodeSessionListCursor(cursorText)
 		if err != nil {
-			return sessionListPage{}, &sessionListQueryError{
+			return options, &sessionListQueryError{
 				code: "invalid_session_cursor", message: "cursor is not a valid Session list cursor",
 			}
 		}
-		start = sort.Search(len(values), func(index int) bool {
-			value := values[index]
-			return value.UpdatedAt.Before(cursor.UpdatedAt) ||
-				(value.UpdatedAt.Equal(cursor.UpdatedAt) && value.ID < cursor.ID)
-		})
+		options.Cursor = &session.ListCursor{UpdatedAt: cursor.UpdatedAt, ID: cursor.ID}
 	}
-
-	end := min(start+limit, len(values))
-	pageValues := values[start:end]
-	metadata := sessionListPageMetadata{Limit: limit, HasMore: end < len(values)}
-	if metadata.HasMore && len(pageValues) > 0 {
-		metadata.NextCursor = encodeSessionListCursor(pageValues[len(pageValues)-1])
-	}
-	return sessionListPage{sessions: pageValues, metadata: metadata}, nil
+	return options, nil
 }
 
 func encodeSessionListCursor(value session.Session) string {

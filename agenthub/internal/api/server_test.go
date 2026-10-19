@@ -469,34 +469,49 @@ func TestSessionSourceAPIAndCombinedFilters(t *testing.T) {
 }
 
 func TestSessionListCursorPagination(t *testing.T) {
-	now := time.Date(2026, 8, 23, 1, 2, 3, 0, time.UTC)
-	values := []session.Session{
-		{ID: "ses_d", UpdatedAt: now.Add(2 * time.Minute)},
-		{ID: "ses_c", UpdatedAt: now.Add(time.Minute)},
-		{ID: "ses_b", UpdatedAt: now},
-		{ID: "ses_a", UpdatedAt: now},
+	store, err := session.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
 	}
-	first, queryErr := paginateSessions(values, url.Values{"limit": {"2"}})
-	if queryErr != nil {
-		t.Fatal(queryErr)
+	for index := 0; index < 4; index++ {
+		if _, err := store.Create(session.CreateInput{Source: &session.Source{App: "pua"}}); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if got := []string{first.sessions[0].ID, first.sessions[1].ID}; !reflect.DeepEqual(got, []string{"ses_d", "ses_c"}) {
-		t.Fatalf("first page ids = %v", got)
+	if _, err := store.Create(session.CreateInput{Source: &session.Source{App: "other"}}); err != nil {
+		t.Fatal(err)
 	}
-	if !first.metadata.HasMore || first.metadata.NextCursor == "" || first.metadata.Limit != 2 {
-		t.Fatalf("first page metadata = %+v", first.metadata)
+	app := "pua"
+	values := store.Filter(session.ListFilter{SourceApp: &app})
+	handler := New(store, "test", time.Now()).Handler()
+	type responsePage struct {
+		Sessions []session.Session       `json:"sessions"`
+		Page     sessionListPageMetadata `json:"page"`
 	}
-	second, queryErr := paginateSessions(values, url.Values{
-		"limit": {"2"}, "cursor": {first.metadata.NextCursor},
-	})
-	if queryErr != nil {
-		t.Fatal(queryErr)
+	readPage := func(query url.Values) responsePage {
+		t.Helper()
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/sessions?"+query.Encode(), nil))
+		var result responsePage
+		if response.Code != http.StatusOK {
+			t.Fatalf("list status = %d: %s", response.Code, response.Body.String())
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		return result
 	}
-	if got := []string{second.sessions[0].ID, second.sessions[1].ID}; !reflect.DeepEqual(got, []string{"ses_b", "ses_a"}) {
-		t.Fatalf("second page ids = %v", got)
+	first := readPage(url.Values{"sourceApp": {"pua"}, "limit": {"2"}})
+	if len(first.Sessions) != 2 || first.Sessions[0].ID != values[0].ID || first.Sessions[1].ID != values[1].ID || !first.Page.HasMore || first.Page.NextCursor == "" || first.Page.Limit != 2 {
+		t.Fatalf("first page = %+v", first)
 	}
-	if second.metadata.HasMore || second.metadata.NextCursor != "" {
-		t.Fatalf("second page metadata = %+v", second.metadata)
+	second := readPage(url.Values{"sourceApp": {"pua"}, "limit": {"2"}, "cursor": {first.Page.NextCursor}})
+	if len(second.Sessions) != 2 || second.Sessions[0].ID != values[2].ID || second.Sessions[1].ID != values[3].ID || second.Page.HasMore || second.Page.NextCursor != "" {
+		t.Fatalf("second page = %+v", second)
+	}
+	unbounded := readPage(url.Values{"sourceApp": {"pua"}})
+	if len(unbounded.Sessions) != 4 || unbounded.Page.Limit != 4 || unbounded.Page.HasMore {
+		t.Fatalf("unbounded page = %+v", unbounded)
 	}
 }
 
@@ -510,7 +525,7 @@ func TestSessionListPaginationValidation(t *testing.T) {
 		{query: url.Values{"limit": {"many"}}, code: "invalid_session_limit"},
 		{query: url.Values{"cursor": {"not-a-cursor"}}, code: "invalid_session_cursor"},
 	} {
-		_, queryErr := paginateSessions(nil, test.query)
+		_, queryErr := parseSessionListOptions(test.query)
 		if queryErr == nil || queryErr.code != test.code {
 			t.Errorf("query %v error = %+v, want %s", test.query, queryErr, test.code)
 		}

@@ -5,6 +5,7 @@
   import type { ResourceAgentBindingModel } from "../models/detail";
   import AgentBindingSelector from "./AgentBindingSelector.svelte";
   import Icon from "./Icon.svelte";
+  import TelegramSettings from "./TelegramSettings.svelte";
   import type { DetailPanelModel } from "./models";
   import { sanitizeUserNameInput, validateUserName } from "../controllers/user-settings-controller";
 
@@ -261,6 +262,7 @@
 
 <div class="resource-settings" data-component-owner="resource-settings-panel">
   {#if model.resourceType === "workspace"}
+    <TelegramSettings workspaceId={model.workspaceId} workspaceName={model.workspaceName} />
     <section class="resource-settings-section">
       <div class="resource-settings-section-head">
         <strong>Generation lifecycle</strong>

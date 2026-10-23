@@ -3251,3 +3251,36 @@ test("public Chat restores the upload dialog, send card and execution model sele
   await page.getByRole("button", { name: "Reopen chat", exact: true }).click(); await expect(input).toBeVisible();
   expect(errors).toEqual([]);
 });
+
+for (const width of [1500, 390]) {
+  test(`configures Telegram in Workspace Settings at ${width}px`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 900 });
+    await installMockApi(page, "workspace");
+    const saved: Array<Record<string, unknown>> = [];
+    let configured = false;
+    await page.route("**/api/workspaces/ws-test/telegram**", async (route) => {
+      const request = route.request();
+      const path = new URL(request.url()).pathname;
+      if (path.endsWith("/pair")) return json(route, { url: "https://t.me/example_bot?start=example", expiresAt: "2030-01-01T00:10:00Z" });
+      if (request.method() === "PUT") { saved.push(request.postDataJSON()); configured = true; }
+      return json(route, { configured, enabled: configured, botName: configured ? "example_bot" : "", accounts: [], topicCount: 0, lastError: "", lastPoll: "", deliveryProblems: [] });
+    });
+    await page.goto("/w/ws-test");
+    if (width < 700) await page.getByRole("button", { name: "Open navigation" }).click();
+    await page.locator("#systemSettingsButton").click();
+    const settings = page.getByRole("dialog", { name: "System Settings" });
+    await settings.getByRole("button", { name: "Workspace", exact: true }).click();
+    await settings.locator(".telegram-settings summary").click();
+    await settings.getByLabel("Bot token", { exact: true }).fill("123:example-token-for-test-only");
+    await settings.getByLabel("Enable Telegram connection").check();
+    await settings.getByRole("button", { name: "Save connection" }).click();
+    await expect(settings.locator(".telegram-settings")).toContainText("@example_bot");
+    await expect(settings.getByLabel("Bot token", { exact: true })).toHaveValue("");
+    expect(saved).toEqual([{ token: "123:example-token-for-test-only", enabled: true }]);
+    await settings.getByRole("button", { name: "Create pairing link" }).click();
+    await expect(settings.getByRole("link", { name: "Open Telegram to pair this account" })).toHaveAttribute("href", "https://t.me/example_bot?start=example");
+    const overflow = await settings.locator(".settings-content").evaluate((node) => node.scrollWidth - node.clientWidth);
+    expect(overflow).toBeLessThanOrEqual(1);
+    await settings.locator(".telegram-settings").screenshot({ path: testInfo.outputPath(`telegram-settings-${width}.png`) });
+  });
+}

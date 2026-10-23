@@ -188,14 +188,17 @@ type uiState struct {
 }
 
 type server struct {
-	addr             string
-	config           string
-	agentHubMode     string
-	agentHubEndpoint string
-	agents           *agentManager
-	doctor           *doctorMonitor
-	locks            *workspaceLockManager
-	uiStateMu        sync.Mutex
+	telegramMu         sync.Mutex
+	telegramSettingsMu sync.Mutex
+	telegramRuntimes   map[string]*telegramRuntime
+	addr               string
+	config             string
+	agentHubMode       string
+	agentHubEndpoint   string
+	agents             *agentManager
+	doctor             *doctorMonitor
+	locks              *workspaceLockManager
+	uiStateMu          sync.Mutex
 }
 
 const (
@@ -410,6 +413,7 @@ func Main(args []string) error {
 		}
 	}()
 	s.agents.startAgentRecovery(lifecycleContext)
+	s.startTelegram(lifecycleContext)
 	s.doctor = newDoctorMonitor(s)
 	s.doctor.start(lifecycleContext)
 	ready.ready.Store(true)
@@ -572,6 +576,9 @@ func (s *server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.updateWorkspaceStallWatchdogPolicy(w, r, id)
+		return
+	case "telegram":
+		s.handleTelegram(w, r, id, parts[2:])
 		return
 	case "tree":
 		if r.Method != http.MethodGet {

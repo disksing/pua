@@ -234,3 +234,20 @@ func migrateChatLocked(root string, c *resourceChat) error {
 	c.Version = 3
 	return saveChatLocked(root, *c)
 }
+
+// appendUserInput is shared by the web and Telegram transports. Callers hold
+// chatMu and commit Chat plus outbox together before acknowledging the input.
+func (c *resourceChat) appendUserInput(id, text string) error {
+	if !c.Open {
+		return errors.New("chat is closed")
+	}
+	for _, message := range c.Messages {
+		if message.ID == id {
+			return c.appendMessage(id, "user", text)
+		}
+	}
+	if err := c.appendMessage(id, "user", text); err != nil {
+		return err
+	}
+	return c.queue("input-"+id, c.ResourceID, c.prompt("User message "+id+" from "+c.User+":\n"+text))
+}

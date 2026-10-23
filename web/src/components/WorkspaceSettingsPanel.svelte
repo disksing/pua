@@ -2,6 +2,7 @@
   import "./WorkspaceSettingsPanel.css";
 
   import Icon from "./Icon.svelte";
+  import TelegramSettings from "./TelegramSettings.svelte";
   import type { SettingsDraft, SettingsModel } from "./models";
   import { cloneSettingsDraft, settingsErrorMessage } from "./settings-draft";
   import { sanitizeUserNameInput, validateUserName } from "../controllers/user-settings-controller";
@@ -214,6 +215,7 @@
             {/each}
           </div>
         {/if}
+        <TelegramSettings workspaceId={workspace.id} workspaceName={workspace.name} />
       </div>
     {:else}
       <div class="settings-empty">No workspaces managed by PUA.</div>

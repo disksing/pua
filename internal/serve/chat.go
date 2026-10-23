@@ -202,21 +202,7 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 			return
 		}
 	case "messages":
-		if !c.Open {
-			err = errors.New("chat is closed")
-			break
-		}
-		duplicate := false
-		for _, message := range c.Messages {
-			if message.ID == body.ID {
-				duplicate = true
-				break
-			}
-		}
-		err = c.appendMessage(body.ID, "user", body.Text)
-		if err == nil && !duplicate {
-			err = c.queue("input-"+body.ID, c.ResourceID, c.prompt("User message "+body.ID+" from "+c.User+":\n"+body.Text))
-		}
+		err = c.appendUserInput(body.ID, body.Text)
 	case "publish":
 		err = c.appendMessage(body.ID, "agent", body.Text)
 	case "notes":

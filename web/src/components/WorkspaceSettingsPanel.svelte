@@ -10,6 +10,7 @@
   let {
     workspaces,
     activeWorkspaceId,
+    workspaceUserNames = {},
     workspaceIcons,
     draft = $bindable(),
     pending = $bindable(),
@@ -21,6 +22,7 @@
   }: {
     workspaces: SettingsModel["workspaces"];
     activeWorkspaceId: string;
+    workspaceUserNames?: Record<string, string>;
     workspaceIcons: SettingsModel["workspaceIcons"];
     draft: SettingsDraft;
     pending: string;
@@ -215,7 +217,7 @@
             {/each}
           </div>
         {/if}
-        <TelegramSettings workspaceId={workspace.id} workspaceName={workspace.name} />
+        <TelegramSettings workspaceId={workspace.id} workspaceName={workspace.name} currentUserName={workspaceUserNames[workspace.id] || ""} />
       </div>
     {:else}
       <div class="settings-empty">No workspaces managed by PUA.</div>

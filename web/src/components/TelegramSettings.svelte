@@ -1,7 +1,8 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { ApiClient } from "../api/client";
 
-  let { workspaceId, workspaceName }: { workspaceId: string; workspaceName: string } = $props();
+  let { workspaceId, workspaceName, currentUserName = "" }: { workspaceId: string; workspaceName: string; currentUserName?: string } = $props();
   interface Settings {
     configured: boolean;
     enabled: boolean;
@@ -27,10 +28,14 @@
   let confirmUnbind = $state("");
   let retryRoute = $state<string | null>(null);
   const endpoint = $derived(`/api/workspaces/${encodeURIComponent(workspaceId)}/telegram`);
+  // Parent models are republished during polling. Depend on the scalar identity,
+  // not on the parent's object-backed prop getter, so drafts survive refreshes.
+  const loadIdentity = $derived(expanded ? workspaceId : "");
 
   $effect(() => {
-    const id = workspaceId;
-    if (!expanded) return;
+    const id = loadIdentity;
+    if (!id) return;
+    const preferredUser = untrack(() => currentUserName);
     let active = true;
     pending = "load"; settings = null; confirmUnbind = ""; confirmDisconnect = false; retryRoute = null;
     error = "";
@@ -40,7 +45,7 @@
     ]).then(([value, list]) => {
       if (!active) return;
       settings = value; enabled = value.enabled; users = list.users;
-      selectedUser = list.users[0]?.name ?? "";
+      selectedUser = list.users.some(user => user.name === preferredUser) ? preferredUser : list.users.length === 1 ? list.users[0].name : "";
       token = ""; pairing = null;
     }).catch((reason: unknown) => { if (active) error = reason instanceof Error ? reason.message : String(reason); })
       .finally(() => { if (active) pending = ""; });
@@ -59,7 +64,8 @@
         const path = key === "save" || key === "refresh" ? endpoint : `${endpoint}/${key}`;
         const result = await client.request<Settings>(path, key === "refresh" ? {} : { method: key === "save" ? "PUT" : "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
         if (identity !== workspaceId) return;
-        settings = result; enabled = result.enabled; token = "";
+        settings = result;
+        if (key === "save" || key === "disconnect") { enabled = result.enabled; token = ""; }
         if (key === "disconnect" || key === "unbind") pairing = null;
         confirmDisconnect = false; confirmUnbind = ""; retryRoute = null;
         notice = key === "refresh" ? "Status refreshed." : "Telegram settings updated.";
@@ -93,10 +99,12 @@
         {#if settings.lastPoll}<p class="help">Last successful connection: {new Date(settings.lastPoll).toLocaleString()}</p>{/if}
         {#if settings.lastError}<p class="error" role="alert">{settings.lastError}</p>{/if}
         {#if settings.enabled}
+          <p class="help">Telegram and the web share history for the same Workspace user. {currentUserName ? `You are viewing web chats as ${currentUserName}.` : "Choose the same user you use for web chats."}</p>
           <form onsubmit={(event) => { event.preventDefault(); void action("pair", { user: selectedUser }); }}>
             <label>Workspace user
-              <select bind:value={selectedUser} disabled={Boolean(pending)} onchange={() => pairing = null}>{#each users as user}<option value={user.name}>{user.name}</option>{/each}</select>
+              <select bind:value={selectedUser} disabled={Boolean(pending)} onchange={() => pairing = null}><option value="" disabled>Choose a Workspace user</option>{#each users as user}<option value={user.name}>{user.name}</option>{/each}</select>
             </label>
+            {#if currentUserName && selectedUser && selectedUser !== currentUserName}<p class="help">Pairing as {selectedUser} opens separate history from your web chats as {currentUserName}.</p>{/if}
             <button type="submit" disabled={Boolean(pending) || !selectedUser}>Create pairing link</button>
           </form>
           {#if pairing}
@@ -108,6 +116,7 @@
           {/if}
         {/if}
         {#each settings.accounts as account (account.telegramId)}
+          {#if currentUserName && account.user !== currentUserName}<p class="help">Telegram is linked as {account.user}, while web chats use {currentUserName}. To share history, unlink and pair as {currentUserName}, or switch the web user to {account.user}.</p>{/if}
           <div class="account"><span><strong>{account.user}</strong> · Telegram {account.telegramId}</span>
             <button type="button" disabled={Boolean(pending)} onclick={() => confirmUnbind = account.user}>Unlink account</button>
           </div>
@@ -127,7 +136,7 @@
             {:else}
               <button type="button" disabled={Boolean(pending)} onclick={() => retryRoute = problem.route}>Review retry</button>
             {/if}
-            <button type="button" disabled={Boolean(pending)} onclick={() => action("delivery", { route: problem.route, delivery: problem.delivery, action: "skip" })}>Skip this reply</button>
+            <button type="button" disabled={Boolean(pending)} onclick={() => action("delivery", { route: problem.route, delivery: problem.delivery, action: "skip" })}>Skip this message</button>
           </div>
         {/each}
         {#if settings.configured}

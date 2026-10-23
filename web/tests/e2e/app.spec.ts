@@ -3255,7 +3255,9 @@ test("public Chat restores the upload dialog, send card and execution model sele
 for (const width of [1500, 390]) {
   test(`configures Telegram in Workspace Settings at ${width}px`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width, height: 900 });
-    await installMockApi(page, "workspace");
+    const harness = await installMockApi(page, "workspace");
+    await page.addInitScript(() => localStorage.setItem("pua.web.users.v2", JSON.stringify({ version: 2, selections: { "ws-test": "disksing" } })));
+    await page.route("**/api/workspaces/ws-test/users", route => json(route, { users: [{ version: 1, name: "User", preference: "" }, { version: 1, name: "disksing", preference: "" }] }));
     const saved: Array<Record<string, unknown>> = [];
     let configured = false;
     await page.route("**/api/workspaces/ws-test/telegram**", async (route) => {
@@ -3277,6 +3279,16 @@ for (const width of [1500, 390]) {
     await expect(settings.locator(".telegram-settings")).toContainText("@example_bot");
     await expect(settings.getByLabel("Bot token", { exact: true })).toHaveValue("");
     expect(saved).toEqual([{ token: "123:example-token-for-test-only", enabled: true }]);
+    await expect(settings.getByRole("combobox", { name: "Workspace user", exact: true })).toHaveValue("disksing");
+    await settings.getByRole("combobox", { name: "Workspace user", exact: true }).selectOption("User");
+    await settings.getByLabel("Bot token", { exact: true }).fill("123:unsaved-token");
+    await settings.getByLabel("Enable Telegram connection").uncheck();
+    const polls = harness.treeRequests;
+    await expect.poll(() => harness.treeRequests, { timeout: 20000 }).toBeGreaterThan(polls + 1);
+    await expect(settings.getByLabel("Bot token", { exact: true })).toHaveValue("123:unsaved-token");
+    await expect(settings.getByRole("combobox", { name: "Workspace user", exact: true })).toHaveValue("User");
+    await expect(settings.getByLabel("Enable Telegram connection")).not.toBeChecked();
+    await settings.getByRole("combobox", { name: "Workspace user", exact: true }).selectOption("disksing");
     await settings.getByRole("button", { name: "Create pairing link" }).click();
     await expect(settings.getByRole("link", { name: "Open Telegram to pair this account" })).toHaveAttribute("href", "https://t.me/example_bot?start=example");
     const overflow = await settings.locator(".settings-content").evaluate((node) => node.scrollWidth - node.clientWidth);

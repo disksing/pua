@@ -1,6 +1,7 @@
 <script lang="ts">
   import "./ResourceSettingsPanel.css";
 
+  import { untrack } from "svelte";
   import { ApiClient } from "../api/client";
   import type { ResourceAgentBindingModel } from "../models/detail";
   import AgentBindingSelector from "./AgentBindingSelector.svelte";
@@ -32,26 +33,39 @@
   let descInput = $state<HTMLInputElement | null>(null);
   let preferenceDrafts = $state<Record<string, string>>({});
   let newUserName = $state("");
+  const savedSettingsKey = $derived(JSON.stringify({
+    identity: model.identity,
+    interval: model.detail?.scheduler?.wakeIntervalMinutes ?? 30,
+    conditionMaxChars: model.detail?.scheduler?.conditionMaxChars ?? 128,
+    descriptionMaxChars: model.detail?.scheduler?.descriptionMaxChars ?? 32,
+    generationBudgetEnabled: model.generationPolicy.budgetEnabled,
+    generationMaxTurns: model.generationPolicy.maxTurns,
+    generationMaxMinutes: model.generationPolicy.maxAccumulatedTurnMinutes,
+    generationInactivityEnabled: model.generationPolicy.inactivityEnabled,
+    generationMaxInactivityMinutes: model.generationPolicy.maxInactivityMinutes,
+    stallWatchdogEnabled: model.stallWatchdogPolicy.enabled,
+    stallWatchdogMinutes: model.stallWatchdogPolicy.timeoutMinutes,
+  }));
+  let previousSettings: Record<string, string | number | boolean> | null = null;
   $effect(() => {
-    const wake = model.detail?.scheduler?.wakeIntervalMinutes;
-    if (typeof wake === "number") interval = wake;
-  });
-  $effect(() => {
-    conditionMaxChars = model.detail?.scheduler?.conditionMaxChars ?? 128;
-  });
-  $effect(() => {
-    descriptionMaxChars = model.detail?.scheduler?.descriptionMaxChars ?? 32;
-  });
-  $effect(() => {
-    generationBudgetEnabled = model.generationPolicy.budgetEnabled;
-    generationMaxTurns = model.generationPolicy.maxTurns;
-    generationMaxMinutes = model.generationPolicy.maxAccumulatedTurnMinutes;
-    generationInactivityEnabled = model.generationPolicy.inactivityEnabled;
-    generationMaxInactivityMinutes = model.generationPolicy.maxInactivityMinutes;
-  });
-  $effect(() => {
-    stallWatchdogEnabled = model.stallWatchdogPolicy.enabled;
-    stallWatchdogMinutes = model.stallWatchdogPolicy.timeoutMinutes;
+    const saved: Record<string, string | number | boolean> = JSON.parse(savedSettingsKey);
+    untrack(() => {
+      // Refresh untouched fields, preserving edits even when another client saves.
+      // Moving to another resource always starts with that resource's settings.
+      const next = <T extends number | boolean>(key: string, draft: T): T =>
+        !previousSettings || previousSettings.identity !== saved.identity || draft === previousSettings[key] ? saved[key] as T : draft;
+      interval = next("interval", interval);
+      conditionMaxChars = next("conditionMaxChars", conditionMaxChars);
+      descriptionMaxChars = next("descriptionMaxChars", descriptionMaxChars);
+      generationBudgetEnabled = next("generationBudgetEnabled", generationBudgetEnabled);
+      generationMaxTurns = next("generationMaxTurns", generationMaxTurns);
+      generationMaxMinutes = next("generationMaxMinutes", generationMaxMinutes);
+      generationInactivityEnabled = next("generationInactivityEnabled", generationInactivityEnabled);
+      generationMaxInactivityMinutes = next("generationMaxInactivityMinutes", generationMaxInactivityMinutes);
+      stallWatchdogEnabled = next("stallWatchdogEnabled", stallWatchdogEnabled);
+      stallWatchdogMinutes = next("stallWatchdogMinutes", stallWatchdogMinutes);
+      previousSettings = saved;
+    });
   });
   $effect(() => {
     if (nameEditing && nameInput) nameInput.focus();
@@ -262,7 +276,7 @@
 
 <div class="resource-settings" data-component-owner="resource-settings-panel">
   {#if model.resourceType === "workspace"}
-    <TelegramSettings workspaceId={model.workspaceId} workspaceName={model.workspaceName} />
+    <TelegramSettings workspaceId={model.workspaceId} workspaceName={model.workspaceName} currentUserName={model.currentUserName} />
     <section class="resource-settings-section">
       <div class="resource-settings-section-head">
         <strong>Generation lifecycle</strong>

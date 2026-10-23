@@ -25,6 +25,7 @@
   let pending = $state("");
 
   onMount(() => channel.subscribe((next) => {
+    const previous = model;
     model = next;
     if (next.identity !== identity) {
       identity = next.identity;
@@ -32,10 +33,15 @@
       draft = createSettingsDraft(next);
       pending = "";
     } else if (next.dataVersion !== dataVersion && !draft.dirty) {
-      const activeTab = draft.tab;
       dataVersion = next.dataVersion;
-      draft = createSettingsDraft(next);
-      draft.tab = activeTab;
+      draft = {
+        ...createSettingsDraft(next),
+        tab: draft.tab,
+        workspacePath: draft.workspacePath,
+        createWorkspace: draft.createWorkspace,
+        workspaceLanguage: draft.workspaceLanguage,
+        initialUserName: draft.initialUserName === previous.suggestedUserName ? next.suggestedUserName : draft.initialUserName,
+      };
     }
   }));
 
@@ -67,7 +73,7 @@
       {#if draft.tab === "system"}
         <SystemInfoPanel system={model.system} />
       {:else if draft.tab === "workspace"}
-        <WorkspaceSettingsPanel workspaces={model.workspaces} activeWorkspaceId={model.activeWorkspaceId} workspaceIcons={model.workspaceIcons} bind:draft bind:pending onAddWorkspace={model.onAddWorkspace} onRemoveWorkspace={model.onRemoveWorkspace} onWorkspaceIcon={model.onWorkspaceIcon} onSaveWorkspaceName={model.onSaveWorkspaceName} onToast={model.onToast} />
+        <WorkspaceSettingsPanel workspaces={model.workspaces} activeWorkspaceId={model.activeWorkspaceId} workspaceUserNames={model.workspaceUserNames} workspaceIcons={model.workspaceIcons} bind:draft bind:pending onAddWorkspace={model.onAddWorkspace} onRemoveWorkspace={model.onRemoveWorkspace} onWorkspaceIcon={model.onWorkspaceIcon} onSaveWorkspaceName={model.onSaveWorkspaceName} onToast={model.onToast} />
       {:else if draft.tab === "appearance"}
         <AppearanceSettingsPanel appearance={model.appearance} onLayoutPreference={model.onLayoutPreference} onFontScale={model.onFontScale} onResetFontScales={model.onResetFontScales} onThemePreference={model.onThemePreference} />
       {:else if draft.tab === "agenthub"}

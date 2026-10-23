@@ -569,3 +569,70 @@ func TestTelegramUnknownResourceDoesNotBlockLaterInput(t *testing.T) {
 		t.Fatal("invalid resource blocked subsequent input")
 	}
 }
+
+func TestTelegramAndWebShareChatInBothDirections(t *testing.T) {
+	rt, f, st := telegramFixture(t)
+	resource := "project1.task1"
+	web := func(user, op string, body any) *httptest.ResponseRecorder {
+		out := chatCall(t, rt.server.agents, rt.workspace, resource, user, op, body, false)
+		mustChatOK(t, out)
+		return out
+	}
+	web("disksing", "open", chatRequest{})
+	web("disksing", "messages", chatRequest{ID: "web-before-link", Text: "old web input"})
+	route := telegramOpen(t, rt, &st, resource)
+	before := len(f.calls)
+	input := telegramInput(10, 777, route.ThreadID, "Telegram input")
+	telegramProcess(t, rt, &st, input)
+	telegramProcess(t, rt, &st, input)
+	telegramPublish(t, rt, resource, "telegram-reply", "Reply to Telegram")
+	web("disksing", "messages", chatRequest{ID: "web-input", Text: "Web input"})
+	telegramPublish(t, rt, resource, "web-reply", "Reply to web")
+	var visible struct {
+		ID       string        `json:"id"`
+		Messages []chatMessage `json:"messages"`
+	}
+	if err := json.Unmarshal(web("disksing", "", nil).Body.Bytes(), &visible); err != nil {
+		t.Fatal(err)
+	}
+	if visible.ID != chatID(resource, "disksing") || len(visible.Messages) != 5 {
+		t.Fatalf("web must expose one shared history, got %#v", visible)
+	}
+	want := []string{"old web input", "Telegram input", "Reply to Telegram", "Web input", "Reply to web"}
+	for i, message := range visible.Messages {
+		if message.Text != want[i] {
+			t.Fatalf("message %d: %q", i, message.Text)
+		}
+	}
+	// Another user's inputs and replies must never enter this topic.
+	web("other", "open", chatRequest{})
+	web("other", "messages", chatRequest{ID: "other-input", Text: "Other user's input"})
+	mustChatOK(t, chatCall(t, rt.server.agents, rt.workspace, resource, "other", "publish", chatRequest{ID: "other-reply", Text: "Other user's reply"}, true))
+	for range 5 {
+		rt.nextSend = map[int64]time.Time{}
+		telegramFlush(t, rt, &st)
+		// Persisted cursors survive restart between each message.
+		st = telegramLoad(t, rt)
+		rt.lastFiles = map[string]time.Time{}
+	}
+	var sent []string
+	for _, call := range f.calls[before:] {
+		if call.Method == "sendMessage" {
+			if int64(call.Body["message_thread_id"].(float64)) != route.ThreadID {
+				t.Fatal("wrong topic")
+			}
+			sent = append(sent, call.Body["text"].(string))
+		}
+	}
+	wantSent := []string{"Reply to Telegram", "disksing (web):\nWeb input", "Reply to web"}
+	if fmt.Sprint(sent) != fmt.Sprint(wantSent) {
+		t.Fatalf("sent %q, want %q", sent, wantSent)
+	}
+	c, err := loadDialogue(rt.workspace.Path, dialoguePrefix+visible.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Outbox) != 3 {
+		t.Fatalf("must dispatch each user input once, got %d", len(c.Outbox))
+	}
+}

@@ -1,6 +1,8 @@
 import { mount, tick, unmount } from "svelte";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import ResourceSettingsHarness from "../fixtures/ResourceSettingsHarness.svelte";
+import { createModelChannel } from "../../src/components/model-channel";
 import ResourceSettingsPanel from "../../src/components/ResourceSettingsPanel.svelte";
 import type { DetailPanelModel } from "../../src/components/models";
 
@@ -336,4 +338,24 @@ describe("ResourceSettingsPanel", () => {
     await vi.waitFor(() => expect(input.disabled).toBe(false));
   });
 
+});
+
+
+it("preserves resource settings edits during polling and resets them on navigation", async () => {
+  const initial = model({ identity: "ws-test:workspace", resourceType: "workspace", resourceId: "workspace" });
+  const channel = createModelChannel(initial);
+  const target = document.body.appendChild(document.createElement("div"));
+  const component = mount(ResourceSettingsHarness, { target, props: { channel } });
+  cleanups.push(() => unmount(component)); await tick();
+  const turns = target.querySelector<HTMLInputElement>('[aria-label="Maximum Turns per Generation"]')!;
+  turns.value = "77"; turns.dispatchEvent(new Event("input", { bubbles: true }));
+  const toggle = target.querySelector<HTMLInputElement>('[aria-label="Enable usage-based Generation rotation"]')!;
+  toggle.checked = false; toggle.dispatchEvent(new Event("change", { bubbles: true })); await tick();
+  channel.publish({ ...initial, generationPolicy: { ...initial.generationPolicy }, stallWatchdogPolicy: { ...initial.stallWatchdogPolicy } }); await tick();
+  expect(turns.value).toBe("77"); expect(toggle.checked).toBe(false);
+  channel.publish({ ...initial, generationPolicy: { ...initial.generationPolicy, maxTurns: 50, maxAccumulatedTurnMinutes: 300 } }); await tick();
+  expect(turns.value).toBe("77");
+  expect(target.querySelector<HTMLInputElement>('[aria-label="Maximum accumulated Turn minutes per Generation"]')!.value).toBe("300");
+  channel.publish({ ...initial, identity: "other:workspace", workspaceId: "other" }); await tick();
+  expect(turns.value).toBe("20"); expect(toggle.checked).toBe(true);
 });

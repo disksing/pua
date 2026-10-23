@@ -303,7 +303,7 @@ func (rt *telegramRuntime) openTopic(ctx context.Context, st *telegramState, use
 	if err = rt.save(*st); err != nil {
 		return err
 	}
-	if err = rt.send(ctx, *st, chat, thread, "Connected to "+title+". New public replies from PUA will appear here. Send text to continue; /menu opens navigation.", nil); err != nil {
+	if err = rt.send(ctx, *st, chat, thread, "Connected to "+title+" as "+user+". This topic shares the web chat for that Workspace user. New web messages and public replies will appear here. Send text to continue; /menu opens navigation.", nil); err != nil {
 		st.LastError = err.Error()
 	}
 	return nil

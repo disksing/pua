@@ -269,6 +269,7 @@ const settingsController = createSettingsController({
 		if (config.revision) controllerState.settingsRevision = config.revision;
 	},
 	activeWorkspaceId: () => controllerState.activeWorkspaceId,
+	workspaceUserName: (workspace) => workspace.id === controllerState.activeWorkspaceId ? currentUserName() : userSettingsController?.selected(workspace.instanceId || workspace.id) || "",
 	setActiveWorkspaceId: (id) => { controllerState.activeWorkspaceId = id; },
 	selectWorkspaceResource: () => { controllerState.selectedId = "workspace"; },
 	request: (path, init) => api(path, init),

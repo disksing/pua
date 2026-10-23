@@ -44,6 +44,7 @@ export interface SettingsControllerDependencies {
 	config(): PUASettingsConfig;
 	setConfig(config: PUASettingsConfig): void;
 	activeWorkspaceId(): string;
+	workspaceUserName?(workspace: WorkspaceOption): string;
 	setActiveWorkspaceId(id: string): void;
 	selectWorkspaceResource(): void;
 	request<T>(path: string, init?: RequestInit): Promise<T>;
@@ -139,6 +140,7 @@ export function createSettingsController(dependencies: SettingsControllerDepende
 			dataVersion: state.dataVersion,
 			initialTab: state.tab,
 			workspaces: data.workspaces || [],
+			workspaceUserNames: Object.fromEntries((data.workspaces || []).map(workspace => [workspace.id, dependencies.workspaceUserName?.(workspace) || ""])),
 			// The settings marker describes the Workspace currently being browsed.
 			// `data.activeId` is the persisted fallback used when there is no route;
 			// it can differ from the route while the user is viewing another Workspace.

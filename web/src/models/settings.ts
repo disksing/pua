@@ -125,6 +125,7 @@ export interface SettingsModel {
   initialTab: SettingsDraft["tab"];
   workspaces: WorkspaceOption[];
   activeWorkspaceId: string;
+  workspaceUserNames?: Record<string, string>;
   workspaceIcons: Array<{ id: string; label: string; src: string }>;
   workspaceIconSavingId: string;
   suggestedUserName: string;

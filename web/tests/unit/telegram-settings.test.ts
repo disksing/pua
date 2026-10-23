@@ -9,10 +9,10 @@ afterEach(async () => {
 });
 const state = { configured: true, enabled: true, botName: "example_bot", accounts: [], topicCount: 0, lastError: "", lastPoll: "", deliveryProblems: [] };
 function response(value: unknown) { return new Response(JSON.stringify(value), { headers: { "Content-Type": "application/json" } }); }
-async function render(fetchMock: typeof fetch) {
+async function render(fetchMock: typeof fetch, currentUserName = "") {
   vi.stubGlobal("fetch", fetchMock);
   const target = document.body.appendChild(document.createElement("div"));
-  const component = mount(TelegramSettings, { target, props: { workspaceId: "ws-a", workspaceName: "Example" } });
+  const component = mount(TelegramSettings, { target, props: { workspaceId: "ws-a", workspaceName: "Example", currentUserName } });
   cleanups.push(() => unmount(component)); await tick();
   return target;
 }
@@ -77,4 +77,12 @@ describe("Telegram Workspace settings", () => {
     await vi.waitFor(() => expect(requests.some((r) => r.path.endsWith("/delivery"))).toBe(true));
     expect(JSON.parse(String(requests.find((r) => r.path.endsWith("/delivery"))?.init?.body))).toEqual({ route: "route-a", delivery: "delivery-b", action: "retry" });
   });
+});
+
+
+it("requires an explicit choice when multiple users exist without a web selection", async () => {
+  const target = await render(vi.fn(async (path: RequestInfo | URL) => response(String(path).endsWith("/users") ? { users: [{ name: "User" }, { name: "disksing" }] } : state)));
+  await expand(target);
+  expect(target.querySelector("select")!.value).toBe("");
+  expect(button(target, "Create pairing link").disabled).toBe(true);
 });

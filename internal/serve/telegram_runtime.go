@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/disksing/pua/internal/app"
@@ -146,8 +147,8 @@ func (rt *telegramRuntime) run(ctx context.Context) {
 }
 
 // flush reads only chats whose files changed (or have queued delivery). It never
-// reads execution history. Cursors count every Chat entry, but only agent entries
-// can be sent. Startup deliberately audits all subscribed chats.
+// reads execution history. Forward public replies and web inputs, but do not
+// echo Telegram inputs back to their originating topic. Startup audits all chats.
 func (rt *telegramRuntime) flush(ctx context.Context, st *telegramState) error {
 	ws, err := app.OpenWorkspace(rt.workspace.Path)
 	if err != nil {
@@ -191,12 +192,26 @@ func (rt *telegramRuntime) flush(ctx context.Context, st *telegramState) error {
 		if route.Pending == nil {
 			for route.Cursor < len(chat.Messages) {
 				message := chat.Messages[route.Cursor]
-				if message.Role != "agent" {
+				text := message.Text
+				switch message.Role {
+				case "user":
+					// Inbound Telegram IDs are assigned by process before the shared
+					// Chat/outbox commit. This also covers records from the first release.
+					if strings.HasPrefix(message.ID, "telegram-") {
+						text = ""
+					} else {
+						text = route.User + " (web):\n" + text
+					}
+				case "agent":
+				default:
+					text = ""
+				}
+				if text == "" {
 					route.Cursor++
 					changed = true
 					continue
 				}
-				route.Pending = &telegramDelivery{Text: message.Text, Chunks: telegramChunks(message.Text), NextCursor: route.Cursor + 1, Status: "queued"}
+				route.Pending = &telegramDelivery{Text: text, Chunks: telegramChunks(text), NextCursor: route.Cursor + 1, Status: "queued"}
 				changed = true
 				break
 			}

@@ -177,6 +177,9 @@ func TestMetadataCopiesAreOwnedDuringConcurrentAppend(t *testing.T) {
 				if value.LastActivityAt != nil {
 					*value.LastActivityAt = time.Time{}
 				}
+				if value.LastProgressAt != nil {
+					*value.LastProgressAt = time.Time{}
+				}
 			}
 		}()
 	}
@@ -187,7 +190,7 @@ func TestMetadataCopiesAreOwnedDuringConcurrentAppend(t *testing.T) {
 	}
 	group.Wait()
 	value, err := store.Get(created.ID)
-	if err != nil || value.Source.Metadata["key"] != "value" || value.LaunchEnvironment["PATH"] != "/bin" || value.LastActivityAt == nil || value.LastActivityAt.IsZero() {
+	if err != nil || value.Source.Metadata["key"] != "value" || value.LaunchEnvironment["PATH"] != "/bin" || value.LastActivityAt == nil || value.LastActivityAt.IsZero() || value.LastProgressAt == nil || value.LastProgressAt.IsZero() {
 		t.Fatalf("mutable metadata escaped: %+v, err=%v", value, err)
 	}
 }

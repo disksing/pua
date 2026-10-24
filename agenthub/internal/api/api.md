@@ -166,6 +166,13 @@ to any client that can read the session or its events. `lastEventId` is the id
 of the newest event in the session log and doubles as the resume cursor for
 the events endpoint.
 
+`lastActivityAt` / `lastActivityTurnId` 表示包含新输入在内的语义活动，继续供界面活跃度和空闲策略使用。
+`lastProgressAt` / `lastProgressTurnId` 表示工作进展：以 `turn.started` 为初始基准，
+由模型输出、工具事件、审批事件、错误和终态更新；新输入、投递回执、排队事件、stderr 不刷新此时间。
+看门狗应优先使用工作进展字段，避免持续收到消息掩盖执行停滞。字段缺失时表示旧版本或尚无可投影事件，
+不能当作当前时间；升级后的 daemon 会从事件日志补算活跃旧会话的进展时间。较旧 daemon 只提供活动时间时，
+PUA 保留旧计时行为，因此这项修复需要同时升级 PUA 与 AgentHub。
+
 ### Agents and providers
 
 Agents are referenced **by name only**. An agent has a `name` (required,

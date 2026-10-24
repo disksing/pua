@@ -992,10 +992,10 @@ func loadTrustedSnapshot(dir, id string) (Session, bool) {
 	if last.ID != snapshot.LastEventID || last.SessionID != id {
 		return Session{}, false
 	}
-	// Older trusted snapshots predate the semantic activity projection. Active
-	// sessions need one replay so a daemon restart can recover the real Turn
-	// activity boundary instead of falling back to the noisy session UpdatedAt.
-	if snapshot.LastActivityAt == nil && (snapshot.State == StateRunning || snapshot.State == StateWaitingApproval) {
+	// Active legacy snapshots need one replay to recover the work progress
+	// boundary. LastActivityAt may have been advanced solely by incoming
+	// messages and cannot safely seed the watchdog's progress clock.
+	if (snapshot.LastActivityAt == nil || snapshot.LastProgressAt == nil) && (snapshot.State == StateRunning || snapshot.State == StateWaitingApproval) {
 		events, err := readEventsRepairTail(filepath.Join(dir, "events.jsonl"))
 		if err != nil || len(events) == 0 {
 			return Session{}, false
@@ -1167,6 +1167,11 @@ func applyEvent(projected *Session, event Event) error {
 		activityAt := event.Time
 		projected.LastActivityAt = &activityAt
 		projected.LastActivityTurnID = event.TurnID
+	}
+	if IsProgressEvent(event) {
+		progressAt := event.Time
+		projected.LastProgressAt = &progressAt
+		projected.LastProgressTurnID = event.TurnID
 	}
 	projected.LastEventID = event.ID
 	projected.UpdatedAt = event.Time
@@ -1533,6 +1538,10 @@ func cloneSession(value Session) Session {
 	if value.LastActivityAt != nil {
 		activity := *value.LastActivityAt
 		value.LastActivityAt = &activity
+	}
+	if value.LastProgressAt != nil {
+		progress := *value.LastProgressAt
+		value.LastProgressAt = &progress
 	}
 	value.PendingApprovalIDs = append([]string(nil), value.PendingApprovalIDs...)
 	value.Source = cloneSource(value.Source)

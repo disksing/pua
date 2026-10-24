@@ -41,8 +41,10 @@ func TestStallWatchdogStopsAndResumesTheSameSessionOnce(t *testing.T) {
 	}
 	session := agentHubSession{
 		ID: record.AgentHubSessionID, AgentName: "fake-agent", State: "running", CurrentTurnID: record.CurrentTurnID,
-		Source:         &agentHubSource{App: agentHubSourceApp, InstanceID: "pua-runtime-test", ExternalID: record.SourceExternalID},
-		LastActivityAt: lastActivity, LastActivityTurnID: record.CurrentTurnID, UpdatedAt: lastActivity,
+		Source: &agentHubSource{App: agentHubSourceApp, InstanceID: "pua-runtime-test", ExternalID: record.SourceExternalID},
+		// Fresh input is activity, but must not postpone recovery of stalled work.
+		LastActivityAt: manager.resourceNow().Format(time.RFC3339Nano), LastActivityTurnID: record.CurrentTurnID,
+		LastProgressAt: lastActivity, LastProgressTurnID: record.CurrentTurnID, UpdatedAt: manager.resourceNow().Format(time.RFC3339Nano),
 	}
 	seedPollerGeneration(t, fake, workspace, record, session)
 	rt := newAgentHubRuntime(manager, workspace, record, client)
@@ -218,7 +220,8 @@ func TestStallWatchdogBoundsASecondStallToOneRecoveryAttempt(t *testing.T) {
 	session := agentHubSession{
 		ID: record.AgentHubSessionID, AgentName: "fake-agent", State: "running", CurrentTurnID: record.CurrentTurnID,
 		Source:         &agentHubSource{App: agentHubSourceApp, InstanceID: "pua-runtime-test", ExternalID: record.SourceExternalID},
-		LastActivityAt: lastActivity, LastActivityTurnID: record.CurrentTurnID, UpdatedAt: lastActivity,
+		LastActivityAt: manager.resourceNow().Format(time.RFC3339Nano), LastActivityTurnID: record.CurrentTurnID,
+		LastProgressAt: lastActivity, LastProgressTurnID: record.CurrentTurnID, UpdatedAt: manager.resourceNow().Format(time.RFC3339Nano),
 	}
 	seedPollerGeneration(t, fake, workspace, record, session)
 	rt := newAgentHubRuntime(manager, workspace, record, client)
@@ -236,5 +239,82 @@ func TestStallWatchdogBoundsASecondStallToOneRecoveryAttempt(t *testing.T) {
 	state := rt.snapshotGeneration().StallWatchdog
 	if state == nil || !state.RecoveryExhausted {
 		t.Fatalf("second stalled recovery was not durably bounded: %#v", state)
+	}
+}
+
+func TestStallWatchdogPreservesProgressAndApprovalGuards(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		prepare func(*agentHubSession, *agentHubSession, *generationRecord)
+	}{
+		{"recent work", func(observed, current *agentHubSession, record *generationRecord) {
+			observed.LastProgressAt = "2026-08-01T00:59:50Z"
+		}},
+		{"pending approval", func(observed, current *agentHubSession, record *generationRecord) {
+			observed.PendingApprovalIDs = []string{"approval_test"}
+		}},
+		{"waiting approval", func(observed, current *agentHubSession, record *generationRecord) {
+			observed.State = "waiting_approval"
+		}},
+		{"stopped", func(observed, current *agentHubSession, record *generationRecord) {
+			observed.State = "stopped"
+		}},
+		{"new turn ignores prior progress", func(observed, current *agentHubSession, record *generationRecord) {
+			observed.LastProgressTurnID = "turn_previous"
+			record.TurnStartedAt = "2026-08-01T00:59:50Z"
+		}},
+		{"work arrives before stop", func(observed, current *agentHubSession, record *generationRecord) {
+			current.LastProgressAt = "2026-08-01T00:59:50Z"
+		}},
+		{"approval arrives before stop", func(observed, current *agentHubSession, record *generationRecord) {
+			current.PendingApprovalIDs = []string{"approval_test"}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fake := newRuntimeFakeAgentHub()
+			hub := httptest.NewServer(fake)
+			defer hub.Close()
+			manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+			manager.now = func() time.Time { return time.Date(2026, 8, 1, 1, 0, 0, 0, time.UTC) }
+			puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := puaWorkspace.SetStallWatchdogPolicy(app.StallWatchdogPolicy{Enabled: true, TimeoutMinutes: 1}); err != nil {
+				t.Fatal(err)
+			}
+			cfg, client, err := manager.agentHubRuntimeConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			record := generationRecord{
+				ID: "gen-progress-guard", GenerationID: "gen-progress-guard", Generation: 1,
+				WorkspaceID: workspace.ID, ResourceID: "project1", Status: "running",
+				SourceInstanceID: "pua-runtime-test", SourceExternalID: workspace.ID + "/progress-guard",
+				AgentHubSessionID: "ses_progress_guard", AgentHubAgentName: "fake-agent",
+				CurrentTurnID: "turn_work", LastTurnID: "turn_work", TurnStartedAt: "2026-08-01T00:55:00Z",
+			}
+			observed := agentHubSession{
+				ID: record.AgentHubSessionID, AgentName: "fake-agent", State: "running", CurrentTurnID: record.CurrentTurnID,
+				Source:         &agentHubSource{App: agentHubSourceApp, InstanceID: "pua-runtime-test", ExternalID: record.SourceExternalID},
+				LastActivityAt: "2026-08-01T01:00:00Z", LastActivityTurnID: record.CurrentTurnID,
+				LastProgressAt: "2026-08-01T00:55:00Z", LastProgressTurnID: record.CurrentTurnID,
+			}
+			current := observed
+			test.prepare(&observed, &current, &record)
+			seedPollerGeneration(t, fake, workspace, record, current)
+			rt := newAgentHubRuntime(manager, workspace, record, client)
+			manager.registerRuntime(rt)
+			if err := manager.reconcileStallWatchdogLocked(context.Background(), cfg, workspace, record, rt, observed, client); err != nil {
+				t.Fatal(err)
+			}
+			manager.waitBackground()
+			fake.mu.Lock()
+			stopCalls := fake.stopCalls
+			fake.mu.Unlock()
+			if stopCalls != 0 || rt.snapshotGeneration().StallWatchdog != nil {
+				t.Fatalf("guard did not prevent recovery: stops=%d state=%+v", stopCalls, rt.snapshotGeneration().StallWatchdog)
+			}
+		})
 	}
 }

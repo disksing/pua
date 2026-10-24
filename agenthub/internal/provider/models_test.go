@@ -29,6 +29,8 @@ func TestHelperProcess(t *testing.T) {
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
 	switch mode {
+	case "pi-steer-boundary":
+		runPiSteerBoundaryHelper(scanner)
 	case "pi-native-missing":
 		fmt.Fprintln(os.Stderr, "No session found matching 'missing-native-session'")
 		os.Exit(1)

@@ -171,6 +171,8 @@ type agentHubSession struct {
 	LastEventID        int64                     `json:"lastEventId"`
 	LastActivityAt     string                    `json:"lastActivityAt,omitempty"`
 	LastActivityTurnID string                    `json:"lastActivityTurnId,omitempty"`
+	LastProgressAt     string                    `json:"lastProgressAt,omitempty"`
+	LastProgressTurnID string                    `json:"lastProgressTurnId,omitempty"`
 	CreatedAt          string                    `json:"createdAt"`
 	UpdatedAt          string                    `json:"updatedAt"`
 }

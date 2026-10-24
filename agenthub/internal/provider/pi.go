@@ -173,16 +173,19 @@ func (p *piSession) Prompt(text string, steer bool) error {
 }
 
 func (p *piSession) prompt(text string, steer bool) error {
-	command := "prompt"
+	fields := map[string]any{"message": text}
 	if steer {
-		command = "steer"
+		// A Turn may settle between the caller's observation and this RPC.
+		// Pi's bare steer only queues, even when idle; prompt decides inside
+		// Pi whether to start a run or steer the still-active run.
+		fields["streamingBehavior"] = "steer"
 	}
 	if !p.prompts.begin() {
 		return errors.New("Pi provider process is stopping")
 	}
 	go func() {
 		defer p.prompts.done()
-		if _, err := p.requestLongRunning(command, map[string]any{"message": text}); err != nil && p.options.Hooks.Event != nil {
+		if _, err := p.requestLongRunning("prompt", fields); err != nil && p.options.Hooks.Event != nil {
 			p.options.Hooks.Event(Event{Type: "provider.error", Data: map[string]any{"message": err.Error()}, TurnDone: true, TurnFailed: true})
 		}
 	}()

@@ -282,10 +282,14 @@ type Session struct {
 	CurrentTurnID      string            `json:"currentTurnId,omitempty"`
 	PendingApprovalIDs []string          `json:"pendingApprovalIds,omitempty"`
 	LastEventID        int64             `json:"lastEventId"`
-	// LastActivityAt is updated only by semantic work events within a Turn.
+	// LastActivityAt includes semantic events and incoming messages within a Turn.
 	// Session lifecycle changes, provider metadata, and stderr do not refresh it.
 	LastActivityAt     *time.Time `json:"lastActivityAt,omitempty"`
 	LastActivityTurnID string     `json:"lastActivityTurnId,omitempty"`
+	// LastProgressAt excludes incoming messages and transport/queue events.
+	// turn.started establishes the baseline before the first agent output.
+	LastProgressAt     *time.Time `json:"lastProgressAt,omitempty"`
+	LastProgressTurnID string     `json:"lastProgressTurnId,omitempty"`
 	CreatedAt          time.Time  `json:"createdAt"`
 	UpdatedAt          time.Time  `json:"updatedAt"`
 }

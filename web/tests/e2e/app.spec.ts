@@ -1754,6 +1754,20 @@ test("switches wizard templates and ignores an older preview response", async ({
 
 test("creates and starts a task with a chosen agent from the wizard", async ({ page }) => {
   const harness = await installMockApi(page, "project1");
+  const chatMutations: string[] = [];
+  await page.route("**/api/workspaces/ws-test/resources/project1.task3/**", async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (path.includes("/chat")) {
+      if (request.method() === "POST") chatMutations.push(path);
+      return json(route, { id: "task3-chat", open: false, messages: [], unreadCount: 0 });
+    }
+    if (path.endsWith("/messages") && request.method() === "POST") {
+      if (request.postDataJSON().role === "user") return json(route, { code: "chat_required", error: "user messages must use resource chat" }, 410);
+      expect(harness.bindingBodies).toEqual([{ kind: "agent", name: "other-agent" }]);
+    }
+    return route.fallback();
+  });
   await page.goto("/w/ws-test/r/project1");
   await page.getByRole("button", { name: "New Task" }).click();
 
@@ -1777,7 +1791,10 @@ test("creates and starts a task with a chosen agent from the wizard", async ({ p
   await expect.poll(() => harness.taskBodies.length).toBe(1);
   // The binding is switched before the start prompt is sent.
   await expect.poll(() => harness.bindingBodies).toEqual([{ kind: "agent", name: "other-agent" }]);
-  await expect.poll(() => harness.inputBodies.some((body) => body.resourceId === "project1.task3" && typeof body.text === "string" && body.text.length > 0)).toBe(true);
+  await expect.poll(() => harness.inputBodies.length).toBe(1);
+  expect(harness.inputBodies[0]).toEqual({ resourceId: "project1.task3", text: expect.any(String), role: "system", sender: { name: "PUA Task Start" }, subscribeResult: false });
+  expect(String(harness.inputBodies[0].text).trim()).not.toBe("");
+  expect(chatMutations).toEqual([]);
   await expect(page.locator("#toast")).toContainText("Task created and started");
   await expect(page).toHaveURL(/project1\.task3/);
 });

@@ -38,7 +38,6 @@ function harness(responder: (path: string, init?: RequestInit) => unknown | Prom
 		agents: () => [{ id: "agent-b", label: "Agent B", summary: "" }],
 		agentProfiles: () => [{ key: "default", agentName: "agent-a" }, { key: "review", agentName: "agent-b" }],
 		defaultTaskBinding: () => ({ kind: "profile", name: "default" }),
-		currentUserName: () => "Test User",
 	});
 	return {
 		controller,
@@ -165,7 +164,7 @@ describe("CreateDialogController", () => {
 		expect(test.current().draft.startPrompt).toBe(DEFAULT_TASK_START_PROMPT);
 	});
 
-	it("creates and starts a task with the default binding, sending only the prompt", async () => {
+	it("starts the task with one execution message without opening chat", async () => {
 		const test = harness(() => ({ id: "project1.task9" }));
 		test.controller.open("task", "project1");
 		const next: CreateDraft = {
@@ -183,7 +182,8 @@ describe("CreateDialogController", () => {
 			"/api/workspaces/workspace-a/tasks",
 			"/api/workspaces/workspace-a/resources/project1.task9/messages",
 		]);
-		expect(body(test.requests[1])).toEqual({ text: "Please begin.", role: "user", sender: { name: "Test User" } });
+		expect(test.requests[1].init?.method).toBe("POST");
+		expect(body(test.requests[1])).toEqual({ text: "Please begin.", role: "system", sender: { name: "PUA Task Start" }, subscribeResult: false });
 		expect(test.toast).toHaveBeenCalledWith("Task created and started.");
 		expect(test.selectResource).toHaveBeenCalledWith("project1.task9");
 	});
@@ -208,6 +208,14 @@ describe("CreateDialogController", () => {
 		]);
 		expect(test.requests[1].init?.method).toBe("PUT");
 		expect(body(test.requests[1])).toEqual({ kind: "agent", name: "agent-b" });
+	});
+
+	it("uses the default start prompt when the submitted prompt is blank", async () => {
+		const test = harness();
+		test.controller.open("task", "project1");
+		await test.current().onSubmit({ ...test.current().draft, title: "Start", startAfterCreate: true, startPrompt: "  " });
+
+		expect(body(test.requests[1])).toEqual({ text: DEFAULT_TASK_START_PROMPT, role: "system", sender: { name: "PUA Task Start" }, subscribeResult: false });
 	});
 
 	it("still selects the created task when auto-start fails", async () => {

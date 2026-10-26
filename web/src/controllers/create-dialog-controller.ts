@@ -30,7 +30,6 @@ export interface CreateDialogDependencies {
 	// The binding a task created in this project would resolve to: the project
 	// task default when set, otherwise the workspace task default.
 	defaultTaskBinding(projectId: string): ResourceAgentBindingModel;
-	currentUserName(): string;
 }
 
 interface CreatedResource {
@@ -274,7 +273,7 @@ export function createCreateDialogController(dependencies: CreateDialogDependenc
 		const text = state.startPrompt.trim() || DEFAULT_TASK_START_PROMPT;
 		await dependencies.request(`/api/workspaces/${workspaceId}/resources/${encodeURIComponent(resourceId)}/messages`, {
 			method: "POST",
-			body: JSON.stringify({ text, role: "user", sender: { name: dependencies.currentUserName() } })
+			body: JSON.stringify({ text, role: "system", sender: { name: "PUA Task Start" }, subscribeResult: false })
 		});
 	}
 

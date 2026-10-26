@@ -232,8 +232,7 @@ const createDialogController = createCreateDialogController({
 		const projectDefault = controllerState.details[projectId]?.taskDefault;
 		if (projectDefault?.name) return projectDefault;
 		return controllerState.tree?.resourceDefaults?.task || { kind: "profile" as const, name: "default" };
-	},
-	currentUserName
+	}
 });
 const elementById = <ElementType extends HTMLElement = HTMLElement>(id: string): ElementType | null => document.getElementById(id) as ElementType | null;
 const AUTO_REFRESH_INTERVAL_MS = 5e3;

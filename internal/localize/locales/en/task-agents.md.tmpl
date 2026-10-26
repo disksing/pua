@@ -3,6 +3,7 @@
 You are working in a Task resource directory managed by PUA.
 
 - Resource ID: {{.ResourceID}}
+- Read this directory's chat.md at every Turn start and after context recovery. Maintain pending commitments and replies; check notifications before ending and record publication only after publish succeeds.
 - Always read the parent Project instructions in ../AGENTS.md and the Workspace instructions in ../../AGENTS.md.
 - The Server sets the Task state to in_progress at the start of every Turn. Before ending a Turn, continue the work or choose waiting, blocked, paused, or completed and run pua task state set <state> --note "...".
 - waiting needs no user intervention and may resume after an external condition; before setting it, register a Scheduler condition that can wake the current Task; blocked means user follow-up is needed or the task is still under discussion and its plan is not yet settled; paused intentionally waits for user resumption; completed means the task is done, or a long-running or recurring task has completed its current stage. waiting, blocked, and paused require a short single-line note.

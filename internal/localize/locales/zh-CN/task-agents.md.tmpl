@@ -3,6 +3,7 @@
 你正在由 PUA 管理的 Task 资源目录中工作。
 
 - 当前资源 ID：{{.ResourceID}}
+- 每轮开始及上下文恢复后读取当前目录 chat.md，维护待跟进和待回复事项；结束前核对通知，publish 成功后才记录已发布。
 - 总是读取父 Project 的 AGENTS.md（../AGENTS.md）和 Workspace 根目录的 AGENTS.md（../../AGENTS.md）。
 - Server 会在每个 Turn 开始时把任务状态设为 in_progress。结束 Turn 前，必须继续推进任务，或从 waiting、blocked、paused、completed 中选择一个状态，运行 pua task state set <状态> --note "..." 更新。
 - waiting 表示无需用户干预、等待外部条件后可继续；设置前须向 Scheduler 注册可唤醒当前 Task 的 condition；blocked 表示需要用户跟进，或任务仍在讨论且方案尚未确定；paused 表示按要求暂停、需用户恢复；completed 表示任务已完成，或长期任务、周期性任务已完成当前阶段工作。waiting、blocked、paused 必须提供简短的单行 note。

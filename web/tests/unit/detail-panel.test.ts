@@ -80,6 +80,43 @@ afterEach(async () => {
 beforeEach(() => vi.stubGlobal("localStorage", new MemoryStorage()));
 
 describe("DetailPanel", () => {
+  it.each(["workspace", "project", "task"] as const)("edits chat follow-ups for %s without changing the brief", async (kind) => {
+    const resourceId = kind === "workspace" ? "workspace" : kind === "project" ? "project1" : "project1.task1";
+    const path = kind === "workspace" ? "chat.md" : kind === "project" ? "project1/chat.md" : "project1/task1/chat.md";
+    const file = { name: "chat.md", path, content: "# Pending reply", contentHash: "chat-hash" };
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(file), { headers: { "content-type": "application/json" } })));
+    const base = resourceModel();
+    const model = resourceModel({ resourceId, resourceType: kind, workspaceChat: kind === "workspace" ? file : null,
+      detail: kind === "workspace" ? null : { ...base.detail!, files: [...base.detail!.files!, file] } });
+    const { target } = mountModel(model);
+    await tick();
+    const tab = Array.from(target.querySelectorAll<HTMLButtonElement>('[role="tab"]')).find((button) => button.textContent === "Chat follow-ups")!;
+    tab.click();
+    await tick();
+    const doc = target.querySelector<HTMLElement>('[data-doc-file="chat.md"]')!;
+    expect(doc.closest("[hidden]")).toBeNull();
+    Array.from(doc.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.trim() === "Edit")!.click();
+    await vi.waitFor(() => expect(target.querySelector('[role="dialog"] .cm-editor')).not.toBeNull());
+    const dialog = target.querySelector<HTMLElement>('[role="dialog"]')!;
+    const view = EditorView.findFromDOM(dialog.querySelector<HTMLElement>(".cm-editor")!)!;
+    view.dispatch({ changes: { from: view.state.doc.length, insert: "\nResult pending" } });
+    await tick();
+    Array.from(dialog.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.trim() === "Save")!.click();
+    await vi.waitFor(() => expect(model.onSaveMarkdownFile).toHaveBeenCalledWith(path, "# Pending reply\nResult pending", "chat-hash"));
+    expect(model.onSaveWorkspaceAgents).not.toHaveBeenCalled();
+  });
+
+  it("shows a missing follow-up document and keeps archived documents read-only", async () => {
+    const model = resourceModel();
+    const { target, channel } = mountModel(model);
+    await tick();
+    Array.from(target.querySelectorAll<HTMLButtonElement>('[role="tab"]')).find((button) => button.textContent === "Chat follow-ups")!.click();
+    await tick();
+    expect(target.textContent).toContain("Chat follow-ups are missing");
+    channel.publish({ ...model, detail: { ...model.detail!, archived: true, files: [{ name: "chat.md", path: "project1/task1/chat.md", content: "# Completed" }] } });
+    await tick();
+    expect(target.querySelector('[data-doc-file="chat.md"]')?.textContent).not.toContain("Edit");
+  });
   it("opens the Markdown editor dialog and saves through the resource callback", async () => {
     const save = vi.fn(async (path: string, content: string) => ({ path, name: "task.md", content, contentHash: "saved-hash" }));
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
@@ -390,7 +427,7 @@ describe("DetailPanel", () => {
     await tick();
 
     const tabs = Array.from(target.querySelectorAll<HTMLButtonElement>("[role=tab]"));
-    expect(tabs.map((tab) => tab.textContent?.trim())).toEqual(["AGENTS.md", "Wiki", "Execution events", "Settings"]);
+    expect(tabs.map((tab) => tab.textContent?.trim())).toEqual(["AGENTS.md", "Chat follow-ups", "Wiki", "Execution events", "Settings"]);
     expect(target.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain("AGENTS.md");
     // The managed block is no longer hidden from the rendered document.
     expect(target.querySelector('[data-doc-file="AGENTS.md"]')).not.toBeNull();

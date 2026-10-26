@@ -44,6 +44,9 @@ func ensureWorkspaceWiki(root, language string) error {
 }
 
 func updateAgentsMD(path, language string) error {
+	if err := ensureChatDocument(filepath.Dir(path), language); err != nil {
+		return err
+	}
 	return updateAgentsMDWithBlock(path, puaPromptBlock(language))
 }
 

@@ -83,13 +83,15 @@ DELETE /api/workspaces/{workspaceId}/users/{name}
 
 用户名只允许 ASCII 字母、数字、下划线和减号，最长 80 个字符；`workspace`、`scheduler`、`project`、`task` 以及 `projectN`、`taskN` 这类与稳定资源 ID 相同或近似的名字（不区分大小写）被保留，不能注册为用户名，避免 `pua message send --to=` 目标产生歧义。`POST .../users` 显式注册用户，`PUT .../users/{name}` 接收 `{ "preference": "..." }`，删除用户会级联删除该用户目录，但不会改写历史消息中的 sender。用户只是 Workspace 范围的身份标记，不构成认证或权限边界。
 
-用户聊天由 `<control-dir>/chats/{chatId}.json` 保存，与 AgentHub 事件独立。一资源一用户一条长期聊天，内部通道仍使用稳定资源 ID，交流通道使用独立的 `dialogue-{chatId}` 运行分区，分别拥有 controller、mailbox 和 generation。此地址不是 Workspace 资源；公开入口为资源下的 `/chat/runtime/...`，不提供直接访问私有运行地址的路由。旧 generation 不改变归属，继续出现在执行事件中。
+用户聊天由 `<control-dir>/chats/{chatId}.json` 保存，与 AgentHub 事件独立。一资源一用户一条长期聊天，输入直接进入资源执行 Agent 的 mailbox。独立交流运行时已停用，旧 `dialogue-{chatId}` 与 `/chat/runtime/...` 仅用于历史审计。
 
-`GET .../resources/{id}/chat` 读取当前用户聊天，`POST .../chat/open|close|messages|read|binding` 管理聊天；`GET .../chats` 保留聊天列表和未读数的查询 API；界面可从资源树或树下 Chat 分组访问聊天。公开消息仅来自用户输入或交流 Agent 的显式发布，不自动复制 Turn final。消息和派工使用稳定 ID；接受用户消息和保存交流 outbox 在同一次原子写入中完成，后台以固定 mailbox ID 重试投递。关闭保留历史，停止交流通道并撤销旧代次资格；已持久派工仍投递内部通道。重开同一聊天时增加 epoch，旧 generation 完成停止和归档后才能接入新的交流代次。Workspace 聊天始终开启。
+`GET .../resources/{id}/chat` 读取当前用户聊天，`POST .../chat/open|close|messages|read` 管理聊天；`GET .../chats` 查询聊天列表和未读数。公开消息仅来自用户输入或执行 Agent 的显式发布，不自动复制 Turn final。输入与 outbox 原子保存，后台按固定 mailbox ID 投递。关闭保留历史并撤销回复资格，不中断资源执行；重开增加 epoch 并产生新资格。Workspace 聊天始终开启。
 
-交流 Agent 通过 `pua chat show|notes|publish|dispatch|timer` 工作。发布、派工、笔记和定时器入口校验 Session 注入的聊天身份、代次凭据和当前 generation；CLI 限制交流角色的资源修改命令，执行修改交由内部通道。这里是可信本地 Workspace 内的角色及生命周期约束，不是操作系统级沙箱或新的用户认证系统。交流 generation 不触发 Task 的状态收口。模型切换复用现有安全 Turn 边界；关闭状态下修改交流绑定不会启动 Session。
+执行 Agent 使用 `pua chat show|notes|publish --reply-to=<capability>`，资格由输入携带，限定资源、用户及聊天开启周期。publish 使用稳定 ID 去重，旧资格不能跨关闭/重开继续使用。旧 notes 保留兼容，dispatch、timer、独立 binding 已停用；不创建新的交流 Session。这是可信本地 Workspace 内的生命周期约束，不是操作系统沙箱或新的用户认证系统。
 
-定时器只保存聊天级检查间隔和下次时间，不保存关注资源、观察订阅、任务与聊天绑定或父级交接关系。交流 Agent 在自己的持久笔记中记录关注范围和通知进度，按需查询资源 History、状态和产物。默认关闭；Agent 可以预约 60 至 86400 秒后的一次检查，设为 0 取消。入队后自动清空 timer，已有待投递输入或活动 Turn 时保留到期预约、延后检查，避免重复插入。Agent 必须按实际跟进事项和预计进展决定是否重新预约，不得机械续订一分钟循环。v1 遗留重复 timer 保留下一次预约，按一次性规则消费并持久升级到 v2；不批量唤醒、不开启原本关闭的 timer。`intervalSeconds` 为兼容保留的预约延迟字段，公开数据增加 `timerMode: "once"` 和 `nextCheckAt`。浏览器 SSE 与状态读取只刷新展示，不驱动模型。
+Workspace、Project、Task 根目录的 `chat.md` 由所属执行 Agent 维护，分别记录工作状态和通知状态、来源消息与 History 引用、下一步与通知条件、最近成功发布记录。程序只创建缺失文件，不解释正文或自动补发；旧 notes 不双写。详情页的 Chat follow-ups 入口复用 Markdown 查看/编辑，`PUT .../resources/{id}/documents?path=...` 仅允许编辑该资源的文件；Workspace 在此接口仅开放根目录 chat.md，保留内容哈希冲突、普通文件与路径校验。Agent 每轮开始和恢复后读取，收到用户插入、协作或调度消息时更新，结束前检查未回复事项。只有 publish 成功才记已发布，进度不解除最终通知义务。文件不存回复凭据，恢复时通过源输入 History 引用读取合法指令并接受有效性校验；失败保留事项，不改投或无限重试。
+
+chat.md 本身不触发工作，长时间等待使用 Scheduler 的真实条件。旧聊天 timer 在迁移和 reconcile 中清零，不恢复旧自动轮询。浏览器 SSE 与状态读取只刷新展示，不驱动模型。
 
 Inbox 路由统一返回 410，旧 `users/*/inbox.json` 在取得 Workspace 所有权后删除，后台也重试清理，不导入聊天。旧 CLI 用户目标明确报移除错误，不能成为内部 Agent 直接发言的旁路。原 History UI 被执行事件和交流事件两个只读 Tab 替代，历史 API/CLI 和已有引用保留。两个事件 Tab 复用原 EventTimeline 聊天式展示和 ChatSessionController SSE/状态同步；user、system、agent 发起的 Turn 一律直接展示，历史记录和实时结束的轮次均不按角色折叠，单个工具详情仍可点击展开。切换资源、用户或通道销毁旧控制器和请求。交流流使用 `/chat/runtime/stream?user=...` 选择用户（仅 GET stream 接受此参数，仍校验已注册用户，其他操作仍需用户头）；两通道事件只在本地投影，不能写入聊天或互相更新状态。两个事件 Tab 支持各自的模型绑定；审批和停止控件在聊天面板独立展示。
 

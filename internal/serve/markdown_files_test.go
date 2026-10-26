@@ -105,6 +105,9 @@ func TestResourceMarkdownSaveAllowsOnlyOwnedOpenMarkdown(t *testing.T) {
 		path       string
 		abs        string
 	}{
+		{name: "workspace chat", resourceID: "workspace", path: "chat.md", abs: filepath.Join(fixture.root, "chat.md")},
+		{name: "project chat", resourceID: "project1", path: project.Path + "/chat.md", abs: filepath.Join(fixture.projectPath, "chat.md")},
+		{name: "task chat", resourceID: "project1.task1", path: task.Path + "/chat.md", abs: filepath.Join(fixture.taskPath, "chat.md")},
 		{name: "project brief", resourceID: "project1", path: project.Path + "/project.md", abs: filepath.Join(fixture.projectPath, "project.md")},
 		{name: "task brief", resourceID: "project1.task1", path: task.Path + "/task.md", abs: filepath.Join(fixture.taskPath, "task.md")},
 		{name: "project template", resourceID: "project1", path: project.Path + "/templates/review.md", abs: filepath.Join(fixture.projectPath, "templates", "review.md")},
@@ -157,6 +160,10 @@ func TestResourceMarkdownSaveRejectsConflictsAndUnownedPaths(t *testing.T) {
 		path       string
 		abs        string
 	}{
+		{name: "workspace child chat", resourceID: "workspace", path: task.Path + "/chat.md", abs: filepath.Join(fixture.taskPath, "chat.md")},
+		{name: "project child chat", resourceID: "project1", path: task.Path + "/chat.md", abs: filepath.Join(fixture.taskPath, "chat.md")},
+		{name: "task parent chat", resourceID: "project1.task1", path: "chat.md", abs: filepath.Join(fixture.root, "chat.md")},
+		{name: "workspace artifact", resourceID: "workspace", path: project.Path + "/artifacts/notes.md", abs: filepath.Join(fixture.projectPath, "artifacts", "notes.md")},
 		{name: "other resource brief", resourceID: "project1", path: task.Path + "/task.md", abs: taskBrief},
 		{name: "text artifact", resourceID: "project1.task1", path: task.Path + "/artifacts/nested/not-markdown.txt", abs: filepath.Join(fixture.taskPath, "artifacts", "nested", "not-markdown.txt")},
 		{name: "nested template", resourceID: "project1", path: project.Path + "/templates/nested/unsupported.md", abs: filepath.Join(fixture.projectPath, "templates", "nested", "unsupported.md")},

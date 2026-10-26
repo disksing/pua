@@ -33,10 +33,13 @@ func (s *server) saveResourceMarkdownFile(w http.ResponseWriter, r *http.Request
 		writeError(w, err, http.StatusBadRequest)
 		return
 	}
-	resource, err := puaWorkspace.ResourceValue(resourceID)
-	if err != nil {
-		writeError(w, err, http.StatusNotFound)
-		return
+	resource := app.ResourceResult{Path: "."}
+	if resourceID != "workspace" {
+		resource, err = puaWorkspace.ResourceValue(resourceID)
+		if err != nil {
+			writeError(w, err, http.StatusNotFound)
+			return
+		}
 	}
 	if resource.Archived {
 		writeError(w, errors.New("archived resources cannot be edited"), http.StatusBadRequest)
@@ -116,6 +119,10 @@ func editableResourceMarkdownPath(workspaceRoot string, resource app.ResourceRes
 	pathSlash := filepath.ToSlash(pathRel)
 	allowed := false
 	switch {
+	case pathSlash == "chat.md" && (resource.Project != nil || resource.Task != nil || resourceRel == "."):
+		allowed = true
+	case resourceRel == ".":
+		allowed = false
 	case resource.Project != nil && pathSlash == "project.md":
 		allowed = true
 	case resource.Task != nil && pathSlash == "task.md":

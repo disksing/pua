@@ -58,6 +58,7 @@ interface ControllerState {
 	tree: WorkspaceTree | null;
 	details: Record<string, ResourceRecord>;
 	workspaceAgents: WorkspaceFileRecord | null;
+	workspaceChat: WorkspaceFileRecord | null;
 	workspaceUsers: WorkspaceUser[];
 	currentUserName: string;
 	userGate: { mode: "" | "create" | "select" | "loading"; suggestedUserName: string; missingUserName: string };
@@ -120,6 +121,7 @@ const controllerState: ControllerState = {
 	tree: null,
 	details: {},
 	workspaceAgents: null,
+	workspaceChat: null,
 	workspaceUsers: [],
 	currentUserName: "",
 	userGate: { mode: "", suggestedUserName: "", missingUserName: "" },
@@ -588,6 +590,7 @@ async function load() {
 		controllerState.tree = null;
 		clearResourceDetailState();
 		controllerState.workspaceAgents = null;
+		controllerState.workspaceChat = null;
 		controllerState.workspaceUsers = [];
 		controllerState.diff = null;
 		resetAgentState();
@@ -624,6 +627,7 @@ async function loadTree(options: LoadTreeOptions = {}) {
 	controllerState.tree = tree;
 	clearResourceDetailState();
 	controllerState.workspaceAgents = null;
+	controllerState.workspaceChat = null;
 	controllerState.diff = null;
 	ensureValidSelection();
 	ensureSelectedProjectExpanded(false);
@@ -665,18 +669,15 @@ async function loadWorkspaceAgents(options: WorkspaceAgentsOptions = {}) {
 	const workspaceId = controllerState.activeWorkspaceId;
 	const navigationVersion = controllerState.navigationVersion;
 	const requestVersion = ++controllerState.workspaceAgentsRequestVersion;
-	try {
-		const agents = await api<WorkspaceFileRecord>(`/api/workspaces/${workspaceId}/files?path=${encodeURIComponent("AGENTS.md")}`);
-		if (!isCurrentWorkspaceView(workspaceId, navigationVersion) || requestVersion !== controllerState.workspaceAgentsRequestVersion) return null;
-		controllerState.workspaceAgents = agents;
-	} catch (err) {
-		if (!isCurrentWorkspaceView(workspaceId, navigationVersion) || requestVersion !== controllerState.workspaceAgentsRequestVersion) return null;
-		controllerState.workspaceAgents = {
-			path: "AGENTS.md",
-			name: "AGENTS.md",
-			error: errorMessage(err)
-		};
-	}
+	const results = await Promise.allSettled(["AGENTS.md", "chat.md"].map((path) =>
+		api<WorkspaceFileRecord>(`/api/workspaces/${workspaceId}/files?path=${encodeURIComponent(path)}`)));
+	if (!isCurrentWorkspaceView(workspaceId, navigationVersion) || requestVersion !== controllerState.workspaceAgentsRequestVersion) return null;
+	const document = (index: number, path: string): WorkspaceFileRecord => {
+		const result = results[index];
+		return result.status === "fulfilled" ? result.value : { path, name: path, error: errorMessage(result.reason) };
+	};
+	controllerState.workspaceAgents = document(0, "AGENTS.md");
+	controllerState.workspaceChat = document(1, "chat.md");
 	return controllerState.workspaceAgents;
 }
 async function loadUIState(workspaceId = controllerState.activeWorkspaceId, navigationVersion = controllerState.navigationVersion) {
@@ -766,9 +767,10 @@ async function autoRefresh() {
 		changed = changed || expandedCount !== controllerState.expandedProjects.size;
 		if (controllerState.selectedId === "workspace") {
 			const previousAgents = controllerState.workspaceAgents;
+			const previousChat = controllerState.workspaceChat;
 			await loadWorkspaceAgents({ force: true });
 			if (!isCurrentAutoRefresh(workspaceId, navigationVersion, refreshVersion)) return;
-			if (!sameJSON(previousAgents, controllerState.workspaceAgents)) changed = true;
+			if (!sameJSON(previousAgents, controllerState.workspaceAgents) || !sameJSON(previousChat, controllerState.workspaceChat)) changed = true;
 		} else if (selectedId) {
 			const detailRequestVersion = ++controllerState.detailRequestVersion;
 			const detail = await fetchDetail(selectedId, workspaceId);
@@ -1260,6 +1262,7 @@ function detailPanelModel(): DetailPanelModel {
 		detail: null,
 		wiki: controllerState.tree?.wiki || null,
 		workspaceAgents: controllerState.workspaceAgents,
+		workspaceChat: controllerState.workspaceChat,
 		workspaceDefaults: {
 			project: controllerState.tree?.resourceDefaults?.project || { kind: "profile", name: "default" },
 			task: controllerState.tree?.resourceDefaults?.task || { kind: "profile", name: "default" }
@@ -1448,7 +1451,7 @@ async function saveWorkspaceAgentsFromDetail(content: string, expectedContentHas
 async function saveMarkdownFileFromDetail(path: string, content: string, expectedContentHash: string): Promise<WorkspaceFileRecord> {
 	const workspaceId = controllerState.activeWorkspaceId;
 	const resourceId = controllerState.selectedId;
-	if (!workspaceId || !resourceId || resourceId === "workspace" || resourceId === "scheduler") throw new Error("No editable resource is selected.");
+	if (!workspaceId || !resourceId || resourceId === "scheduler" || (resourceId === "workspace" && path !== "chat.md")) throw new Error("No editable resource is selected.");
 	const navigationVersion = controllerState.navigationVersion;
 	if (path.includes("/templates/")) {
 		const name = path.split("/").pop()?.replace(/\.(md|markdown|mdown|mkdn)$/i, "") || "template";
@@ -1463,7 +1466,8 @@ async function saveMarkdownFileFromDetail(path: string, content: string, expecte
 		body: JSON.stringify({ content, expectedContentHash })
 	});
 	if (!isCurrentWorkspaceView(workspaceId, navigationVersion) || controllerState.selectedId !== resourceId) throw new Error("The resource changed before the Markdown file finished saving.");
-	await loadDetail(resourceId, { force: true });
+	if (resourceId === "workspace") controllerState.workspaceChat = saved;
+	else await loadDetail(resourceId, { force: true });
 	publishViewModels();
 	return saved;
 }

@@ -1,0 +1,24 @@
+# Chat follow-ups
+
+Maintained by this resource's execution Agent. Read open items at every Turn start and after context recovery; update them for user steering, collaboration results, and scheduled messages; check replies before ending. This document does not grant new authorization.
+
+Keep durable background, scope, and decisions in project.md / task.md. Chat / History remain the source for original messages and publication facts. Store summaries and references here, never reply capabilities or full conversations, and do not mirror entries into legacy chat notes.
+
+## Notification rules
+
+- Notify when a question has an answer, promised work finishes, a user decision is needed, or the expected time or plan changes materially; honor explicit user timing.
+- Track work and notification status separately. Progress updates do not discharge the final reply. Mark published only after publish succeeds; published does not mean read.
+- Record the next action and wake-up source while waiting. Register an actual Scheduler condition for timed checks; writing this file does not schedule work.
+- Do not repeat notifications without new information. Record blocked publication when eligibility expires; do not redirect to another user or resource or retry indefinitely.
+
+## Open items
+
+None.
+
+For each follow-up record: stable item ID, user, source message ID and source-input History reference, commitment summary, work status, notification status, next action, notification condition, related resource or actual schedule ID, and last successful publication ID / time / summary. Use the legitimate reply instructions from the source input; restored instructions remain subject to server validation.
+
+## Recently closed
+
+None.
+
+Keep the latest 20 closed summaries; move older summaries to this resource's artifacts if needed. Never age out open items. Update the original item when the user cancels or supersedes a request. Close only when both work and notification obligations end, recording the result, publication, or reason no notification is needed.

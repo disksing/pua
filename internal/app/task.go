@@ -92,6 +92,9 @@ func createResourceFilesWithMarkdown(dir string, resource Resource, markdown, la
 	if err := os.WriteFile(filepath.Join(dir, markdownFileName(resource)), []byte(markdown), 0o644); err != nil {
 		return err
 	}
+	if err := ensureChatDocument(dir, language); err != nil {
+		return err
+	}
 	return os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte(taskAgentsBlock(resource, language)+"\n"), 0o644)
 }
 
@@ -397,6 +400,9 @@ func updateOpenTaskAgentsMD(root, language string) error {
 }
 
 func updateTaskAgentsMD(root, dir string, resource Resource, language string) error {
+	if err := ensureChatDocument(dir, language); err != nil {
+		return err
+	}
 	path := filepath.Join(dir, "AGENTS.md")
 	block := taskAgentsBlock(resource, language)
 

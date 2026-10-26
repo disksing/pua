@@ -382,8 +382,8 @@ func TestResourceDetailToleratesDeletedMarkdownAndDirectories(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resource detail = %#v, %v", detail, err)
 	}
-	if len(detail.Files) != 1 || detail.Files[0].Name != "AGENTS.md" {
-		t.Fatalf("expected only AGENTS.md after deleting task.md, got %#v", detail.Files)
+	if len(detail.Files) != 2 || detail.Files[0].Name != "chat.md" || detail.Files[1].Name != "AGENTS.md" {
+		t.Fatalf("expected chat.md and AGENTS.md after deleting task.md, got %#v", detail.Files)
 	}
 	if detail.Artifacts == nil || len(detail.Artifacts) != 0 {
 		t.Fatalf("expected empty artifacts slice after deleting artifacts dir, got %#v", detail.Artifacts)
@@ -404,7 +404,7 @@ func TestResourceDetailToleratesDeletedMarkdownAndDirectories(t *testing.T) {
 	if err != nil {
 		t.Fatalf("project detail = %#v, %v", projectDetail, err)
 	}
-	if len(projectDetail.Files) != 1 || projectDetail.Files[0].Name != "AGENTS.md" {
-		t.Fatalf("expected only AGENTS.md after deleting project.md, got %#v", projectDetail.Files)
+	if len(projectDetail.Files) != 2 || projectDetail.Files[0].Name != "chat.md" || projectDetail.Files[1].Name != "AGENTS.md" {
+		t.Fatalf("expected chat.md and AGENTS.md after deleting project.md, got %#v", projectDetail.Files)
 	}
 }

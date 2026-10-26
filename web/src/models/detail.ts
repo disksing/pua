@@ -94,6 +94,7 @@ export interface DetailPanelModel {
   detail: ResourceDetailModel | null;
   wiki: { exists?: boolean; error?: string; entries?: FileTreeModel[] } | null;
   workspaceAgents: WorkspaceAgentsModel | null;
+  workspaceChat?: WorkspaceAgentsModel | null;
   workspaceDefaults: { project: ResourceAgentBindingModel; task: ResourceAgentBindingModel };
   workspaceUsers: WorkspaceUser[];
   currentUserName: string;

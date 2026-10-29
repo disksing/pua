@@ -1180,18 +1180,22 @@ func mailboxStoreMeta(store resourceMailboxStore) resourceMailboxMeta {
 	return resourceMailboxMeta{Version: resourceMailboxStoreVersion, InstanceID: store.InstanceID, ResourceID: store.ResourceID, ResourceKey: store.ResourceKey}
 }
 
-func mailboxStoreMessageIDs(store resourceMailboxStore) map[string]bool {
-	ids := make(map[string]bool, len(store.Mailbox.Messages)+len(store.Receipts.Receipts))
-	for _, message := range store.Mailbox.Messages {
-		ids[message.ID] = true
+func mailboxStoreLocatorStates(store resourceMailboxStore) map[string]resourceMailboxLocator {
+	locators := make(map[string]resourceMailboxLocator, len(store.Mailbox.Messages)+len(store.Receipts.Receipts)+len(store.Receipts.Expired))
+	for _, expired := range store.Receipts.Expired {
+		locators[expired.ID] = resourceMailboxLocator{State: resourceMailboxExpiredState, UpdatedAt: expired.ExpiredAt}
 	}
 	for _, receipt := range store.Receipts.Receipts {
-		ids[receipt.ID] = true
+		locators[receipt.ID] = resourceMailboxLocator{State: "receipt"}
 	}
-	for _, expired := range store.Receipts.Expired {
-		ids[expired.ID] = true
+	for _, message := range store.Mailbox.Messages {
+		state := "hot"
+		if message.receipt {
+			state = "receipt"
+		}
+		locators[message.ID] = resourceMailboxLocator{State: state}
 	}
-	return ids
+	return locators
 }
 
 func updateResourceMailboxLocators(workspacePath string, store resourceMailboxStore, hot resourceMailboxHotDocument, receipts resourceMailboxReceiptDocument, before resourceMailboxStore) error {
@@ -1209,12 +1213,20 @@ func updateResourceMailboxLocators(workspacePath string, store resourceMailboxSt
 	for _, expired := range receipts.Expired {
 		current[expired.ID] = resourceMailboxLocator{Version: resourceMailboxStoreVersion, MessageID: expired.ID, ResourceID: store.ResourceID, ResourceKey: store.ResourceKey, State: resourceMailboxExpiredState, UpdatedAt: expired.ExpiredAt}
 	}
+	previous := mailboxStoreLocatorStates(before)
+	var firstErr error
+	// Unchanged locators need no writes; lookups fall back to canonical data.
 	for id, locator := range current {
+		if prior, found := previous[id]; found && prior.State == locator.State &&
+			(locator.State != resourceMailboxExpiredState || prior.UpdatedAt == locator.UpdatedAt) {
+			continue
+		}
 		if err := writeResourceMailboxIndexJSON(resourceMailboxLocatorPath(workspacePath, id), locator); err != nil {
-			return err
+			if firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
-	previous := mailboxStoreMessageIDs(before)
 	for id := range previous {
 		if _, stillKnown := current[id]; stillKnown {
 			continue
@@ -1223,15 +1235,20 @@ func updateResourceMailboxLocators(workspacePath string, store resourceMailboxSt
 		var locator resourceMailboxLocator
 		found, err := readResourceMailboxJSON(path, &locator)
 		if err != nil {
-			return err
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
 		if found && locator.ResourceKey == store.ResourceKey {
 			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-				return err
+				if firstErr == nil {
+					firstErr = err
+				}
 			}
 		}
 	}
-	return nil
+	return firstErr
 }
 
 func persistResourceMailboxStore(workspacePath string, store resourceMailboxStore, before resourceMailboxStore) error {
@@ -1613,16 +1630,18 @@ func mailboxMessageByID(workspacePath, messageID string) (resourceMailboxMessage
 	if locator, found, err := readResourceMailboxLocator(workspacePath, messageID); err != nil {
 		return resourceMailboxMessage{}, false, err
 	} else if found {
-		if locator.State == resourceMailboxExpiredState {
-			return resourceMailboxMessage{}, false, &resourceAPIError{Code: "message_receipt_expired", Message: fmt.Sprintf("message receipt expired: %s", messageID)}
-		}
-		mailbox, loadErr := loadResourceMailboxForResource(workspacePath, locator.ResourceID)
+		store, loadErr := loadResourceMailboxStoreForRead(workspacePath, locator.ResourceID)
 		if loadErr != nil {
 			return resourceMailboxMessage{}, false, loadErr
 		}
-		for _, message := range mailbox.Messages {
+		for _, message := range store.Mailbox.Messages {
 			if message.ID == messageID {
 				return cloneMailboxMessage(message), true, nil
+			}
+		}
+		for _, expired := range store.Receipts.Expired {
+			if expired.ID == messageID {
+				return resourceMailboxMessage{}, false, &resourceAPIError{Code: "message_receipt_expired", Message: fmt.Sprintf("message receipt expired: %s", messageID)}
 			}
 		}
 		// A locator can lag a just-committed resource document. Continue with

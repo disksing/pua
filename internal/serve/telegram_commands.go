@@ -89,11 +89,24 @@ func (rt *telegramRuntime) process(ctx context.Context, st *telegramState, u tel
 		return nil
 	}
 	if _, err = ws.User(user); err != nil {
+		for i := range st.Routes {
+			route := &st.Routes[i]
+			if route.ChatID == account && route.ThreadID == msg.ThreadID && route.User == user &&
+				!(route.Paused && !telegramAutoRecheck(route.PauseReason)) {
+				if route.pause(telegramPauseUser) {
+					if e := rt.save(*st); e != nil {
+						return e
+					}
+				}
+				break
+			}
+		}
+		say("The Workspace user could not be verified. Your message was not sent to PUA; check Workspace settings and try again.", nil)
 		return nil
 	}
 	switch verb {
 	case "/start", "/menu", "/help":
-		say("Choose a resource. Use /search words to find tasks, /open resource-id to open one, /status for this topic, /stop to pause pushes, and /resume to resume new replies.", telegramHomeButtons())
+		say("Choose a resource. Use /search words to find tasks, /open resource-id to open one, /status for this topic, /stop to pause it, and /resume to continue.", telegramHomeButtons())
 		return nil
 	case "/projects", "/tasks", "/search", "/recent":
 		text, buttons, e := rt.resourceMenu(ws, *st, user, args)
@@ -115,11 +128,11 @@ func (rt *telegramRuntime) process(ctx context.Context, st *telegramState, u tel
 		if verb == "/bind" {
 			thread = msg.ThreadID
 		}
-		return rt.openTopic(ctx, st, user, msg.Chat.ID, thread, args[1], say)
+		return rt.openTopic(ctx, st, user, msg.Chat.ID, thread, args[1], false, false, say)
 	case "/stop", "/resume", "/status":
 		for i := range st.Routes {
 			route := &st.Routes[i]
-			if route.ChatID != account || route.ThreadID != msg.ThreadID {
+			if route.ChatID != account || route.ThreadID != msg.ThreadID || route.User != user {
 				continue
 			}
 			if verb == "/status" {
@@ -128,19 +141,36 @@ func (rt *telegramRuntime) process(ctx context.Context, st *telegramState, u tel
 				if e == nil {
 					status = fmt.Sprintf("\nState: %v", detail.State)
 				}
-				say(route.Title+"\nResource: "+route.Resource+status+fmt.Sprintf("\nPushes paused: %t", route.Paused), nil)
+				status += fmt.Sprintf("\nTopic paused: %t", route.Paused)
+				if route.Paused {
+					status += "\n" + telegramPauseHint(route.PauseReason)
+					if route.PausedAt != "" {
+						status += "\nPaused since: " + route.PausedAt
+					}
+				}
+				if len(route.Held) > 0 {
+					status += "\nEarlier deliveries need review in Workspace Telegram settings."
+				}
+				say(route.Title+"\nResource: "+route.Resource+status, nil)
 				return nil
 			}
 			if verb == "/stop" {
-				route.Paused = true
-				route.Pending = nil
+				if route.Paused && route.PauseReason != telegramPauseManual && !telegramAutoRecheck(route.PauseReason) {
+					say(telegramPauseHint(route.PauseReason), nil)
+					return nil
+				}
+				route.pause(telegramPauseManual)
 				if e := rt.save(*st); e != nil {
 					return e
 				}
-				say("Pushes paused for this topic. Agent execution and the PUA chat continue. Use /resume for new replies.", nil)
+				say("This topic is paused. PUA chat and Agent execution continue; Telegram input is rejected and pending deliveries are retained. Use /resume to continue.", nil)
 				return nil
 			}
-			return rt.openTopic(ctx, st, user, msg.Chat.ID, route.ThreadID, route.Resource, say)
+			if len(args) > 2 || (len(args) == 2 && args[1] != "confirm") {
+				say("Use /resume or /resume confirm.", nil)
+				return nil
+			}
+			return rt.openTopic(ctx, st, user, msg.Chat.ID, route.ThreadID, route.Resource, true, len(args) == 2, say)
 		}
 		say("Open a resource first.", telegramHomeButtons())
 		return nil
@@ -160,21 +190,21 @@ func (rt *telegramRuntime) process(ctx context.Context, st *telegramState, u tel
 		if route.ChatID != account || route.ThreadID != msg.ThreadID || route.User != user {
 			continue
 		}
-		if route.Paused {
-			say("This topic is paused. Use /resume to reopen it.", nil)
-			return nil
+		_, _, ready, changed := rt.checkRoute(st, route, ws, false)
+		if changed {
+			if e := rt.save(*st); e != nil {
+				return e
+			}
 		}
-		exists, archived, _, e := resourceExistsAndArchived(rt.workspace.Path, route.Resource)
-		if e != nil || !exists || archived {
-			route.Paused = true
-			say("This resource is unavailable or archived. Check PUA and use /resume when it is available.", nil)
+		if !ready {
+			say("This topic is paused. "+telegramPauseHint(route.PauseReason)+" Your message was not sent to PUA; please send it again when the topic is available.", nil)
 			return nil
 		}
 		chatMu.Lock()
-		chat, e := ensureChatLocked(rt.workspace.Path, route.Resource, user)
+		chat, e := loadChatLocked(rt.workspace.Path, chatID(route.Resource, user))
 		if e == nil && (!chat.Open || chat.Epoch != route.Epoch) {
 			chatMu.Unlock()
-			say("This PUA chat was closed or reopened. Use /resume to reconnect this topic.", nil)
+			say("This PUA chat was closed or reopened. Reopen it in PUA if needed, then send your message again.", nil)
 			return nil
 		}
 		if e == nil {
@@ -196,7 +226,7 @@ func (rt *telegramRuntime) process(ctx context.Context, st *telegramState, u tel
 func telegramHomeButtons() [][]telegramButton {
 	return [][]telegramButton{{{Text: "Workspace", Data: "/open workspace"}, {Text: "Recent chats", Data: "/recent"}}, {{Text: "Browse projects", Data: "/projects"}, {Text: "Search tasks", Data: "/search"}}}
 }
-func (rt *telegramRuntime) openTopic(ctx context.Context, st *telegramState, user string, chat, thread int64, resource string, say func(string, [][]telegramButton)) error {
+func (rt *telegramRuntime) openTopic(ctx context.Context, st *telegramState, user string, chat, thread int64, resource string, explicitResume, confirm bool, say func(string, [][]telegramButton)) error {
 	resource = normalizedResourceID(resource)
 	exists, archived, _, err := resourceExistsAndArchived(rt.workspace.Path, resource)
 	// A typo or a stale menu must not poison the durable input queue.
@@ -222,7 +252,7 @@ func (rt *telegramRuntime) openTopic(ctx context.Context, st *telegramState, use
 	}
 	index := -1
 	for i, r := range st.Routes {
-		if r.ChatID == chat && thread != 0 && r.ThreadID == thread && r.Resource != resource {
+		if r.ChatID == chat && thread != 0 && r.ThreadID == thread && (r.Resource != resource || r.User != user) {
 			say("This topic belongs to another resource. Open a separate topic instead.", nil)
 			return nil
 		}
@@ -231,17 +261,10 @@ func (rt *telegramRuntime) openTopic(ctx context.Context, st *telegramState, use
 		}
 	}
 
-	if index >= 0 && thread != 0 && st.Routes[index].ThreadID != thread {
-		// /bind explicitly repairs a deleted or inaccessible topic. The old
-		// topic loses its mapping; pending deliveries never move to a new topic.
-		st.Routes[index].ThreadID = thread
-		st.Routes[index].Paused = true
-		st.Routes[index].Pending = nil
-	}
-
 	if index < 0 {
-		st.Routes = append(st.Routes, telegramRoute{User: user, ChatID: chat, Resource: resource, Title: title, Paused: true})
+		st.Routes = append(st.Routes, telegramRoute{User: user, ChatID: chat, Resource: resource, Title: title})
 		index = len(st.Routes) - 1
+		st.Routes[index].pause(telegramPauseCreating)
 		// Reserve before createForumTopic. A crash after creation must not create a
 		// second topic automatically on inbox replay.
 		if err = rt.save(*st); err != nil {
@@ -274,36 +297,114 @@ func (rt *telegramRuntime) openTopic(ctx context.Context, st *telegramState, use
 		return nil
 	}
 
+	initial := route.ThreadID == 0
+	rebind := !initial && route.ThreadID != thread
+	legacy := !initial && route.Paused && route.PauseReason != telegramPauseManual && !telegramAutoRecheck(route.PauseReason)
+	if !rebind && !initial && route.Paused && !explicitResume && (legacy || route.PauseReason == telegramPauseManual) {
+		say(telegramPauseHint(route.PauseReason), nil)
+		return nil
+	}
+	if !rebind && legacy && explicitResume && !confirm {
+		say("This older pause has no recorded cause. To reconnect from now, send /resume confirm. Earlier unforwarded messages and any unconfirmed delivery will be held for review in Workspace Telegram settings, not automatically sent.", nil)
+		return nil
+	}
+
+	lifecycle := chatLifecycleLock(rt.workspace.Path, chatID(resource, user))
+	lifecycle.Lock()
 	chatMu.Lock()
-	c, err := ensureChatLocked(rt.workspace.Path, resource, user)
+	var c resourceChat
+	if initial {
+		c, err = ensureChatLocked(rt.workspace.Path, resource, user)
+	} else {
+		c, err = loadChatLocked(rt.workspace.Path, chatID(resource, user))
+	}
 	if err == nil {
 		if !c.Open {
-			c.Open = true
-			c.Epoch++
-			c.Token = newGenerationRecordID()
+			if !initial && !rebind && !explicitResume {
+				chatMu.Unlock()
+				lifecycle.Unlock()
+				say("The PUA chat is closed. Reopen it in PUA, or send /resume to reopen it.", nil)
+				return nil
+			}
+			c.open()
 		}
 		err = saveChatLocked(rt.workspace.Path, c)
 	}
 	chatMu.Unlock()
 	if err != nil {
+		lifecycle.Unlock()
 		return err
 	}
-	if route.ThreadID != 0 && !route.Paused && route.Epoch == c.Epoch {
-		if e := rt.send(ctx, *st, chat, thread, "Continue chatting with "+route.Title+" here.", nil); e != nil {
-			st.LastError = e.Error()
+	if !initial && c.Epoch < route.Epoch {
+		route.pause(telegramPauseEpoch)
+		err = rt.save(*st)
+		lifecycle.Unlock()
+		if err != nil {
+			return err
 		}
+		say("The chat period moved backwards and cannot be verified. Check Workspace Telegram settings before reconnecting.", nil)
 		return nil
+	}
+	unknownEpoch := !initial && c.Epoch != route.Epoch &&
+		(c.Epoch <= route.Epoch || c.EpochStart == nil || *c.EpochStart < route.Cursor || *c.EpochStart > len(c.Messages))
+	if !initial && !rebind && unknownEpoch && !confirm {
+		route.pause(telegramPauseEpoch)
+		err = rt.save(*st)
+		lifecycle.Unlock()
+		if err != nil {
+			return err
+		}
+		say("The earlier chat period cannot be verified. To reconnect from now, send /resume confirm. Earlier unforwarded messages and any unconfirmed delivery will be held for review in Workspace Telegram settings, not automatically sent.", nil)
+		return nil
+	}
+	if initial {
+		route.Epoch = c.Epoch
+		route.Cursor = len(c.Messages)
+		route.unpause()
+	} else if rebind || legacy || unknownEpoch {
+		reason := "legacy_reconnect"
+		if rebind {
+			reason = "topic_rebound"
+		} else if unknownEpoch {
+			reason = "epoch_boundary_unknown"
+		}
+		if !route.holdUntil(c, len(c.Messages), reason) {
+			route.pause(telegramPauseEpoch)
+			err = rt.save(*st)
+			lifecycle.Unlock()
+			if err != nil {
+				return err
+			}
+			say("The saved delivery position cannot be verified. Check Workspace Telegram settings before reconnecting.", nil)
+			return nil
+		}
+		route.Epoch = c.Epoch
+		route.unpause()
+	} else if explicitResume && route.PauseReason == telegramPauseManual {
+		route.unpause()
 	}
 	route.ThreadID = thread
 	route.Title = title
-	route.Epoch = c.Epoch
-	route.Cursor = len(c.Messages)
-	route.Paused = false
-	route.Pending = nil
-	if err = rt.save(*st); err != nil {
+	ws, err := app.OpenWorkspace(rt.workspace.Path)
+	if err != nil {
+		lifecycle.Unlock()
 		return err
 	}
-	if err = rt.send(ctx, *st, chat, thread, "Connected to "+title+" as "+user+". This topic shares the web chat for that Workspace user. New web messages and public replies will appear here. Send text to continue; /menu opens navigation.", nil); err != nil {
+	_, _, ready, _ := rt.checkRoute(st, route, ws, false)
+	if err = rt.save(*st); err != nil {
+		lifecycle.Unlock()
+		return err
+	}
+	lifecycle.Unlock()
+	if !ready {
+		say(telegramPauseHint(route.PauseReason), nil)
+		return nil
+	}
+	message := "Connected to " + title + " as " + user + ". This topic shares the web chat for that Workspace user. New web messages and public replies will appear here. Send text to continue; /menu opens navigation."
+	if len(route.Held) > 0 {
+		message += " Earlier deliveries need review in Workspace Telegram settings."
+	}
+	if err = rt.send(ctx, *st, chat, thread, message, nil); err != nil {
 		st.LastError = err.Error()
 	}
 	return nil

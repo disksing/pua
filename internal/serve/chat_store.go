@@ -22,6 +22,15 @@ const dialoguePrefix = "dialogue-"
 
 var chatMu sync.Mutex
 
+// A Telegram send holds a per-chat read lock until the external request
+// finishes. Close and reopen take the write lock to fence old sends.
+var chatLifecycleLocks sync.Map
+
+func chatLifecycleLock(root, id string) *sync.RWMutex {
+	lock, _ := chatLifecycleLocks.LoadOrStore(filepath.Clean(root)+"\x00"+id, &sync.RWMutex{})
+	return lock.(*sync.RWMutex)
+}
+
 type chatMessage struct {
 	ID        string `json:"id"`
 	Role      string `json:"role"`
@@ -48,6 +57,7 @@ type resourceChat struct {
 	User            string           `json:"user"`
 	Open            bool             `json:"open"`
 	Epoch           uint64           `json:"epoch"`
+	EpochStart      *int             `json:"epochStart,omitempty"`
 	Token           string           `json:"token"`
 	Binding         app.AgentBinding `json:"binding"`
 	Notes           string           `json:"notes"`
@@ -55,6 +65,16 @@ type resourceChat struct {
 	NextCheckAt     string           `json:"nextCheckAt,omitempty"`
 	Messages        []chatMessage    `json:"messages"`
 	Outbox          []chatDelivery   `json:"outbox"`
+}
+
+func (c *resourceChat) open() {
+	c.Open = true
+	c.Epoch++
+	start := len(c.Messages)
+	c.EpochStart = &start
+	c.Token = newGenerationRecordID()
+	c.IntervalSeconds = 0
+	c.NextCheckAt = ""
 }
 
 func chatID(resourceID, user string) string {

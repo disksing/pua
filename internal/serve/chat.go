@@ -74,6 +74,11 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 			return
 		}
 	}
+	if r.Method == http.MethodPost && (operation == "open" || operation == "close") {
+		lifecycle := chatLifecycleLock(workspace.Path, chatID(resourceID, user))
+		lifecycle.Lock()
+		defer lifecycle.Unlock()
+	}
 	chatMu.Lock()
 	c, err := ensureChatLocked(workspace.Path, resourceID, user)
 	if err != nil {
@@ -89,9 +94,7 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 		}
 	}
 	if resourceID == "workspace" && c.Epoch == 0 {
-		c.Open = true
-		c.Epoch = 1
-		c.Token = newGenerationRecordID()
+		c.open()
 		err = saveChatLocked(workspace.Path, c)
 	}
 	if err != nil {
@@ -173,11 +176,7 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 	switch operation {
 	case "open":
 		if !c.Open {
-			c.Open = true
-			c.Epoch++
-			c.Token = newGenerationRecordID()
-			c.NextCheckAt = ""
-			c.IntervalSeconds = 0
+			c.open()
 		}
 	case "close":
 		if resourceID == "workspace" {
@@ -251,9 +250,7 @@ func (m *agentManager) reconcileWorkspaceChats(ctx context.Context, workspace se
 			return e
 		}
 		if c.Epoch == 0 {
-			c.Open = true
-			c.Epoch = 1
-			c.Token = newGenerationRecordID()
+			c.open()
 			if e = saveChatLocked(workspace.Path, c); e != nil {
 				chatMu.Unlock()
 				return e

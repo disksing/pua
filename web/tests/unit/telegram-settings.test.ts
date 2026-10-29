@@ -77,8 +77,31 @@ describe("Telegram Workspace settings", () => {
     await vi.waitFor(() => expect(requests.some((r) => r.path.endsWith("/delivery"))).toBe(true));
     expect(JSON.parse(String(requests.find((r) => r.path.endsWith("/delivery"))?.init?.body))).toEqual({ route: "route-a", delivery: "delivery-b", action: "retry" });
   });
+  it("shows pause guidance and requires review before clearing older delivery state", async () => {
+    const requests: Array<{ path: string; init?: RequestInit }> = [];
+    const mock = vi.fn(async (path: RequestInfo | URL, init?: RequestInit) => {
+      requests.push({ path: String(path), init });
+      return response(String(path).endsWith("/users") ? { users: [{ name: "Alice" }] } : {
+        ...state,
+        topicProblems: [{ resource: "project1.task1", user: "Alice", reason: "chat_closed", hint: "Reopen the chat in PUA.", since: "2026-10-29T12:00:00Z" }],
+        deliveryProblems: [
+          { route: "route-a", delivery: "held-b", resource: "project1.task1", user: "Alice", status: "chat_reopened", held: true, count: 2, pendingStatus: "unknown" },
+          { route: "route-a", delivery: "active-c", resource: "project1.task1", user: "Alice", status: "unknown", error: "Check Telegram" },
+        ],
+      });
+    });
+    const target = await render(mock); await expand(target);
+    expect(target.textContent).toContain("Reopen the chat in PUA.");
+    expect(target.textContent).toContain("2 earlier messages may not have been forwarded");
+    expect(target.textContent).toContain("may already be in Telegram");
+    button(target, "Review notice").click(); await tick();
+    expect(requests.some((r) => r.path.endsWith("/delivery"))).toBe(false);
+    expect(target.textContent).toContain("saved pending delivery will be removed");
+    button(target, "Clear review notice").click();
+    await vi.waitFor(() => expect(requests.some((r) => r.path.endsWith("/delivery"))).toBe(true));
+    expect(JSON.parse(String(requests.find((r) => r.path.endsWith("/delivery"))?.init?.body))).toEqual({ route: "route-a", delivery: "held-b", action: "acknowledge" });
+  });
 });
-
 
 it("requires an explicit choice when multiple users exist without a web selection", async () => {
   const target = await render(vi.fn(async (path: RequestInfo | URL) => response(String(path).endsWith("/users") ? { users: [{ name: "User" }, { name: "disksing" }] } : state)));

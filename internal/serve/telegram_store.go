@@ -15,6 +15,8 @@ import (
 
 // Telegram credentials and delivery state live beside the server configuration,
 // never in a Workspace or its repositories. Lock order: runtime.mu, then chatMu.
+const telegramStateVersion = 2
+
 type telegramState struct {
 	Version   int                        `json:"version"`
 	Revision  uint64                     `json:"revision"`
@@ -35,15 +37,26 @@ type telegramPairing struct {
 	Expires time.Time `json:"expires"`
 }
 type telegramRoute struct {
-	User     string            `json:"user"`
-	ChatID   int64             `json:"chatId"`
-	ThreadID int64             `json:"threadId"`
-	Resource string            `json:"resource"`
-	Title    string            `json:"title"`
-	Epoch    uint64            `json:"epoch"`
-	Cursor   int               `json:"cursor"`
-	Paused   bool              `json:"paused"`
-	Pending  *telegramDelivery `json:"pending,omitempty"`
+	User        string                 `json:"user"`
+	ChatID      int64                  `json:"chatId"`
+	ThreadID    int64                  `json:"threadId"`
+	Resource    string                 `json:"resource"`
+	Title       string                 `json:"title"`
+	Epoch       uint64                 `json:"epoch"`
+	Cursor      int                    `json:"cursor"`
+	Paused      bool                   `json:"paused"`
+	PauseReason string                 `json:"pauseReason,omitempty"`
+	PausedAt    string                 `json:"pausedAt,omitempty"`
+	Pending     *telegramDelivery      `json:"pending,omitempty"`
+	Held        []telegramHeldDelivery `json:"held,omitempty"`
+}
+type telegramHeldDelivery struct {
+	ID      string            `json:"id"`
+	Epoch   uint64            `json:"epoch"`
+	Reason  string            `json:"reason"`
+	Count   int               `json:"count"`
+	HeldAt  string            `json:"heldAt"`
+	Pending *telegramDelivery `json:"pending,omitempty"`
 }
 type telegramDelivery struct {
 	Text       string    `json:"text"`
@@ -81,7 +94,7 @@ func (rt *telegramRuntime) path() string {
 	return filepath.Join(filepath.Dir(rt.server.config), "telegram", chatID(rt.workspace.InstanceID, rt.workspace.Path)+".json")
 }
 func (rt *telegramRuntime) load() (telegramState, error) {
-	st := telegramState{Version: 1, Pairings: map[string]telegramPairing{}, Accounts: map[int64]string{}, Routes: []telegramRoute{}}
+	st := telegramState{Version: telegramStateVersion, Pairings: map[string]telegramPairing{}, Accounts: map[int64]string{}, Routes: []telegramRoute{}}
 	data, err := os.ReadFile(rt.path())
 	if os.IsNotExist(err) {
 		return st, nil
@@ -92,7 +105,7 @@ func (rt *telegramRuntime) load() (telegramState, error) {
 	if err = json.Unmarshal(data, &st); err != nil {
 		return st, err
 	}
-	if st.Version != 1 {
+	if st.Version < 1 || st.Version > telegramStateVersion {
 		return st, errors.New("unsupported Telegram state version")
 	}
 	if st.Pairings == nil {
@@ -104,6 +117,8 @@ func (rt *telegramRuntime) load() (telegramState, error) {
 	return st, nil
 }
 func (rt *telegramRuntime) save(st telegramState) error {
+	// Older binaries must refuse this state rather than erase held deliveries.
+	st.Version = telegramStateVersion
 	data, err := json.Marshal(st)
 	if err != nil {
 		return err

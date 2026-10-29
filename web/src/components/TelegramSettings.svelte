@@ -11,7 +11,8 @@
     topicCount: number;
     lastError: string;
     lastPoll: string;
-    deliveryProblems: Array<{ route: string; delivery: string; resource: string; user: string; status: string; error: string }>;
+    deliveryProblems: Array<{ route: string; delivery: string; resource: string; user: string; status: string; error: string; held?: boolean; count?: number; pendingStatus?: string; since?: string }>;
+    topicProblems?: Array<{ resource: string; user: string; reason: string; hint: string; since?: string }>;
   }
   const client = new ApiClient();
   let expanded = $state(false);
@@ -26,7 +27,7 @@
   let pairing = $state<{ url: string; expiresAt: string } | null>(null);
   let confirmDisconnect = $state(false);
   let confirmUnbind = $state("");
-  let retryRoute = $state<string | null>(null);
+  let reviewDelivery = $state<string | null>(null);
   const endpoint = $derived(`/api/workspaces/${encodeURIComponent(workspaceId)}/telegram`);
   // Parent models are republished during polling. Depend on the scalar identity,
   // not on the parent's object-backed prop getter, so drafts survive refreshes.
@@ -37,7 +38,7 @@
     if (!id) return;
     const preferredUser = untrack(() => currentUserName);
     let active = true;
-    pending = "load"; settings = null; confirmUnbind = ""; confirmDisconnect = false; retryRoute = null;
+    pending = "load"; settings = null; confirmUnbind = ""; confirmDisconnect = false; reviewDelivery = null;
     error = "";
     Promise.all([
       client.request<Settings>(`/api/workspaces/${encodeURIComponent(id)}/telegram`),
@@ -67,7 +68,7 @@
         settings = result;
         if (key === "save" || key === "disconnect") { enabled = result.enabled; token = ""; }
         if (key === "disconnect" || key === "unbind") pairing = null;
-        confirmDisconnect = false; confirmUnbind = ""; retryRoute = null;
+        confirmDisconnect = false; confirmUnbind = ""; reviewDelivery = null;
         notice = key === "refresh" ? "Status refreshed." : "Telegram settings updated.";
       }
     } catch (reason) { if (identity === workspaceId) error = reason instanceof Error ? reason.message : String(reason); }
@@ -121,27 +122,47 @@
             <button type="button" disabled={Boolean(pending)} onclick={() => confirmUnbind = account.user}>Unlink account</button>
           </div>
           {#if confirmUnbind === account.user}
-            <div class="confirmation"><p>Unlink {account.user}? Telegram input and pushes will stop. PUA chat history will remain.</p>
+            <div class="confirmation"><p>Unlink {account.user}? Telegram input and pushes will stop, and saved delivery and review records for this user will be removed. PUA chat history will remain.</p>
               <button type="button" disabled={Boolean(pending)} onclick={() => action("unbind", { user: account.user })}>Unlink</button>
               <button type="button" onclick={() => confirmUnbind = ""}>Cancel</button>
             </div>
           {/if}
         {/each}
-        {#each settings.deliveryProblems as problem (problem.route)}
-          <div class="delivery"><strong>{problem.resource} · {problem.user}</strong><p>{problem.error || problem.status}</p>
-            {#if retryRoute === problem.route}
-              <p>The message may already be in Telegram. Retrying can create a duplicate.</p>
-              <button type="button" disabled={Boolean(pending)} onclick={() => action("delivery", { route: problem.route, delivery: problem.delivery, action: "retry" })}>Retry delivery</button>
-              <button type="button" onclick={() => retryRoute = null}>Cancel</button>
+        {#each settings.topicProblems ?? [] as topic (`${topic.resource}/${topic.user}`)}
+          <div class="delivery"><strong>{topic.resource} · {topic.user}</strong>
+            <p>{topic.hint}</p>
+            {#if topic.since}<p class="help">Paused since {new Date(topic.since).toLocaleString()}</p>{/if}
+          </div>
+        {/each}
+        {#each settings.deliveryProblems as problem (problem.delivery)}
+          <div class="delivery"><strong>{problem.resource} · {problem.user}</strong>
+            {#if problem.held}
+              <p>{problem.count || 0} earlier messages may not have been forwarded. They remain in PUA and will not be sent automatically.</p>
+              {#if problem.pendingStatus}<p>A previous delivery was {problem.pendingStatus}; it may already be in Telegram. Check both chats before deciding.</p>{/if}
+              {#if problem.since}<p class="help">Needs review since {new Date(problem.since).toLocaleString()}</p>{/if}
+              {#if reviewDelivery === problem.delivery}
+                <p>Clear this review notice? Earlier messages will not be resent, and the saved pending delivery will be removed.</p>
+                <button type="button" disabled={Boolean(pending)} onclick={() => action("delivery", { route: problem.route, delivery: problem.delivery, action: "acknowledge" })}>Clear review notice</button>
+                <button type="button" onclick={() => reviewDelivery = null}>Cancel</button>
+              {:else}
+                <button type="button" disabled={Boolean(pending)} onclick={() => reviewDelivery = problem.delivery}>Review notice</button>
+              {/if}
             {:else}
-              <button type="button" disabled={Boolean(pending)} onclick={() => retryRoute = problem.route}>Review retry</button>
+              <p>{problem.error || problem.status}</p>
+              {#if reviewDelivery === problem.delivery}
+                <p>The message may already be in Telegram. Retrying can create a duplicate.</p>
+                <button type="button" disabled={Boolean(pending)} onclick={() => action("delivery", { route: problem.route, delivery: problem.delivery, action: "retry" })}>Retry delivery</button>
+                <button type="button" onclick={() => reviewDelivery = null}>Cancel</button>
+              {:else}
+                <button type="button" disabled={Boolean(pending)} onclick={() => reviewDelivery = problem.delivery}>Review retry</button>
+              {/if}
+              <button type="button" disabled={Boolean(pending)} onclick={() => action("delivery", { route: problem.route, delivery: problem.delivery, action: "skip" })}>Skip this message</button>
             {/if}
-            <button type="button" disabled={Boolean(pending)} onclick={() => action("delivery", { route: problem.route, delivery: problem.delivery, action: "skip" })}>Skip this message</button>
           </div>
         {/each}
         {#if settings.configured}
           {#if confirmDisconnect}
-            <div class="confirmation"><p>Disconnect this bot and remove its saved token, pairings and topic mappings? PUA chat history and existing Telegram messages will remain.</p>
+            <div class="confirmation"><p>Disconnect this bot and remove its saved token, pairings, topic mappings, and delivery and review records? PUA chat history and existing Telegram messages will remain.</p>
               <button type="button" disabled={Boolean(pending)} onclick={() => action("disconnect")}>Disconnect bot</button>
               <button type="button" onclick={() => confirmDisconnect = false}>Cancel</button>
             </div>

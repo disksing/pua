@@ -205,7 +205,7 @@ func (s *server) handleTelegram(w http.ResponseWriter, r *http.Request, id strin
 		st.Inbox = inbox
 		st.Revision++
 	case r.Method == http.MethodPost && op == "disconnect":
-		st = telegramState{Version: 1, Revision: st.Revision + 1, Pairings: map[string]telegramPairing{}, Accounts: map[int64]string{}, Routes: []telegramRoute{}}
+		st = telegramState{Version: telegramStateVersion, Revision: st.Revision + 1, Pairings: map[string]telegramPairing{}, Accounts: map[int64]string{}, Routes: []telegramRoute{}}
 	case r.Method == http.MethodPost && op == "delivery":
 
 		var route *telegramRoute
@@ -215,22 +215,41 @@ func (s *server) handleTelegram(w http.ResponseWriter, r *http.Request, id strin
 				break
 			}
 		}
-		if route == nil || route.Pending == nil || route.deliveryKey() != body.Delivery {
+		if route == nil {
 			writeError(w, errors.New("delivery changed; refresh the status first"), 409)
 			return
 		}
 
-		switch body.Action {
-		case "retry":
-			route.Pending.Status = "queued"
-			route.Pending.RetryAt = time.Time{}
-			route.Pending.Error = ""
-		case "skip":
-			route.Cursor = route.Pending.NextCursor
-			route.Pending = nil
-		default:
-			writeError(w, errors.New("choose retry or skip"), 400)
-			return
+		if route.Pending != nil && route.deliveryKey() == body.Delivery {
+			switch body.Action {
+			case "retry":
+				route.Pending.Status = "queued"
+				route.Pending.RetryAt = time.Time{}
+				route.Pending.Error = ""
+			case "skip":
+				route.Cursor = route.Pending.NextCursor
+				route.Pending = nil
+			default:
+				writeError(w, errors.New("choose retry or skip"), 400)
+				return
+			}
+		} else {
+			index := -1
+			for i, held := range route.Held {
+				if held.ID == body.Delivery {
+					index = i
+					break
+				}
+			}
+			if index < 0 {
+				writeError(w, errors.New("delivery changed; refresh the status first"), 409)
+				return
+			}
+			if body.Action != "acknowledge" {
+				writeError(w, errors.New("earlier deliveries cannot be retried across chat periods"), 409)
+				return
+			}
+			route.Held = append(route.Held[:index], route.Held[index+1:]...)
 		}
 	default:
 		w.WriteHeader(405)
@@ -253,18 +272,43 @@ func (rt *telegramRuntime) writeSettings(w http.ResponseWriter, st telegramState
 	}
 	sort.Slice(accounts, func(i, j int) bool { return accounts[i].User < accounts[j].User })
 	type problem struct {
-		Route    string `json:"route"`
-		Delivery string `json:"delivery"`
+		Route         string `json:"route"`
+		Delivery      string `json:"delivery"`
+		Resource      string `json:"resource"`
+		User          string `json:"user"`
+		Status        string `json:"status"`
+		Error         string `json:"error"`
+		Held          bool   `json:"held"`
+		Count         int    `json:"count,omitempty"`
+		PendingStatus string `json:"pendingStatus,omitempty"`
+		Since         string `json:"since,omitempty"`
+	}
+	type topicProblem struct {
 		Resource string `json:"resource"`
 		User     string `json:"user"`
-		Status   string `json:"status"`
-		Error    string `json:"error"`
+		Reason   string `json:"reason"`
+		Hint     string `json:"hint"`
+		Since    string `json:"since,omitempty"`
 	}
 	problems := []problem{}
+	topics := []topicProblem{}
 	for _, r := range st.Routes {
+		if r.Paused {
+			topics = append(topics, topicProblem{r.Resource, r.User, r.PauseReason, telegramPauseHint(r.PauseReason), r.PausedAt})
+		}
 		if r.Pending != nil && r.Pending.Status != "queued" {
-			problems = append(problems, problem{r.key(), r.deliveryKey(), r.Resource, r.User, r.Pending.Status, r.Pending.Error})
+			problems = append(problems, problem{Route: r.key(), Delivery: r.deliveryKey(), Resource: r.Resource, User: r.User, Status: r.Pending.Status, Error: r.Pending.Error})
+		}
+		for _, held := range r.Held {
+			pendingStatus := ""
+			if held.Pending != nil {
+				pendingStatus = held.Pending.Status
+			}
+			problems = append(problems, problem{
+				Route: r.key(), Delivery: held.ID, Resource: r.Resource, User: r.User,
+				Status: held.Reason, Held: true, Count: held.Count, PendingStatus: pendingStatus, Since: held.HeldAt,
+			})
 		}
 	}
-	writeJSON(w, map[string]any{"enabled": st.Enabled, "configured": st.Token != "", "botName": st.BotName, "accounts": accounts, "topicCount": len(st.Routes), "lastError": st.LastError, "lastPoll": st.LastPoll, "deliveryProblems": problems})
+	writeJSON(w, map[string]any{"enabled": st.Enabled, "configured": st.Token != "", "botName": st.BotName, "accounts": accounts, "topicCount": len(st.Routes), "lastError": st.LastError, "lastPoll": st.LastPoll, "deliveryProblems": problems, "topicProblems": topics})
 }

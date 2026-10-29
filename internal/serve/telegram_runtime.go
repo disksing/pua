@@ -3,7 +3,6 @@ package serve
 import (
 	"context"
 	"errors"
-	"os"
 	"strings"
 	"time"
 
@@ -157,36 +156,13 @@ func (rt *telegramRuntime) flush(ctx context.Context, st *telegramState) error {
 	changed := false
 	for i := range st.Routes {
 		route := &st.Routes[i]
-		if route.Paused || route.ThreadID == 0 {
-			continue
-		}
-		_, userErr := ws.User(route.User)
-		exists, archived, _, resourceErr := resourceExistsAndArchived(rt.workspace.Path, route.Resource)
-		if userErr != nil || resourceErr != nil || !exists || archived || st.Accounts[route.ChatID] != route.User {
-			route.Paused = true
-			route.Pending = nil
-			changed = true
+		chat, modTime, ready, routeChanged := rt.checkRoute(st, route, ws, true)
+		changed = changed || routeChanged
+		if !ready {
 			continue
 		}
 		id := chatID(route.Resource, route.User)
-		path := chatPath(rt.workspace.Path, id)
-		info, e := os.Stat(path)
-		if e != nil {
-			continue
-		}
-		if route.Pending == nil && rt.lastFiles[id].Equal(info.ModTime()) {
-			continue
-		}
-		chatMu.Lock()
-		chat, e := loadChatLocked(rt.workspace.Path, id)
-		chatMu.Unlock()
-		if e != nil {
-			return e
-		}
-		if !chat.Open || chat.Epoch != route.Epoch {
-			route.Paused = true
-			route.Pending = nil
-			changed = true
+		if route.Pending == nil && rt.lastFiles[id].Equal(modTime) {
 			continue
 		}
 		if route.Pending == nil {
@@ -216,7 +192,7 @@ func (rt *telegramRuntime) flush(ctx context.Context, st *telegramState) error {
 				break
 			}
 			if route.Pending == nil {
-				rt.lastFiles[id] = info.ModTime()
+				rt.lastFiles[id] = modTime
 				continue
 			}
 		}
@@ -235,15 +211,43 @@ func (rt *telegramRuntime) flush(ctx context.Context, st *telegramState) error {
 			changed = true
 			continue
 		}
+		lifecycle := chatLifecycleLock(rt.workspace.Path, id)
+		lifecycle.RLock()
+		chatMu.Lock()
+		currentChat, chatErr := loadChatLocked(rt.workspace.Path, id)
+		chatMu.Unlock()
+		_, userErr := ws.User(route.User)
+		exists, archived, _, resourceErr := resourceExistsAndArchived(rt.workspace.Path, route.Resource)
+		if chatErr != nil || !currentChat.Open || currentChat.Epoch != route.Epoch || userErr != nil || resourceErr != nil || !exists || archived || st.Accounts[route.ChatID] != route.User {
+			lifecycle.RUnlock()
+			switch {
+			case st.Accounts[route.ChatID] != route.User:
+				changed = route.pause(telegramPauseUnpaired) || changed
+			case userErr != nil:
+				changed = route.pause(telegramPauseUser) || changed
+			case resourceErr != nil || !exists:
+				changed = route.pause(telegramPauseResource) || changed
+			case archived:
+				changed = route.pause(telegramPauseArchived) || changed
+			case chatErr != nil:
+				changed = route.pause(telegramPauseChat) || changed
+			case !currentChat.Open:
+				changed = route.pause(telegramPauseClosed) || changed
+			}
+			continue
+		}
 		pending.Status = "sending"
 		if err = rt.save(*st); err != nil {
+			lifecycle.RUnlock()
 			return err
 		}
 		// Recheck cancellation immediately before any external write.
 		if ctx.Err() != nil {
+			lifecycle.RUnlock()
 			return ctx.Err()
 		}
 		err = rt.send(ctx, *st, route.ChatID, route.ThreadID, pending.Chunks[pending.Part], nil)
+		lifecycle.RUnlock()
 		rt.nextSend[route.ChatID] = time.Now().Add(time.Second)
 		if err == nil {
 			pending.Part++

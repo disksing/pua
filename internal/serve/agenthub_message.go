@@ -169,36 +169,21 @@ func sameProviderMessageParty(leftRole string, left *agentHubMessageSender, righ
 	return reflect.DeepEqual(normalizedMessageSender(left), normalizedMessageSender(right))
 }
 
-func providerMessageCanDeliverAgentResult(message resourceMailboxMessage) bool {
-	if normalizedProviderMessageRole(message.Role) != "agent" || !message.SubscribeResult ||
-		message.Sender == nil || !isStablePUAResourceID(message.Sender.ID) || strings.TrimSpace(message.SenderWorkspaceInstanceID) == "" {
-		return false
-	}
-	switch message.ResultSubscriptionStatus {
-	case resourceResultSubscriptionDisabled, resourceResultSubscriptionNone:
-		return false
-	default:
-		return true
-	}
-}
-
-func providerOpenerResponse(role string, message *resourceMailboxMessage) string {
-	switch normalizedProviderMessageRole(role) {
-	case "user":
+func providerOpenerResponse(role string, _ *resourceMailboxMessage) string {
+	if normalizedProviderMessageRole(role) == "user" {
 		return providerResponseProgressFinal
-	case "agent":
-		if message != nil && providerMessageCanDeliverAgentResult(*message) {
-			return providerResponseFinalOnly
-		}
 	}
 	return providerResponseNone
 }
 
 func providerMessageTextWithContext(message resourceMailboxMessage, steer bool) string {
+	return providerMessageTextWithLegacyContext(message, steer, false)
+}
+
+func providerMessageTextWithLegacyContext(message resourceMailboxMessage, steer, legacy bool) string {
 	// Chat owns its explicit publication instructions, including busy-turn
 	// inserts. Do not label it as a system notification or imply that final
-	// reaches this user. The mailbox role still disables internal turn-result
-	// subscriptions; no execution output is automatically copied to Chat.
+	// reaches this user; no execution output is automatically copied to Chat.
 	if message.Type == "user_chat_input" {
 		return message.Text
 	}
@@ -207,12 +192,16 @@ func providerMessageTextWithContext(message resourceMailboxMessage, steer bool) 
 		return providerMessageText(message.Text, message.Role, message.Sender, steer)
 	}
 	language := context.Language
+	openerResponse := context.OpenerResponse
+	if !legacy && normalizedProviderMessageRole(context.OpenerRole) == "agent" {
+		openerResponse = providerResponseNone
+	}
 	from := providerMessageParty(message.Role, message.Sender, language)
 	if !steer {
 		if language == localize.SimplifiedChinese {
-			return chineseProviderMessageSource(from, "消息") + " " + providerResponseLabel(language, context.OpenerResponse) + "：\n" + message.Text
+			return chineseProviderMessageSource(from, "消息") + " " + providerResponseLabel(language, openerResponse) + "：\n" + message.Text
 		}
-		return "Message from " + from + " " + providerResponseLabel(language, context.OpenerResponse) + ":\n" + message.Text
+		return "Message from " + from + " " + providerResponseLabel(language, openerResponse) + ":\n" + message.Text
 	}
 	if context.OpenerUnknown {
 		replyTarget, canReply := providerMessageReplyTarget(message.Role, message.Sender)
@@ -233,7 +222,7 @@ func providerMessageTextWithContext(message resourceMailboxMessage, steer bool) 
 		}
 		return "Inserted message from " + from + ":\n" + message.Text
 	}
-	opener := providerMessageParty(context.OpenerRole, context.OpenerSender, language) + " " + providerResponseLabel(language, context.OpenerResponse)
+	opener := providerMessageParty(context.OpenerRole, context.OpenerSender, language) + " " + providerResponseLabel(language, openerResponse)
 	replyTarget, canReply := providerMessageReplyTarget(message.Role, message.Sender)
 	if language == localize.SimplifiedChinese {
 		clauses := make([]string, 0, 2)
@@ -400,7 +389,8 @@ func canonicalAgentHubMessageMatches(canonical agentHubInboundMessage, expected 
 		expectedPayload, expectedOK := decodePUAMessagePayload(expectedWire.Payload)
 		expectedText := providerMessageTextWithContext(expected, canonical.Steer)
 		legacyText := providerMessageText(expected.Text, expected.Role, expected.Sender, canonical.Steer)
-		return ok && expectedOK && (canonical.Text == expectedText || canonical.Text == legacyText) &&
+		legacyContextText := providerMessageTextWithLegacyContext(expected, canonical.Steer, true)
+		return ok && expectedOK && (canonical.Text == expectedText || canonical.Text == legacyText || canonical.Text == legacyContextText) &&
 			canonical.MessageID == expectedWire.MessageID && reflect.DeepEqual(actualPayload, expectedPayload)
 	}
 	role := canonical.Role

@@ -659,18 +659,16 @@ Commands:
 
 func printMessageHelp() {
 	fmt.Print(`Usage:
-  pua message send --to=<resource|user> [--mode=steer|enqueue|interrupt] [--subscribe-result=false] [--server=<url>] <message>
+  pua message send --to=<resource|user> [--mode=steer|enqueue|interrupt] [--server=<url>] <message>
   pua message show --id=<message-id> [--server=<url>]
 
 Commands:
-  pua message send --to=<resource|user> [--mode=steer|enqueue|interrupt] [--subscribe-result=false] [--server=<url>] <message>
+  pua message send --to=<resource|user> [--mode=steer|enqueue|interrupt] [--server=<url>] <message>
     When --to is a stable resource id (workspace, scheduler, projectN, or
     projectN.taskM), persist a message in the target resource mailbox through
     the owning pua serve process. steer is the default.
-    A message that actually opens a Turn subscribes to its result by default;
-    a message delivered as steer into an
-    existing Turn does not. Pass --subscribe-result=false to disable the
-    opener result. The current directory's stable work-subject id and
+    Agent messages are one-way; the recipient's Turn does not automatically
+    return its final response. The current directory's stable work-subject id and
     Workspace instance id are sent as role=agent provenance. A valid injected
     PUA resource environment takes precedence over cwd; provenance is not
     authentication or instruction priority.

@@ -61,7 +61,7 @@ type resourceMailboxReceipt struct {
 	Role                      string                       `json:"role,omitempty"`
 	Sender                    *agentHubMessageSender       `json:"sender,omitempty"`
 	SenderWorkspaceInstanceID string                       `json:"senderWorkspaceInstanceId,omitempty"`
-	SubscribeResult           bool                         `json:"subscribeResult"`
+	SubscribeResult           *bool                        `json:"subscribeResult,omitempty"`
 	ResultSubscriptionStatus  string                       `json:"resultSubscriptionStatus,omitempty"`
 	ResultOperationID         string                       `json:"resultOperationId,omitempty"`
 	Type                      string                       `json:"type,omitempty"`
@@ -86,36 +86,6 @@ type resourceMailboxReceipt struct {
 	PromotedAt                string                       `json:"promotedAt,omitempty"`
 	LastError                 string                       `json:"lastError,omitempty"`
 	LastErrorCode             string                       `json:"lastErrorCode,omitempty"`
-	subscribeResultPresent    bool
-}
-
-// UnmarshalJSON applies the pre-subscribeResult default to old receipt files
-// while retaining an explicitly persisted false value.
-func (receipt *resourceMailboxReceipt) UnmarshalJSON(data []byte) error {
-	type mailboxReceiptAlias resourceMailboxReceipt
-	var decoded mailboxReceiptAlias
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		return err
-	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil {
-		return err
-	}
-	_, present := fields["subscribeResult"]
-	decoded.subscribeResultPresent = present
-	if !present {
-		decoded.SubscribeResult = true
-	}
-	if decoded.Role == "system" {
-		decoded.SubscribeResult = false
-		decoded.ResultSubscriptionStatus = resourceResultSubscriptionDisabled
-	}
-	message := mailboxMessageFromReceipt(resourceMailboxReceipt(decoded))
-	decoded.Type = message.Type
-	decoded.Causation = cloneMailboxCausation(message.Causation)
-	decoded.Notification = cloneNotificationReceipt(message.Notification)
-	*receipt = resourceMailboxReceipt(decoded)
-	return nil
 }
 
 type resourceMailboxExpiredEntry struct {
@@ -458,8 +428,7 @@ func receiptFromMailboxMessage(message resourceMailboxMessage) resourceMailboxRe
 		TurnTerminalAt: message.TurnTerminalAt, GenerationID: message.GenerationID,
 		AgentHubSessionID: message.AgentHubSessionID, TurnID: message.TurnID, ProviderContext: cloneProviderMessageContext(message.ProviderContext), InterruptTurnID: message.InterruptTurnID,
 		InterruptAt: message.InterruptAt, PromotedAt: message.PromotedAt, LastError: message.LastError,
-		LastErrorCode:          message.LastErrorCode,
-		subscribeResultPresent: message.subscribeResultPresent,
+		LastErrorCode: message.LastErrorCode,
 	}
 }
 
@@ -481,7 +450,6 @@ func mailboxMessageFromReceipt(receipt resourceMailboxReceipt) resourceMailboxMe
 		AgentHubSessionID: receipt.AgentHubSessionID, TurnID: receipt.TurnID, ProviderContext: cloneProviderMessageContext(receipt.ProviderContext), InterruptTurnID: receipt.InterruptTurnID,
 		InterruptAt: receipt.InterruptAt, PromotedAt: receipt.PromotedAt, LastError: receipt.LastError,
 		LastErrorCode: receipt.LastErrorCode, receipt: true,
-		subscribeResultPresent: receipt.subscribeResultPresent,
 	}
 }
 
@@ -598,7 +566,6 @@ func loadResourceMailboxStoreInternal(workspacePath, resourceID string) (resourc
 		for _, message := range hot.Messages {
 			message.ResourceID = normalizedResourceID(message.ResourceID)
 			message.receipt = false
-			normalizeStoredMailboxMessage(&message)
 			store.Mailbox.Messages = append(store.Mailbox.Messages, cloneMailboxMessage(message))
 			if message.Sequence > store.Mailbox.NextSequence {
 				store.Mailbox.NextSequence = message.Sequence
@@ -616,9 +583,6 @@ func loadResourceMailboxStoreInternal(workspacePath, resourceID string) (resourc
 		}
 		if store.Receipts.Expired == nil {
 			store.Receipts.Expired = []resourceMailboxExpiredEntry{}
-		}
-		for index := range store.Receipts.Receipts {
-			normalizeStoredMailboxReceipt(&store.Receipts.Receipts[index])
 		}
 	}
 	if found, err := readResourceMailboxJSON(resourceMailboxOutboxPath(store.Directory), &store.Outbox); err != nil {
@@ -651,7 +615,6 @@ func loadResourceMailboxStoreInternal(workspacePath, resourceID string) (resourc
 		if _, exists := byID[receipt.ID]; exists {
 			continue
 		}
-		normalizeStoredMailboxReceipt(&receipt)
 		byID[receipt.ID] = mailboxMessageFromReceipt(receipt)
 		if receipt.Sequence > store.Mailbox.NextSequence {
 			store.Mailbox.NextSequence = receipt.Sequence
@@ -679,15 +642,6 @@ func mailboxMessageNeedsHot(message resourceMailboxMessage) bool {
 		return true
 	}
 	if message.Notification != nil && message.Notification.Status != resourceNotificationDelivered && message.Notification.Status != resourceNotificationTerminal {
-		return true
-	}
-	if message.ResultSubscriptionStatus == resourceResultSubscriptionPending && message.Notification == nil {
-		return true
-	}
-	if message.Type == "" && message.Status == resourceMessageDelivered && message.SubscribeResult &&
-		message.ResultSubscriptionStatus == "" && message.Notification == nil && message.ActualMode != resourceMessageModeSteer &&
-		message.Sender != nil && isStablePUAResourceID(message.Sender.ID) && strings.TrimSpace(message.SenderWorkspaceInstanceID) != "" &&
-		strings.TrimSpace(message.GenerationID) != "" {
 		return true
 	}
 	if message.Type == "" && (message.Status == resourceMessageCancelled || message.Status == resourceMessageUndeliverable || message.Status == resourceMessageDeliveryUnknown) &&
@@ -904,45 +858,6 @@ func listHotResourceMailboxResourceIDs(workspacePath string) ([]string, error) {
 	return rebuildResourceMailboxHotIndex(workspacePath)
 }
 
-// normalizeStoredMailboxMessage applies compatibility rules that must not
-// change public JSON decoding. It prevents legacy durable inputs from gaining
-// subscriptions that the current runtime would not create.
-func normalizeStoredMailboxMessage(message *resourceMailboxMessage) {
-	if message == nil {
-		return
-	}
-	if !message.subscribeResultPresent && message.Status == resourceMessageDelivered && message.Notification == nil && message.Type == "" {
-		message.SubscribeResult = false
-		message.ResultSubscriptionStatus = resourceResultSubscriptionNone
-	}
-	// Older versions subscribed every agent input bound to a Turn, including
-	// steer inputs. Suppress only subscriptions that have not created a durable
-	// callback operation yet; an operation already in flight must finish its
-	// crash-safe delivery protocol.
-	if message.Status == resourceMessageDelivered && message.Notification == nil && message.Type == "" &&
-		message.ActualMode == resourceMessageModeSteer &&
-		(message.ResultSubscriptionStatus == "" || message.ResultSubscriptionStatus == resourceResultSubscriptionPending) {
-		message.ResultSubscriptionStatus = resourceResultSubscriptionNone
-		message.ResultOperationID = ""
-	}
-}
-
-func normalizeStoredMailboxReceipt(receipt *resourceMailboxReceipt) {
-	if receipt == nil {
-		return
-	}
-	if !receipt.subscribeResultPresent && receipt.Status == resourceMessageDelivered && receipt.Notification == nil && receipt.Type == "" {
-		receipt.SubscribeResult = false
-		receipt.ResultSubscriptionStatus = resourceResultSubscriptionNone
-	}
-	if receipt.Status == resourceMessageDelivered && receipt.Notification == nil && receipt.Type == "" &&
-		receipt.ActualMode == resourceMessageModeSteer &&
-		(receipt.ResultSubscriptionStatus == "" || receipt.ResultSubscriptionStatus == resourceResultSubscriptionPending) {
-		receipt.ResultSubscriptionStatus = resourceResultSubscriptionNone
-		receipt.ResultOperationID = ""
-	}
-}
-
 func mailboxMessageRetentionTime(message resourceMailboxMessage) time.Time {
 	for _, value := range []string{message.TerminalAt, message.UpdatedAt, message.AcceptedAt} {
 		if parsed, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(value)); err == nil {
@@ -1076,7 +991,8 @@ func prepareResourceMailboxDocuments(store resourceMailboxStore) (resourceMailbo
 	outbox.ResourceID = store.ResourceID
 	pending := make([]resourceMailboxNotificationOp, 0, len(outbox.Operations))
 	for _, operation := range outbox.Operations {
-		if operation.Status == resourceNotificationDelivered || operation.Status == resourceNotificationTerminal {
+		if (operation.Status == resourceNotificationDelivered || operation.Status == resourceNotificationTerminal) &&
+			!(isLegacyTurnResultType(operation.Type) && operation.LastErrorCode == "result_subscription_removed") {
 			continue
 		}
 		pending = append(pending, cloneMailboxOperation(operation))
@@ -1718,7 +1634,6 @@ func resourceMailboxOperationGeneratedMessage(operation resourceMailboxNotificat
 	return resourceMailboxMessage{
 		ID: operation.GeneratedMessageID, ResourceID: operation.TargetResourceID, Text: operation.GeneratedText,
 		Role: "system", Sender: operation.GeneratedSender, SenderWorkspaceInstanceID: operation.SourceWorkspaceInstanceID,
-		SubscribeResult: false, ResultSubscriptionStatus: resourceResultSubscriptionDisabled,
 		Type: operation.Type, Causation: operation.GeneratedCausation,
 		RequestedMode: requestedMode, ActualMode: actualMode, ModeFrozen: operation.GeneratedModeFrozen, DowngradeReason: operation.GeneratedDowngradeReason,
 		Status: resourceMessageQueued, AcceptedAt: operation.AcceptedAt, UpdatedAt: operation.UpdatedAt,
@@ -1801,10 +1716,6 @@ func upsertMailboxNotificationOperationForSources(workspacePath string, sourceMe
 			if message.Notification == nil && operation.ID != "" {
 				message.Notification = &resourceNotificationReceipt{ID: operation.ID, Type: operation.Type, Status: operation.Status, TargetWorkspaceInstanceID: operation.TargetWorkspaceInstanceID, TargetResourceID: operation.TargetResourceID, CreatedAt: operation.UpdatedAt, UpdatedAt: operation.UpdatedAt}
 			}
-			if operation.Type == resourceMessageTypeTurnResult && message.ResultSubscriptionStatus != resourceResultSubscriptionComplete {
-				message.ResultSubscriptionStatus = resourceResultSubscriptionPending
-				message.ResultOperationID = operation.ID
-			}
 		}
 		for _, id := range ids {
 			if !foundSources[id] {
@@ -1875,6 +1786,9 @@ func pendingResourceMailboxNotificationOperations(workspacePath string) ([]resou
 		}
 		for _, operation := range store.Outbox.Operations {
 			if operation.Status != resourceNotificationDelivered && operation.Status != resourceNotificationTerminal {
+				if operation.SourceResourceID == "" {
+					operation.SourceResourceID = resourceID
+				}
 				operations = append(operations, cloneMailboxOperation(operation))
 			}
 		}

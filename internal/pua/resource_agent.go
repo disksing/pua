@@ -31,7 +31,7 @@ const (
 	projectStatusUsage              = "usage: pua project status [--project=<project>] [--server=<url>]"
 	taskStatusUsage                 = "usage: pua task status [--project=<project>] [--task=<task>] [--server=<url>]"
 	taskStateUsage                  = "usage: pua task state [--project=<project>] [--task=<task>] [--server=<url>] | pua task state set <waiting|blocked|paused|completed> [--note=<text>] [--project=<project>] [--task=<task>] [--server=<url>]"
-	messageSendUsage                = "usage: pua message send --to=<resource|user> [--mode=steer|enqueue|interrupt] [--subscribe-result=false] [--server=<url>] <message>"
+	messageSendUsage                = "usage: pua message send --to=<resource|user> [--mode=steer|enqueue|interrupt] [--server=<url>] <message>"
 	messageShowUsage                = "usage: pua message show --id=<message-id> [--server=<url>]"
 	workspaceHistoryUsage           = "usage: pua workspace history [--cursor=<cursor>] [--limit=<n>] [--server=<url>] [--json]"
 	projectHistoryUsage             = "usage: pua project history [--project=<project>] [--cursor=<cursor>] [--limit=<n>] [--server=<url>] [--json]"
@@ -40,12 +40,11 @@ const (
 )
 
 type resourceServerOptions struct {
-	ID              string
-	Mode            string
-	ModeSet         bool
-	ServerURL       string
-	Text            string
-	SubscribeResult *bool
+	ID        string
+	Mode      string
+	ModeSet   bool
+	ServerURL string
+	Text      string
 }
 
 type resourceHistoryOptions struct {
@@ -114,25 +113,6 @@ func parseMessageServerArgs(args []string, command string) (resourceServerOption
 			index++
 			options.Mode = strings.ToLower(strings.TrimSpace(args[index]))
 			options.ModeSet = true
-		case strings.HasPrefix(arg, "--subscribe-result=") && command == "send":
-			if options.SubscribeResult != nil {
-				return resourceServerOptions{}, errors.New(usage)
-			}
-			value, parseErr := strconv.ParseBool(strings.TrimSpace(strings.TrimPrefix(arg, "--subscribe-result=")))
-			if parseErr != nil {
-				return resourceServerOptions{}, errors.New(usage)
-			}
-			options.SubscribeResult = &value
-		case arg == "--subscribe-result" && command == "send":
-			if index+1 >= len(args) || strings.HasPrefix(args[index+1], "--") || options.SubscribeResult != nil {
-				return resourceServerOptions{}, errors.New(usage)
-			}
-			index++
-			value, parseErr := strconv.ParseBool(strings.TrimSpace(args[index]))
-			if parseErr != nil {
-				return resourceServerOptions{}, errors.New(usage)
-			}
-			options.SubscribeResult = &value
 		case strings.HasPrefix(arg, "--server="):
 			if options.ServerURL != "" {
 				return resourceServerOptions{}, errors.New(usage)
@@ -516,9 +496,6 @@ func runMessageSend(args []string) error {
 		"sender":                    map[string]string{"id": senderID, "name": senderID},
 		"senderWorkspaceInstanceId": senderInstanceID,
 	}
-	if options.SubscribeResult != nil {
-		body["subscribeResult"] = *options.SubscribeResult
-	}
 	var response map[string]any
 	path := fmt.Sprintf("/api/workspaces/%s/resources/%s/messages", url.PathEscape(client.workspaceID), url.PathEscape(options.ID))
 	if err := client.request(context.Background(), http.MethodPost, path, body, &response); err != nil {
@@ -592,9 +569,6 @@ func runUserMessageSend(_ *resourceServerClient, options resourceServerOptions, 
 	}
 	if options.ModeSet {
 		return errors.New("--mode applies only to resource targets")
-	}
-	if options.SubscribeResult != nil {
-		return errors.New("--subscribe-result applies only to resource targets")
 	}
 	return errors.New("Inbox was removed; reply to user Chat inputs with the explicit pua chat publish command supplied in that input")
 }

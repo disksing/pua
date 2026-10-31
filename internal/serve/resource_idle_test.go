@@ -380,7 +380,7 @@ func TestResourceIdleSleepSchedulerTickResumesCurrentGeneration(t *testing.T) {
 		}
 		return false
 	})
-	if tick.Role != "system" || tick.SubscribeResult || tick.RequestedMode != resourceMessageModeEnqueue ||
+	if tick.Role != "system" || tick.SubscribeResult != nil || tick.RequestedMode != resourceMessageModeEnqueue ||
 		tick.ActualMode != resourceMessageModeEnqueue || !tick.ModeFrozen {
 		t.Fatalf("Scheduler tick mode mapping = %#v", tick)
 	}

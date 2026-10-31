@@ -145,104 +145,28 @@ func TestResourceMailboxEmptyWorkspaceHasNoStores(t *testing.T) {
 	}
 }
 
-func TestResultSubscriptionDefaultsAndSystemMessages(t *testing.T) {
+func TestNewMessagesOmitSubscriptionAndLegacyReceiptPreservesIt(t *testing.T) {
 	root := t.TempDir()
 	if _, err := app.Initialize(root, "en"); err != nil {
 		t.Fatal(err)
 	}
-	sender := &agentHubMessageSender{ID: "project1.task2", Name: "Sender"}
-
-	defaulted, err := acceptMailboxMessage(root, "workspace", resourceMessageRequest{
-		Text: "default subscription", Mode: resourceMessageModeEnqueue, Role: "agent", Sender: sender, SenderWorkspaceInstanceID: "instance-1",
-	})
+	message, err := acceptMailboxMessage(root, "workspace", resourceMessageRequest{Text: "one way", Role: "agent", Sender: &agentHubMessageSender{ID: "project1.task2"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !defaulted.SubscribeResult || defaulted.ResultSubscriptionStatus != "" || !defaulted.subscribeResultPresent {
-		t.Fatalf("omitted subscribeResult = %#v", defaulted)
+	encoded, err := json.Marshal(mailboxMessageResponse(message))
+	if err != nil || strings.Contains(string(encoded), "subscribeResult") || strings.Contains(string(encoded), "resultSubscription") {
+		t.Fatalf("new message exposes a subscription: %s, %v", encoded, err)
 	}
-	bindMailboxResultSubscription(&defaulted, "turn-1")
-	if defaulted.ResultSubscriptionStatus != resourceResultSubscriptionPending {
-		t.Fatalf("delivered default subscription = %#v", defaulted)
-	}
-
-	steered, err := acceptMailboxMessage(root, "workspace", resourceMessageRequest{
-		Text: "steer without result subscription", Role: "agent", Sender: sender, SenderWorkspaceInstanceID: "instance-1",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	bindMailboxResultSubscription(&steered, "turn-1")
-	if !steered.SubscribeResult || steered.ResultSubscriptionStatus != resourceResultSubscriptionNone {
-		t.Fatalf("delivered steer subscription = %#v", steered)
-	}
-
-	downgraded := steered
-	downgraded.ActualMode = resourceMessageModeEnqueue
-	bindMailboxResultSubscription(&downgraded, "turn-2")
-	if downgraded.ResultSubscriptionStatus != resourceResultSubscriptionPending {
-		t.Fatalf("steer downgraded to enqueue subscription = %#v", downgraded)
-	}
-
-	interrupted := steered
-	interrupted.ActualMode = resourceMessageModeInterrupt
-	bindMailboxResultSubscription(&interrupted, "turn-3")
-	if interrupted.ResultSubscriptionStatus != resourceResultSubscriptionPending {
-		t.Fatalf("interrupt opener subscription = %#v", interrupted)
-	}
-
-	disabled := false
-	explicitlyDisabled, err := acceptMailboxMessage(root, "workspace", resourceMessageRequest{
-		Text: "disabled subscription", Role: "agent", Sender: sender, SenderWorkspaceInstanceID: "instance-1", SubscribeResult: &disabled,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if explicitlyDisabled.SubscribeResult || explicitlyDisabled.ResultSubscriptionStatus != resourceResultSubscriptionDisabled {
-		t.Fatalf("explicit false subscription = %#v", explicitlyDisabled)
-	}
-	bindMailboxResultSubscription(&explicitlyDisabled, "turn-2")
-	if explicitlyDisabled.ResultSubscriptionStatus != resourceResultSubscriptionDisabled {
-		t.Fatalf("bound explicit false subscription = %#v", explicitlyDisabled)
-	}
-
-	trueValue := true
-	system, err := acceptMailboxMessage(root, "workspace", resourceMessageRequest{
-		Text: "system message", Role: "system", SubscribeResult: &trueValue,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if system.SubscribeResult || system.ResultSubscriptionStatus != resourceResultSubscriptionDisabled {
-		t.Fatalf("system subscription = %#v", system)
-	}
-
-	var omitted resourceMailboxMessage
-	if err := json.Unmarshal([]byte(`{"id":"old","role":"agent","status":"delivered"}`), &omitted); err != nil {
-		t.Fatal(err)
-	}
-	if !omitted.SubscribeResult || omitted.ResultSubscriptionStatus != "" {
-		t.Fatalf("old completed message subscription = %#v", omitted)
-	}
-	normalizeStoredMailboxMessage(&omitted)
-	if omitted.SubscribeResult || omitted.ResultSubscriptionStatus != resourceResultSubscriptionNone {
-		t.Fatalf("stored old completed message subscription = %#v", omitted)
-	}
-	var explicitFalse resourceMailboxMessage
-	if err := json.Unmarshal([]byte(`{"id":"new","role":"agent","status":"queued","subscribeResult":false}`), &explicitFalse); err != nil {
-		t.Fatal(err)
-	}
-	if explicitFalse.SubscribeResult || !explicitFalse.subscribeResultPresent {
-		t.Fatalf("explicit false JSON subscription = %#v", explicitFalse)
-	}
-
-	legacySteer := resourceMailboxMessage{
-		Status: resourceMessageDelivered, ActualMode: resourceMessageModeSteer, SubscribeResult: true,
-		ResultSubscriptionStatus: resourceResultSubscriptionPending, subscribeResultPresent: true,
-	}
-	normalizeStoredMailboxMessage(&legacySteer)
-	if !legacySteer.SubscribeResult || legacySteer.ResultSubscriptionStatus != resourceResultSubscriptionNone || legacySteer.ResultOperationID != "" {
-		t.Fatalf("stored steer subscription = %#v", legacySteer)
+	for _, raw := range []string{`{"subscribeResult":true,"resultSubscriptionStatus":"pending","resultOperationId":"old-op"}`, `{"subscribeResult":false}`} {
+		var legacy resourceMailboxMessage
+		if err := json.Unmarshal([]byte(raw), &legacy); err != nil {
+			t.Fatal(err)
+		}
+		roundTrip := mailboxMessageFromReceipt(receiptFromMailboxMessage(legacy))
+		if !reflect.DeepEqual(legacy.SubscribeResult, roundTrip.SubscribeResult) || legacy.ResultSubscriptionStatus != roundTrip.ResultSubscriptionStatus || legacy.ResultOperationID != roundTrip.ResultOperationID {
+			t.Fatalf("legacy receipt lost audit fields: %#v", roundTrip)
+		}
 	}
 }
 
@@ -1000,6 +924,7 @@ func TestResourceServerAPIStructuredErrors(t *testing.T) {
 		status                         int
 	}{
 		{name: "invalid request", method: http.MethodPost, path: "/api/workspaces/" + workspace.ID + "/resources/project1.task1/messages", body: `{"text":"hello","mode":"later","role":"agent"}`, code: "invalid_request", status: http.StatusBadRequest},
+		{name: "retired subscription request", method: http.MethodPost, path: "/api/workspaces/" + workspace.ID + "/resources/project1.task1/messages", body: `{"text":"hello","role":"agent","subscribeResult":true}`, code: "invalid_request", status: http.StatusBadRequest},
 		{name: "missing resource", method: http.MethodPost, path: "/api/workspaces/" + workspace.ID + "/resources/project9.task9/messages", body: `{"text":"hello","role":"agent"}`, code: "resource_not_found", status: http.StatusNotFound},
 		{name: "missing message", method: http.MethodGet, path: "/api/workspaces/" + workspace.ID + "/messages/msg-missing", code: "message_not_found", status: http.StatusNotFound},
 		{name: "steer missing message", method: http.MethodPost, path: "/api/workspaces/" + workspace.ID + "/messages/msg-missing/steer", code: "message_not_found", status: http.StatusNotFound},

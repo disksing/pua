@@ -62,7 +62,7 @@ func TestCreatedTaskStartsWithoutOpeningChat(t *testing.T) {
 		t.Fatalf("auto-start input not delivered exactly once: %#v", mailbox.Messages)
 	}
 	message := mailbox.Messages[0]
-	if message.Role != "system" || message.SubscribeResult || message.Sender == nil || message.Sender.Name != "PUA Task Start" {
+	if message.Role != "system" || message.SubscribeResult != nil || message.Sender == nil || message.Sender.Name != "PUA Task Start" {
 		t.Fatalf("unexpected start message: %#v", message)
 	}
 	fake.mu.Lock()

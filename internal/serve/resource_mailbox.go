@@ -31,11 +31,6 @@ const (
 )
 
 const (
-	resourceResultSubscriptionPending  = "pending"
-	resourceResultSubscriptionDisabled = "disabled"
-	resourceResultSubscriptionNone     = "none"
-	resourceResultSubscriptionComplete = "complete"
-
 	resourceMessageTypeTurnResult        = "turn_result"
 	resourceMessageTypeDeliveryTerminal  = "delivery_terminal_notice"
 	resourceMessageTypeSchedulerTick     = "scheduler_tick"
@@ -47,6 +42,10 @@ const (
 	resourceNotificationDelivered = "delivered"
 	resourceNotificationTerminal  = "terminal"
 )
+
+func isLegacyTurnResultType(messageType string) bool {
+	return messageType == resourceMessageTypeTurnResult || messageType == "creator_turn_result"
+}
 
 const (
 	resourceMessageReasonNoActiveTurn        = "no_active_turn"
@@ -88,7 +87,7 @@ type resourceMailboxMessage struct {
 	Role                      string                       `json:"role"`
 	Sender                    *agentHubMessageSender       `json:"sender,omitempty"`
 	SenderWorkspaceInstanceID string                       `json:"senderWorkspaceInstanceId,omitempty"`
-	SubscribeResult           bool                         `json:"subscribeResult"`
+	SubscribeResult           *bool                        `json:"subscribeResult,omitempty"`
 	ResultSubscriptionStatus  string                       `json:"resultSubscriptionStatus,omitempty"`
 	ResultOperationID         string                       `json:"resultOperationId,omitempty"`
 	Type                      string                       `json:"type,omitempty"`
@@ -117,32 +116,6 @@ type resourceMailboxMessage struct {
 	LastError                 string                       `json:"lastError,omitempty"`
 	LastErrorCode             string                       `json:"lastErrorCode,omitempty"`
 	receipt                   bool
-	subscribeResultPresent    bool
-}
-
-// UnmarshalJSON keeps the public default (omitted subscribeResult means true)
-// for messages written by older PUA versions while preserving explicit false.
-func (message *resourceMailboxMessage) UnmarshalJSON(data []byte) error {
-	type mailboxMessageAlias resourceMailboxMessage
-	var decoded mailboxMessageAlias
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		return err
-	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil {
-		return err
-	}
-	_, present := fields["subscribeResult"]
-	decoded.subscribeResultPresent = present
-	if !present {
-		decoded.SubscribeResult = true
-	}
-	if decoded.Role == "system" {
-		decoded.SubscribeResult = false
-		decoded.ResultSubscriptionStatus = resourceResultSubscriptionDisabled
-	}
-	*message = resourceMailboxMessage(decoded)
-	return nil
 }
 
 type resourceMessageCausation struct {
@@ -242,7 +215,6 @@ type resourceMessageRequest struct {
 	Role                      string                 `json:"role,omitempty"`
 	Sender                    *agentHubMessageSender `json:"sender,omitempty"`
 	SenderWorkspaceInstanceID string                 `json:"senderWorkspaceInstanceId,omitempty"`
-	SubscribeResult           *bool                  `json:"subscribeResult,omitempty"`
 }
 
 type resourceMessageResponse struct {
@@ -260,7 +232,7 @@ type resourceMessageResponse struct {
 	GenerationID             string                       `json:"generationId,omitempty"`
 	AgentHubSessionID        string                       `json:"agentHubSessionId,omitempty"`
 	TurnID                   string                       `json:"turnId,omitempty"`
-	SubscribeResult          bool                         `json:"subscribeResult"`
+	SubscribeResult          *bool                        `json:"subscribeResult,omitempty"`
 	ResultSubscriptionStatus string                       `json:"resultSubscriptionStatus,omitempty"`
 	ResultOperationID        string                       `json:"resultOperationId,omitempty"`
 	LastError                string                       `json:"lastError,omitempty"`
@@ -303,30 +275,6 @@ func numericResourcePart(value, prefix string) bool {
 		}
 	}
 	return true
-}
-
-func bindMailboxResultSubscription(message *resourceMailboxMessage, turnID string) {
-	if !message.SubscribeResult {
-		message.ResultSubscriptionStatus = resourceResultSubscriptionDisabled
-		message.ResultOperationID = ""
-		return
-	}
-	// A steer joins an already-running Turn; it does not own that Turn's final
-	// result. Callers that need a direct reply to a steer must receive a new
-	// explicit resource message from the target agent.
-	if message.ActualMode == resourceMessageModeSteer {
-		message.ResultSubscriptionStatus = resourceResultSubscriptionNone
-		message.ResultOperationID = ""
-		return
-	}
-	if message.Role != "agent" || message.Sender == nil || !isStablePUAResourceID(message.Sender.ID) ||
-		strings.TrimSpace(message.SenderWorkspaceInstanceID) == "" || strings.TrimSpace(turnID) == "" {
-		message.ResultSubscriptionStatus = resourceResultSubscriptionNone
-		message.ResultOperationID = ""
-		return
-	}
-	message.ResultSubscriptionStatus = resourceResultSubscriptionPending
-	message.ResultOperationID = ""
 }
 
 func normalizeResourceMessageMode(mode string) (string, error) {
@@ -501,23 +449,10 @@ func acceptMailboxMessage(workspacePath, resourceID string, request resourceMess
 	}
 	resourceID = normalizedResourceID(resourceID)
 	now := time.Now().Format(time.RFC3339Nano)
-	subscribeResult := true
-	if request.SubscribeResult != nil {
-		subscribeResult = *request.SubscribeResult
-	}
-	if role == "system" {
-		subscribeResult = false
-	}
-	resultSubscriptionStatus := ""
-	if !subscribeResult {
-		resultSubscriptionStatus = resourceResultSubscriptionDisabled
-	}
 	message := resourceMailboxMessage{
 		ID: "msg-" + newGenerationRecordID(), ResourceID: resourceID, Text: text,
-		Role: role, Sender: request.Sender, SenderWorkspaceInstanceID: strings.TrimSpace(request.SenderWorkspaceInstanceID), SubscribeResult: subscribeResult,
-		ResultSubscriptionStatus: resultSubscriptionStatus, RequestedMode: mode, ActualMode: mode,
-		subscribeResultPresent: true,
-		Status:                 resourceMessageQueued, AcceptedAt: now, UpdatedAt: now,
+		Role: role, Sender: request.Sender, SenderWorkspaceInstanceID: strings.TrimSpace(request.SenderWorkspaceInstanceID),
+		RequestedMode: mode, ActualMode: mode, Status: resourceMessageQueued, AcceptedAt: now, UpdatedAt: now,
 	}
 	_, err = mutateResourceMailboxForResource(workspacePath, resourceID, func(mailbox *resourceMailbox) error {
 		mailbox.NextSequence++
@@ -555,10 +490,9 @@ func acceptGeneratedMailboxMessage(workspacePath string, expected resourceMailbo
 		return resourceMailboxMessage{}, &resourceAPIError{Code: "invalid_request", Message: "generated mailbox messages may use only steer or enqueue"}
 	}
 	expected.Role = "system"
-	expected.SubscribeResult = false
-	expected.ResultSubscriptionStatus = resourceResultSubscriptionDisabled
-	expected.ResultOperationID = ""
-	expected.subscribeResultPresent = true
+	if isLegacyTurnResultType(expected.Type) {
+		return resourceMailboxMessage{}, errors.New("automatic Turn results are no longer supported")
+	}
 	expected.RequestedMode = requestedMode
 	if expected.ModeFrozen {
 		expected.ActualMode = actualMode
@@ -1176,6 +1110,23 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 		if !found {
 			return nil
 		}
+		if isLegacyTurnResultType(message.Type) {
+			_, err = updateMailboxMessage(workspace.Path, message.ID, func(current *resourceMailboxMessage) {
+				current.TerminalAt = time.Now().Format(time.RFC3339Nano)
+				current.LastErrorCode = "result_subscription_removed"
+				if current.Status == resourceMessageDelivering {
+					current.Status = resourceMessageDeliveryUnknown
+					current.LastError = "Automatic Turn results were removed; a previous delivery attempt may already have been accepted."
+				} else {
+					current.Status = resourceMessageCancelled
+					current.LastError = "Automatic Turn results were removed before delivery."
+				}
+			})
+			if err != nil {
+				return err
+			}
+			continue
+		}
 		var record generationRecord
 		var rt *agentRuntime
 		var client *agentHubClient
@@ -1554,7 +1505,6 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 						turnID = strings.TrimSpace(session.CurrentTurnID)
 					}
 					current.TurnID = turnID
-					bindMailboxResultSubscription(current, turnID)
 				})
 				if persistErr != nil {
 					return persistErr
@@ -1580,7 +1530,6 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 			current.DeliveredAt = time.Now().Format(time.RFC3339Nano)
 			current.TerminalAt = current.DeliveredAt
 			current.TurnID = turnID
-			bindMailboxResultSubscription(current, turnID)
 			current.LastError = ""
 			current.LastErrorCode = ""
 		})

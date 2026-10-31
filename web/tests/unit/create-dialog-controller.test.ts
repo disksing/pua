@@ -183,7 +183,7 @@ describe("CreateDialogController", () => {
 			"/api/workspaces/workspace-a/resources/project1.task9/messages",
 		]);
 		expect(test.requests[1].init?.method).toBe("POST");
-		expect(body(test.requests[1])).toEqual({ text: "Please begin.", role: "system", sender: { name: "PUA Task Start" }, subscribeResult: false });
+		expect(body(test.requests[1])).toEqual({ text: "Please begin.", role: "system", sender: { name: "PUA Task Start" } });
 		expect(test.toast).toHaveBeenCalledWith("Task created and started.");
 		expect(test.selectResource).toHaveBeenCalledWith("project1.task9");
 	});
@@ -215,7 +215,7 @@ describe("CreateDialogController", () => {
 		test.controller.open("task", "project1");
 		await test.current().onSubmit({ ...test.current().draft, title: "Start", startAfterCreate: true, startPrompt: "  " });
 
-		expect(body(test.requests[1])).toEqual({ text: DEFAULT_TASK_START_PROMPT, role: "system", sender: { name: "PUA Task Start" }, subscribeResult: false });
+		expect(body(test.requests[1])).toEqual({ text: DEFAULT_TASK_START_PROMPT, role: "system", sender: { name: "PUA Task Start" } });
 	});
 
 	it("still selects the created task when auto-start fails", async () => {

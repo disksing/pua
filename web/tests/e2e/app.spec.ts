@@ -1841,7 +1841,7 @@ test("creates and starts a task with a chosen agent from the wizard", async ({ p
   // The binding is switched before the start prompt is sent.
   await expect.poll(() => harness.bindingBodies).toEqual([{ kind: "agent", name: "other-agent" }]);
   await expect.poll(() => harness.inputBodies.length).toBe(1);
-  expect(harness.inputBodies[0]).toEqual({ resourceId: "project1.task3", text: expect.any(String), role: "system", sender: { name: "PUA Task Start" }, subscribeResult: false });
+  expect(harness.inputBodies[0]).toEqual({ resourceId: "project1.task3", text: expect.any(String), role: "system", sender: { name: "PUA Task Start" } });
   expect(String(harness.inputBodies[0].text).trim()).not.toBe("");
   expect(chatMutations).toEqual([]);
   await expect(page.locator("#toast")).toContainText("Task created and started");

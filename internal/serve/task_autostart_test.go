@@ -35,7 +35,7 @@ func TestCreatedTaskStartsWithoutOpeningChat(t *testing.T) {
 
 	input := "Please read task.md and begin work."
 	data, err := json.Marshal(map[string]any{
-		"text": input, "role": "system", "sender": map[string]string{"name": "PUA Task Start"}, "subscribeResult": false,
+		"text": input, "role": "system", "sender": map[string]string{"name": "PUA Task Start"},
 	})
 	if err != nil {
 		t.Fatal(err)

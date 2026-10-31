@@ -273,7 +273,7 @@ export function createCreateDialogController(dependencies: CreateDialogDependenc
 		const text = state.startPrompt.trim() || DEFAULT_TASK_START_PROMPT;
 		await dependencies.request(`/api/workspaces/${workspaceId}/resources/${encodeURIComponent(resourceId)}/messages`, {
 			method: "POST",
-			body: JSON.stringify({ text, role: "system", sender: { name: "PUA Task Start" }, subscribeResult: false })
+			body: JSON.stringify({ text, role: "system", sender: { name: "PUA Task Start" } })
 		});
 	}
 

@@ -87,6 +87,8 @@ DELETE /api/workspaces/{workspaceId}/users/{name}
 
 `GET .../resources/{id}/chat` 读取当前用户聊天，`POST .../chat/open|close|messages|read` 管理聊天；`GET .../chats` 查询聊天列表和未读数。公开消息仅来自用户输入或执行 Agent 的显式发布，不自动复制 Turn final。输入与 outbox 原子保存，后台按固定 mailbox ID 投递。关闭保留历史并撤销回复资格，不中断资源执行；重开增加 epoch 并产生新资格。Workspace 聊天始终开启。
 
+公开聊天支持按消息 ID 分页：`GET .../chat?limit=40` 返回最新一页，`before` 或 `after` 分别返回指定消息之前或之后的一页（不含该消息）。`limit` 范围为 1–100，两个游标不能同时使用；分页结果中的 `hasOlder`、`hasNewer` 表示是否还有前后页面，`unreadCount` 始终针对整个聊天。未指定 `limit` 时保留完整历史响应以兼容现有客户端；聊天写操作也可指定 `limit` 来限制响应消息数。当前磁盘存储仍是整份 JSON，分页减少网络传输和浏览器渲染，不消除服务端读取及解析完整文件的开销。
+
 执行 Agent 使用 `pua chat show|notes|publish --reply-to=<capability>`，资格由输入携带，限定资源、用户及聊天开启周期。publish 使用稳定 ID 去重，旧资格不能跨关闭/重开继续使用。旧 notes 保留兼容，dispatch、timer、独立 binding 已停用；不创建新的交流 Session。这是可信本地 Workspace 内的生命周期约束，不是操作系统沙箱或新的用户认证系统。
 
 Workspace、Project、Task 根目录的 `chat.md` 由所属执行 Agent 维护，分别记录工作状态和通知状态、来源消息与 History 引用、下一步与通知条件、最近成功发布记录。程序只创建缺失文件，不解释正文或自动补发；旧 notes 不双写。详情页的 Chat follow-ups 入口复用 Markdown 查看/编辑，`PUT .../resources/{id}/documents?path=...` 仅允许编辑该资源的文件；Workspace 在此接口仅开放根目录 chat.md，保留内容哈希冲突、普通文件与路径校验。Agent 每轮开始和恢复后读取，收到用户插入、协作或调度消息时更新，结束前检查未回复事项。只有 publish 成功才记已发布，进度不解除最终通知义务。文件不存回复凭据，恢复时通过源输入 History 引用读取合法指令并接受有效性校验；失败保留事项，不改投或无限重试。

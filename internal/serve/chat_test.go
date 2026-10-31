@@ -64,6 +64,94 @@ func mustChatOK(t *testing.T, r *httptest.ResponseRecorder) {
 		t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
 	}
 }
+
+func TestChatMessagePaginationAndLegacyResponses(t *testing.T) {
+	m, w := chatTestManager(t)
+	resource, user := "project1.task1", "disksing"
+	mustChatOK(t, chatCall(t, m, w, resource, user, "open", chatRequest{}, false))
+	chatMu.Lock()
+	c, err := loadChatLocked(w.Path, chatID(resource, user))
+	if err != nil {
+		chatMu.Unlock()
+		t.Fatal(err)
+	}
+	for i := range 8 {
+		c.Messages = append(c.Messages, chatMessage{ID: fmt.Sprintf("m%d", i), Role: "agent", Text: fmt.Sprintf("message %d", i)})
+	}
+	err = saveChatLocked(w.Path, c)
+	chatMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := func(method, operation, query string, body any) *httptest.ResponseRecorder {
+		t.Helper()
+		data, _ := json.Marshal(body)
+		req := httptest.NewRequest(method, "/api/workspaces/"+w.ID+"/resources/"+resource+"/chat"+operation+query, bytes.NewReader(data))
+		req.Header.Set(workspaceUserHeader, user)
+		out := httptest.NewRecorder()
+		m.server.handleWorkspace(out, req)
+		return out
+	}
+	decode := func(r *httptest.ResponseRecorder) publicChat {
+		t.Helper()
+		mustChatOK(t, r)
+		var page publicChat
+		if err := json.Unmarshal(r.Body.Bytes(), &page); err != nil {
+			t.Fatal(err)
+		}
+		return page
+	}
+	ids := func(messages []chatMessage) string {
+		var result []string
+		for _, message := range messages {
+			result = append(result, message.ID)
+		}
+		return strings.Join(result, ",")
+	}
+	latest := decode(call("GET", "", "?limit=3", nil))
+	if ids(latest.Messages) != "m5,m6,m7" || latest.HasOlder == nil || !*latest.HasOlder || latest.HasNewer == nil || *latest.HasNewer || latest.UnreadCount != 8 {
+		t.Fatalf("unexpected latest page: %+v", latest)
+	}
+	older := decode(call("GET", "", "?limit=3&before=m5", nil))
+	if ids(older.Messages) != "m2,m3,m4" || !*older.HasOlder || !*older.HasNewer {
+		t.Fatalf("unexpected older page: %+v", older)
+	}
+	first := decode(call("GET", "", "?limit=3&before=m2", nil))
+	if ids(first.Messages) != "m0,m1" || *first.HasOlder {
+		t.Fatalf("unexpected first page: %+v", first)
+	}
+	mustChatOK(t, chatCall(t, m, w, resource, user, "publish", chatRequest{ID: "new", Text: "new message"}, true))
+	after := decode(call("GET", "", "?limit=1&after=m6", nil))
+	if ids(after.Messages) != "m7" || !*after.HasNewer {
+		t.Fatalf("unexpected forward page: %+v", after)
+	}
+	after = decode(call("GET", "", "?limit=1&after=m7", nil))
+	if ids(after.Messages) != "new" || *after.HasNewer {
+		t.Fatalf("unexpected last forward page: %+v", after)
+	}
+	empty := decode(call("GET", "", "?limit=3&after=new", nil))
+	if empty.Messages == nil || len(empty.Messages) != 0 || !*empty.HasOlder || *empty.HasNewer {
+		t.Fatalf("unexpected empty forward page: %+v", empty)
+	}
+	// A later append must not shift an older page selected by message ID.
+	if got := decode(call("GET", "", "?limit=3&before=m5", nil)); ids(got.Messages) != "m2,m3,m4" {
+		t.Fatalf("append shifted older page: %+v", got)
+	}
+	read := decode(call("POST", "/read", "?limit=1", chatRequest{ID: "m7"}))
+	if ids(read.Messages) != "new" || read.UnreadCount != 1 {
+		t.Fatalf("read response was not bounded or did not preserve unread count: %+v", read)
+	}
+	legacy := decode(call("GET", "", "", nil))
+	if len(legacy.Messages) != 9 || legacy.HasOlder != nil || legacy.HasNewer != nil {
+		t.Fatalf("legacy response changed: %+v", legacy)
+	}
+	for _, query := range []string{"?limit=0", "?limit=101", "?limit=bad", "?before=m5", "?limit=3&before=m5&after=m6", "?limit=3&before=missing"} {
+		if got := call("GET", "", query, nil); got.Code != http.StatusBadRequest {
+			t.Fatalf("%s: status=%d body=%s", query, got.Code, got.Body.String())
+		}
+	}
+}
+
 func TestChatLifecycleIsolationAndOutboxReplay(t *testing.T) {
 	m, w := chatTestManager(t)
 	resource := "project1.task1"

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/disksing/pua/internal/app"
@@ -42,6 +43,23 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 	operation := ""
 	if len(parts) > 0 {
 		operation = parts[0]
+	}
+	var pageLimit int
+	var before, after string
+	if operation != "runtime" {
+		before, after = r.URL.Query().Get("before"), r.URL.Query().Get("after")
+		if rawLimit := r.URL.Query().Get("limit"); rawLimit != "" {
+			pageLimit, err = strconv.Atoi(rawLimit)
+			if err != nil || pageLimit < 1 || pageLimit > 100 {
+				writeError(w, errors.New("chat limit must be between 1 and 100"), 400)
+				return
+			}
+		}
+		if (before != "" && after != "") || (pageLimit == 0 && (before != "" || after != "")) ||
+			(r.Method != http.MethodGet && (before != "" || after != "")) {
+			writeError(w, errors.New("invalid chat page cursor"), 400)
+			return
+		}
 	}
 	agent := r.Header.Get("X-PUA-Chat-Token") != ""
 	var user string
@@ -146,7 +164,12 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 			http.NotFound(w, r)
 			return
 		}
-		writeJSON(w, c.public())
+		page, pageErr := c.publicPage(pageLimit, before, after)
+		if pageErr != nil {
+			writeError(w, pageErr, 400)
+			return
+		}
+		writeJSON(w, page)
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -197,7 +220,8 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 		}
 		if previous == c.ReadThrough {
 			chatMu.Unlock()
-			writeJSON(w, c.public())
+			page, _ := c.publicPage(pageLimit, "", "")
+			writeJSON(w, page)
 			return
 		}
 	case "messages":
@@ -223,7 +247,8 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 	// All effects are replayed from durable state by the reconciler. Closing
 	// revokes publication without interrupting execution.
 	m.requestReconcile(reconcileMailboxes | reconcileAgentHub)
-	writeJSON(w, c.public())
+	page, _ := c.publicPage(pageLimit, "", "")
+	writeJSON(w, page)
 }
 
 func (m *agentManager) reconcileWorkspaceChats(ctx context.Context, workspace serveWorkspace) error {

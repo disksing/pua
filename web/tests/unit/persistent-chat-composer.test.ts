@@ -76,7 +76,7 @@ it("saves the execution binding from the composer and surfaces failures", async 
 it("keeps newly attached files when an earlier send finishes", async () => {
   const { target } = await setup();
   let accept!: (value: Response) => void;
-  vi.mocked(globalThis.fetch).mockImplementation(async (path) => String(path).endsWith("/chat/messages")
+  vi.mocked(globalThis.fetch).mockImplementation(async (path) => String(path).split("?")[0].endsWith("/chat/messages")
     ? await new Promise<Response>(resolve => { accept = resolve; })
     : response({ id: "c", open: true, epoch: 1, messages: [], sessionState: "idle" }));
   const input = target.querySelector<HTMLTextAreaElement>("#chatInput")!;

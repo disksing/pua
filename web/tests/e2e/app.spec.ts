@@ -1179,6 +1179,55 @@ test("keeps a newly created task Activity row aligned when its first turn starts
   expect(Math.abs(layout.titleTop - layout.statusTop)).toBeLessThan(2);
 });
 
+for (const viewport of [{ width: 1500, height: 800 }, { width: 440, height: 844 }]) {
+  test(`pages public chat history and keeps controls visible at ${viewport.width}px`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await installMockApi(page);
+    const messages = Array.from({ length: 120 }, (_, index) => ({
+      id: `m${index}`, role: "agent", text: `Paginated message ${index}: chat history`, createdAt: now,
+    }));
+    const requests: URL[] = [];
+    let open = true;
+    await page.route("**/api/workspaces/ws-test/resources/project1.task1/chat**", async route => {
+      const req = route.request(), url = new URL(req.url());
+      if (!["/chat", "/chat/open", "/chat/close", "/chat/read"].some(suffix => url.pathname.endsWith(suffix))) return route.fallback();
+      requests.push(url);
+      if (url.pathname.endsWith("/chat/close")) open = false;
+      if (url.pathname.endsWith("/chat/open")) open = true;
+      const limit = Number(url.searchParams.get("limit") || messages.length);
+      const before = url.searchParams.get("before"), after = url.searchParams.get("after");
+      let start = 0, end = messages.length;
+      if (before) end = messages.findIndex(message => message.id === before);
+      if (after) start = messages.findIndex(message => message.id === after) + 1;
+      if (after) end = Math.min(end, start + limit);
+      else start = Math.max(start, end - limit);
+      return json(route, { id: "paged-chat", open, epoch: 1, unreadCount: 0, messages: messages.slice(start, end), hasOlder: start > 0, hasNewer: end < messages.length });
+    });
+    await page.goto("/w/ws-test/r/project1.task1");
+    const scroller = page.locator("#chatTimeline");
+    const heading = scroller.locator(".chat-heading");
+    const articles = scroller.locator(".public-messages article");
+    await expect(articles).toHaveCount(40);
+    await expect(articles.first()).toContainText("Paginated message 80:");
+    expect(requests[0].searchParams.get("limit")).toBe("40");
+    await expect.poll(() => scroller.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
+    await expect(scroller.getByLabel("Execution controls")).toBeVisible();
+    const bottomHeadingY = (await heading.boundingBox())!.y;
+    const beforeY = await scroller.evaluate(element => {
+      element.scrollTop = 0;
+      return [...element.querySelectorAll("article")].find(article => article.textContent?.includes("Paginated message 80:"))!.getBoundingClientRect().top;
+    });
+    await expect(articles).toHaveCount(80);
+    const afterY = await articles.filter({ hasText: "Paginated message 80:" }).evaluate(element => element.getBoundingClientRect().top);
+    expect(Math.abs(afterY - beforeY)).toBeLessThan(2);
+    expect(Math.abs((await heading.boundingBox())!.y - bottomHeadingY)).toBeLessThan(2);
+    expect(requests.some(url => url.searchParams.get("before") === "m80")).toBe(true);
+    await scroller.getByRole("button", { name: "Close chat" }).click();
+    await expect(scroller.getByRole("button", { name: "Reopen chat" })).toBeVisible();
+    await expect(articles).toHaveCount(80);
+  });
+}
+
 test("keeps public chat unread and both event cursors independent in the resource tree", async ({ page }, testInfo) => {
   test.setTimeout(60_000);
   await installMockApi(page, "project1.task2");

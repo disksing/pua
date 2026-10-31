@@ -2,8 +2,9 @@
  import { ApiClient } from "../api/client";
  import { projectConversationEvents } from "./timeline-events";
  import ApprovalCard from "./ApprovalCard.svelte";
+ import type { Snippet } from "svelte";
  import type { AgentEvent, DetailPanelModel, TimelineItem } from "./models";
- let { model }: { model:DetailPanelModel } = $props();
+ let { model, heading }: { model:DetailPanelModel; heading:Snippet } = $props();
  type Status = { sessionState:string; configError?:string; lastError?:string; generation?:{generationId:string}; session?:{pendingApprovalIds?:string[]} };
  let status = $state<Status | null>(null), approvals = $state<TimelineItem[]>([]), error = $state(""), pending = $state(false);
  const client = new ApiClient();
@@ -31,10 +32,13 @@
  }
  async function stop() { pending=true; error=""; try {await control("turn/end");} catch(e) {error=String(e);} finally {pending=false;} }
 </script>
-<div class="session-controls" aria-label="Execution controls">
- <span>Execution: {status?.sessionState || "Loading…"}</span>
- {#if status?.sessionState === "working" || status?.sessionState === "attention_required"}<button disabled={pending} onclick={stop}>Stop execution</button>{/if}
- {#if error || status?.configError || status?.lastError}<small role="status">{error || status?.configError || status?.lastError}</small>{/if}
- {#each approvals as item (item.approvalId)}<ApprovalCard {item} generationId={status?.generation?.generationId || ""} contextIdentity={base} onApproval={async (_generation,id,reply) => {await control("approval",{requestId:id,...reply}); approvals=approvals.filter(a => a.approvalId!==id);}} onToast={model.onToast} />{/each}
+<div class="chat-heading">
+ {@render heading()}
+ <div class="session-controls" aria-label="Execution controls">
+  <span>Execution: {status?.sessionState || "Loading…"}</span>
+  {#if status?.sessionState === "working" || status?.sessionState === "attention_required"}<button disabled={pending} onclick={stop}>Stop execution</button>{/if}
+  {#if error || status?.configError || status?.lastError}<small role="status">{error || status?.configError || status?.lastError}</small>{/if}
+ </div>
 </div>
+{#each approvals as item (item.approvalId)}<ApprovalCard {item} generationId={status?.generation?.generationId || ""} contextIdentity={base} onApproval={async (_generation,id,reply) => {await control("approval",{requestId:id,...reply}); approvals=approvals.filter(a => a.approvalId!==id);}} onToast={model.onToast} />{/each}
 <style>.session-controls { display:flex; flex-wrap:wrap; align-items:center; gap:8px; font-size:.85em; } small { width:100%; opacity:.7; }</style>

@@ -12,11 +12,18 @@
   let { channel }: { channel: ModelChannel<DetailPanelModel> } = $props();
   // svelte-ignore state_referenced_locally
   let model = $state(channel.current());
-  type Chat = { id: string; open: boolean; epoch: number; unreadCount: number; messages: Array<{ id: string; role: string; text: string; createdAt: string }> };
+  type Message = { id: string; role: string; text: string; createdAt: string };
+  type Chat = { id: string; open: boolean; epoch: number; unreadCount: number; messages: Message[]; hasOlder?: boolean; hasNewer?: boolean };
+  const PAGE_SIZE = 40;
   let chat = $state<Chat | null>(null);
   let root: HTMLElement;
   let followTail = true;
   let scrollIdentity = "";
+  let hasOlder = $state(false);
+  let loadingOlder = $state(false);
+  let olderError = $state("");
+  let loadOlder: () => void = () => {};
+  let refreshNow: () => void = () => {};
   let draft = $state("");
   let draftResetVersion = $state(0);
   let uploadOpen = $state(false);
@@ -35,26 +42,72 @@
   $effect(() => {
     const key = identity, path = base, userHeaders = { "X-PUA-User": userName };
     chat = null; draft = ""; error = ""; requestID = ""; pending = false; uploadOpen = false; bindingSaving = false;
+    hasOlder = false; loadingOlder = false; olderError = "";
     if (!canLoad) return;
     let disposed = false, loading = false;
     async function refresh() {
-      if (loading) return; loading = true; const revision = mutationRevision;
-      try { const next = await client.request<Chat>(path, { headers: userHeaders }); if (!disposed && key === identity && revision === mutationRevision && !pending) {
-        chat = next;
-        model.onChatState?.({ open: next.open, unreadCount: next.unreadCount || 0 });
+      if (loading || untrack(() => pending)) return;
+      loading = true; const revision = mutationRevision;
+      try {
+        let after = untrack(() => chat?.messages.at(-1)?.id);
+        let next: Chat;
+        let pages = 0;
+        do {
+          const query = new URLSearchParams({ limit: String(PAGE_SIZE) });
+          if (after) query.set("after", after);
+          next = await client.request<Chat>(`${path}?${query}`, { headers: userHeaders });
+          if (disposed || key !== identity || revision !== mutationRevision || untrack(() => pending)) return;
+          const current = untrack(() => chat);
+          if (!current || !after) {
+            chat = next;
+            hasOlder = Boolean(next.hasOlder);
+          } else {
+            const known = new Set(current.messages.map(message => message.id));
+            chat = { ...next, messages: [...current.messages, ...next.messages.filter(message => !known.has(message.id))] };
+          }
+          model.onChatState?.({ open: next.open, unreadCount: next.unreadCount || 0 });
+          const last = next.messages.at(-1)?.id;
+          if (!last || last === after) break;
+          after = last;
+        } while (next.hasNewer && ++pages < 10);
         await tick();
         if (disposed || key !== identity || revision !== mutationRevision) return;
-        const last=next.messages.at(-1);
-        if (last && next.unreadCount > 0 && document.visibilityState !== "hidden" && followTail) {
-          const read = await client.request<Chat>(`${path}/read`, { method:"POST", headers:{...userHeaders,"Content-Type":"application/json"}, body:JSON.stringify({id:last.id}) });
+        const latest = untrack(() => chat);
+        const last = latest?.messages.at(-1);
+        if (last && latest && latest.unreadCount > 0 && document.visibilityState !== "hidden" && followTail && !next.hasNewer) {
+          const read = await client.request<Chat>(`${path}/read?limit=1`, { method:"POST", headers:{...userHeaders,"Content-Type":"application/json"}, body:JSON.stringify({id:last.id}) });
           if (!disposed && key === identity && revision === mutationRevision) model.onChatState?.({ open: read.open, unreadCount: read.unreadCount || 0 });
         }
-      } }
+      }
       catch (e) { if (!disposed) error = String(e); }
       finally { loading = false; }
     }
+    async function older() {
+      const current = untrack(() => chat);
+      const first = current?.messages[0];
+      if (disposed || !first || !untrack(() => hasOlder) || untrack(() => loadingOlder)) return;
+      loadingOlder = true; olderError = "";
+      try {
+        const query = new URLSearchParams({ limit: String(PAGE_SIZE), before: first.id });
+        const next = await client.request<Chat>(`${path}?${query}`, { headers: userHeaders });
+        if (disposed || key !== identity) return;
+        const active = untrack(() => chat);
+        if (!active || active.id !== current.id) return;
+        const container = root?.closest<HTMLElement>("#chatTimeline");
+        const height = container?.scrollHeight || 0, top = container?.scrollTop || 0;
+        const known = new Set(active.messages.map(message => message.id));
+        followTail = false;
+        chat = { ...active, messages: [...next.messages.filter(message => !known.has(message.id)), ...active.messages] };
+        hasOlder = Boolean(next.hasOlder);
+        await tick();
+        if (!disposed && key === identity && container) container.scrollTop = top + container.scrollHeight - height;
+      } catch (e) { if (!disposed) olderError = String(e); }
+      finally { if (!disposed) loadingOlder = false; }
+    }
+    loadOlder = () => { void older(); };
+    refreshNow = () => { void refresh(); };
     void refresh(); const timer = setInterval(refresh, 2000);
-    return () => { disposed = true; clearInterval(timer); };
+    return () => { disposed = true; clearInterval(timer); loadOlder = () => {}; refreshNow = () => {}; };
   });
   let lastFocusRequest = 0;
   $effect(() => {
@@ -71,7 +124,11 @@
   function trackScroll(element: HTMLElement) {
     root = element;
     const container = element.closest<HTMLElement>("#chatTimeline");
-    const onScroll = () => { if (container) followTail = container.scrollHeight - container.scrollTop - container.clientHeight < 120; };
+    const onScroll = () => {
+      if (!container) return;
+      followTail = container.scrollHeight - container.scrollTop - container.clientHeight < 120;
+      if (container.scrollTop < 120) loadOlder();
+    };
     container?.addEventListener("scroll", onScroll, { passive: true });
     return { destroy: () => container?.removeEventListener("scroll", onScroll) };
   }
@@ -84,8 +141,9 @@
   async function act(operation: string, body: unknown = {}) {
     const key = identity; mutationRevision++; pending = true; error = "";
     try {
-      const next = await client.request<Chat>(`${base}/${operation}`, { method: "POST", headers, body: JSON.stringify(body) });
-      if (key !== identity) return false; chat = next;
+      const next = await client.request<Chat>(`${base}/${operation}?limit=1`, { method: "POST", headers, body: JSON.stringify(body) });
+      if (key !== identity) return false;
+      chat = chat ? { ...next, messages: chat.messages } : next;
       model.onChatState?.({ open: next.open, unreadCount: next.unreadCount || 0 });
       if (operation === "messages") {
         if (draft === sentText) { draft = ""; draftResetVersion++; }
@@ -98,7 +156,7 @@
       if (key === identity) error = String(e);
       return false;
     }
-    finally { if (key === identity) pending = false; }
+    finally { if (key === identity) { pending = false; refreshNow(); } }
   }
   function composerModel(): ComposerModel {
     const key = identity;
@@ -154,9 +212,17 @@
 
 </script>
 <section tabindex="-1" use:trackScroll class="persistent-chat" aria-label="Resource chat">
-  <header><strong>Chat</strong><span>{model.resourceTitle}</span>{#if chat?.open && model.resourceId !== "workspace" && !model.detail?.archived}<button disabled={pending} onclick={() => act("close")}>Close chat</button>{/if}</header>
-  {#if chat}<SessionControls {model} />{/if}
+  {#snippet heading()}
+    <header><strong>Chat</strong><span>{model.resourceTitle}</span>{#if chat?.open && model.resourceId !== "workspace" && !model.detail?.archived}<button disabled={pending} onclick={() => act("close")}>Close chat</button>{/if}</header>
+  {/snippet}
+  {#if chat}<SessionControls {model} {heading} />{:else}<div class="chat-heading">{@render heading()}</div>{/if}
   <div class="public-messages" aria-live="polite">
+    {#if hasOlder}
+      <div class="older-messages">
+        <button disabled={loadingOlder} onclick={() => loadOlder()}>{loadingOlder ? "Loading older messages…" : "Load older messages"}</button>
+        {#if olderError}<small role="alert">{olderError}</small>{/if}
+      </div>
+    {/if}
     {#each chat?.messages || [] as message (message.id)}
       <article class:user-message={message.role === "user"}>
         <small>{message.role === "user" ? model.currentUserName : "Agent"} · {new Date(message.createdAt).toLocaleString()}</small>
@@ -177,9 +243,12 @@
 <div data-component-owner="upload-dialog" style="display: contents"><UploadDialog channel={upload} /></div>
 <style>
   .persistent-chat { display:flex; flex-direction:column; min-height:100%; gap:12px; padding:16px; }
+  .persistent-chat :global(.chat-heading) { position:sticky; top:0; z-index:2; display:flex; flex-direction:column; gap:8px; margin:-16px -16px 0; padding:16px; background:var(--panel); border-bottom:1px solid var(--border-color, #8883); }
+  .persistent-chat :global(.chat-heading)::before { content:""; position:absolute; left:0; right:0; top:-10px; height:10px; background:var(--panel); }
   header { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
   header span { flex:1; opacity:.65; }
   .public-messages { flex:1; display:flex; flex-direction:column; gap:16px; }
+  .older-messages { display:flex; flex-direction:column; align-items:center; gap:4px; }
   article { padding:12px; border:1px solid var(--border-color, #8883); border-radius:10px; overflow-wrap:anywhere; }
   .user-message { margin-left:24px; background:var(--surface-hover, #8881); }
   small,.chat-hint { opacity:.7; }

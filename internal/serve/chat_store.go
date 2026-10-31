@@ -152,19 +152,67 @@ func (c resourceChat) snapshot() *chatSnapshot {
 	return &chatSnapshot{Open: c.Open, UnreadCount: unread}
 }
 
-func (c resourceChat) public() any {
-	return struct {
-		ID              string           `json:"id"`
-		ResourceID      string           `json:"resourceId"`
-		Open            bool             `json:"open"`
-		Epoch           uint64           `json:"epoch"`
-		Binding         app.AgentBinding `json:"binding"`
-		Messages        []chatMessage    `json:"messages"`
-		IntervalSeconds int              `json:"intervalSeconds"`
-		NextCheckAt     string           `json:"nextCheckAt,omitempty"`
-		TimerMode       string           `json:"timerMode"`
-		UnreadCount     int              `json:"unreadCount"`
-	}{c.ID, c.ResourceID, c.Open, c.Epoch, c.Binding, c.Messages, c.IntervalSeconds, c.NextCheckAt, "once", c.snapshot().UnreadCount}
+type publicChat struct {
+	ID              string           `json:"id"`
+	ResourceID      string           `json:"resourceId"`
+	Open            bool             `json:"open"`
+	Epoch           uint64           `json:"epoch"`
+	Binding         app.AgentBinding `json:"binding"`
+	Messages        []chatMessage    `json:"messages"`
+	IntervalSeconds int              `json:"intervalSeconds"`
+	NextCheckAt     string           `json:"nextCheckAt,omitempty"`
+	TimerMode       string           `json:"timerMode"`
+	UnreadCount     int              `json:"unreadCount"`
+	HasOlder        *bool            `json:"hasOlder,omitempty"`
+	HasNewer        *bool            `json:"hasNewer,omitempty"`
+}
+
+func (c resourceChat) public() publicChat {
+	return publicChat{
+		ID: c.ID, ResourceID: c.ResourceID, Open: c.Open, Epoch: c.Epoch,
+		Binding: c.Binding, Messages: c.Messages, IntervalSeconds: c.IntervalSeconds,
+		NextCheckAt: c.NextCheckAt, TimerMode: "once", UnreadCount: c.snapshot().UnreadCount,
+	}
+}
+
+// Message IDs are stable across appends and chat epochs, unlike offsets from
+// the end of the history when new messages arrive between page requests.
+func (c resourceChat) publicPage(limit int, before, after string) (publicChat, error) {
+	result := c.public()
+	if limit == 0 {
+		return result, nil
+	}
+	start, end := 0, len(c.Messages)
+	if before != "" || after != "" {
+		cursor := before
+		if after != "" {
+			cursor = after
+		}
+		index := -1
+		for i, message := range c.Messages {
+			if message.ID == cursor {
+				index = i
+				break
+			}
+		}
+		if index < 0 {
+			return publicChat{}, errors.New("chat message cursor not found")
+		}
+		if before != "" {
+			end = index
+		} else {
+			start = index + 1
+		}
+	}
+	if after != "" {
+		end = min(end, start+limit)
+	} else {
+		start = max(start, end-limit)
+	}
+	result.Messages = c.Messages[start:end]
+	older, newer := start > 0, end < len(c.Messages)
+	result.HasOlder, result.HasNewer = &older, &newer
+	return result, nil
 }
 func (c *resourceChat) appendMessage(id, role, text string) error {
 	if strings.TrimSpace(id) == "" || len(id) > 200 || strings.TrimSpace(text) == "" {

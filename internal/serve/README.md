@@ -83,13 +83,15 @@ DELETE /api/workspaces/{workspaceId}/users/{name}
 
 用户名只允许 ASCII 字母、数字、下划线和减号，最长 80 个字符；`workspace`、`scheduler`、`project`、`task` 以及 `projectN`、`taskN` 这类与稳定资源 ID 相同或近似的名字（不区分大小写）被保留，不能注册为用户名，避免 `pua message send --to=` 目标产生歧义。`POST .../users` 显式注册用户，`PUT .../users/{name}` 接收 `{ "preference": "..." }`，删除用户会级联删除该用户目录，但不会改写历史消息中的 sender。用户只是 Workspace 范围的身份标记，不构成认证或权限边界。
 
-用户聊天由 `<control-dir>/chats/{chatId}.json` 保存，与 AgentHub 事件独立。一资源一用户一条长期聊天，输入直接进入资源执行 Agent 的 mailbox。独立交流运行时已停用，旧 `dialogue-{chatId}` 与 `/chat/runtime/...` 仅用于历史审计。
+用户聊天由 `<control-dir>/chats/{chatId}.json` 保存，与 AgentHub 事件独立。每个资源有一条 Workspace 用户共享的长期聊天，用户消息标明发送者，各用户的未读游标独立；输入直接进入资源执行 Agent 的 mailbox。独立交流运行时已停用，旧 `dialogue-{chatId}` 与 `/chat/runtime/...` 仍按原用户定位历史审计。
 
-`GET .../resources/{id}/chat` 读取当前用户聊天，`POST .../chat/open|close|messages|read` 管理聊天；`GET .../chats` 查询聊天列表和未读数。公开消息仅来自用户输入或执行 Agent 的显式发布，不自动复制 Turn final。输入与 outbox 原子保存，后台按固定 mailbox ID 投递。关闭保留历史并撤销回复资格，不中断资源执行；重开增加 epoch 并产生新资格。Workspace 聊天始终开启。
+`GET .../resources/{id}/chat` 读取资源共享聊天，`POST .../chat/open|close|messages|read` 管理聊天；`GET .../chats` 查询聊天列表和当前用户未读数。公开消息仅来自用户输入或执行 Agent 的显式发布，不自动复制 Turn final。输入与 outbox 原子保存，后台按固定 mailbox ID 投递。关闭保留历史并撤销回复资格，不中断资源执行；重开增加 epoch 并产生新资格。Workspace 聊天始终开启。
 
 公开聊天支持按消息 ID 分页：`GET .../chat?limit=40` 返回最新一页，`before` 或 `after` 分别返回指定消息之前或之后的一页（不含该消息）。`limit` 范围为 1–100，两个游标不能同时使用；分页结果中的 `hasOlder`、`hasNewer` 表示是否还有前后页面，`unreadCount` 始终针对整个聊天。未指定 `limit` 时保留完整历史响应以兼容现有客户端；聊天写操作也可指定 `limit` 来限制响应消息数。当前磁盘存储仍是整份 JSON，分页减少网络传输和浏览器渲染，不消除服务端读取及解析完整文件的开销。
 
-执行 Agent 使用 `pua chat show|notes|publish --reply-to=<capability>`，资格由输入携带，限定资源、用户及聊天开启周期。publish 使用稳定 ID 去重，旧资格不能跨关闭/重开继续使用。旧 notes 保留兼容，dispatch、timer、独立 binding 已停用；不创建新的交流 Session。这是可信本地 Workspace 内的生命周期约束，不是操作系统沙箱或新的用户认证系统。
+执行 Agent 使用 `pua chat show|notes|publish --reply-to=<capability>`，资格由输入携带，限定资源及聊天开启周期；共享 Chat 的新凭据无需再附加 Chat ID，旧版 `chat-id.token` 仍可在原周期内使用。publish 使用稳定 ID 去重，旧资格不能跨关闭/重开继续使用。旧 notes 保留在迁移备份，dispatch、timer、独立 binding 已停用；不创建新的交流 Session。这是可信本地 Workspace 内的生命周期约束，不是操作系统沙箱或新的用户认证系统。
+
+读取旧数据时按资源合并原用户 Chat，保留各旧 Chat 内的顺序并按消息时间合并，碰撞的消息 ID 确定性改名；旧用户输入标注原发送者。原始文件保留在原位置，并在写入共享记录前复制到 `<control-dir>/chats-legacy-backup/`。历史消息对所有 Workspace 用户可见；原用户未读状态保留，新增用户从头计算未读。旧周期尚未确认的执行输入继续按原 mailbox ID 去重；关闭或周期失效的输入不重投。原笔记、旧 outbox 和历史事件可从备份和旧身份审计。旧版 Server 不支持共享记录或新版 Telegram 状态；旧文件与共享记录不会双向同步，旧版回退期间的新写入不会自动再次合并，回退需先保存新数据并制定恢复方案。
 
 Workspace、Project、Task 根目录的 `chat.md` 由所属执行 Agent 维护，分别记录工作状态和通知状态、来源消息与 History 引用、下一步与通知条件、最近成功发布记录。程序只创建缺失文件，不解释正文或自动补发；旧 notes 不双写。详情页的 Chat follow-ups 入口复用 Markdown 查看/编辑，`PUT .../resources/{id}/documents?path=...` 仅允许编辑该资源的文件；Workspace 在此接口仅开放根目录 chat.md，保留内容哈希冲突、普通文件与路径校验。Agent 每轮开始和恢复后读取，收到用户插入、协作或调度消息时更新，结束前检查未回复事项。只有 publish 成功才记已发布，进度不解除最终通知义务。文件不存回复凭据，恢复时通过源输入 History 引用读取合法指令并接受有效性校验；失败保留事项，不改投或无限重试。
 

@@ -479,15 +479,15 @@ func TestActivityChatIncludesReadAndClosedChatsForCurrentUser(t *testing.T) {
 	if err := s.enrichTreeResourceActivity(workspace, &other, "other"); err != nil {
 		t.Fatal(err)
 	}
-	if len(other.Activity.Unread) != 0 || other.Projects[0].Children[3].UnreadCount != 9 {
-		t.Fatal("chat user isolation or event counts changed")
+	if len(other.Activity.Unread) != 6 || other.Projects[0].Children[3].UnreadCount != 9 || other.Projects[0].Chat == nil {
+		t.Fatal("shared chat visibility or event counts changed")
 	}
 	for _, id := range ids {
-		c, err := loadChatLocked(workspace, chatID(id, user))
+		c, err := loadChatLocked(workspace, sharedChatID(id))
 		if err != nil {
 			t.Fatal(err)
 		}
-		c.ReadThrough = len(c.Messages)
+		c.markRead(user, "mine")
 		if err := saveChatLocked(workspace, c); err != nil {
 			t.Fatal(err)
 		}
@@ -517,8 +517,9 @@ func TestActivityChatSortsByLatestMessageRegardlessOfReadState(t *testing.T) {
 		{ResourceID: "project1.task4", Messages: []chatMessage{{Role: "user", CreatedAt: "invalid"}}},
 	}
 	for i := range chats {
-		chats[i].ID = chatID(chats[i].ResourceID, user)
-		chats[i].User = user
+		chats[i].ID = sharedChatID(chats[i].ResourceID)
+		chats[i].Version = 4
+		chats[i].ReadCursors = map[string]int{user: chats[i].ReadThrough}
 		chats[i].Epoch = 1
 		chats[i].Open = true
 		if err := saveChatLocked(workspace, chats[i]); err != nil {
@@ -546,7 +547,7 @@ func TestActivityChatSortsByLatestMessageRegardlessOfReadState(t *testing.T) {
 	check(original)
 	// Reading and closing a chat must not demote its latest message.
 	for i := range chats {
-		chats[i].ReadThrough = len(chats[i].Messages)
+		chats[i].ReadCursors[user] = len(chats[i].Messages)
 		chats[i].Open = false
 		if err := saveChatLocked(workspace, chats[i]); err != nil {
 			t.Fatal(err)

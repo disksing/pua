@@ -63,21 +63,29 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 	}
 	agent := r.Header.Get("X-PUA-Chat-Token") != ""
 	var user string
+	var identity resourceChat
 	if agent {
-		c, loadErr := loadDialogue(workspace.Path, dialoguePrefix+r.Header.Get("X-PUA-Chat"))
+		chatID := r.Header.Get("X-PUA-Chat")
+		if chatID == "" {
+			chatID = sharedChatID(resourceID)
+		}
+		c, loadErr := loadDialogue(workspace.Path, dialoguePrefix+chatID)
 		if loadErr != nil || c.ResourceID != normalizedResourceID(resourceID) {
 			writeError(w, errors.New("invalid chat identity"), 403)
 			return
 		}
-		user = c.User
-		ws, openErr := app.OpenWorkspace(workspace.Path)
-		if openErr != nil {
-			writeError(w, openErr, 500)
-			return
-		}
-		if _, userErr := ws.User(user); userErr != nil {
-			writeError(w, errors.New("chat user no longer exists"), 403)
-			return
+		identity = c
+		if c.Version < 4 {
+			user = c.User
+			ws, openErr := app.OpenWorkspace(workspace.Path)
+			if openErr != nil {
+				writeError(w, openErr, 500)
+				return
+			}
+			if _, userErr := ws.User(user); userErr != nil {
+				writeError(w, errors.New("chat user no longer exists"), 403)
+				return
+			}
 		}
 	} else {
 		// Native EventSource cannot set X-PUA-User. Accept the selected user
@@ -93,11 +101,22 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 		}
 	}
 	if r.Method == http.MethodPost && (operation == "open" || operation == "close") {
-		lifecycle := chatLifecycleLock(workspace.Path, chatID(resourceID, user))
+		lifecycle := chatLifecycleLock(workspace.Path, sharedChatID(resourceID))
 		lifecycle.Lock()
 		defer lifecycle.Unlock()
 	}
 	chatMu.Lock()
+	if !agent {
+		ws, openErr := app.OpenWorkspace(workspace.Path)
+		if openErr == nil {
+			_, openErr = ws.User(user)
+		}
+		if openErr != nil {
+			chatMu.Unlock()
+			writeError(w, errors.New("chat user no longer exists"), 400)
+			return
+		}
+	}
 	c, err := ensureChatLocked(workspace.Path, resourceID, user)
 	if err != nil {
 		chatMu.Unlock()
@@ -105,13 +124,22 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 		return
 	}
 	if agent {
-		if !c.Open || archived || c.Token == "" || r.Header.Get("X-PUA-Chat-Generation") != "" || subtle.ConstantTimeCompare([]byte(c.Token), []byte(r.Header.Get("X-PUA-Chat-Token"))) != 1 {
+		token := c.Token
+		if identity.ID != c.ID {
+			source, found := c.LegacySources[identity.ID]
+			if !found || !source.Open || source.User != user {
+				token = ""
+			} else {
+				token = source.Token
+			}
+		}
+		if !c.Open || archived || token == "" || r.Header.Get("X-PUA-Chat-Generation") != "" || subtle.ConstantTimeCompare([]byte(token), []byte(r.Header.Get("X-PUA-Chat-Token"))) != 1 {
 			chatMu.Unlock()
 			writeError(w, errors.New("chat is closed or reply capability has expired"), 409)
 			return
 		}
 	}
-	if resourceID == "workspace" && c.Epoch == 0 {
+	if resourceID == "workspace" && !c.Open {
 		c.open()
 		err = saveChatLocked(workspace.Path, c)
 	}
@@ -130,22 +158,27 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 			http.NotFound(w, r)
 			return
 		}
+		legacyAddress := c.address()
+		legacyID := chatID(resourceID, user)
+		if _, found := c.LegacySources[legacyID]; found {
+			legacyAddress = dialoguePrefix + legacyID
+		}
 		switch parts[1] {
 		case "read":
-			m.server.handleSessionRead(w, r, workspace.Path, c.address(), user)
+			m.server.handleSessionRead(w, r, workspace.Path, legacyAddress, user)
 		case "history":
-			m.handleResourceHistory(w, r, workspaceID, c.address(), parts[2:])
+			m.handleResourceHistory(w, r, workspaceID, legacyAddress, parts[2:])
 		case "status":
-			m.handleResourceStatus(w, r, workspaceID, c.address())
+			m.handleResourceStatus(w, r, workspaceID, legacyAddress)
 		case "events":
-			m.handleResourceEvents(w, r, workspaceID, c.address())
+			m.handleResourceEvents(w, r, workspaceID, legacyAddress)
 		case "stream":
-			m.handleResourceStream(w, r, workspaceID, c.address())
+			m.handleResourceStream(w, r, workspaceID, legacyAddress)
 		case "approval":
-			m.handleResourceApproval(w, r, workspaceID, c.address())
+			m.handleResourceApproval(w, r, workspaceID, legacyAddress)
 		case "turn":
 			if len(parts) == 3 && parts[2] == "end" {
-				m.handleResourceEndTurn(w, r, workspaceID, c.address())
+				m.handleResourceEndTurn(w, r, workspaceID, legacyAddress)
 			} else {
 				http.NotFound(w, r)
 			}
@@ -164,7 +197,7 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 			http.NotFound(w, r)
 			return
 		}
-		page, pageErr := c.publicPage(pageLimit, before, after)
+		page, pageErr := c.publicPage(pageLimit, before, after, user)
 		if pageErr != nil {
 			writeError(w, pageErr, 400)
 			return
@@ -207,27 +240,52 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 		} else {
 			c.Open = false
 			c.Token = ""
+			for id, source := range c.LegacySources {
+				source.Token = ""
+				source.Open = false
+				c.LegacySources[id] = source
+			}
 			c.IntervalSeconds = 0
 			c.NextCheckAt = ""
 		}
 	case "read":
-		previous := c.ReadThrough
-		for i, message := range c.Messages {
-			if message.ID == body.ID && i+1 > c.ReadThrough {
-				c.ReadThrough = i + 1
-				break
-			}
-		}
-		if previous == c.ReadThrough {
+		if !c.markRead(user, body.ID) {
 			chatMu.Unlock()
-			page, _ := c.publicPage(pageLimit, "", "")
+			page, _ := c.publicPage(pageLimit, "", "", user)
 			writeJSON(w, page)
 			return
 		}
 	case "messages":
-		err = c.appendUserInput(body.ID, body.Text)
+		err = c.appendUserInput(body.ID, body.Text, user)
 	case "publish":
+		publishID := body.ID
+		if identity.ID != c.ID {
+			// Preserve retries from a pre-migration capability even when IDs
+			// from different users collided during the merge.
+			matched := false
+			for _, message := range c.Messages {
+				if (message.LegacyChatID == identity.ID && message.LegacyID == body.ID) ||
+					(message.PublishOrigin == identity.ID && message.ClientID == body.ID) {
+					body.ID = message.ID
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				for _, message := range c.Messages {
+					if message.ID == body.ID && message.LegacyChatID != identity.ID {
+						body.ID = "legacy-" + chatID(identity.ID, body.ID)
+						break
+					}
+				}
+			}
+		}
+		previousLength := len(c.Messages)
 		err = c.appendMessage(body.ID, "agent", body.Text)
+		if err == nil && identity.ID != c.ID && len(c.Messages) > previousLength {
+			c.Messages[len(c.Messages)-1].PublishOrigin = identity.ID
+			c.Messages[len(c.Messages)-1].ClientID = publishID
+		}
 	case "notes":
 		c.Notes = body.Text
 	case "dispatch", "timer", "binding":
@@ -247,7 +305,7 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 	// All effects are replayed from durable state by the reconciler. Closing
 	// revokes publication without interrupting execution.
 	m.requestReconcile(reconcileMailboxes | reconcileAgentHub)
-	page, _ := c.publicPage(pageLimit, "", "")
+	page, _ := c.publicPage(pageLimit, "", "", user)
 	writeJSON(w, page)
 }
 
@@ -266,20 +324,24 @@ func (m *agentManager) reconcileWorkspaceChats(ctx context.Context, workspace se
 		return err
 	}
 	registered := make(map[string]bool, len(users))
-	chatMu.Lock()
 	for _, user := range users {
 		registered[user.Name] = true
-		c, e := ensureChatLocked(workspace.Path, "workspace", user.Name)
-		if e != nil {
+	}
+	chatMu.Lock()
+	if err = migrateExistingChatsLocked(workspace.Path); err != nil {
+		chatMu.Unlock()
+		return err
+	}
+	c, e := ensureChatLocked(workspace.Path, "workspace", "")
+	if e != nil {
+		chatMu.Unlock()
+		return e
+	}
+	if !c.Open {
+		c.open()
+		if e = saveChatLocked(workspace.Path, c); e != nil {
 			chatMu.Unlock()
 			return e
-		}
-		if c.Epoch == 0 {
-			c.open()
-			if e = saveChatLocked(workspace.Path, c); e != nil {
-				chatMu.Unlock()
-				return e
-			}
 		}
 	}
 	chatMu.Unlock()
@@ -298,18 +360,26 @@ func (m *agentManager) reconcileWorkspaceChats(ctx context.Context, workspace se
 			chatMu.Unlock()
 			return loadErr
 		}
-		before, _ := json.Marshal(c)
-		if loadErr = migrateChatLocked(workspace.Path, &c); loadErr != nil {
+		if c.Version < 4 {
 			chatMu.Unlock()
-			return loadErr
+			pending, pendingErr := mailboxPendingForResource(workspace.Path, c.address())
+			if pendingErr != nil {
+				return pendingErr
+			}
+			if pending {
+				if err = markResourceMailboxArchived(workspace.Path, c.address()); err != nil {
+					return err
+				}
+			}
+			continue
 		}
+		before, _ := json.Marshal(c)
 		c.IntervalSeconds, c.NextCheckAt = 0, ""
-
-		if !registered[c.User] {
-			c.Open = false
-			c.Token = ""
-			c.IntervalSeconds = 0
-			c.NextCheckAt = ""
+		for id, source := range c.LegacySources {
+			if !registered[source.User] && (source.Open || source.Token != "") {
+				source.Open, source.Token = false, ""
+				c.LegacySources[id] = source
+			}
 		}
 		_, archived, _, loadErr := resourceExistsAndArchived(workspace.Path, c.ResourceID)
 		if loadErr != nil {
@@ -322,7 +392,12 @@ func (m *agentManager) reconcileWorkspaceChats(ctx context.Context, workspace se
 				continue
 			}
 			// Work durably dispatched before closure still belongs to execution.
-			if d.Target == c.address() || (d.userInput() && (!c.Open || archived || d.Epoch != c.Epoch)) {
+			legacySourceValid := true
+			if d.userInput() && d.SourceChatID != "" {
+				source, found := c.LegacySources[d.SourceChatID]
+				legacySourceValid = found && source.Open && registered[source.User]
+			}
+			if d.Target == c.address() || (d.userInput() && (!c.Open || archived || d.Epoch != c.Epoch || !legacySourceValid)) {
 				d.Accepted = true
 				continue
 			}
@@ -330,8 +405,16 @@ func (m *agentManager) reconcileWorkspaceChats(ctx context.Context, workspace se
 			if d.userInput() {
 				messageType = "user_chat_input"
 			}
-			sum := chatID(c.ID, d.ID)
-			_, err = acceptGeneratedMailboxMessage(workspace.Path, resourceMailboxMessage{ID: "chat-" + sum, ResourceID: d.Target, Text: d.Text, Type: messageType, RequestedMode: resourceMessageModeSteer, Causation: &resourceMessageCausation{Type: "chat", SourceResourceID: c.ResourceID, MessageID: d.ID}})
+			sourceID := c.ID
+			if d.SourceChatID != "" {
+				sourceID = d.SourceChatID
+			}
+			sum := chatID(sourceID, d.ID)
+			var sender *agentHubMessageSender
+			if d.Sender != "" {
+				sender = &agentHubMessageSender{Name: d.Sender}
+			}
+			_, err = acceptGeneratedMailboxMessage(workspace.Path, resourceMailboxMessage{ID: "chat-" + sum, ResourceID: d.Target, Text: d.Text, Sender: sender, Type: messageType, RequestedMode: resourceMessageModeSteer, Causation: &resourceMessageCausation{Type: "chat", SourceResourceID: c.ResourceID, MessageID: d.ID}})
 			if err != nil {
 				chatMu.Unlock()
 				return err
@@ -377,11 +460,6 @@ func (m *agentManager) handleChats(w http.ResponseWriter, r *http.Request, works
 		writeError(w, err, 400)
 		return
 	}
-	paths, err := filepath.Glob(filepath.Join(workspacepath.ControlDir(workspace.Path), "chats", "*.json"))
-	if err != nil {
-		writeError(w, err, 500)
-		return
-	}
 	type entry struct {
 		ResourceID string `json:"resourceId"`
 		Open       bool   `json:"open"`
@@ -390,19 +468,31 @@ func (m *agentManager) handleChats(w http.ResponseWriter, r *http.Request, works
 	}
 	entries := []entry{}
 	chatMu.Lock()
+	if err = migrateExistingChatsLocked(workspace.Path); err != nil {
+		chatMu.Unlock()
+		writeError(w, err, 500)
+		return
+	}
+	paths, err := filepath.Glob(filepath.Join(workspacepath.ControlDir(workspace.Path), "chats", "*.json"))
+	if err != nil {
+		chatMu.Unlock()
+		writeError(w, err, 500)
+		return
+	}
 	for _, path := range paths {
 		c, e := loadChatLocked(workspace.Path, strings.TrimSuffix(filepath.Base(path), ".json"))
 		if e != nil {
 			err = e
 			break
 		}
-		if c.User != user || c.Epoch == 0 {
+		if c.Version < 4 || c.Epoch == 0 {
 			continue
 		}
 		item := entry{ResourceID: c.ResourceID, Open: c.Open}
+		legacyUnread := c.legacyUnreadSet(user)
 		for i, message := range c.Messages {
 			item.UpdatedAt = message.CreatedAt
-			if i >= c.ReadThrough && message.Role == "agent" {
+			if c.unread(user, i, message, legacyUnread) {
 				item.Unread++
 			}
 		}

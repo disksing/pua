@@ -212,7 +212,7 @@ func TestTelegramTopicsRouteInputAndPublishWithoutDuplicates(t *testing.T) {
 	telegramProcess(t, rt, &st, telegramInput(11, 777, b.ThreadID, "workspace input"))
 	telegramProcess(t, rt, &st, telegramInput(10, 777, a.ThreadID, "task input"))
 	telegramProcess(t, rt, &st, telegramInput(12, 888, a.ThreadID, "unauthorized"))
-	c, e := loadDialogue(rt.workspace.Path, dialoguePrefix+chatID(a.Resource, "disksing"))
+	c, e := loadDialogue(rt.workspace.Path, dialoguePrefix+sharedChatID(a.Resource))
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -482,7 +482,7 @@ func TestTelegramRestartedSendingIsUnknownAndDeletedTopicCanBeRebound(t *testing
 		t.Fatal("deleted topic repair failed")
 	}
 	telegramProcess(t, rt, &st, telegramInput(3, 777, route.ThreadID, "old topic input"))
-	c, e := loadDialogue(rt.workspace.Path, dialoguePrefix+chatID(route.Resource, "disksing"))
+	c, e := loadDialogue(rt.workspace.Path, dialoguePrefix+sharedChatID(route.Resource))
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -506,7 +506,7 @@ func TestTelegramWorkerCommitsInboxBeforeAcknowledgingUpdates(t *testing.T) {
 		saved, e := rt.load()
 		rt.mu.Unlock()
 		if e == nil && saved.Offset == 11 && len(saved.Inbox) == 0 {
-			c, e := loadDialogue(rt.workspace.Path, dialoguePrefix+chatID(route.Resource, "disksing"))
+			c, e := loadDialogue(rt.workspace.Path, dialoguePrefix+sharedChatID(route.Resource))
 			if e == nil && len(c.Messages) == 1 {
 				break
 			}
@@ -517,7 +517,7 @@ func TestTelegramWorkerCommitsInboxBeforeAcknowledgingUpdates(t *testing.T) {
 	<-done
 	done = make(chan struct{})
 	close(done)
-	c, e := loadDialogue(rt.workspace.Path, dialoguePrefix+chatID(route.Resource, "disksing"))
+	c, e := loadDialogue(rt.workspace.Path, dialoguePrefix+sharedChatID(route.Resource))
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -564,7 +564,7 @@ func TestTelegramUnknownResourceDoesNotBlockLaterInput(t *testing.T) {
 	}
 	route := telegramOpen(t, rt, &st, "project1.task1")
 	telegramProcess(t, rt, &st, telegramInput(10, 777, route.ThreadID, "valid follow-up"))
-	c, e := loadDialogue(rt.workspace.Path, dialoguePrefix+chatID(route.Resource, "disksing"))
+	c, e := loadDialogue(rt.workspace.Path, dialoguePrefix+sharedChatID(route.Resource))
 	if e != nil || len(c.Messages) != 1 {
 		t.Fatal("invalid resource blocked subsequent input")
 	}
@@ -595,7 +595,7 @@ func TestTelegramAndWebShareChatInBothDirections(t *testing.T) {
 	if err := json.Unmarshal(web("disksing", "", nil).Body.Bytes(), &visible); err != nil {
 		t.Fatal(err)
 	}
-	if visible.ID != chatID(resource, "disksing") || len(visible.Messages) != 5 {
+	if visible.ID != sharedChatID(resource) || len(visible.Messages) != 5 {
 		t.Fatalf("web must expose one shared history, got %#v", visible)
 	}
 	want := []string{"old web input", "Telegram input", "Reply to Telegram", "Web input", "Reply to web"}
@@ -604,7 +604,7 @@ func TestTelegramAndWebShareChatInBothDirections(t *testing.T) {
 			t.Fatalf("message %d: %q", i, message.Text)
 		}
 	}
-	// Another user's inputs and replies must never enter this topic.
+	// Every user's inputs and public replies share the same topic.
 	web("other", "open", chatRequest{})
 	web("other", "messages", chatRequest{ID: "other-input", Text: "Other user's input"})
 	mustChatOK(t, chatCall(t, rt.server.agents, rt.workspace, resource, "other", "publish", chatRequest{ID: "other-reply", Text: "Other user's reply"}, true))
@@ -624,7 +624,7 @@ func TestTelegramAndWebShareChatInBothDirections(t *testing.T) {
 			sent = append(sent, call.Body["text"].(string))
 		}
 	}
-	wantSent := []string{"Reply to Telegram", "disksing (web):\nWeb input", "Reply to web"}
+	wantSent := []string{"Reply to Telegram", "disksing (web):\nWeb input", "Reply to web", "other (web):\nOther user's input", "Other user's reply"}
 	if fmt.Sprint(sent) != fmt.Sprint(wantSent) {
 		t.Fatalf("sent %q, want %q", sent, wantSent)
 	}
@@ -632,7 +632,7 @@ func TestTelegramAndWebShareChatInBothDirections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(c.Outbox) != 3 {
+	if len(c.Outbox) != 4 {
 		t.Fatalf("must dispatch each user input once, got %d", len(c.Outbox))
 	}
 }

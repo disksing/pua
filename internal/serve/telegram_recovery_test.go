@@ -59,7 +59,7 @@ func TestTelegramTemporaryResourceFailureRetainsAndRevalidates(t *testing.T) {
 		t.Fatal("revalidation lost or retried the uncertain delivery")
 	}
 	telegramProcess(t, rt, &st, telegramInput(10, 777, route.ThreadID, "new input"))
-	c, err := loadDialogue(rt.workspace.Path, dialoguePrefix+chatID(route.Resource, route.User))
+	c, err := loadDialogue(rt.workspace.Path, dialoguePrefix+sharedChatID(route.Resource))
 	if err != nil || len(c.Messages) != 2 {
 		t.Fatal("input did not resume after the resource recovered")
 	}
@@ -188,7 +188,7 @@ func TestTelegramManualPausePreservesPendingAndRequiresResume(t *testing.T) {
 		t.Fatal("manual pause did not retain and block the queued delivery")
 	}
 	telegramProcess(t, rt, &st, telegramInput(3, 777, route.ThreadID, "blocked input"))
-	c, err := loadDialogue(rt.workspace.Path, dialoguePrefix+chatID(route.Resource, route.User))
+	c, err := loadDialogue(rt.workspace.Path, dialoguePrefix+sharedChatID(route.Resource))
 	if err != nil || len(c.Messages) != 1 {
 		t.Fatal("input was accepted while manually paused")
 	}
@@ -231,7 +231,7 @@ func TestTelegramInputCanReconcileReopenedChat(t *testing.T) {
 	mustChatOK(t, chatCall(t, rt.server.agents, rt.workspace, route.Resource, route.User, "close", chatRequest{}, false))
 	mustChatOK(t, chatCall(t, rt.server.agents, rt.workspace, route.Resource, route.User, "open", chatRequest{}, false))
 	telegramProcess(t, rt, &st, telegramInput(2, 777, route.ThreadID, "synthetic new input"))
-	c, err := loadDialogue(rt.workspace.Path, dialoguePrefix+chatID(route.Resource, route.User))
+	c, err := loadDialogue(rt.workspace.Path, dialoguePrefix+sharedChatID(route.Resource))
 	if err != nil || len(c.Messages) != 2 || c.Messages[1].Text != "synthetic new input" ||
 		len(st.Routes[0].Held) != 1 || st.Routes[0].Held[0].Pending == nil || st.Routes[0].Held[0].Pending.Status != "unknown" {
 		t.Fatal("input-first recovery lost the input or the old delivery")
@@ -287,7 +287,7 @@ func TestTelegramUnknownEpochRequiresExplicitRecovery(t *testing.T) {
 	telegramPublish(t, rt, route.Resource, "new", "synthetic new before upgrade")
 	// Model a Chat reopened by the older version, before epoch boundaries existed.
 	chatMu.Lock()
-	c, err := loadChatLocked(rt.workspace.Path, chatID(route.Resource, route.User))
+	c, err := loadChatLocked(rt.workspace.Path, sharedChatID(route.Resource))
 	if err == nil {
 		c.EpochStart = nil
 		err = saveChatLocked(rt.workspace.Path, c)
@@ -404,7 +404,7 @@ func TestTelegramInputRecoversAfterUserVerificationFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	telegramProcess(t, rt, &st, telegramInput(3, 777, route.ThreadID, "synthetic accepted"))
-	c, err := loadDialogue(rt.workspace.Path, dialoguePrefix+chatID(route.Resource, route.User))
+	c, err := loadDialogue(rt.workspace.Path, dialoguePrefix+sharedChatID(route.Resource))
 	if err != nil || st.Routes[0].Paused || len(c.Messages) != 1 || c.Messages[0].Text != "synthetic accepted" {
 		t.Fatal("verified user did not recover safely")
 	}

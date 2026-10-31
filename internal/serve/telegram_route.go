@@ -18,6 +18,7 @@ const (
 	telegramPauseChat     = "chat_unavailable"
 	telegramPauseClosed   = "chat_closed"
 	telegramPauseEpoch    = "epoch_boundary_unknown"
+	telegramPauseDeleted  = "user_deleted"
 )
 
 func (r *telegramRoute) pause(reason string) bool {
@@ -70,15 +71,27 @@ func telegramPauseHint(reason string) string {
 		return "The PUA chat is closed. Reopen it in PUA to continue."
 	case telegramPauseEpoch:
 		return "The previous chat period cannot be verified. Send /resume for recovery options."
+	case telegramPauseDeleted:
+		return "The Workspace user was deleted. Pair again, then send /resume for recovery options."
 	default:
 		return "The pause cause is unknown. Send /resume for recovery options."
 	}
 }
 
-func telegramForwardable(message chatMessage) bool {
+func telegramForwardable(message chatMessage, route *telegramRoute) bool {
+	if message.LegacyChatID != "" && (route.LegacyChat != message.LegacyChatID || message.LegacyIndex < route.LegacyCursor) {
+		return false
+	}
 	switch message.Role {
 	case "user":
-		return message.Text != "" && !strings.HasPrefix(message.ID, "telegram-")
+		if message.OriginRoute != "" {
+			return message.Text != "" && message.OriginRoute != route.key()
+		}
+		id := message.ID
+		if message.LegacyID != "" {
+			id = message.LegacyID
+		}
+		return message.Text != "" && !(strings.HasPrefix(id, "telegram-") && message.Sender == route.User)
 	case "agent":
 		return message.Text != ""
 	default:
@@ -94,7 +107,7 @@ func (r *telegramRoute) holdUntil(c resourceChat, end int, reason string) bool {
 	}
 	count := 0
 	for _, message := range c.Messages[r.Cursor:end] {
-		if telegramForwardable(message) {
+		if telegramForwardable(message, r) {
 			count++
 		}
 	}
@@ -110,6 +123,48 @@ func (r *telegramRoute) holdUntil(c resourceChat, end int, reason string) bool {
 	}
 	r.Pending = nil
 	r.Cursor = end
+	return true
+}
+
+func (r *telegramRoute) migrateSharedChat(c resourceChat) bool {
+	if r.SharedChat {
+		return true
+	}
+	id := chatID(r.Resource, r.User)
+	source, found := c.LegacySources[id]
+	if !found || !source.Open || source.Epoch != r.Epoch || r.Cursor < 0 || r.Cursor > len(source.MessageIDs) {
+		return false
+	}
+	position := func(oldIndex int) (int, bool) {
+		if oldIndex == len(source.MessageIDs) {
+			return c.MigrationEnd, true
+		}
+		if oldIndex < 0 || oldIndex >= len(source.MessageIDs) {
+			return 0, false
+		}
+		for i, message := range c.Messages {
+			if message.ID == source.MessageIDs[oldIndex] {
+				return i, true
+			}
+		}
+		return 0, false
+	}
+	cursor, ok := position(r.Cursor)
+	if !ok {
+		return false
+	}
+	if r.Pending != nil {
+		if r.Pending.NextCursor <= r.Cursor || r.Pending.NextCursor > len(source.MessageIDs) {
+			return false
+		}
+		last, exists := position(r.Pending.NextCursor - 1)
+		if !exists {
+			return false
+		}
+		r.Pending.NextCursor = last + 1
+	}
+	r.LegacyChat, r.LegacyCursor = id, r.Cursor
+	r.Cursor, r.Epoch, r.SharedChat = cursor, c.Epoch, true
 	return true
 }
 
@@ -133,33 +188,39 @@ func (rt *telegramRuntime) checkRoute(st *telegramState, r *telegramRoute, ws *a
 	if archived {
 		return empty, time.Time{}, false, r.pause(telegramPauseArchived)
 	}
-	id := chatID(r.Resource, r.User)
-	info, err := os.Stat(chatPath(rt.workspace.Path, id))
-	if err != nil {
-		return empty, time.Time{}, false, r.pause(telegramPauseChat)
-	}
-	if allowCached && !r.Paused && r.Pending == nil && rt.lastFiles[id].Equal(info.ModTime()) {
-		return empty, info.ModTime(), true, false
-	}
+	id := sharedChatID(r.Resource)
 	chatMu.Lock()
-	c, err := loadChatLocked(rt.workspace.Path, id)
+	c, err := ensureChatLocked(rt.workspace.Path, r.Resource, r.User)
 	chatMu.Unlock()
 	if err != nil {
 		return empty, time.Time{}, false, r.pause(telegramPauseChat)
 	}
+	info, err := os.Stat(chatPath(rt.workspace.Path, id))
+	if err != nil {
+		return empty, time.Time{}, false, r.pause(telegramPauseChat)
+	}
+	if allowCached && r.SharedChat && !r.Paused && r.Pending == nil && rt.lastFiles[r.key()].Equal(info.ModTime()) {
+		return empty, info.ModTime(), true, false
+	}
 	if !c.Open {
 		return c, info.ModTime(), false, r.pause(telegramPauseClosed)
+	}
+	changed := false
+	if !r.SharedChat {
+		if !r.migrateSharedChat(c) {
+			return c, info.ModTime(), false, r.pause(telegramPauseEpoch)
+		}
+		changed = true
 	}
 	if r.Cursor < 0 || r.Cursor > len(c.Messages) {
 		return c, info.ModTime(), false, r.pause(telegramPauseEpoch)
 	}
-	changed := false
 	if c.Epoch != r.Epoch {
 		if c.Epoch <= r.Epoch || c.EpochStart == nil || !r.holdUntil(c, *c.EpochStart, "chat_reopened") {
 			return c, info.ModTime(), false, r.pause(telegramPauseEpoch)
 		}
 		r.Epoch = c.Epoch
-		delete(rt.lastFiles, id)
+		delete(rt.lastFiles, r.key())
 		changed = true
 	}
 	changed = r.unpause() || changed

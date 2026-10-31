@@ -89,6 +89,29 @@ it("ignores a pending old user's chat read after switching user",async()=>{
  expect(target.textContent).not.toContain('old user history');
 });
 
+it("shows the same chat and actual senders after switching user", async () => {
+ const users: string[] = [];
+ vi.stubGlobal("fetch", vi.fn(async (input, init) => {
+  if (pathname(input).endsWith("/status")) return response({ sessionState: "idle" });
+  users.push(new Headers(init?.headers).get("X-PUA-User") || "");
+  return response({ id: "shared", open: true, epoch: 1, unreadCount: 0, messages: [
+   { id: "a", role: "user", sender: "disksing", text: "First input", createdAt: "2026-10-14T00:00:00Z" },
+   { id: "b", role: "user", sender: "other", text: "Second input", createdAt: "2026-10-14T00:00:01Z" },
+  ] });
+ }));
+ const { channel, target } = setup();
+ await vi.waitFor(() => expect(target.querySelectorAll("article")).toHaveLength(2));
+ expect(target.querySelectorAll("article")[0].textContent).toContain("disksing");
+ expect(target.querySelectorAll("article")[1].textContent).toContain("other");
+ channel.publish({ ...channel.current(), currentUserName: "other" });
+ await vi.waitFor(() => expect(users).toContain("other"));
+ await vi.waitFor(() => expect(target.querySelectorAll("article")).toHaveLength(2));
+ expect(target.querySelectorAll("article")[0].textContent).toContain("disksing");
+ expect(target.querySelectorAll("article")[1].textContent).toContain("other");
+ expect(target.textContent).toContain("First input");
+ expect(target.textContent).toContain("Second input");
+});
+
 it("keeps approval content outside the fixed heading and permits a response", async () => {
  let approvalBody: unknown;
  vi.stubGlobal("fetch", vi.fn(async (input, init) => {

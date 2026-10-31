@@ -122,7 +122,38 @@ func (s *server) handleUsers(w http.ResponseWriter, r *http.Request, workspaceID
 		}
 		writeJSON(w, profile)
 	case http.MethodDelete:
+		telegram := s.telegramFor(workspace)
+		telegram.mu.Lock()
+		defer telegram.mu.Unlock()
+		chatMu.Lock()
+		users, listErr := puaWorkspace.Users()
+		found := false
+		for _, user := range users {
+			found = found || user.Name == name
+		}
+		if listErr != nil || !found || len(users) <= 1 {
+			chatMu.Unlock()
+			if listErr != nil {
+				writeError(w, listErr, http.StatusInternalServerError)
+			} else if !found {
+				writeError(w, errors.New("user not found"), http.StatusNotFound)
+			} else {
+				writeError(w, &resourceAPIError{Code: "last_user", Message: app.ErrLastUser.Error()}, http.StatusConflict)
+			}
+			return
+		}
+		if err := revokeLegacyChatUserLocked(workspace.Path, name); err != nil {
+			chatMu.Unlock()
+			writeError(w, err, http.StatusInternalServerError)
+			return
+		}
+		if err := telegram.revokeUser(name); err != nil {
+			chatMu.Unlock()
+			writeError(w, err, http.StatusInternalServerError)
+			return
+		}
 		if err := puaWorkspace.DeleteUser(name); err != nil {
+			chatMu.Unlock()
 			if errors.Is(err, app.ErrLastUser) {
 				writeError(w, &resourceAPIError{Code: "last_user", Message: app.ErrLastUser.Error()}, http.StatusConflict)
 				return
@@ -130,6 +161,7 @@ func (s *server) handleUsers(w http.ResponseWriter, r *http.Request, workspaceID
 			writeError(w, err, http.StatusNotFound)
 			return
 		}
+		chatMu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		w.WriteHeader(http.StatusMethodNotAllowed)

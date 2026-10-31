@@ -207,7 +207,7 @@ it("preserves Telegram drafts and pairing across background settings publication
   await vi.waitFor(() => expect(details.querySelector("select")).not.toBeNull());
   const selected = details.querySelector("select")!;
   expect(selected.value).toBe("disksing");
-  expect(details.textContent).toContain("Telegram is linked as User, while web chats use disksing");
+  expect(details.textContent).toContain("Telegram messages are sent as User; you are viewing the shared chat as disksing");
   selected.value = "User"; selected.dispatchEvent(new Event("change", { bubbles: true })); await tick();
   details.querySelectorAll("form")[1].dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
   await vi.waitFor(() => expect(details.querySelector('a[href="https://t.me/test_bot?start=once"]')).not.toBeNull());

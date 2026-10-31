@@ -100,7 +100,7 @@
         {#if settings.lastPoll}<p class="help">Last successful connection: {new Date(settings.lastPoll).toLocaleString()}</p>{/if}
         {#if settings.lastError}<p class="error" role="alert">{settings.lastError}</p>{/if}
         {#if settings.enabled}
-          <p class="help">Telegram and the web share history for the same Workspace user. {currentUserName ? `You are viewing web chats as ${currentUserName}.` : "Choose the same user you use for web chats."}</p>
+          <p class="help">Each resource has one chat shared by Workspace users. The selected user identifies messages sent from Telegram and has a separate unread position.</p>
           <form onsubmit={(event) => { event.preventDefault(); void action("pair", { user: selectedUser }); }}>
             <label>Workspace user
               <select bind:value={selectedUser} disabled={Boolean(pending)} onchange={() => pairing = null}><option value="" disabled>Choose a Workspace user</option>{#each users as user}<option value={user.name}>{user.name}</option>{/each}</select>
@@ -117,7 +117,7 @@
           {/if}
         {/if}
         {#each settings.accounts as account (account.telegramId)}
-          {#if currentUserName && account.user !== currentUserName}<p class="help">Telegram is linked as {account.user}, while web chats use {currentUserName}. To share history, unlink and pair as {currentUserName}, or switch the web user to {account.user}.</p>{/if}
+          {#if currentUserName && account.user !== currentUserName}<p class="help">Telegram messages are sent as {account.user}; you are viewing the shared chat as {currentUserName}.</p>{/if}
           <div class="account"><span><strong>{account.user}</strong> · Telegram {account.telegramId}</span>
             <button type="button" disabled={Boolean(pending)} onclick={() => confirmUnbind = account.user}>Unlink account</button>
           </div>
@@ -137,7 +137,11 @@
         {#each settings.deliveryProblems as problem (problem.delivery)}
           <div class="delivery"><strong>{problem.resource} · {problem.user}</strong>
             {#if problem.held}
-              <p>{problem.count || 0} earlier messages may not have been forwarded. They remain in PUA and will not be sent automatically.</p>
+              {#if problem.status === "legacy_position_unknown"}
+                <p>The earlier delivery position is unknown. Messages remain in PUA and will not be sent automatically.</p>
+              {:else}
+                <p>{problem.count || 0} earlier messages may not have been forwarded. They remain in PUA and will not be sent automatically.</p>
+              {/if}
               {#if problem.pendingStatus}<p>A previous delivery was {problem.pendingStatus}; it may already be in Telegram. Check both chats before deciding.</p>{/if}
               {#if problem.since}<p class="help">Needs review since {new Date(problem.since).toLocaleString()}</p>{/if}
               {#if reviewDelivery === problem.delivery}

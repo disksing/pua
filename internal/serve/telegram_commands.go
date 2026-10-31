@@ -201,14 +201,14 @@ func (rt *telegramRuntime) process(ctx context.Context, st *telegramState, u tel
 			return nil
 		}
 		chatMu.Lock()
-		chat, e := loadChatLocked(rt.workspace.Path, chatID(route.Resource, user))
+		chat, e := loadChatLocked(rt.workspace.Path, sharedChatID(route.Resource))
 		if e == nil && (!chat.Open || chat.Epoch != route.Epoch) {
 			chatMu.Unlock()
 			say("This PUA chat was closed or reopened. Reopen it in PUA if needed, then send your message again.", nil)
 			return nil
 		}
 		if e == nil {
-			e = chat.appendUserInput(fmt.Sprintf("telegram-%d-%d", st.BotID, u.ID), msg.Text)
+			e = chat.appendUserInput(fmt.Sprintf("telegram-%d-%d", st.BotID, u.ID), msg.Text, user, route.key())
 		}
 		if e == nil {
 			e = saveChatLocked(rt.workspace.Path, chat)
@@ -309,15 +309,10 @@ func (rt *telegramRuntime) openTopic(ctx context.Context, st *telegramState, use
 		return nil
 	}
 
-	lifecycle := chatLifecycleLock(rt.workspace.Path, chatID(resource, user))
+	lifecycle := chatLifecycleLock(rt.workspace.Path, sharedChatID(resource))
 	lifecycle.Lock()
 	chatMu.Lock()
-	var c resourceChat
-	if initial {
-		c, err = ensureChatLocked(rt.workspace.Path, resource, user)
-	} else {
-		c, err = loadChatLocked(rt.workspace.Path, chatID(resource, user))
-	}
+	c, err := ensureChatLocked(rt.workspace.Path, resource, user)
 	if err == nil {
 		if !c.Open {
 			if !initial && !rebind && !explicitResume {
@@ -334,6 +329,29 @@ func (rt *telegramRuntime) openTopic(ctx context.Context, st *telegramState, use
 	if err != nil {
 		lifecycle.Unlock()
 		return err
+	}
+	if !initial && !route.SharedChat && !route.migrateSharedChat(c) {
+		if !explicitResume || !confirm {
+			route.pause(telegramPauseEpoch)
+			err = rt.save(*st)
+			lifecycle.Unlock()
+			if err != nil {
+				return err
+			}
+			say("The earlier chat delivery position cannot be verified. Send /resume confirm to reconnect from now; earlier delivery will be held for review.", nil)
+			return nil
+		}
+		if route.Pending != nil && route.Pending.Status == "sending" {
+			route.Pending.Status = "unknown"
+			route.Pending.Error = "Delivery may have succeeded before restart. Check Telegram before deciding."
+		}
+		route.Held = append(route.Held, telegramHeldDelivery{
+			ID: newGenerationRecordID(), Epoch: route.Epoch, Reason: "legacy_position_unknown",
+			HeldAt: time.Now().UTC().Format(time.RFC3339), Pending: route.Pending,
+		})
+		route.LegacyChat, route.LegacyCursor = chatID(resource, user), route.Cursor
+		route.Pending, route.Cursor, route.Epoch, route.SharedChat = nil, len(c.Messages), c.Epoch, true
+		route.unpause()
 	}
 	if !initial && c.Epoch < route.Epoch {
 		route.pause(telegramPauseEpoch)
@@ -360,6 +378,7 @@ func (rt *telegramRuntime) openTopic(ctx context.Context, st *telegramState, use
 	if initial {
 		route.Epoch = c.Epoch
 		route.Cursor = len(c.Messages)
+		route.SharedChat = true
 		route.unpause()
 	} else if rebind || legacy || unknownEpoch {
 		reason := "legacy_reconnect"
@@ -400,7 +419,7 @@ func (rt *telegramRuntime) openTopic(ctx context.Context, st *telegramState, use
 		say(telegramPauseHint(route.PauseReason), nil)
 		return nil
 	}
-	message := "Connected to " + title + " as " + user + ". This topic shares the web chat for that Workspace user. New web messages and public replies will appear here. Send text to continue; /menu opens navigation."
+	message := "Connected to " + title + " as " + user + ". This topic shares the resource chat with Workspace users. New messages and public replies will appear here. Send text to continue; /menu opens navigation."
 	if len(route.Held) > 0 {
 		message += " Earlier deliveries need review in Workspace Telegram settings."
 	}
@@ -433,7 +452,7 @@ func (rt *telegramRuntime) resourceMenu(ws *app.Workspace, st telegramState, use
 		}
 		for _, id := range paths {
 			c, e := loadChatLocked(rt.workspace.Path, id)
-			if e != nil || c.User != user || !c.Open {
+			if e != nil || c.Version < 4 || !c.Open {
 				continue
 			}
 			title := titles[c.ResourceID]

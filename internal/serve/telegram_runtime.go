@@ -161,26 +161,26 @@ func (rt *telegramRuntime) flush(ctx context.Context, st *telegramState) error {
 		if !ready {
 			continue
 		}
-		id := chatID(route.Resource, route.User)
-		if route.Pending == nil && rt.lastFiles[id].Equal(modTime) {
+		id := sharedChatID(route.Resource)
+		if route.Pending == nil && rt.lastFiles[route.key()].Equal(modTime) {
 			continue
 		}
 		if route.Pending == nil {
 			for route.Cursor < len(chat.Messages) {
 				message := chat.Messages[route.Cursor]
 				text := message.Text
-				switch message.Role {
-				case "user":
-					// Inbound Telegram IDs are assigned by process before the shared
-					// Chat/outbox commit. This also covers records from the first release.
-					if strings.HasPrefix(message.ID, "telegram-") {
-						text = ""
-					} else {
-						text = route.User + " (web):\n" + text
-					}
-				case "agent":
-				default:
+				if !telegramForwardable(message, route) {
 					text = ""
+				} else if message.Role == "user" {
+					sender := message.Sender
+					if sender == "" {
+						sender = "User"
+					}
+					channel := "web"
+					if message.OriginRoute != "" || strings.HasPrefix(message.ID, "telegram-") {
+						channel = "Telegram"
+					}
+					text = sender + " (" + channel + "):\n" + text
 				}
 				if text == "" {
 					route.Cursor++
@@ -192,7 +192,7 @@ func (rt *telegramRuntime) flush(ctx context.Context, st *telegramState) error {
 				break
 			}
 			if route.Pending == nil {
-				rt.lastFiles[id] = modTime
+				rt.lastFiles[route.key()] = modTime
 				continue
 			}
 		}

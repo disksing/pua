@@ -25,11 +25,15 @@ func TestExecutionCLIUsesExplicitChatCapability(t *testing.T) {
 				http.NotFound(w, r)
 				return
 			}
-			if r.Header.Get("X-PUA-Chat") != "test-chat" || r.Header.Get("X-PUA-Chat-Token") != "test-token" || r.Header.Get("X-PUA-Chat-Generation") != "" {
-				t.Error("missing explicit reply capability")
-			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Error(err)
+			}
+			expectedChatID := "test-chat"
+			if body["id"] == "reply-2" {
+				expectedChatID = ""
+			}
+			if r.Header.Get("X-PUA-Chat") != expectedChatID || r.Header.Get("X-PUA-Chat-Token") != "test-token" || r.Header.Get("X-PUA-Chat-Generation") != "" {
+				t.Error("missing explicit reply capability")
 			}
 			_, _ = io.WriteString(w, `{"id":"test-chat","messages":[]}`)
 		}))
@@ -46,6 +50,10 @@ func TestExecutionCLIUsesExplicitChatCapability(t *testing.T) {
 		run(t, "chat", "publish", "--reply-to=test-chat.test-token", "--id=reply-1", "Hello")
 		if body["id"] != "reply-1" || body["text"] != "Hello" {
 			t.Fatalf("unexpected publish: %#v", body)
+		}
+		run(t, "chat", "publish", "--reply-to=test-token", "--id=reply-2", "Shared")
+		if body["id"] != "reply-2" || body["text"] != "Shared" {
+			t.Fatalf("unexpected shared publish: %#v", body)
 		}
 		if _, err := runErr(t, "chat", "publish", "--id=missing", "Hello"); err == nil {
 			t.Fatal("missing capability accepted")

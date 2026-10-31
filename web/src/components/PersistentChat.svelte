@@ -12,7 +12,7 @@
   let { channel }: { channel: ModelChannel<DetailPanelModel> } = $props();
   // svelte-ignore state_referenced_locally
   let model = $state(channel.current());
-  type Message = { id: string; role: string; text: string; createdAt: string };
+  type Message = { id: string; role: string; sender?: string; text: string; createdAt: string };
   type Chat = { id: string; open: boolean; epoch: number; unreadCount: number; messages: Message[]; hasOlder?: boolean; hasNewer?: boolean };
   const PAGE_SIZE = 40;
   let chat = $state<Chat | null>(null);
@@ -225,7 +225,7 @@
     {/if}
     {#each chat?.messages || [] as message (message.id)}
       <article class:user-message={message.role === "user"}>
-        <small>{message.role === "user" ? model.currentUserName : "Agent"} · {new Date(message.createdAt).toLocaleString()}</small>
+        <small>{message.role === "user" ? (message.sender || "User") : "Agent"} · {new Date(message.createdAt).toLocaleString()}</small>
         <div class="markdown-rendered" use:markdownResourceNavigation={{ resolveResourceTitle: model.resolveResourceTitle, onNavigate: model.onNavigate }}>{@html markdownHTML(message.text, { resolveResourceTitle: model.resolveResourceTitle, workspaceId: model.workspaceId })}</div>
       </article>
     {/each}

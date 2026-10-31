@@ -47,7 +47,7 @@ func chatCall(t *testing.T, m *agentManager, w serveWorkspace, resource, user, o
 	req := httptest.NewRequest(method, path, bytes.NewReader(data))
 	req.Header.Set(workspaceUserHeader, user)
 	if agent {
-		c, err := loadDialogue(w.Path, dialoguePrefix+chatID(resource, user))
+		c, err := loadDialogue(w.Path, dialoguePrefix+sharedChatID(resource))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -70,7 +70,7 @@ func TestChatMessagePaginationAndLegacyResponses(t *testing.T) {
 	resource, user := "project1.task1", "disksing"
 	mustChatOK(t, chatCall(t, m, w, resource, user, "open", chatRequest{}, false))
 	chatMu.Lock()
-	c, err := loadChatLocked(w.Path, chatID(resource, user))
+	c, err := loadChatLocked(w.Path, sharedChatID(resource))
 	if err != nil {
 		chatMu.Unlock()
 		t.Fatal(err)
@@ -101,7 +101,7 @@ func TestChatMessagePaginationAndLegacyResponses(t *testing.T) {
 		}
 		return page
 	}
-	ids := func(messages []chatMessage) string {
+	ids := func(messages []publicChatMessage) string {
 		var result []string
 		for _, message := range messages {
 			result = append(result, message.ID)
@@ -159,7 +159,7 @@ func TestChatLifecycleIsolationAndOutboxReplay(t *testing.T) {
 	body := chatRequest{ID: "request-1", Text: "Please work in the background"}
 	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "messages", body, false))
 	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "messages", body, false))
-	c, _ := loadDialogue(w.Path, dialoguePrefix+chatID(resource, "disksing"))
+	c, _ := loadDialogue(w.Path, dialoguePrefix+sharedChatID(resource))
 	if len(c.Messages) != 1 || len(c.Outbox) != 1 {
 		t.Fatalf("duplicate input: %#v", c)
 	}
@@ -193,8 +193,9 @@ func TestChatLifecycleIsolationAndOutboxReplay(t *testing.T) {
 	}
 	other := chatCall(t, m, w, resource, "other", "", nil, false)
 	mustChatOK(t, other)
-	if strings.Contains(other.Body.String(), body.Text) {
-		t.Fatal("chat leaked across users")
+	var shared publicChat
+	if err := json.Unmarshal(other.Body.Bytes(), &shared); err != nil || len(shared.Messages) != 1 || shared.Messages[0].Text != body.Text || shared.Messages[0].Sender != "disksing" {
+		t.Fatal("shared input or sender missing for other user")
 	}
 	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "close", chatRequest{}, false))
 	if got := chatCall(t, m, w, resource, "disksing", "messages", chatRequest{ID: "late", Text: "late"}, false); got.Code != 409 {
@@ -211,7 +212,7 @@ func TestChatAgentReplyCapabilityAndIsolation(t *testing.T) {
 	m, w := chatTestManager(t)
 	resource := "project1.task1"
 	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "open", chatRequest{}, false))
-	c, _ := loadDialogue(w.Path, dialoguePrefix+chatID(resource, "disksing"))
+	c, _ := loadDialogue(w.Path, dialoguePrefix+sharedChatID(resource))
 	publish := chatRequest{ID: "reply-1", Text: "Work completed."}
 	if r := chatCall(t, m, w, resource, "disksing", "publish", publish, false); r.Code != 403 {
 		t.Fatal(r.Code)
@@ -239,8 +240,8 @@ func TestChatAgentReplyCapabilityAndIsolation(t *testing.T) {
 	}
 	mustChatOK(t, chatCall(t, m, w, resource, "other", "open", chatRequest{}, false))
 	other := chatCall(t, m, w, resource, "other", "", nil, false)
-	if strings.Contains(other.Body.String(), publish.Text) {
-		t.Fatal("reply leaked across users")
+	if !strings.Contains(other.Body.String(), publish.Text) {
+		t.Fatal("shared reply missing for other user")
 	}
 	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "close", chatRequest{}, false))
 	if call(resource, c.Token, "") != 409 {
@@ -266,7 +267,7 @@ func TestChatBindingDoesNotOpenAndInboxDiscarded(t *testing.T) {
 	if got := chatCall(t, m, w, "project1.task1", "disksing", "binding", chatRequest{Binding: app.AgentBinding{Kind: "agent", Name: "example"}}, false); got.Code != 409 {
 		t.Fatal(got.Code)
 	}
-	c, _ := loadDialogue(w.Path, dialoguePrefix+chatID("project1.task1", "disksing"))
+	c, _ := loadDialogue(w.Path, dialoguePrefix+sharedChatID("project1.task1"))
 	if c.Open || c.Epoch != 0 {
 		t.Fatal("model selection opened chat")
 	}
@@ -331,7 +332,7 @@ func TestChatUsesExecutionRuntimeWhileBusyAndAfterReopen(t *testing.T) {
 		if current.GenerationID != original.GenerationID {
 			t.Fatal("chat replaced running execution")
 		}
-		c, _ := loadDialogue(w.Path, dialoguePrefix+chatID(resource, "disksing"))
+		c, _ := loadDialogue(w.Path, dialoguePrefix+sharedChatID(resource))
 		if _, found, _ := currentResourceGeneration(w.Path, c.address()); found {
 			t.Fatal("dialogue generation created")
 		}
@@ -343,7 +344,7 @@ func TestChatUsesExecutionRuntimeWhileBusyAndAfterReopen(t *testing.T) {
 				fake.mu.Lock()
 				input := fake.messageInputs[message.ID]
 				fake.mu.Unlock()
-				if !strings.Contains(input.Text, "pua chat publish --reply-to="+c.ID+"."+c.Token) || !strings.Contains(input.Text, "NEVER automatic public replies") {
+				if !strings.Contains(input.Text, "pua chat publish --reply-to="+c.Token) || !strings.Contains(input.Text, "NEVER automatic public replies") {
 					t.Fatal("reply instructions missing")
 				}
 				if message.ActualMode != resourceMessageModeSteer {
@@ -367,7 +368,7 @@ func TestChatUsesExecutionRuntimeWhileBusyAndAfterReopen(t *testing.T) {
 		}
 		mustChatOK(t, chatCall(t, m, w, resource, "disksing", "open", chatRequest{}, false))
 	}
-	c, _ := loadDialogue(w.Path, dialoguePrefix+chatID(resource, "disksing"))
+	c, _ := loadDialogue(w.Path, dialoguePrefix+sharedChatID(resource))
 	if len(c.Messages) != 4 {
 		t.Fatalf("internal work leaked into Chat: %d", len(c.Messages))
 	}
@@ -377,7 +378,7 @@ func TestChatNotesAndReadCursorWithoutTimer(t *testing.T) {
 	m, w := chatTestManager(t)
 	resource := "project1.task1"
 	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "open", chatRequest{}, false))
-	c, _ := loadDialogue(w.Path, dialoguePrefix+chatID(resource, "disksing"))
+	c, _ := loadDialogue(w.Path, dialoguePrefix+sharedChatID(resource))
 	rec := generationRecord{ID: "timer-gen", GenerationID: "timer-gen", Generation: 1, WorkspaceID: w.ID, ResourceID: c.address(), OwnerResourceID: resource, ChatEpoch: c.Epoch, Status: "idle"}
 	if err := saveGenerationRecord(w.Path, rec); err != nil {
 		t.Fatal(err)
@@ -416,12 +417,12 @@ func TestChatNotesAndReadCursorWithoutTimer(t *testing.T) {
 
 	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "close", chatRequest{}, false))
 	current, _ := loadDialogue(w.Path, c.address())
-	if current.IntervalSeconds != 0 || current.Notes == "" || current.ReadThrough != 1 {
+	if current.IntervalSeconds != 0 || current.Notes == "" || current.ReadCursors["disksing"] != 1 {
 		t.Fatal("closure lost notes/read state or retained timer")
 	}
 }
 
-func TestDeletingUserDisablesTheirDialogue(t *testing.T) {
+func TestDeletingUserDoesNotCloseSharedChat(t *testing.T) {
 	m, w := chatTestManager(t)
 	mustChatOK(t, chatCall(t, m, w, "project1.task1", "disksing", "open", chatRequest{}, false))
 	ws, err := app.OpenWorkspace(w.Path)
@@ -432,27 +433,33 @@ func TestDeletingUserDisablesTheirDialogue(t *testing.T) {
 		t.Fatal(err)
 	}
 	denied := chatCall(t, m, w, "project1.task1", "disksing", "publish", chatRequest{ID: "late", Text: "late"}, true)
-	if denied.Code != 403 {
-		t.Fatalf("deleted user publication: %d", denied.Code)
+	if denied.Code != 200 {
+		t.Fatalf("shared capability stopped after deletion: %d", denied.Code)
 	}
 	if err = m.reconcileWorkspaceChats(context.Background(), w); err != nil {
 		t.Fatal(err)
 	}
-	c, err := loadDialogue(w.Path, dialoguePrefix+chatID("project1.task1", "disksing"))
+	c, err := loadDialogue(w.Path, dialoguePrefix+sharedChatID("project1.task1"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Open || c.Token != "" || c.IntervalSeconds != 0 {
-		t.Fatal("deleted user retains active dialogue")
+	if !c.Open || c.Token == "" || c.IntervalSeconds != 0 {
+		t.Fatal("deleting a user closed the shared chat")
+	}
+	if got := chatCall(t, m, w, "project1.task1", "disksing", "", nil, false); got.Code != 400 {
+		t.Fatal("deleted user can still read")
+	}
+	mustChatOK(t, chatCall(t, m, w, "project1.task1", "other", "", nil, false))
+	if got := chatCall(t, m, w, "project1.task1", "other", "", nil, false); !strings.Contains(got.Body.String(), "late") {
+		t.Fatal("remaining user lost shared history")
 	}
 }
 
 func TestChatLegacyMigrationRetiresTimerAndPreservesDispatchedWork(t *testing.T) {
 	m, w := chatTestManager(t)
 	resource := "project1.task1"
-	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "open", chatRequest{}, false))
-	c, _ := loadDialogue(w.Path, dialoguePrefix+chatID(resource, "disksing"))
-	c.Version = 2
+	c := resourceChat{Version: 2, ID: chatID(resource, "disksing"), ResourceID: resource, User: "disksing",
+		Open: true, Epoch: 1, Token: "old-token", Messages: []chatMessage{}}
 	c.IntervalSeconds = 60
 	c.NextCheckAt = "2020-01-01T00:00:00Z"
 	c.Notes = "legacy audit notes"
@@ -488,6 +495,9 @@ func TestChatLegacyMigrationRetiresTimerAndPreservesDispatchedWork(t *testing.T)
 	_ = c.appendMessage("reply", "agent", "preserved public reply")
 	c.ReadThrough = 2
 	data, _ := json.Marshal(c)
+	if err = os.MkdirAll(filepath.Dir(chatPath(w.Path, c.ID)), 0700); err != nil {
+		t.Fatal(err)
+	}
 	if err = os.WriteFile(chatPath(w.Path, c.ID), data, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -507,9 +517,13 @@ func TestChatLegacyMigrationRetiresTimerAndPreservesDispatchedWork(t *testing.T)
 			t.Fatal(err)
 		}
 	}
-	next, _ := loadDialogue(w.Path, c.address())
-	if next.Version != 3 || next.IntervalSeconds != 0 || next.NextCheckAt != "" || next.Token == c.Token || len(next.Messages) != 5 || next.ReadThrough != 2 || next.Notes != c.Notes {
+	next, _ := loadDialogue(w.Path, dialoguePrefix+sharedChatID(resource))
+	if next.Version != 4 || next.IntervalSeconds != 0 || next.NextCheckAt != "" || next.Token == c.Token || len(next.Messages) != 5 || next.ReadCursors["disksing"] != 5 || len(next.LegacyUnread["disksing"]) != 1 {
 		t.Fatal("migration lost history or retained old authority/timer")
+	}
+	backup, err := os.ReadFile(filepath.Join(workspacepath.ControlDir(w.Path), "chats-legacy-backup", c.ID+".json"))
+	if err != nil || !bytes.Equal(backup, data) {
+		t.Fatal("migration did not preserve the original record and notes")
 	}
 	mailbox, _ := loadResourceMailboxForResource(w.Path, resource)
 	if len(mailbox.Messages) != 3 {
@@ -569,7 +583,7 @@ func TestChatReadOpenAndReconcileNeverScheduleChecks(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		c, err := loadDialogue(w.Path, dialoguePrefix+chatID(resource, "disksing"))
+		c, err := loadDialogue(w.Path, dialoguePrefix+sharedChatID(resource))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -609,13 +623,18 @@ func TestChatStreamUserSelectionIsScopedAndValidated(t *testing.T) {
 func TestChatAndEventReadCursorsRemainIndependentPerUser(t *testing.T) {
 	m, w := chatTestManager(t)
 	resource := "project1.task1"
-	c := resourceChat{ID: chatID(resource, "disksing"), ResourceID: resource, User: "disksing", Open: true, Epoch: 1,
-		Messages: []chatMessage{{ID: "a", Role: "agent", Text: "first"}, {ID: "u", Role: "user", Text: "mine"}, {ID: "b", Role: "agent", Text: "second"}}}
+	c := resourceChat{ID: sharedChatID(resource), ResourceID: resource, User: "disksing", Open: true, Epoch: 1,
+		Messages:      []chatMessage{{ID: "a", Role: "agent", Text: "first"}, {ID: "u", Role: "user", Text: "mine"}, {ID: "b", Role: "agent", Text: "second"}},
+		LegacySources: map[string]legacyChatSource{chatID(resource, "disksing"): {User: "disksing"}}}
 	if err := saveChatLocked(w.Path, c); err != nil {
 		t.Fatal(err)
 	}
+	if err := saveChatLocked(w.Path, resourceChat{ID: chatID(resource, "disksing"), ResourceID: resource, User: "disksing"}); err != nil {
+		t.Fatal(err)
+	}
 	records := []generationRecord{}
-	for i, id := range []string{resource, c.address()} {
+	legacyAddress := dialoguePrefix + chatID(resource, "disksing")
+	for i, id := range []string{resource, legacyAddress} {
 		generation := fmt.Sprintf("gen-read-%d", i)
 		records = append(records, generationRecord{ID: generation, GenerationID: generation, WorkspaceID: w.ID, ResourceID: id, Generation: 1, AgentHubSessionID: "session-" + generation, Status: "idle", TurnNumber: 3 + i, Cwd: w.Path})
 	}
@@ -661,8 +680,8 @@ func TestChatAndEventReadCursorsRemainIndependentPerUser(t *testing.T) {
 	}
 	assertCounts(2, 3, 4)
 	other := snapshot("other")
-	if other.Chat != nil || other.DialogueEvents != nil || other.UnreadCount != 3 {
-		t.Fatalf("user state leaked: %+v", other)
+	if other.Chat == nil || other.Chat.UnreadCount != 2 || other.DialogueEvents == nil || other.DialogueEvents.UnreadCount != 0 || other.UnreadCount != 3 {
+		t.Fatalf("shared chat or independent user state missing: %+v", other)
 	}
 	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "read", chatRequest{ID: "a"}, false))
 	assertCounts(1, 3, 4)
@@ -702,7 +721,7 @@ func TestChatAndEventReadCursorsRemainIndependentPerUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if *state.ResourceStates[resource].ReadTurnNumber != 2 || *state.ResourceStates[c.address()].ReadTurnNumber != 4 {
+	if *state.ResourceStates[resource].ReadTurnNumber != 2 || *state.ResourceStates[legacyAddress].ReadTurnNumber != 4 {
 		t.Fatalf("persisted cursors: %+v", state.ResourceStates)
 	}
 }
@@ -718,7 +737,7 @@ func TestChatRetiresOnlyLegacySessionAndNeverResumesIt(t *testing.T) {
 	_ = acceptTestResourceMessage(t, m, w, resource, "execution continues", resourceMessageModeSteer, nil)
 	execution, _, _ := currentResourceGeneration(w.Path, resource)
 	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "open", chatRequest{}, false))
-	c, _ := loadDialogue(w.Path, dialoguePrefix+chatID(resource, "disksing"))
+	c, _ := loadDialogue(w.Path, dialoguePrefix+sharedChatID(resource))
 	legacy := execution
 	legacy.ID = "legacy-active"
 	legacy.GenerationID = "legacy-active"

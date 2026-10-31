@@ -67,10 +67,13 @@ func runChat(args []string) error {
 		return err
 	}
 	capability := strings.SplitN(replyTo, ".", 2)
-	if len(capability) != 2 || capability[0] == "" || capability[1] == "" {
+	if len(capability) == 1 && capability[0] != "" {
+		client.chatToken = capability[0]
+	} else if len(capability) == 2 && capability[0] != "" && capability[1] != "" {
+		client.chatID, client.chatToken = capability[0], capability[1]
+	} else {
 		return errors.New(chatUsage)
 	}
-	client.chatID, client.chatToken = capability[0], capability[1]
 	path := fmt.Sprintf("/api/workspaces/%s/resources/%s/chat", url.PathEscape(client.workspaceID), url.PathEscape(os.Getenv("PUA_RESOURCE_ID")))
 	if operation != "" {
 		path += "/" + operation

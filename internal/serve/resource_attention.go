@@ -653,9 +653,13 @@ func (s *server) enrichTreeResourceActivity(workspacePath string, tree *workspac
 		return fmt.Errorf("load resource generations for activity: %w", err)
 	}
 	chats := make(map[string]resourceChat)
-	// Read only this user's resource chats; tree reads never create chats or wake models.
+	// Migrate existing chats without creating unrelated resources or waking models.
 	chatMu.Lock()
-	paths, chatErr := filepath.Glob(filepath.Join(workspacepath.ControlDir(workspacePath), "chats", "*.json"))
+	chatErr := migrateExistingChatsLocked(workspacePath)
+	var paths []string
+	if chatErr == nil {
+		paths, chatErr = filepath.Glob(filepath.Join(workspacepath.ControlDir(workspacePath), "chats", "*.json"))
+	}
 	if chatErr == nil {
 		for _, path := range paths {
 			c, err := loadChatLocked(workspacePath, strings.TrimSuffix(filepath.Base(path), ".json"))
@@ -663,7 +667,7 @@ func (s *server) enrichTreeResourceActivity(workspacePath string, tree *workspac
 				chatErr = err
 				break
 			}
-			if c.User == selectedUserName(userNames) && c.Epoch > 0 {
+			if c.Version >= 4 && c.Epoch > 0 {
 				chats[c.ResourceID] = c
 			}
 		}
@@ -677,10 +681,15 @@ func (s *server) enrichTreeResourceActivity(workspacePath string, tree *workspac
 	applyState = func(item *resourceSnapshot) {
 		resourceID := normalizedResourceID(item.ID)
 		if c, ok := chats[resourceID]; ok {
-			item.Chat = c.snapshot()
-			latest := latestCompletedTurns[c.address()].TurnNumber
+			item.Chat = c.snapshot(selectedUserName(userNames))
+			legacyAddress := c.address()
+			legacyID := chatID(c.ResourceID, selectedUserName(userNames))
+			if _, found := c.LegacySources[legacyID]; found {
+				legacyAddress = dialoguePrefix + legacyID
+			}
+			latest := latestCompletedTurns[legacyAddress].TurnNumber
 			read := 0
-			if cursor := resourceStates[c.address()].ReadTurnNumber; cursor != nil {
+			if cursor := resourceStates[legacyAddress].ReadTurnNumber; cursor != nil {
 				read = *cursor
 			}
 			item.DialogueEvents = &sessionReadSnapshot{LatestTurnNumber: latest, ReadTurnNumber: read, UnreadCount: max(0, latest-read)}
@@ -736,11 +745,13 @@ func (s *server) enrichTreeResourceActivity(workspacePath string, tree *workspac
 		if item.Chat != nil {
 			unreadItem := item
 			chat := chats[normalizedResourceID(item.ID)]
+			user := selectedUserName(userNames)
+			legacyUnread := chat.legacyUnreadSet(user)
 			for i, message := range chat.Messages {
 				if resourceActivitySortTime(message.CreatedAt).After(resourceActivitySortTime(unreadItem.LatestChatAt)) {
 					unreadItem.LatestChatAt = message.CreatedAt
 				}
-				if i >= chat.ReadThrough && message.Role == "agent" && resourceActivitySortTime(message.CreatedAt).After(resourceActivitySortTime(unreadItem.LatestUnreadChatAt)) {
+				if chat.unread(user, i, message, legacyUnread) && resourceActivitySortTime(message.CreatedAt).After(resourceActivitySortTime(unreadItem.LatestUnreadChatAt)) {
 					unreadItem.LatestUnreadChatAt = message.CreatedAt
 				}
 			}

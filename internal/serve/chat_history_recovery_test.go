@@ -27,7 +27,7 @@ func TestChatReplyRestoredFromRetiredGenerationHistory(t *testing.T) {
 	resource := "project1.task1"
 	mustChatOK(t, chatCall(t, m, w, resource, "reader", "open", chatRequest{}, false))
 	mustChatOK(t, chatCall(t, m, w, resource, "reader", "messages", chatRequest{ID: "source-request", Text: "Notify me when done"}, false))
-	c, err := loadDialogue(w.Path, dialoguePrefix+chatID(resource, "reader"))
+	c, err := loadDialogue(w.Path, dialoguePrefix+sharedChatID(resource))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,12 +71,11 @@ func TestChatReplyRestoredFromRetiredGenerationHistory(t *testing.T) {
 	if !ok {
 		t.Fatal("history lost reply instructions")
 	}
-	capability := strings.SplitN(strings.Fields(tail)[0], ".", 2)
+	capability := strings.Fields(tail)[0]
 	publish := func() *httptest.ResponseRecorder {
 		data, _ := json.Marshal(chatRequest{ID: "result-stable", Text: "Result complete"})
 		req := httptest.NewRequest(http.MethodPost, "/api/workspaces/"+w.ID+"/resources/"+resource+"/chat/publish", bytes.NewReader(data))
-		req.Header.Set("X-PUA-Chat", capability[0])
-		req.Header.Set("X-PUA-Chat-Token", capability[1])
+		req.Header.Set("X-PUA-Chat-Token", capability)
 		response := httptest.NewRecorder()
 		m.server.handleWorkspace(response, req)
 		return response

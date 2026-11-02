@@ -61,15 +61,16 @@ type MessageSender struct {
 // controls. The remaining provenance and correlation fields are accepted and
 // replayed only for schema-v1 compatibility.
 type MessageInput struct {
-	SchemaVersion int             `json:"schemaVersion,omitempty"`
-	Text          string          `json:"text"`
-	Payload       json.RawMessage `json:"payload,omitempty"`
-	Steer         bool            `json:"steer"`
-	MessageID     string          `json:"messageId,omitempty"`
-	Role          MessageRole     `json:"role,omitempty"`
-	Sender        *MessageSender  `json:"sender,omitempty"`
-	ReplyTo       string          `json:"replyTo,omitempty"`
-	CorrelationID string          `json:"correlationId,omitempty"`
+	ExpectedTurnID string          `json:"expectedTurnId,omitempty"`
+	SchemaVersion  int             `json:"schemaVersion,omitempty"`
+	Text           string          `json:"text"`
+	Payload        json.RawMessage `json:"payload,omitempty"`
+	Steer          bool            `json:"steer"`
+	MessageID      string          `json:"messageId,omitempty"`
+	Role           MessageRole     `json:"role,omitempty"`
+	Sender         *MessageSender  `json:"sender,omitempty"`
+	ReplyTo        string          `json:"replyTo,omitempty"`
+	CorrelationID  string          `json:"correlationId,omitempty"`
 }
 
 // MessageDeliveryEventData records attempts to hand one durable canonical
@@ -130,6 +131,9 @@ func (e *MessageInputError) Error() string {
 // legacy provenance contract. Schema v2 never inspects Payload contents beyond
 // requiring one valid JSON value.
 func NormalizeMessageInput(value MessageInput) (MessageInput, error) {
+	if value.ExpectedTurnID != "" && (!value.Steer || value.SchemaVersion != MessageSchemaOpaquePayload) {
+		return MessageInput{}, &MessageInputError{Code: "invalid_expected_turn", Field: "expectedTurnId", Message: "expectedTurnId requires a schema-v2 steer input"}
+	}
 	if strings.TrimSpace(value.Text) == "" {
 		return MessageInput{}, &MessageInputError{
 			Code: "invalid_message_text", Field: "text", Message: "message text is required",
@@ -308,7 +312,8 @@ type Source struct {
 // Session. It is captured with the Session so archived Sessions remain
 // self-describing even when the daemon configuration later changes.
 type InputCapabilities struct {
-	Steer bool `json:"steer"`
+	Steer           bool `json:"steer"`
+	TurnScopedSteer bool `json:"turnScopedSteer,omitempty"`
 }
 
 // Event is a durable canonical session event. StartTime is populated for a
@@ -389,6 +394,7 @@ type TurnSummary struct {
 // count/timing metadata; callers use the bounded Event range endpoint to
 // expand their raw details.
 type TurnItem struct {
+	Complete             bool            `json:"complete,omitempty"`
 	Type                 string          `json:"type"`
 	Role                 MessageRole     `json:"role,omitempty"`
 	Sender               *MessageSender  `json:"sender,omitempty"`

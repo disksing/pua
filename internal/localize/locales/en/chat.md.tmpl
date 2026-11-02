@@ -7,7 +7,7 @@ Keep durable background, scope, and decisions in project.md / task.md. Chat / Hi
 ## Notification rules
 
 - Notify when a question has an answer, promised work finishes, a user decision is needed, or the expected time or plan changes materially; honor explicit user timing.
-- Track work and notification status separately. Progress updates do not discharge the final reply. Mark published only after publish succeeds; published does not mean read.
+- Track work and notification status separately. Progress updates do not discharge the final reply. Mark published only after automatic synchronization or legacy publish succeeds; published does not mean read.
 - Record the next action and wake-up source while waiting. Register an actual Scheduler condition for timed checks; writing this file does not schedule work.
 - Do not repeat notifications without new information. Record blocked publication when eligibility expires; do not redirect to another user or resource or retry indefinitely.
 

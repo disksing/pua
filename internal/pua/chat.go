@@ -11,11 +11,14 @@ import (
 	"strings"
 )
 
-const chatUsage = "usage: pua chat <show|notes|publish> --reply-to=<capability> [--id=<stable-id>] [text]"
+const chatUsage = "usage: pua chat show --work=<opener-work-id> | pua chat <show|notes|publish> --reply-to=<legacy-capability> [--id=<stable-id>] [text]"
 
 func runChat(args []string) error {
 	if len(args) == 0 {
 		return errors.New(chatUsage)
+	}
+	if args[0] == "show" && len(args) == 2 && strings.HasPrefix(args[1], "--work=") {
+		return runTurn([]string{"chat", args[1]})
 	}
 	if os.Getenv("PUA_CHANNEL") == "dialogue" || os.Getenv("PUA_RESOURCE_ID") == "" {
 		return errors.New("chat commands require the resource execution Agent and an explicit --reply-to capability")

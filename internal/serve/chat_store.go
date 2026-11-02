@@ -45,6 +45,7 @@ type chatMessage struct {
 	LegacyIndex   int    `json:"legacyIndex,omitempty"`
 }
 type chatDelivery struct {
+	Automatic    bool   `json:"automatic,omitempty"`
 	ID           string `json:"id"`
 	Target       string `json:"target"`
 	Text         string `json:"text"`
@@ -466,5 +467,9 @@ func (c *resourceChat) appendUserInput(id, text string, context ...string) error
 		}
 	}
 	c.Messages = append(c.Messages, chatMessage{ID: publicID, ClientID: id, Role: "user", Sender: user, OriginRoute: originRoute, Text: text, CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)})
-	return c.queue("input-"+publicID, c.ResourceID, c.prompt("User message "+id+" from "+user+":\n"+text, user), user)
+	if err := c.queue("input-"+publicID, c.ResourceID, text, user); err != nil {
+		return err
+	}
+	c.Outbox[len(c.Outbox)-1].Automatic = true
+	return nil
 }

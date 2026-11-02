@@ -2316,6 +2316,7 @@ func TestStatusCapabilitiesAreBackedByHTTPBehavior(t *testing.T) {
 		CapabilityTurnsStableIndex,
 		CapabilityTurnsMaterialized,
 		CapabilityTurnsActivityItems,
+		CapabilityTurnScopedSteer,
 		CapabilityEventsCanonicalTerminal,
 		CapabilityRecoveryClosedTurns,
 		CapabilitySessionLaunchEnvironment,

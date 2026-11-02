@@ -151,7 +151,8 @@ type agentHubSource struct {
 }
 
 type agentHubInputCapabilities struct {
-	Steer bool `json:"steer"`
+	Steer           bool `json:"steer"`
+	TurnScopedSteer bool `json:"turnScopedSteer,omitempty"`
 }
 
 type agentHubSession struct {
@@ -188,14 +189,15 @@ type agentHubMessageSender struct {
 // agentHubInboundMessage is the schema-v2 wire shape plus deprecated schema-v1
 // fields used to recognize existing durable inputs during rolling upgrades.
 type agentHubInboundMessage struct {
-	SchemaVersion int                    `json:"schemaVersion,omitempty"`
-	Text          string                 `json:"text"`
-	Payload       json.RawMessage        `json:"payload,omitempty"`
-	Role          string                 `json:"role,omitempty"`
-	Sender        *agentHubMessageSender `json:"sender,omitempty"`
-	Steer         bool                   `json:"steer,omitempty"`
-	MessageID     string                 `json:"messageId,omitempty"`
-	TurnID        string                 `json:"-"`
+	ExpectedTurnID string                 `json:"expectedTurnId,omitempty"`
+	SchemaVersion  int                    `json:"schemaVersion,omitempty"`
+	Text           string                 `json:"text"`
+	Payload        json.RawMessage        `json:"payload,omitempty"`
+	Role           string                 `json:"role,omitempty"`
+	Sender         *agentHubMessageSender `json:"sender,omitempty"`
+	Steer          bool                   `json:"steer,omitempty"`
+	MessageID      string                 `json:"messageId,omitempty"`
+	TurnID         string                 `json:"-"`
 }
 
 type agentHubCreateSessionRequest struct {
@@ -273,6 +275,7 @@ func semanticAgentHubEvent(event agentHubSemanticEvent) agentHubEvent {
 }
 
 type agentHubTurnItem struct {
+	Complete             bool                   `json:"complete,omitempty"`
 	Type                 string                 `json:"type"`
 	Role                 string                 `json:"role,omitempty"`
 	Sender               *agentHubMessageSender `json:"sender,omitempty"`

@@ -65,7 +65,7 @@ func TestCodexClassifiesItemLifecycleNotifications(t *testing.T) {
 		want   string
 	}{
 		{method: "item/started", params: `{"item":{"id":"user-1","type":"userMessage"}}`, want: "provider.event"},
-		{method: "item/completed", params: `{"item":{"id":"agent-1","type":"agentMessage"}}`, want: "provider.event"},
+		{method: "item/completed", params: `{"item":{"id":"agent-1","type":"agentMessage"}}`, want: "message.assistant.completed"},
 		{method: "item/updated", params: `{"item":{"id":"reasoning-1","type":"reasoning"}}`, want: "provider.event"},
 		{method: "item/started", params: `{"item":{"id":"search-1","type":"webSearch"}}`, want: "tool.call"},
 		{method: "item/completed", params: `{"item":{"id":"command-1","type":"commandExecution"}}`, want: "tool.call"},
@@ -351,8 +351,8 @@ func TestPiNormalizesSnapshotOnlyMessageUpdates(t *testing.T) {
 		"message":{"content":[{"type":"thinking","thinking":"reasoning result"},{"type":"text","text":"answer result"}]}
 	}`))
 
-	if len(events) != 2 {
-		t.Fatalf("snapshot-only updates emitted %d events, want one reasoning and one answer: %+v", len(events), events)
+	if len(events) != 3 || events[2].Type != "message.assistant.completed" {
+		t.Fatalf("snapshot-only updates must emit reasoning, answer and boundary: %+v", events)
 	}
 	want := []struct {
 		typeName string
@@ -387,8 +387,8 @@ func TestPiDoesNotDuplicateMessageEndAfterDeltas(t *testing.T) {
 	value.event("message_update", json.RawMessage(`{"assistantMessageEvent":{"type":"text_delta","contentIndex":2,"delta":" world"},"message":{"content":[{"text":"larger snapshot"}]}}`))
 	value.event("message_update", json.RawMessage(`{"assistantMessageEvent":{"type":"text_end","contentIndex":2,"content":"Hello world","partial":{"content":[]}},"message":{"content":[{"text":"Hello world"}]}}`))
 
-	if len(events) != 2 {
-		t.Fatalf("stream with deltas emitted %d events, want only the two fragments: %+v", len(events), events)
+	if len(events) != 3 || events[2].Type != "message.assistant.completed" {
+		t.Fatalf("stream must emit two fragments and a boundary: %+v", events)
 	}
 	for i, expected := range []string{"Hello", " world"} {
 		data, ok := events[i].Data.(map[string]any)

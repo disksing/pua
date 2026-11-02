@@ -421,6 +421,9 @@ func updateTaskAgentsMD(root, dir string, resource Resource, language string) er
 	if err != nil {
 		return err
 	}
+	if updated == content {
+		return nil
+	}
 	return os.WriteFile(path, []byte(updated), 0o644)
 }
 

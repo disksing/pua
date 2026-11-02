@@ -69,7 +69,7 @@ func TestSharedChatConcurrentSendersReadCursorsAndEpoch(t *testing.T) {
 	}
 	for _, message := range mailbox.Messages {
 		if message.Sender == nil || !senders[message.Sender.Name] ||
-			!strings.Contains(message.Text, "user "+message.Sender.Name) {
+			message.Causation == nil || !message.Causation.AutomaticChat || message.Causation.ChatEpoch == 0 {
 			t.Fatal("execution input lost its authenticated sender")
 		}
 	}

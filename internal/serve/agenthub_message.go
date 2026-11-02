@@ -177,6 +177,19 @@ func providerOpenerResponse(role string, _ *resourceMailboxMessage) string {
 }
 
 func providerMessageTextWithContext(message resourceMailboxMessage, steer bool) string {
+	if c := message.ProviderContext; c != nil && c.Protocol == 1 {
+		context := ""
+		if c.ParentWork != "" {
+			context = fmt.Sprintf("\nSuspended work: %s. History: %s. Use turn cancel-resume if this input cancels it.", c.ParentWork, c.ParentHistory)
+		}
+		if c.PreviousResult != "" {
+			context += "\n" + c.PreviousResult
+		}
+		return strings.TrimSpace(localize.MustRender(c.Language, "turn-opener.md", map[string]any{
+			"Party":   providerMessageParty(c.OpenerRole, c.OpenerSender, c.Language),
+			"Visible": c.ChatVisible, "WorkID": c.WorkID, "Context": context, "Text": message.Text,
+		}))
+	}
 	return providerMessageTextWithLegacyContext(message, steer, false)
 }
 
@@ -297,6 +310,30 @@ func (m *agentManager) ensureProviderMessageContext(ctx context.Context, workspa
 	contextValue := providerMessageContext{
 		Language: language, OpenerRole: normalizedProviderMessageRole(message.Role),
 		OpenerSender: normalizedMessageSender(message.Sender), OpenerResponse: providerOpenerResponse(message.Role, &message),
+	}
+	// Existing frozen inputs retain their old presentation during upgrades.
+	if message.ActualMode != resourceMessageModeSteer &&
+		(message.Type != "user_chat_input" || (message.Causation != nil && message.Causation.AutomaticChat)) {
+		contextValue.Protocol, contextValue.WorkID = 1, message.ID
+		if message.Causation != nil {
+			contextValue.ChatEpoch = message.Causation.ChatEpoch
+			contextValue.ChatVisible = message.Causation.AutomaticChat
+		}
+		if message.Type == "user_chat_input" {
+			contextValue.OpenerRole = "user"
+		}
+		file, e := loadTurnWork(workspace.Path, message.ResourceID)
+		if e != nil {
+			return resourceMailboxMessage{}, e
+		}
+		for _, work := range file.Works {
+			if work.State == "suspended" && work.TargetID == message.ID {
+				contextValue.ParentWork, contextValue.ParentHistory = work.ID, work.History
+			}
+			if work.State == "cancelled" && work.Previews[message.ID] && work.OutputDone {
+				contextValue.PreviousResult = "The previous work was already cancelled after your preview. History: " + work.History
+			}
+		}
 	}
 	if message.ActualMode == resourceMessageModeSteer {
 		contextValue.OpenerUnknown = true

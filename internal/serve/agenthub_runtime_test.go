@@ -21,6 +21,7 @@ import (
 )
 
 type runtimeFakeAgentHub struct {
+	materializeTurns     bool
 	mu                   sync.Mutex
 	sessions             map[string]agentHubSession
 	events               map[string][]agentHubEvent
@@ -75,6 +76,10 @@ func newRuntimeFakeAgentHub() *runtimeFakeAgentHub {
 }
 
 func (f *runtimeFakeAgentHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/v1/status" {
+		writeRuntimeFakeJSON(w, map[string]any{"apiVersion": "1", "capabilities": []string{"messages.turn-scoped-steer"}})
+		return
+	}
 	if r.URL.Path == "/v1/agents" && r.Method == http.MethodGet {
 		f.mu.Lock()
 		rejected := f.rejectAgentName
@@ -207,6 +212,11 @@ func (f *runtimeFakeAgentHub) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 			messageHook(id, body)
 		}
 		f.mu.Lock()
+		if f.materializeTurns && body.ExpectedTurnID != "" && f.sessions[id].CurrentTurnID != body.ExpectedTurnID {
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusConflict)
+			return
+		}
 		f.messageSteers = append(f.messageSteers, body.Steer)
 		_, presentationRole, presentationSender := puaMessagePresentation(body.Text, body.Role, body.Sender, body.Payload)
 		f.messageRoles = append(f.messageRoles, presentationRole)
@@ -229,6 +239,18 @@ func (f *runtimeFakeAgentHub) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 			f.messageInputs[body.MessageID] = body
 		}
 		inputData := fakeMessageInputData(body)
+		if f.materializeTurns && !body.Steer {
+			current := f.sessions[id]
+			current.CurrentTurnID = fmt.Sprintf("turn-%d", len(f.events[id])+1)
+			f.sessions[id] = current
+			if f.turns[id] == nil {
+				f.turns[id] = map[string]agentHubTurn{}
+			}
+			f.turns[id][current.CurrentTurnID] = agentHubTurn{
+				ID: current.CurrentTurnID, TurnID: current.CurrentTurnID, Status: "active",
+				TriggerMessageID: body.MessageID, TriggerPayload: body.Payload,
+			}
+		}
 		f.appendLocked(id, "message.input", inputData)
 		f.appendLocked(id, "turn.started", map[string]any{"text": body.Text})
 		session := f.sessions[id]
@@ -431,6 +453,10 @@ func (f *runtimeFakeAgentHub) create(w http.ResponseWriter, r *http.Request) {
 		ID: id, Title: request.Title, Cwd: request.Cwd, AgentName: request.AgentName,
 		LaunchEnvironment: request.LaunchEnvironment, Source: request.Source, Provider: "fake",
 		State: "ready", CreatedAt: time.Now().Format(time.RFC3339), UpdatedAt: time.Now().Format(time.RFC3339),
+	}
+	if f.materializeTurns {
+		session.InputCapabilities.TurnScopedSteer = true
+		session.InputCapabilities.Steer = true
 	}
 	if f.createStartupError {
 		session.State = "stopped"
@@ -1304,7 +1330,7 @@ func TestAgentHubManualMessagesCarryBrowserUserProvenance(t *testing.T) {
 		}
 	}
 	if initial.Type == "" || initialMessage.SchemaVersion != agentHubOpaqueMessageSchema ||
-		initialMessage.Text != "Message from user \"Ada Lovelace\" [sender receives: progress + final reply]:\nhello" || initialPayload.Role != "user" ||
+		!strings.Contains(initialMessage.Text, "From user \"Ada Lovelace\" | audience: internal") || initialPayload.Role != "user" ||
 		initialPayload.Sender == nil || initialPayload.Sender.Name != "Ada Lovelace" {
 		t.Fatalf("initial opaque message = message %#v payload %#v; events=%#v", initialMessage, initialPayload, initialEvents)
 	}

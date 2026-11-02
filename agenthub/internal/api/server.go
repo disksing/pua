@@ -32,6 +32,7 @@ import (
 const APIVersion = protocol.APIMajor
 
 const (
+	CapabilityTurnScopedSteer          = protocol.CapabilityTurnScopedSteer
 	CapabilitySessionSource            = protocol.CapabilitySessionSource
 	CapabilitySessionSourceMetadata    = protocol.CapabilitySessionSourceMetadata
 	CapabilitySessionIdempotentCreate  = protocol.CapabilitySessionIdempotentCreate
@@ -282,6 +283,7 @@ func (s *Server) capabilities() []string {
 	}
 	if s.runtime != nil {
 		capabilities = append(capabilities,
+			CapabilityTurnScopedSteer,
 			CapabilityEventsCanonicalTerminal,
 			CapabilityRecoveryClosedTurns,
 			CapabilitySessionLaunchEnvironment,
@@ -823,19 +825,21 @@ func (s *Server) sessionOps() []sessionOp {
 // initialMessage. Schema v2 carries opaque caller payload. The provenance
 // fields below are accepted only by the schema-v1 compatibility adapter.
 type inboundMessageRequest struct {
-	SchemaVersion int             `json:"schemaVersion"`
-	Text          string          `json:"text"`
-	Payload       json.RawMessage `json:"payload"`
-	Role          string          `json:"role"`
-	Sender        json.RawMessage `json:"sender"`
-	Steer         bool            `json:"steer"`
-	MessageID     string          `json:"messageId"`
-	ReplyTo       string          `json:"replyTo"`
-	CorrelationID string          `json:"correlationId"`
+	ExpectedTurnID string          `json:"expectedTurnId,omitempty"`
+	SchemaVersion  int             `json:"schemaVersion"`
+	Text           string          `json:"text"`
+	Payload        json.RawMessage `json:"payload"`
+	Role           string          `json:"role"`
+	Sender         json.RawMessage `json:"sender"`
+	Steer          bool            `json:"steer"`
+	MessageID      string          `json:"messageId"`
+	ReplyTo        string          `json:"replyTo"`
+	CorrelationID  string          `json:"correlationId"`
 }
 
 func (request inboundMessageRequest) hasMessageIntent() bool {
 	return strings.TrimSpace(request.Text) != "" ||
+		request.ExpectedTurnID != "" ||
 		request.SchemaVersion != 0 || len(bytes.TrimSpace(request.Payload)) > 0 ||
 		strings.TrimSpace(request.Role) != "" || request.Steer ||
 		len(bytes.TrimSpace(request.Sender)) > 0 || request.MessageID != "" ||
@@ -848,15 +852,16 @@ func (request inboundMessageRequest) messageInput() (session.MessageInput, error
 		return session.MessageInput{}, err
 	}
 	return session.NormalizeMessageInput(session.MessageInput{
-		SchemaVersion: request.SchemaVersion,
-		Text:          request.Text,
-		Payload:       request.Payload,
-		Role:          session.MessageRole(request.Role),
-		Sender:        sender,
-		Steer:         request.Steer,
-		MessageID:     request.MessageID,
-		ReplyTo:       request.ReplyTo,
-		CorrelationID: request.CorrelationID,
+		ExpectedTurnID: request.ExpectedTurnID,
+		SchemaVersion:  request.SchemaVersion,
+		Text:           request.Text,
+		Payload:        request.Payload,
+		Role:           session.MessageRole(request.Role),
+		Sender:         sender,
+		Steer:          request.Steer,
+		MessageID:      request.MessageID,
+		ReplyTo:        request.ReplyTo,
+		CorrelationID:  request.CorrelationID,
 	})
 }
 

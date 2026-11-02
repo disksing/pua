@@ -67,6 +67,13 @@ type resourceMailbox struct {
 // AgentHub persists that payload opaquely for history, while this context is
 // only PUA's deterministic retry input.
 type providerMessageContext struct {
+	ParentWork     string                 `json:"parentWork,omitempty"`
+	ParentHistory  string                 `json:"parentHistory,omitempty"`
+	PreviousResult string                 `json:"previousResult,omitempty"`
+	Protocol       int                    `json:"protocol,omitempty"`
+	WorkID         string                 `json:"workId,omitempty"`
+	ChatEpoch      uint64                 `json:"chatEpoch,omitempty"`
+	ChatVisible    bool                   `json:"chatVisible,omitempty"`
 	Language       string                 `json:"language"`
 	TurnID         string                 `json:"turnId,omitempty"`
 	OpenerRole     string                 `json:"openerRole"`
@@ -119,6 +126,8 @@ type resourceMailboxMessage struct {
 }
 
 type resourceMessageCausation struct {
+	ChatEpoch                 uint64   `json:"chatEpoch,omitempty"`
+	AutomaticChat             bool     `json:"automaticChat,omitempty"`
 	Type                      string   `json:"type"`
 	SourceWorkspaceInstanceID string   `json:"sourceWorkspaceInstanceId"`
 	SourceResourceID          string   `json:"sourceResourceId"`
@@ -1088,6 +1097,9 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 		return resourceErr
 	}
 	if archived {
+		if err := cancelSuspendedTurnWork(workspace.Path, resourceID, "resource archived"); err != nil {
+			return err
+		}
 		mailbox, mailboxErr := loadHotResourceMailbox(workspace.Path, resourceID)
 		if mailboxErr != nil {
 			return mailboxErr
@@ -1102,11 +1114,38 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 		return nil
 	}
 	for iteration := 0; iteration < 32; iteration++ {
+		if iteration == 0 {
+			works, e := loadTurnWork(workspace.Path, resourceID)
+			if e != nil {
+				return e
+			}
+			if len(works.Works) > 0 {
+				_, client, e := m.agentHubRuntimeConfig()
+				if e != nil {
+					return e
+				}
+				if e = m.reconcileTurnWorkLocked(ctx, workspace, resourceID, client); e != nil {
+					return e
+				}
+			}
+		}
 		mailbox, err := loadHotResourceMailbox(workspace.Path, resourceID)
 		if err != nil {
 			return err
 		}
 		message, found := selectPendingMailboxMessage(mailbox, resourceID)
+		selectedID, selectErr := selectedTurnWorkInput(workspace.Path, resourceID)
+		if selectErr != nil {
+			return selectErr
+		}
+		if selectedID != "" && (!found || (message.Status == resourceMessageQueued && message.RequestedMode != resourceMessageModeInterrupt)) {
+			for _, candidate := range mailbox.Messages {
+				if candidate.ID == selectedID && candidate.Status == resourceMessageQueued {
+					message, found = candidate, true
+					break
+				}
+			}
+		}
 		if !found {
 			return nil
 		}
@@ -1219,6 +1258,40 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 		rt.applyAgentHubSessionState(m, session)
 		record = rt.snapshotGeneration()
 		active := session.State == "running" || session.State == "waiting_approval"
+		workFile, workErr := loadTurnWork(workspace.Path, resourceID)
+		if workErr != nil {
+			return workErr
+		}
+		if active && (workFile.active(session.ID, session.CurrentTurnID) != nil ||
+			(message.Causation != nil && message.Causation.AutomaticChat)) &&
+			message.Status == resourceMessageQueued && message.RequestedMode != resourceMessageModeInterrupt {
+			if !message.ModeFrozen || message.ActualMode != resourceMessageModeEnqueue {
+				_, err = updateMailboxMessage(workspace.Path, message.ID, func(current *resourceMailboxMessage) {
+					current.ActualMode, current.ModeFrozen = resourceMessageModeEnqueue, true
+					current.DowngradeReason = "fixed_turn_audience"
+				})
+				if err != nil {
+					return err
+				}
+			}
+			previewCount := 0
+			for _, queued := range mailbox.Messages {
+				if queued.Status == resourceMessageQueued && queued.RequestedMode != resourceMessageModeInterrupt {
+					if activeWork := workFile.active(session.ID, session.CurrentTurnID); activeWork == nil || activeWork.Previews[queued.ID] {
+						continue
+					}
+					previewCount++
+					if previewCount > 8 {
+						break
+					}
+					if err := m.previewQueuedInput(ctx, workspace, session, client, queued); err != nil {
+						recordMailboxFailure(workspace.Path, queued.ID, err)
+						return err
+					}
+				}
+			}
+			return nil
+		}
 		// A queued non-steer input at an inactive boundary is about to create a
 		// new Turn (including a steer that must be downgraded, and an interrupt
 		// after its old Turn has stopped). Evaluate the generation budget and
@@ -1433,6 +1506,9 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 		if err != nil {
 			return err
 		}
+		if err := prepareTurnWork(workspace.Path, resourceID, record.GenerationID, session.ID, message); err != nil {
+			return err
+		}
 		deliveryPlan := lifecyclePlan
 		if err := m.prepareTaskWorkChain(workspace, message, rt); err != nil {
 			return err
@@ -1537,6 +1613,9 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 			return err
 		}
 		rt.applyAgentHubSessionState(m, delivered)
+		if err := bindTurnWork(workspace.Path, resourceID, message.ID, turnID); err != nil {
+			return err
+		}
 		if delivered.State == "running" || delivered.State == "waiting_approval" {
 			// More eligible steer inputs may enter this Turn; enqueue inputs wait.
 			continue
@@ -1685,6 +1764,11 @@ func (m *agentManager) handleTaskState(w http.ResponseWriter, r *http.Request, w
 			return &resourceAPIError{Code: "invalid_request", Message: setErr.Error()}
 		}
 		response = taskStateResponse{ResourceID: task.ID, State: task.State, Note: task.StateNote, StateUpdatedAt: task.StateUpdatedAt}
+		if body.State == app.TaskStatePaused {
+			if err := cancelSuspendedTurnWork(workspace.Path, resourceID, "task paused"); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	if err != nil {

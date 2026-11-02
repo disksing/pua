@@ -376,7 +376,7 @@ func TestResourceMailboxProviderEnvelopeUsesTurnOpenerAndFreezesLanguage(t *test
 	fake.mu.Lock()
 	openerWire := fake.messageInputs[opener.ID]
 	fake.mu.Unlock()
-	if openerWire.Text != "Message from user \"disksing\" [sender receives: progress + final reply]:\nstart here" {
+	if !strings.Contains(openerWire.Text, "From user \"disksing\" | audience: internal") || !strings.HasSuffix(openerWire.Text, "\nstart here") {
 		t.Fatalf("opener provider text = %q", openerWire.Text)
 	}
 

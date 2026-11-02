@@ -41,11 +41,11 @@ Scheduler API 同样委托 `internal/app`，提供 `GET/POST .../scheduler`、`P
 
 每个 Workspace、Scheduler、Project、Task 都持久化显式 `{kind: profile|agent, name}` 绑定，不做父级继承。资源聊天在首条消息到达时懒创建代际；PUA 使用 Workspace 稳定 instance ID、资源 ID、代际编号/ID、绑定与 Profile revision 组成 AgentHub source metadata，并用代际 ID 幂等建会。PUA 向 AgentHub 发送 schema v2 消息：顶层 `text` 是 PUA 已完整组装、应原样交给 Provider 的 prompt，`payload` 则以 `pua.resource-message.v1` 保存原始正文、role、sender、Workspace instance、type 与 causation。AgentHub 不解释 payload；PUA 在历史、时间线和重试恢复时自行解码。浏览器用户输入先保存到独立聊天，再生成交流通道的内部待办；用户名表示来源，不能被解释为额外授权。旧 AgentHub `message.input` 中的顶层 role/sender 继续作为只读兼容数据处理。
 
-Provider 消息封装跟随目标 Workspace 的 `en` / `zh-CN` 内容语言，并明确 Turn opener 的实际响应通道：用户 Chat 仅通过显式 publish 公开回复；Agent 与 system 均不自动接收进度或最终回复。插入活动 Turn 的消息会显示真实 Turn opener 及其响应通道；插入者与 opener 不同时还给出精确的 `pua message send --to=...` 单独回复命令，相同时保持简短。Server 在首次投递前把语言、Turn ID、opener 身份和响应通道冻结到 mailbox 的内部 provider context，旧 Agent 订阅提示在重试时改为单向消息，恢复时仍可识别旧封装；该上下文不进入公开 Payload，`pua.resource-message.v1` 保持不变。旧或不完整的活动 Session 若无法提供 opener 上下文，封装会省略未知会话信息但仍继续投递；canonical 恢复继续接受升级前的英文旧封装。
+Provider 消息封装跟随目标 Workspace 的 `en` / `zh-CN` 内容语言。新 Turn 的精简开场固定来源、对话对象、Chat 可见性和 work ID；公共规则写入托管 AGENTS.md，首次投递前更新其 managed block 并保留自定义内容。用户 Chat Turn 的普通阶段文本与 final 自动同步；内部 Agent、system 和 Scheduler Turn 保持内部可见，Agent 消息仍是单向的。旧冻结输入继续使用原封装与显式 publish。语言、受众和输出周期冻结在 mailbox provider context，重试不会改变。
 
 资源代际按资源拆分保存在 `<workspace>/<control-dir>/runtime/resources/<resource-key>/`：`current.json` 是唯一可变 current，`generations/` 保存不可变 retired manifest；resource key 由稳定 Workspace instance ID 与规范化 resource ID 编码而成，与 Workspace 路径无关。`generation-store.json` 是版本化迁移 marker，旧的 `<control-dir>/runtime/generations.json` 与 `<control-dir>/gui-agent/runs.json` 会保留为 rollback evidence，缺少 `generationId` 的记录只进入 cold history，不进入 lifecycle reconcile。同一资源目录还包含原子提交的 `hot.json`、`receipts.json`、`outbox.json`、`scheduler.json` 和 `commit.json`：hot 只保留 `queued`/`delivering`/`interrupting`、结果不明、待重试、未收敛 notification/outbox 或 Scheduler Turn 终态观察所需的完整消息；普通终态进入不含正文的最小 receipt。receipt 固定最多 2,048 条且保留七天，另有同样有界的过期 ID 索引；过期索引内的查询返回 `message_receipt_expired`/HTTP 410，索引再次过期后才返回 `message_not_found`。`.message-locations/` 只是可重建的查找加速索引，资源文档才是事实源。HTTP 只有在资源文档临时文件完成 write + fsync + rename 且提交目录 fsync 后才返回 accepted。旧的全局 mailbox 文件和 migration marker 不再读取或改写；当前版本只使用资源目录中的 mailbox bundle。
 
-三种模式共享同一 reconciler：`steer` 默认在支持能力的活动 Turn 中插入，不支持时持久降级为 `enqueue`；`enqueue` 只在 ready 边界作为新 Turn 投递；`interrupt` 先记录被中断的稳定 Turn ID，只重试同一 Turn 的中断，确认其 terminal 后再开启新 Turn。已经处于 delivering/interrupting 的结果不明项最先收敛；其余项按 interrupt、steer、enqueue 优先级处理，同一类保持接受顺序，因此显式 steer/interrupt 可以越过早先等待的 enqueue。AgentHub 成功承担至少一次投递责任后状态才变为 delivered；这不表示 Turn 已完成。绑定替换不再搬运消息：steer 成功后留在旧 Turn，enqueue 等新 generation，interrupt 终止旧 Turn 后再随 replacement 收敛。归档资源拒收新消息；尚未开始发送的项进入 `undeliverable`，已开始发送但无法确认结果的项进入 `delivery_unknown`，两种终态都可按 message ID 查询。
+三种模式共享同一 reconciler：新版固定受众 Turn 中的业务消息（包括同一用户的新消息）统一排队，`downgradeReason=fixed_turn_audience`；只有独立预告可以提前插入。旧 Turn 的 `steer` 保留原能力降级行为；`enqueue` 只在 ready 边界作为新 Turn 投递；`interrupt` 先记录被中断的稳定 Turn ID，只重试同一 Turn 的中断，确认其 terminal 后再开启新 Turn。已经处于 delivering/interrupting 的结果不明项最先收敛；其余项按 interrupt、steer、enqueue 优先级处理，同一类保持接受顺序，因此显式 steer/interrupt 可以越过早先等待的 enqueue。AgentHub 成功承担至少一次投递责任后状态才变为 delivered；这不表示 Turn 已完成。绑定替换不再搬运消息：steer 成功后留在旧 Turn，enqueue 等新 generation，interrupt 终止旧 Turn 后再随 replacement 收敛。归档资源拒收新消息；尚未开始发送的项进入 `undeliverable`，已开始发送但无法确认结果的项进入 `delivery_unknown`，两种终态都可按 message ID 查询。
 
 ### 工作对象状态与消息 API
 
@@ -85,15 +85,15 @@ DELETE /api/workspaces/{workspaceId}/users/{name}
 
 用户聊天由 `<control-dir>/chats/{chatId}.json` 保存，与 AgentHub 事件独立。每个资源有一条 Workspace 用户共享的长期聊天，用户消息标明发送者，各用户的未读游标独立；输入直接进入资源执行 Agent 的 mailbox。独立交流运行时已停用，旧 `dialogue-{chatId}` 与 `/chat/runtime/...` 仍按原用户定位历史审计。
 
-`GET .../resources/{id}/chat` 读取资源共享聊天，`POST .../chat/open|close|messages|read` 管理聊天；`GET .../chats` 查询聊天列表和当前用户未读数。公开消息仅来自用户输入或执行 Agent 的显式发布，不自动复制 Turn final。输入与 outbox 原子保存，后台按固定 mailbox ID 投递。关闭保留历史并撤销回复资格，不中断资源执行；重开增加 epoch 并产生新资格。Workspace 聊天始终开启。
+`GET .../resources/{id}/chat` 读取资源共享聊天，`POST .../chat/open|close|messages|read` 管理聊天；`GET .../chats` 查询聊天列表和当前用户未读数。公开消息来自用户输入、新版可见 Turn 的普通 Agent 文本和兼容旧输入的显式发布。推理、工具调用及结果不进入 Chat。输入与 outbox 原子保存，后台按固定 mailbox ID 投递。关闭保留历史并撤销回复资格，不中断资源执行；重开增加 epoch 并产生新资格。Workspace 聊天始终开启。
 
 公开聊天支持按消息 ID 分页：`GET .../chat?limit=40` 返回最新一页，`before` 或 `after` 分别返回指定消息之前或之后的一页（不含该消息）。`limit` 范围为 1–100，两个游标不能同时使用；分页结果中的 `hasOlder`、`hasNewer` 表示是否还有前后页面，`unreadCount` 始终针对整个聊天。未指定 `limit` 时保留完整历史响应以兼容现有客户端；聊天写操作也可指定 `limit` 来限制响应消息数。当前磁盘存储仍是整份 JSON，分页减少网络传输和浏览器渲染，不消除服务端读取及解析完整文件的开销。
 
-执行 Agent 使用 `pua chat show|notes|publish --reply-to=<capability>`，资格由输入携带，限定资源及聊天开启周期；共享 Chat 的新凭据无需再附加 Chat ID，旧版 `chat-id.token` 仍可在原周期内使用。publish 使用稳定 ID 去重，旧资格不能跨关闭/重开继续使用。旧 notes 保留在迁移备份，dispatch、timer、独立 binding 已停用；不创建新的交流 Session。这是可信本地 Workspace 内的生命周期约束，不是操作系统沙箱或新的用户认证系统。
+新版可见 Turn 使用 `pua chat show --work=<work-id>` 读取共享历史，通过普通输出自动发布。旧输入继续使用 `pua chat show|notes|publish --reply-to=<capability>`，资格由原输入携带，限定资源及聊天开启周期；共享 Chat 的新凭据无需再附加 Chat ID，旧版 `chat-id.token` 仍可在原周期内使用。publish 使用稳定 ID 去重，旧资格不能跨关闭/重开继续使用。旧 notes 保留在迁移备份，dispatch、timer、独立 binding 已停用；不创建新的交流 Session。这是可信本地 Workspace 内的生命周期约束，不是操作系统沙箱或新的用户认证系统。
 
 读取旧数据时按资源合并原用户 Chat，保留各旧 Chat 内的顺序并按消息时间合并，碰撞的消息 ID 确定性改名；旧用户输入标注原发送者。原始文件保留在原位置，并在写入共享记录前复制到 `<control-dir>/chats-legacy-backup/`。历史消息对所有 Workspace 用户可见；原用户未读状态保留，新增用户从头计算未读。旧周期尚未确认的执行输入继续按原 mailbox ID 去重；关闭或周期失效的输入不重投。原笔记、旧 outbox 和历史事件可从备份和旧身份审计。旧版 Server 不支持共享记录或新版 Telegram 状态；旧文件与共享记录不会双向同步，旧版回退期间的新写入不会自动再次合并，回退需先保存新数据并制定恢复方案。
 
-Workspace、Project、Task 根目录的 `chat.md` 由所属执行 Agent 维护，分别记录工作状态和通知状态、来源消息与 History 引用、下一步与通知条件、最近成功发布记录。程序只创建缺失文件，不解释正文或自动补发；旧 notes 不双写。详情页的 Chat follow-ups 入口复用 Markdown 查看/编辑，`PUT .../resources/{id}/documents?path=...` 仅允许编辑该资源的文件；Workspace 在此接口仅开放根目录 chat.md，保留内容哈希冲突、普通文件与路径校验。Agent 每轮开始和恢复后读取，收到用户插入、协作或调度消息时更新，结束前检查未回复事项。只有 publish 成功才记已发布，进度不解除最终通知义务。文件不存回复凭据，恢复时通过源输入 History 引用读取合法指令并接受有效性校验；失败保留事项，不改投或无限重试。
+Workspace、Project、Task 根目录的 `chat.md` 由所属执行 Agent 维护，分别记录工作状态和通知状态、来源消息与 History 引用、下一步与通知条件、最近成功发布记录。程序只创建缺失文件，不解释正文或自动补发；旧 notes 不双写。详情页的 Chat follow-ups 入口复用 Markdown 查看/编辑，`PUT .../resources/{id}/documents?path=...` 仅允许编辑该资源的文件；Workspace 在此接口仅开放根目录 chat.md，保留内容哈希冲突、普通文件与路径校验。Agent 每轮开始和恢复后读取，收到用户插入、协作或调度消息时更新，结束前检查未回复事项。只有自动同步或旧 publish 成功才记已发布，进度不解除最终通知义务。文件不存回复凭据，恢复时通过源输入 History 引用读取合法指令并接受有效性校验；失败保留事项，不改投或无限重试。
 
 chat.md 本身不触发工作，长时间等待使用 Scheduler 的真实条件。旧聊天 timer 在迁移和 reconcile 中清零，不恢复旧自动轮询。浏览器 SSE 与状态读取只刷新展示，不驱动模型。
 
@@ -115,7 +115,7 @@ Inbox 路由统一返回 410，旧 `users/*/inbox.json` 在取得 Workspace 所�
 }
 ```
 
-发送响应包含 `messageId`、`resourceId`、正文（仍在 hot 中时）、`receipt` 标记、`requestedMode`、`actualMode`、`downgradeReason`、对外消息状态、接受/提升时间、可再次 GET 的 `reference`、当前 generation/Turn 关联以及可选的 `lastErrorCode`/`lastError`。历史结果与投递失败通知可能包含 `type`、`causation` 和源消息上的 `notification` receipt。内部 `queued` 对外映射为 `waiting`。`GET .../messages/{messageId}` 对保留的冷 receipt 返回无正文但带 `receipt: true` 的诊断结果；超过 retention 返回稳定 `message_receipt_expired`（HTTP 410），不把已存在的消息伪装成从未存在。状态响应的公共状态只会是 `idle`、`working`、`attention_required`、`unavailable` 或 `archived`；消息等待数与 `waitingMessages` 单列，不会把 Task 标成 queued。状态不再展示 creator；显式绑定、当前 generation/replacement、Turn/steer capability 和最近错误仍可诊断。`POST .../steer` 仅在活动 Turn 支持 steer 时把同一个 waiting mailbox 项立即插入，不创建新消息。稳定错误 code 还包括 `message_not_waiting`、`steer_unavailable` 和 `message_receipt_expired`。provenance 只是来源元数据，不构成认证、授权或指令优先级。
+发送响应包含 `messageId`、`resourceId`、正文（仍在 hot 中时）、`receipt` 标记、`requestedMode`、`actualMode`、`downgradeReason`、对外消息状态、接受/提升时间、可再次 GET 的 `reference`、当前 generation/Turn 关联以及可选的 `lastErrorCode`/`lastError`。历史结果与投递失败通知可能包含 `type`、`causation` 和源消息上的 `notification` receipt。内部 `queued` 对外映射为 `waiting`。`GET .../messages/{messageId}` 对保留的冷 receipt 返回无正文但带 `receipt: true` 的诊断结果；超过 retention 返回稳定 `message_receipt_expired`（HTTP 410），不把已存在的消息伪装成从未存在。状态响应的公共状态只会是 `idle`、`working`、`attention_required`、`unavailable` 或 `archived`；消息等待数与 `waitingMessages` 单列，不会把 Task 标成 queued。状态不再展示 creator；显式绑定、当前 generation/replacement、Turn/steer capability 和最近错误仍可诊断。`POST .../steer` 保留同一个 waiting mailbox 项；旧 Turn 支持 steer 时立即插入，新版固定受众 Turn 则保持排队并发送独立预告，不消费原输入。稳定错误 code 还包括 `message_not_waiting`、`steer_unavailable` 和 `message_receipt_expired`。provenance 只是来源元数据，不构成认证、授权或指令优先级。
 
 curl 示例：
 
@@ -149,3 +149,21 @@ PUA Web 在自身源码中维护 semantic Event 到连续 `activity`（思考与
 持久 schema 升级是无损的：一次性版本化迁移会删除 Workspace/Project/Task 中旧的 `creator`/`createdBy` 字段，已完成历史不会重新批量通知。旧 `<control-dir>/runtime/mailbox.json`、mailbox migration marker 和 generation `pendingMessages` 已退出在线兼容范围；当前版本忽略这些残留文件和字段，不主动清理生产数据。`<control-dir>/initializing.json` 表示可重试但尚未完成的 Workspace 初始化，正常打开会拒绝该半成品并提示重新执行 `pua init`。发布前可备份 Workspace；代码回滚不要求改写资源 JSON，回滚前应暂停跨 Workspace 通知。
 
 Telegram 接入位于 `telegram_*.go`：每 Workspace 独立配置、私聊话题与资源 Chat 映射、一次性用户配对、持久输入游标和公开回复投递。使用方法及恢复边界见 [Telegram 接入说明](../../docs/telegram.md)。
+
+## 固定受众与工作续接
+
+`GET/POST .../resources/{resourceId}/turn-work` 提供持久工作查询与控制。`GET ?chat=true&work=<id>` 读取该可见工作所属开启周期的最近共享消息。控制必须引用开场 work ID，并匹配当前 generation、Session 和 Turn；拒绝未决审批、过期 work、重复但不同的控制请求。
+
+- `pua turn yield --work=<id> --message=<queued-id> --checkpoint="已完成；下一步；待核对副作用"`：先保存让出请求，再要求 Agent 立即自然结束当前 Turn；服务端确认 canonical terminal 后才开启选定输入。仅支持一层挂起，B 不能再次挂起。
+- B 成功结束后，服务端用稳定 mailbox ID 创建 A2；保留 A 的受众和 Chat epoch，开场携带 A 的检查点及 A、B 的 History 查询引用。A2 完成后收口原工作。
+- `pua turn finish --work=<id> --reason=cancelled`：安全收尾后直接结束，不建立续接；原排队消息仍正式处理，获得之前取消的 History。普通结束同样不自动建立续接，不解析 final 猜测意图。
+- `pua turn cancel-resume --work=<id> --reason="用户取消"`：B 明确取消挂起的 A。手动停止、Task paused 和资源归档同样取消待恢复安排；失败或结果不明的 B 使 A blocked。
+- `pua turn notify --work=<id> --text="通知意图" [--checkpoint="..."]`：内部工作请求单独可见通知 Turn；有检查点时通知后恢复，没有时原工作正常结束。不能从可见轮递归通知。
+
+工作状态保存在 `<control-dir>/turn-work/{resource-chat-id}.json`，所有写入由资源 controller 串行，采用原子持久提交。它只保存续接与输出收据，AgentHub canonical Turn 历史仍是执行事实源。新输入的工作记录先于投递落盘；重启后从 mailbox 和 Turn 历史核对。选定输入、恢复输入与通知使用稳定 ID；正在投递/中断的项和显式 interrupt 保持优先。
+
+预告另有稳定 ID，schema v2 `expectedTurnId` 限定当前 Turn，不改变原 mailbox receipt。需要 AgentHub `messages.turn-scoped-steer` 及 Session `inputCapabilities.turnScopedSteer`；第一版只有 Codex app-server 提供此保证，Pi/ACP 保持排队。每轮核对最多处理八条新预告。预告仅是尽力通知，拒绝或丢失不影响正式业务输入；绝不回退为新 Turn。
+
+活动同步走快速核对（默认活动间隔 2 秒），冷核对负责发现和重启恢复。`message.assistant.completed` 标记完整文本块；后续 item 或 Turn terminal 也形成边界。Codex 与 Pi 输出完整块边界，ACP 在后续 item/terminal 时同步。Chat 消息 ID 由 Session、Turn 和块的起始事件 ID 确定；重复读取、同游标增量合并和崩溃重试不重复发布。关闭或重开后保留执行历史及 LastError，不向新 epoch 转投。
+
+第一版是协作式安全让出，不强杀正在运行的工具，也不恢复工具进程或模型内部状态。长工具会延迟响应；恢复时 Agent 必须先核对外部操作结果。工作记录目前保留完整续接审计，后续可增加终态压缩；Chat 仍使用既有整文件持久化。

@@ -148,6 +148,9 @@ func (m *agentManager) pollAgentHubSessions(ctx context.Context) error {
 		if err := m.reconcileWorkspaceNotifications(ctx, workspace, client); err != nil {
 			failures = append(failures, fmt.Sprintf("%s notifications: %v", workspace.ID, err))
 		}
+		if err := m.reconcileWorkspaceTurnWork(ctx, workspace, client); err != nil {
+			failures = append(failures, fmt.Sprintf("%s Turn work: %v", workspace.ID, err))
+		}
 	}
 	if len(failures) > 0 {
 		return errors.New(strings.Join(failures, "; "))

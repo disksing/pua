@@ -73,6 +73,8 @@ func Run(args []string) error {
 		return runUser(args[1:])
 	case "chat":
 		return runChat(args[1:])
+	case "turn":
+		return runTurn(args[1:])
 	case "message":
 		return runMessage(args[1:])
 	case "history":
@@ -301,6 +303,7 @@ Usage:
   pua user <command>
   pua workspace <command>
   pua chat show|notes|publish|dispatch|timer
+  pua turn status|yield|notify|finish|cancel-resume
   pua message <command>
   pua history <command>
   pua serve [--addr=<address>] [--workspace=<path>] [--version]
@@ -400,6 +403,8 @@ func runHelp(args []string) error {
 		printWorkspaceHelp()
 	case "chat":
 		fmt.Println(chatUsage)
+	case "turn":
+		fmt.Println(turnUsage)
 	case "message":
 		printMessageHelp()
 	case "history":
@@ -678,8 +683,9 @@ Commands:
     standard input, for example:
       pua message send --to=project1.task2 - <<'EOF'
 
-    User Inbox delivery has been removed. Dialogue Sessions publish public
-    messages with pua chat publish --id=<stable-id> <text>.
+    User Inbox delivery has been removed. New Chat Turns publish ordinary
+    assistant text automatically. Internal Turns can request a visible
+    notification with pua turn notify. Only legacy inputs use chat publish.
 
   pua message show --id=<message-id> [--server=<url>]
     Query the current delivery record for a stable mailbox message id. Status

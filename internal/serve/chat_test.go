@@ -296,7 +296,7 @@ func TestChatBindingDoesNotOpenAndInboxDiscarded(t *testing.T) {
 	}
 }
 
-func TestChatUsesExecutionRuntimeWhileBusyAndAfterReopen(t *testing.T) {
+func TestLegacyChatUsesExecutionRuntimeWhileBusyAndAfterReopen(t *testing.T) {
 	fake := newRuntimeFakeAgentHub()
 	fake.enforceMessageIDs = true
 	hub := httptest.NewServer(fake)
@@ -322,6 +322,18 @@ func TestChatUsesExecutionRuntimeWhileBusyAndAfterReopen(t *testing.T) {
 	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "open", chatRequest{}, false))
 	for _, id := range []string{"first", "second"} {
 		mustChatOK(t, chatCall(t, m, w, resource, "disksing", "messages", chatRequest{ID: id, Text: "User question " + id}, false))
+		chatMu.Lock()
+		legacy, _ := loadChatLocked(w.Path, sharedChatID(resource))
+		for i := range legacy.Outbox {
+			if !legacy.Outbox[i].Accepted && legacy.Outbox[i].Automatic {
+				legacy.Outbox[i].Text = legacy.prompt(legacy.Outbox[i].Text, "disksing")
+				legacy.Outbox[i].Automatic = false
+			}
+		}
+		if err := saveChatLocked(w.Path, legacy); err != nil {
+			t.Fatal(err)
+		}
+		chatMu.Unlock()
 		if err = m.reconcileWorkspaceChats(context.Background(), w); err != nil {
 			t.Fatal(err)
 		}

@@ -1274,3 +1274,9 @@ curl -fsS -X POST "$BASE/v1/sessions/$SESSION/stop" \
 curl -fsS -X POST "$BASE/v1/sessions/$SESSION/resume" \
   -H "Content-Type: application/json" -d '{}'
 ```
+
+## Turn 限定预告与普通文本边界
+
+新增能力 `messages.turn-scoped-steer`。schema v2 输入可携带 `expectedTurnId`，只能与 `steer: true` 同用。Session 另以 `inputCapabilities.turnScopedSteer` 表示 Provider 是否保证只投向当前 Turn；第一版为 Codex。没有活动 Turn、Turn 不匹配或 Provider 不支持时拒绝，绝不自动开启新 Turn。预告有独立 `messageId`，重复相同输入沿用既有 receipt；旧 Turn 已终结的待投递预告标为 cancelled，不启动 Provider 或恢复旧 Turn。Provider 拒绝或结果不明时终止该预告的自动重试，调用方保留正式业务输入。
+
+新增 canonical `message.assistant.completed` 事件（无必填正文），表示当前普通助手文本块完成。Codex `item/completed` 的 agentMessage 与 Pi `text_end` 产生此边界。物化 Turn 的 message item 新增可选 `complete: true`；其后普通文本开始新 item。没有此边界的旧记录仍使用后续 item 或 Turn terminal 判断完整性。消费者必须读取最新物化文本，不能仅用最后一个事件 ID 判断内容是否更新（同游标 delta 仍可合并）。推理与工具事件不属于普通助手输出。

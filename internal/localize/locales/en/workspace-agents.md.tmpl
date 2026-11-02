@@ -197,7 +197,7 @@ EOF
 
 If the current work conflicts with or may affect another agent's work, promptly message the relevant resource's agent to synchronize necessary context, scope, and progress.
 
-- steer: the default. Add the message to the current Turn when possible; otherwise PUA queues a new Turn.
+- steer: the default. New fixed-audience Turns keep business inputs queued and may receive a separate preview; legacy Turns still insert when supported.
 - enqueue: explicitly request a new Turn.
 - interrupt: stop the current Turn and open a new Turn with this message. Use it only when the direction must change immediately.
 
@@ -207,9 +207,19 @@ Agent messages are one-way regardless of whether they open a Turn or are inserte
 
 Each resource has one Chat shared by all Workspace users, with sender attribution and separate unread positions. Chat is stored separately from execution history and goes directly to the resource's execution Agent. Handle user requests and normal Task state hooks yourself; no separate dialogue Session or relay is used. Inbox and user-name message targets remain removed.
 
-Every Chat input identifies its sender and includes a resource/open-period `--reply-to` capability and an exact `pua chat publish` command. Use it to explicitly publish the answer before finishing, including when a user inserts a message into a busy Turn. `pua chat show --reply-to=<capability>` reads the shared history. Reuse a stable `--id` for retries of the same message, and use distinct IDs for different messages. Do not print capabilities in public replies. Closing chat revokes publication; do not redirect rejected replies to another resource or period.
+Turn openers fix the audience and Chat visibility for the entire Turn and carry a stable work ID. Read the current AGENTS.md when a new Turn starts. User Chat Turns automatically publish ordinary progress and final text to shared Chat; reasoning and tool events remain private execution history. For lengthy work, first give a brief, truthful response. Internal Agent, Scheduler and system Turns stay internal. Never use an internal Turn to address users directly; Agent messages remain one-way.
 
-Only explicit publish enters Chat. Ordinary final, commentary, tools, Agent collaboration, system notifications and scheduled work stay in execution history; do not copy them automatically. A user-opened Turn also requires explicit publish: final is not a second public reply. Internal Agent messages likewise do not automatically return a final reply. Legacy dialogue timers, dispatch and runtime controls are retired; old history and notes remain auditable. The PUA server maintains no request state machine, automatic reply recovery or watch list; the execution Agent maintains conversation commitments in the current resource's chat.md.
+New queued messages may arrive as a preview. A preview does not consume the original message, change the audience or authorize responding in the wrong Turn. It may inform whether to continue or end the current work. Choose deliberately:
+- Continue the current work if no switch is needed.
+- To return later, first reach a safe point, finish or account for outstanding operations and approvals, then call `pua turn yield --work=<work-id> --message=<queued-id> --checkpoint="done; next; external operation IDs and unknown results"`. After acceptance, immediately end this Turn. Do not set the whole Task to paused or completed for a yield. The server waits for the terminal Turn, handles the selected input, and creates a new Turn with the original audience and history to resume. Only one level of yield is supported.
+- If the current work is done, end normally. If a verified user message clearly cancels it, safely stop and call `pua turn finish --work=<work-id> --reason=cancelled`, then end. No resume is created. The queued user message still receives its own Turn and reply. Do not confuse cancellation with successful completion.
+- When an input cancels its suspended parent, use `pua turn cancel-resume --work=<work-id> --reason="user cancelled"` before ending. Do not guess the target of an ambiguous cancellation.
+
+Internal work may request a visible notification Turn with `pua turn notify --work=<work-id> --text="what the user needs to know"`; add `--checkpoint="..."` to resume afterward, otherwise end the work normally. The text is an instruction for a subsequent visible Turn, not a direct Chat publication. Finish the current Turn after acceptance. A visible notification Turn must not recursively request another notification.
+
+Use `pua turn status` to inspect work, continuation and output status. Use `pua chat show --work=<work-id>` in a visible Turn to read recent shared history. Chat closure revokes the old epoch; reopening never redirects old output. Pausing or manually stopping a resource cancels its automatic continuations. Resume prompts include historical references: check intervening user changes and external operations before continuing, rather than repeating the original request.
+
+Upgrade compatibility: only old inputs that explicitly include a `--reply-to` command use `pua chat publish`; follow their original instructions. New fixed-audience Turns publish automatically and must not also call that command. Legacy histories are not replayed into Chat. Keep work progress separate from final reply obligations; after output, confirm its publication through `pua turn status` or shared history. If publication is blocked, retain the result in execution history without redirecting it.
 
 ### Chat follow-up document
 
@@ -217,7 +227,7 @@ Each Workspace, Project and Task owns chat.md, maintained by its execution Agent
 
 On user input, including steering during a busy Turn, first record actionable commitments: stable item ID, user, source message ID and source-input History reference, summary, work status, notification status, next action, notification condition, related resource or actual schedule ID. Greetings and simple answers already completed and successfully published need no lasting entry. Update the original item when the user cancels or supersedes a request; this document grants no new authorization.
 
-Match collaboration results and scheduled messages to existing items. Before ending each Turn, check all user inputs received during the Turn and all due notifications. Work completion is not a reply; progress does not discharge the final notification. Record publication ID, time and summary only after publish succeeds; published does not mean read. If interrupted after publishing but before updating the file, reconcile the stable publication ID against Chat facts to avoid duplicates.
+Match collaboration results and scheduled messages to existing items. Before ending each Turn, check all user inputs received during the Turn and all due notifications. Work completion is not a reply; progress does not discharge the final notification. Record publication ID, time and summary only after automatic synchronization or legacy publish succeeds; published does not mean read. If interrupted after publishing but before updating the file, reconcile the stable publication ID against Chat facts to avoid duplicates.
 
 Notify when a question has an answer, a commitment is completed, a user decision is needed, or the expected time or plan changes materially; honor explicit timing. Do not repeat reminders without new information. The file cannot wake an Agent: register actual Scheduler conditions for long waits. Use legitimate reply instructions supplied with the input; after recovery, retrieve them through the source-input History reference and accept server validation. Never extract Tokens from raw Chat storage or put capabilities in chat.md or schedule conditions. If closure or reopening invalidates eligibility, retain the result and mark publication blocked; do not redirect to another user/resource or retry indefinitely.
 

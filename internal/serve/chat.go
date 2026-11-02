@@ -258,6 +258,20 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 	case "messages":
 		err = c.appendUserInput(body.ID, body.Text, user)
 	case "publish":
+		works, workErr := loadTurnWork(workspace.Path, resourceID)
+		if workErr != nil {
+			err = workErr
+			break
+		}
+		for _, work := range works.Works {
+			if work.Context.ChatVisible && work.Context.ChatEpoch == c.Epoch && work.TurnID != "" && !work.OutputDone {
+				err = errors.New("this Turn publishes ordinary text automatically; do not call chat publish")
+				break
+			}
+		}
+		if err != nil {
+			break
+		}
 		publishID := body.ID
 		if identity.ID != c.ID {
 			// Preserve retries from a pre-migration capability even when IDs
@@ -414,7 +428,11 @@ func (m *agentManager) reconcileWorkspaceChats(ctx context.Context, workspace se
 			if d.Sender != "" {
 				sender = &agentHubMessageSender{Name: d.Sender}
 			}
-			_, err = acceptGeneratedMailboxMessage(workspace.Path, resourceMailboxMessage{ID: "chat-" + sum, ResourceID: d.Target, Text: d.Text, Sender: sender, Type: messageType, RequestedMode: resourceMessageModeSteer, Causation: &resourceMessageCausation{Type: "chat", SourceResourceID: c.ResourceID, MessageID: d.ID}})
+			cause := &resourceMessageCausation{Type: "chat", SourceResourceID: c.ResourceID, MessageID: d.ID}
+			if d.Automatic {
+				cause.ChatEpoch, cause.AutomaticChat = d.Epoch, true
+			}
+			_, err = acceptGeneratedMailboxMessage(workspace.Path, resourceMailboxMessage{ID: "chat-" + sum, ResourceID: d.Target, Text: d.Text, Sender: sender, Type: messageType, RequestedMode: resourceMessageModeSteer, Causation: cause})
 			if err != nil {
 				chatMu.Unlock()
 				return err

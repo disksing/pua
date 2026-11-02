@@ -195,6 +195,15 @@ func (m *agentManager) handleTaskTurnCompletionLocked(ctx context.Context, rt *a
 	if marker == "" || marker == record.TaskStateCompletionMarker {
 		return nil
 	}
+	file, workErr := loadTurnWork(rt.workspace.Path, record.ResourceID)
+	if workErr != nil {
+		return workErr
+	}
+	for _, work := range file.Works {
+		if work.SessionID == record.CompletionSessionID && work.TurnID == record.CompletionTurnID {
+			return markTaskTurnCompletionHandled(rt, marker)
+		}
+	}
 	detail, task, err := taskDetail(rt.workspace.Path, record.ResourceID)
 	if err != nil || !task {
 		return err

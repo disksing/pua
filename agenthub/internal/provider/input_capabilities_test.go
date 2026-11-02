@@ -10,5 +10,8 @@ func TestInputCapabilitiesByProvider(t *testing.T) {
 		if got := InputCapabilities(test.provider).Steer; got != test.steer {
 			t.Fatalf("%s steer = %v, want %v", test.provider, got, test.steer)
 		}
+		if got := InputCapabilities(test.provider).TurnScopedSteer; got != (test.provider == "codex") {
+			t.Fatalf("%s unexpected turn-scoped capability: %v", test.provider, got)
+		}
 	}
 }

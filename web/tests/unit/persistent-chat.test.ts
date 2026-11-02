@@ -16,6 +16,15 @@ function setup() {
  return { channel, target };
 }
 function button(target: HTMLElement, text: string) { const result = [...target.querySelectorAll("button")].find(b => b.textContent?.trim() === text); expect(result).toBeTruthy(); return result!; }
+it("shows queued input counts without copying internal message content into Chat", async () => {
+ vi.stubGlobal("fetch", vi.fn(async (input) => {
+  if (pathname(input).endsWith("/status")) return response({ sessionState: "working", messages: { waiting: 2 }, waitingMessages: [{ text: "private background request" }] });
+  return response({ id: "c", open: true, epoch: 1, messages: [] });
+ }));
+ const { target } = setup();
+ await vi.waitFor(() => expect(target.textContent).toContain("Queued inputs: 2"));
+ expect(target.textContent).not.toContain("private background request");
+});
 it("keeps history on close and reopen and retains drafts across parent refreshes", async () => {
  let chat = { id: "c", open: true, epoch: 1, messages: [{ id: "m", role: "agent", text: "Public reply", createdAt: "2026-10-13T00:00:00Z" }] };
  vi.stubGlobal("fetch", vi.fn(async (input, init) => {

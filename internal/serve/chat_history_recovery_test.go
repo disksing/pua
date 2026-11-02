@@ -38,7 +38,8 @@ func TestChatReplyRestoredFromRetiredGenerationHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	turn := historyTestTurn("turn-source", 1, true)
-	turn.Items[0].Text = c.Outbox[0].Text
+	// The retired Turn predates automatic publication.
+	turn.Items[0].Text = c.prompt(c.Outbox[0].Text, "reader")
 	fake.mu.Lock()
 	fake.turns["ses-old"] = []agentHubTurn{turn}
 	fake.mu.Unlock()

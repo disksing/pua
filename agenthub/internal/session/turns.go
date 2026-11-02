@@ -301,6 +301,10 @@ func buildTurnSummaries(events []Event) []TurnSummary {
 			}
 		case "message.reasoning.delta":
 			appendThinkingActivity(turn, event)
+		case "message.assistant.completed":
+			if n := len(turn.Items); n > 0 && turn.Items[n-1].Role == MessageRoleAssistant {
+				turn.Items[n-1].Complete = true
+			}
 		case "tool.event", "tool.call":
 			turn.ToolEventCount++
 			appendToolActivity(turn, event, toolIdentities)
@@ -506,7 +510,7 @@ func appendMessageItem(turn *TurnSummary, event Event, role MessageRole, text st
 func appendAssistantItem(turn *TurnSummary, event Event, text string) {
 	if len(turn.Items) > 0 {
 		last := &turn.Items[len(turn.Items)-1]
-		if last.Type == "message" && last.Role == MessageRoleAssistant {
+		if last.Type == "message" && last.Role == MessageRoleAssistant && !last.Complete {
 			last.Text += text
 			last.EndEventID = event.ID
 			last.EndedAt = event.Time

@@ -605,6 +605,10 @@ func (s *server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		s.agents.handleChats(w, r, id)
 		return
 	case "resources":
+		if len(parts) == 4 && parts[3] == "turn-work" {
+			s.agents.handleTurnWork(w, r, id, parts[2])
+			return
+		}
 		if len(parts) > 2 && strings.HasPrefix(parts[2], dialoguePrefix) {
 			http.NotFound(w, r)
 			return

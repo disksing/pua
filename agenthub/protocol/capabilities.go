@@ -6,6 +6,7 @@ package protocol
 const APIMajor = "1"
 
 const (
+	CapabilityTurnScopedSteer                = "messages.turn-scoped-steer"
 	CapabilitySessionSource                  = "session.source"
 	CapabilitySessionSourceMetadata          = "session.source-metadata"
 	CapabilitySessionIdempotentCreate        = "session.idempotent-create"

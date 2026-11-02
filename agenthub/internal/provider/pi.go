@@ -331,6 +331,15 @@ func (p *piSession) readLoop(reader io.Reader) {
 }
 
 func (p *piSession) event(kind string, raw json.RawMessage) {
+	defer func() {
+		var update struct {
+			AssistantMessageEvent piAssistantMessageUpdate `json:"assistantMessageEvent"`
+		}
+		if kind == "message_update" && json.Unmarshal(raw, &update) == nil &&
+			update.AssistantMessageEvent.Type == "text_end" && p.options.Hooks.Event != nil {
+			p.options.Hooks.Event(Event{Type: "message.assistant.completed", Data: map[string]any{"method": "message_update"}})
+		}
+	}()
 	event := Event{Type: "provider.event", Data: map[string]any{"method": kind, "raw": raw}}
 	var value struct {
 		AssistantMessageEvent piAssistantMessageUpdate `json:"assistantMessageEvent"`

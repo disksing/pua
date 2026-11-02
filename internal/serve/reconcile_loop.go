@@ -295,6 +295,11 @@ func (m *agentManager) pollFastAgentHubSessions(ctx context.Context) error {
 			continue
 		}
 		m.reconcileAgentHubGeneration(ctx, cfg, workspace, record, byExternalID, byID, client)
+		if err := m.withResourceController(ctx, workspace, record.ResourceID, func() error {
+			return m.reconcileResourceMailboxLocked(ctx, workspace, record.ResourceID)
+		}); err != nil {
+			return err
+		}
 	}
 	return nil
 }

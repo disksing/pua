@@ -5,7 +5,7 @@
  import type { Snippet } from "svelte";
  import type { AgentEvent, DetailPanelModel, TimelineItem } from "./models";
  let { model, heading }: { model:DetailPanelModel; heading:Snippet } = $props();
- type Status = { sessionState:string; configError?:string; lastError?:string; generation?:{generationId:string}; session?:{pendingApprovalIds?:string[]} };
+ type Status = { sessionState:string; messages?:{waiting?:number}; configError?:string; lastError?:string; generation?:{generationId:string}; session?:{pendingApprovalIds?:string[]} };
  let status = $state<Status | null>(null), approvals = $state<TimelineItem[]>([]), error = $state(""), pending = $state(false);
  const client = new ApiClient();
  const base = $derived(`/api/workspaces/${encodeURIComponent(model.workspaceId)}/resources/${encodeURIComponent(model.resourceId)}`);
@@ -36,6 +36,7 @@
  {@render heading()}
  <div class="session-controls" aria-label="Execution controls">
   <span>Execution: {status?.sessionState || "Loading…"}</span>
+  {#if status?.messages?.waiting}<span role="status">Queued inputs: {status.messages.waiting}</span>{/if}
   {#if status?.sessionState === "working" || status?.sessionState === "attention_required"}<button disabled={pending} onclick={stop}>Stop execution</button>{/if}
   {#if error || status?.configError || status?.lastError}<small role="status">{error || status?.configError || status?.lastError}</small>{/if}
  </div>

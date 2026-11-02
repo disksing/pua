@@ -241,6 +241,9 @@ func (m *Manager) SendMessage(id string, input session.MessageInput) (session.Se
 		}
 	}
 	current := value.CurrentTurnID
+	if input.ExpectedTurnID != "" && (current != input.ExpectedTurnID || !value.InputCapabilities.TurnScopedSteer) {
+		return session.Session{}, errors.New("expected active turn no longer matches or scoped steering is unsupported")
+	}
 	if current != "" && input.Steer && !value.InputCapabilities.Steer {
 		return session.Session{}, errors.New("session provider does not support steering an active turn")
 	}
@@ -291,6 +294,15 @@ func (m *Manager) deliverMessageLocked(id string, message session.DurableMessage
 	if value.State == session.StateStopping || value.State == session.StateArchived {
 		return false
 	}
+	if message.Input.ExpectedTurnID != "" {
+		m.mu.Lock()
+		running := m.running[id] != nil
+		m.mu.Unlock()
+		if value.CurrentTurnID != message.Input.ExpectedTurnID || !running {
+			_ = m.recordDelivery(id, message, session.MessageDeliveryCancelled, errors.New("preview turn is no longer running"))
+			return true
+		}
+	}
 	if message.StartupAttempts >= maxPendingStartupAttempts {
 		m.mu.Lock()
 		// An explicit Resume may already have started a healthy provider.
@@ -305,6 +317,10 @@ func (m *Manager) deliverMessageLocked(id string, message session.DurableMessage
 		}
 	}
 	if value.CurrentTurnID == "" {
+		if message.Input.ExpectedTurnID != "" {
+			_ = m.recordDelivery(id, message, session.MessageDeliveryCancelled, errors.New("preview turn has ended"))
+			return true
+		}
 		if _, err := m.store.Append(id, "turn.started", message.TurnID, nil); err != nil {
 			m.schedulePendingRetry(id)
 			return false
@@ -347,13 +363,27 @@ func (m *Manager) deliverMessageLocked(id string, message session.DurableMessage
 		m.schedulePendingRetry(id)
 		return false
 	}
-	run.setTurn(message.TurnID)
+	if message.Input.ExpectedTurnID != "" {
+		latest, readErr := m.store.Get(id)
+		if readErr != nil || latest.CurrentTurnID != message.Input.ExpectedTurnID {
+			_ = m.recordDelivery(id, message, session.MessageDeliveryCancelled, errors.New("preview turn has ended"))
+			return true
+		}
+	} else {
+		run.setTurn(message.TurnID)
+	}
 	message.StartupAttempts = 0
 	if err := m.recordDelivery(id, message, session.MessageDeliveryAttempting, nil); err != nil {
 		m.schedulePendingRetry(id)
 		return false
 	}
 	if err := promptAdapter(run.adapter, message.Input); err != nil {
+		if message.Input.ExpectedTurnID != "" {
+			// Previews are advisory: never replay an ambiguous provider response
+			// into a later turn. The business input remains queued in PUA.
+			m.recordDelivery(id, message, session.MessageDeliveryCancelled, err)
+			return true
+		}
 		m.recordDelivery(id, message, session.MessageDeliveryPending, err)
 		m.schedulePendingRetry(id)
 		return false
@@ -449,6 +479,13 @@ func promptAdapter(adapter provider.Session, input session.MessageInput) error {
 	text, err := provider.PromptText(input)
 	if err != nil {
 		return err
+	}
+	if input.ExpectedTurnID != "" {
+		scoped, ok := adapter.(provider.TurnScopedSteerer)
+		if !ok {
+			return errors.New("provider does not support Turn-scoped steering")
+		}
+		return scoped.SteerActive(text)
 	}
 	return adapter.Prompt(text, input.Steer)
 }

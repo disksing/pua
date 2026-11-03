@@ -20,26 +20,27 @@ import (
 // All mutations are serialized by the resource controller. This is PUA work
 // state, not another copy of AgentHub's canonical Turn history.
 type turnWork struct {
-	ID                   string                  `json:"id"`
-	GenerationID         string                  `json:"generationId"`
-	SessionID            string                  `json:"sessionId"`
-	TurnID               string                  `json:"turnId,omitempty"`
-	Context              providerMessageContext  `json:"context"`
-	State                string                  `json:"state"`
-	History              string                  `json:"history,omitempty"`
-	ParentID             string                  `json:"parentId,omitempty"`
-	TargetID             string                  `json:"targetId,omitempty"`
-	Checkpoint           string                  `json:"checkpoint,omitempty"`
-	ResumeID             string                  `json:"resumeId,omitempty"`
-	Outcome              string                  `json:"outcome,omitempty"`
-	LastError            string                  `json:"lastError,omitempty"`
-	OutputDone           bool                    `json:"outputDone,omitempty"`
-	PublishedIDs         []string                `json:"publishedIds,omitempty"`
-	NotificationAccepted bool                    `json:"notificationAccepted,omitempty"`
-	Command              *turnWorkCommand        `json:"command,omitempty"`
-	Notification         *resourceMailboxMessage `json:"notification,omitempty"`
-	Previews             map[string]bool         `json:"previews,omitempty"`
-	PreviewErrors        map[string]string       `json:"previewErrors,omitempty"`
+	ID                   string                            `json:"id"`
+	GenerationID         string                            `json:"generationId"`
+	SessionID            string                            `json:"sessionId"`
+	TurnID               string                            `json:"turnId,omitempty"`
+	Context              providerMessageContext            `json:"context"`
+	State                string                            `json:"state"`
+	History              string                            `json:"history,omitempty"`
+	ParentID             string                            `json:"parentId,omitempty"`
+	TargetID             string                            `json:"targetId,omitempty"`
+	Checkpoint           string                            `json:"checkpoint,omitempty"`
+	ResumeID             string                            `json:"resumeId,omitempty"`
+	Outcome              string                            `json:"outcome,omitempty"`
+	LastError            string                            `json:"lastError,omitempty"`
+	OutputDone           bool                              `json:"outputDone,omitempty"`
+	PublishedIDs         []string                          `json:"publishedIds,omitempty"`
+	NotificationAccepted bool                              `json:"notificationAccepted,omitempty"`
+	Command              *turnWorkCommand                  `json:"command,omitempty"`
+	Notification         *resourceMailboxMessage           `json:"notification,omitempty"`
+	Previews             map[string]bool                   `json:"previews,omitempty"`
+	PreviewAttempts      map[string]agentHubInboundMessage `json:"previewAttempts,omitempty"`
+	PreviewErrors        map[string]string                 `json:"previewErrors,omitempty"`
 }
 
 type turnWorkFile struct {
@@ -101,6 +102,21 @@ func (f *turnWorkFile) active(session, turn string) *turnWork {
 		}
 	}
 	return nil
+}
+
+func (f turnWorkFile) canPreview(work *turnWork, messageID string) bool {
+	if work == nil {
+		return false
+	}
+	for _, previous := range f.Works {
+		if previous.Previews[messageID] {
+			return false
+		}
+		if _, attempted := previous.PreviewAttempts[messageID]; attempted && previous.ID != work.ID {
+			return false
+		}
+	}
+	return true
 }
 
 func prepareTurnWork(root, resource, generation, session string, message resourceMailboxMessage) error {
@@ -385,7 +401,7 @@ func (m *agentManager) previewQueuedInput(ctx context.Context, workspace serveWo
 		return err
 	}
 	work := file.active(session.ID, session.CurrentTurnID)
-	if work == nil || !session.InputCapabilities.TurnScopedSteer || work.Previews[message.ID] {
+	if !session.InputCapabilities.TurnScopedSteer || !file.canPreview(work, message.ID) {
 		return nil
 	}
 	status, err := client.Status(ctx)
@@ -399,19 +415,36 @@ func (m *agentManager) previewQueuedInput(ctx context.Context, workspace serveWo
 	if !scoped {
 		return nil
 	}
-	// A preview is bound to the current Turn and has its own id. It never
-	// advances the original mailbox receipt, even after a lost acknowledgement.
-	role := message.Role
-	if message.Type == "user_chat_input" {
-		role = "user"
+	input, attempted := work.PreviewAttempts[message.ID]
+	if !attempted {
+		role := message.Role
+		if message.Type == "user_chat_input" {
+			role = "user"
+		}
+		text := fmt.Sprintf("System queue notification: message %s from %s (preview only; still queued). Current audience and visibility are unchanged.\n%s",
+			message.ID, providerMessageParty(role, message.Sender, "en"), message.Text)
+		payload, err := marshalPUAMessagePayload(puaMessagePayload{
+			Schema: puaMessagePayloadSchema, Text: text, Role: "system", Type: "queue_preview",
+			Causation: &resourceMessageCausation{Type: "queue_preview", SourceResourceID: message.ResourceID, MessageID: message.ID},
+		})
+		if err != nil {
+			return err
+		}
+		input = agentHubInboundMessage{
+			SchemaVersion: 2, Steer: true, ExpectedTurnID: session.CurrentTurnID,
+			MessageID: "preview-" + chatID(work.ID, message.ID), Text: text, Payload: payload,
+		}
+		if work.PreviewAttempts == nil {
+			work.PreviewAttempts = map[string]agentHubInboundMessage{}
+		}
+		// Reserve before sending. An unknown outcome may retry this exact input
+		// in its original Turn, but cannot replay the queue into a later Turn.
+		work.PreviewAttempts[message.ID] = input
+		if err := saveTurnWork(workspace.Path, message.ResourceID, file); err != nil {
+			return err
+		}
 	}
-	text := fmt.Sprintf("Queued message %s from %s (preview only; still queued). Current audience and visibility are unchanged.\n%s",
-		message.ID, providerMessageParty(role, message.Sender, "en"), message.Text)
-	_, err = client.Message(ctx, session.ID, agentHubInboundMessage{
-		SchemaVersion: 2, Steer: true, ExpectedTurnID: session.CurrentTurnID,
-		MessageID: "preview-" + chatID(work.ID, message.ID), Text: text,
-		Payload: json.RawMessage(`{"schema":"pua.queue-preview.v1"}`),
-	})
+	_, err = client.Message(ctx, session.ID, input)
 	if err != nil {
 		if work.PreviewErrors == nil {
 			work.PreviewErrors = map[string]string{}

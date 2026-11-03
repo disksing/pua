@@ -191,6 +191,7 @@ export function buildTimeline(events) {
   // appended while the agent keeps thinking, and later reasoning deltas must
   // still merge into the same block instead of starting a second one.
   let openThinking = null;
+  let completedAssistant = null;
 
   const settleOpenToolCalls = (status, time) => {
     for (const { call, group } of openToolCalls.values()) {
@@ -240,6 +241,13 @@ export function buildTimeline(events) {
           text: typeof data.text === "string" ? data.text : "",
         });
         break;
+      case "message.assistant.completed": {
+        const last = items.at(-1);
+        if (last?.kind === "message" && last.role === "assistant" && last.turnId === (event.turnId || "")) {
+          completedAssistant = last;
+        }
+        break;
+      }
       case "message.assistant.delta": {
         // Assistant text ends the reasoning phase.
         openThinking = null;
@@ -250,7 +258,7 @@ export function buildTimeline(events) {
         // the missing value so consecutive chunks still merge into one
         // message instead of one bubble per delta.
         const turnId = event.turnId || "";
-        if (last?.kind === "message" && last.role === "assistant" && last.turnId === turnId) {
+        if (last?.kind === "message" && last.role === "assistant" && last.turnId === turnId && last !== completedAssistant) {
           last.text += text;
           last.time = time;
         } else if (text) {

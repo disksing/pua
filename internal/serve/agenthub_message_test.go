@@ -1,6 +1,7 @@
 package serve
 
 import (
+	"encoding/json"
 	"reflect"
 	"testing"
 )
@@ -227,5 +228,27 @@ func TestPUAMessagePresentationDecodesV2AndKeepsLegacy(t *testing.T) {
 	text, role, sender = puaMessagePresentation("legacy", "system", legacySender, nil)
 	if text != "legacy" || role != "system" || sender != legacySender {
 		t.Fatalf("legacy presentation = %q %q %+v", text, role, sender)
+	}
+}
+
+func TestPUAMessagePresentationCorrectsHistoricalQueueAndChatRoles(t *testing.T) {
+	for _, tt := range []struct {
+		name, payload, text, role string
+	}{
+		{"preview", `{"schema":"pua.queue-preview.v1"}`, "queue notice", "system"},
+		{"user", `{"schema":"pua.resource-message.v1","role":"system","type":"user_chat_input","text":"question"}`, "question", "user"},
+		{"notification", `{"schema":"pua.resource-message.v1","role":"system","type":"chat_notification","text":"update"}`, "update", "system"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			text, role, _ := puaMessagePresentation("queue notice", "user", nil, json.RawMessage(tt.payload))
+			if text != tt.text || role != tt.role {
+				t.Fatalf("presentation = %q %q", text, role)
+			}
+			summary, err := historyTurnSummary("ws", "project1", generationRecord{GenerationID: "gen"},
+				agentHubTurn{ID: "turn", TriggerPreview: "queue notice", TriggerRole: "user", TriggerPayload: json.RawMessage(tt.payload)}, resourceMailbox{})
+			if err != nil || summary.TriggerRole != tt.role || summary.TriggerPreview != tt.text {
+				t.Fatalf("history summary = %+v %v", summary, err)
+			}
+		})
 	}
 }

@@ -164,6 +164,8 @@ Telegram 接入位于 `telegram_*.go`：每 Workspace 独立配置、私聊话�
 
 预告另有稳定 ID，schema v2 `expectedTurnId` 限定当前 Turn，不改变原 mailbox receipt。需要 AgentHub `messages.turn-scoped-steer` 及 Session `inputCapabilities.turnScopedSteer`；第一版只有 Codex app-server 提供此保证，Pi/ACP 保持排队。每轮核对最多处理八条新预告。预告仅是尽力通知，拒绝或丢失不影响正式业务输入；绝不回退为新 Turn。
 
+去重范围覆盖资源内所有 work：已预告的排队项不因 Turn 结束、续接或重启而重新预告。发送前保存完整预告请求和所属 Turn，结果不明时仅允许在原 Turn 用相同 ID 与请求重试；原 Turn 结束后不向新 Turn 重发。升级时保留旧 work 中成功的 `previews` 记录。预告 payload 使用 `pua.resource-message.v1` 的 `system` 身份，原发送人只出现在预告正文；正式自动 Chat 输入使用 `user` 身份。历史投影兼容旧 `pua.queue-preview.v1` 与错误标为 system 的 `user_chat_input`，不改写 canonical payload 或投递 receipt。
+
 活动同步走快速核对（默认活动间隔 2 秒），冷核对负责发现和重启恢复。`message.assistant.completed` 标记完整文本块；后续 item 或 Turn terminal 也形成边界。Codex 与 Pi 输出完整块边界，ACP 在后续 item/terminal 时同步。Chat 消息 ID 由 Session、Turn 和块的起始事件 ID 确定；重复读取、同游标增量合并和崩溃重试不重复发布。关闭或重开后保留执行历史及 LastError，不向新 epoch 转投。
 
 第一版是协作式安全让出，不强杀正在运行的工具，也不恢复工具进程或模型内部状态。长工具会延迟响应；恢复时 Agent 必须先核对外部操作结果。工作记录目前保留完整续接审计，后续可增加终态压缩；Chat 仍使用既有整文件持久化。

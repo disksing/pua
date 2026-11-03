@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { buildTimeline } from "../../src/components/timeline-projector";
+import { buildTimeline as buildAgentHubTimeline } from "../../src/agenthub/core/timeline";
 import type { AgentEvent, TimelineItem } from "../../src/components/models";
 import { compactTimelineEvents, formatClock, groupTimelineActivities, isHiddenConversationLifecycleText, markTurnAgentRuns, markTurnFinalAssistant, mergeCanonicalEventBatch, mergeCanonicalEvents, projectConversationEvents, visibleConversationTimelineItems } from "../../src/components/timeline-events";
 
@@ -14,6 +15,37 @@ function toolUpdate(id: number, callId: string, text: string): AgentEvent {
 }
 
 describe("timeline event algorithms", () => {
+  it("displays old and new queue notices as system and formal Chat inputs as user", () => {
+    const payloads = [
+      { schema: "pua.queue-preview.v1" },
+      { schema: "pua.resource-message.v1", type: "queue_preview", role: "system", text: "new preview" },
+      { schema: "pua.resource-message.v1", type: "user_chat_input", role: "system", text: "old question", sender: { name: "reader" } },
+      { schema: "pua.resource-message.v1", type: "user_chat_input", role: "user", text: "new question", sender: { name: "reader" } },
+      { schema: "pua.resource-message.v1", type: "chat_notification", role: "system", text: "update" },
+    ];
+    const events = payloads.map((payload, index) => ({
+      id: index + 1, type: "message.input", data: { text: "old preview", role: "user", payload },
+    }));
+    const items = projectConversationEvents(events);
+    expect(items.map((item) => item.role)).toEqual(["system", "system", "user", "user", "system"]);
+    expect(items.map((item) => item.text)).toEqual(["old preview", "new preview", "old question", "new question", "update"]);
+    expect(items[0].sender).toBeUndefined();
+    expect(items[2].sender).toEqual({ name: "reader" });
+    expect(events[2].data.payload.role).toBe("system");
+  });
+
+  it.each([projectConversationEvents, buildAgentHubTimeline])("uses assistant completion as an invisible boundary without an unknown event (%#)", (project) => {
+    const items = project([
+      { id: 1, type: "message.assistant.delta", turnId: "t1", data: { text: "Progress" } },
+      { id: 2, type: "message.assistant.completed", turnId: "t1", data: {} },
+      { id: 3, type: "message.assistant.delta", turnId: "t1", data: { text: "Final" } },
+      { id: 4, type: "message.assistant.delta", turnId: "t1", data: { text: " reply" } },
+      { id: 5, type: "message.assistant.completed", turnId: "t1", data: {} },
+    ]);
+    expect(items).toHaveLength(2);
+    expect(items.map((item) => [item.kind, item.text])).toEqual([["message", "Progress"], ["message", "Final reply"]]);
+  });
+
   it("merges overlap, out-of-order events, append deltas, and full healing deterministically", () => {
     const events = mergeCanonicalEvents([
       { id: 4, type: "message.assistant.delta", time: "t1", data: { text: "hel" } },

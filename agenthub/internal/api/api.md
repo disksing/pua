@@ -807,6 +807,7 @@ SemanticEvent {
 | --- | --- |
 | `message.input` | `role`, `text`, `steer`, optional opaque `payload`, `sender`, `messageId`, `replyTo`, `correlationId` |
 | `message.assistant.delta`, `message.reasoning.delta` | `text` |
+| `message.assistant.completed` | 空对象；结束当前助手文本块，不产生独立消息或错误提示 |
 | `tool.call` | `schemaVersion: 1`, `callId`, `operation`, optional `toolKind`, `name`, `summary`, `status`, `output`, `error` |
 | `approval.requested` | `approvalId`, `kind`, `title`, `detail`, `question`, `options[]` |
 | `approval.resolved` | `approvalId`, `decision`, optional `optionId`, `text`, `reason` |

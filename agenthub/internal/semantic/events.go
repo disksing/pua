@@ -122,6 +122,8 @@ func normalize(source session.Event) []Event {
 		return []Event{{Type: source.Type, Data: messageInput(data)}}
 	case "message.assistant.delta", "message.reasoning.delta":
 		return []Event{{Type: source.Type, Data: map[string]any{"text": textValue(data["text"])}}}
+	case "message.assistant.completed":
+		return []Event{{Type: source.Type, Data: map[string]any{}}}
 	case "approval.requested":
 		return []Event{{Type: source.Type, Data: approvalRequest(data)}}
 	case "approval.resolved":

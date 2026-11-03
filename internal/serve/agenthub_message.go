@@ -440,10 +440,28 @@ func canonicalAgentHubMessageMatches(canonical agentHubInboundMessage, expected 
 
 func puaMessagePresentation(text, role string, sender *agentHubMessageSender, payload json.RawMessage) (string, string, *agentHubMessageSender) {
 	if decoded, ok := decodePUAMessagePayload(payload); ok {
-		return decoded.Text, decoded.Role, decoded.Sender
+		return decoded.Text, puaMessageRole(decoded.Role, decoded.Type), decoded.Sender
+	}
+	var legacyPreview struct {
+		Schema string `json:"schema"`
+	}
+	if json.Unmarshal(payload, &legacyPreview) == nil && legacyPreview.Schema == "pua.queue-preview.v1" {
+		return text, "system", nil
 	}
 	if role == "" {
 		role = "user"
 	}
 	return text, role, sender
+}
+
+// Correct presentation of historical Chat inputs without rewriting canonical
+// payloads, which also participate in delivery idempotency.
+func puaMessageRole(role, messageType string) string {
+	if messageType == "user_chat_input" {
+		return "user"
+	}
+	if messageType == "queue_preview" {
+		return "system"
+	}
+	return role
 }

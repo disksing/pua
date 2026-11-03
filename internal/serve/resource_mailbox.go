@@ -499,6 +499,9 @@ func acceptGeneratedMailboxMessage(workspacePath string, expected resourceMailbo
 		return resourceMailboxMessage{}, &resourceAPIError{Code: "invalid_request", Message: "generated mailbox messages may use only steer or enqueue"}
 	}
 	expected.Role = "system"
+	if expected.Type == "user_chat_input" && expected.Causation != nil && expected.Causation.AutomaticChat {
+		expected.Role = "user"
+	}
 	if isLegacyTurnResultType(expected.Type) {
 		return resourceMailboxMessage{}, errors.New("automatic Turn results are no longer supported")
 	}
@@ -526,7 +529,11 @@ func acceptGeneratedMailboxMessage(workspacePath string, expected resourceMailbo
 			if current.ID != expected.ID {
 				continue
 			}
-			if current.ResourceID != expected.ResourceID || (current.Text != "" && current.Text != expected.Text) || current.Role != expected.Role ||
+			// Keep the original receipt and wire identity when accepting a retry
+			// of a Chat input created before generated user roles were corrected.
+			compatibleRole := current.Role == expected.Role ||
+				(expected.Role == "user" && expected.Type == "user_chat_input" && current.Role == "system")
+			if current.ResourceID != expected.ResourceID || (current.Text != "" && current.Text != expected.Text) || !compatibleRole ||
 				current.Type != expected.Type || current.SenderWorkspaceInstanceID != expected.SenderWorkspaceInstanceID ||
 				!reflect.DeepEqual(current.Sender, expected.Sender) || !reflect.DeepEqual(current.Causation, expected.Causation) {
 				return &resourceAPIError{Code: "message_conflict", Message: "stable generated message id conflicts with a different mailbox message"}
@@ -1277,7 +1284,7 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 			previewCount := 0
 			for _, queued := range mailbox.Messages {
 				if queued.Status == resourceMessageQueued && queued.RequestedMode != resourceMessageModeInterrupt {
-					if activeWork := workFile.active(session.ID, session.CurrentTurnID); activeWork == nil || activeWork.Previews[queued.ID] {
+					if !workFile.canPreview(workFile.active(session.ID, session.CurrentTurnID), queued.ID) {
 						continue
 					}
 					previewCount++

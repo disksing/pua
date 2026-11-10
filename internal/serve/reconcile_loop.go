@@ -281,10 +281,14 @@ func (m *agentManager) pollFastAgentHubSessions(ctx context.Context) error {
 			byExternalID[sourceLookupKey(session.Source.InstanceID, session.Source.ExternalID)] = session
 		}
 	}
+	var failures []error
 	for _, rt := range m.runtimeSnapshots() {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(append(failures, err)...)
+		}
 		record := rt.snapshotGeneration()
 		workspace := rt.workspace
-		if !m.server.ownsWorkspace(workspace.Path) || !isAgentHubGeneration(record) {
+		if !m.server.ownsWorkspace(workspace.Path) || !isAgentHubGeneration(record) || record.Retired {
 			continue
 		}
 		session, found := byExternalID[sourceLookupKey(generationSourceInstanceID(cfg, record), record.SourceExternalID)]
@@ -292,16 +296,30 @@ func (m *agentManager) pollFastAgentHubSessions(ctx context.Context) error {
 			session, found = byID[strings.TrimSpace(record.AgentHubSessionID)]
 		}
 		if !generationNeedsFastReconcile(m, rt, record, session, found) {
-			continue
+			file, err := loadTurnWork(workspace.Path, record.ResourceID)
+			if err != nil {
+				failures = append(failures, fmt.Errorf("%s/%s: %w", workspace.ID, record.ResourceID, err))
+				continue
+			}
+			pendingOutput := false
+			for _, work := range file.Works {
+				if !work.OutputDone {
+					pendingOutput = true
+					break
+				}
+			}
+			if !pendingOutput {
+				continue
+			}
 		}
 		m.reconcileAgentHubGeneration(ctx, cfg, workspace, record, byExternalID, byID, client)
 		if err := m.withResourceController(ctx, workspace, record.ResourceID, func() error {
 			return m.reconcileResourceMailboxLocked(ctx, workspace, record.ResourceID)
 		}); err != nil {
-			return err
+			failures = append(failures, fmt.Errorf("%s/%s: %w", workspace.ID, record.ResourceID, err))
 		}
 	}
-	return nil
+	return errors.Join(failures...)
 }
 
 func (m *agentManager) agentHubFastWorkPending() bool {

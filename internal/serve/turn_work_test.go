@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -281,6 +283,116 @@ func TestTurnWorkFastPollPublishesProgressBeforeCompletion(t *testing.T) {
 	chat, _ := loadDialogue(w.Path, dialoguePrefix+sharedChatID("project1.task1"))
 	if len(chat.Messages) != 2 || chat.Messages[1].Text != "Working on it." || workFile(t, w).find(work.ID).OutputDone {
 		t.Fatalf("active progress missing or duplicated: %+v", chat.Messages)
+	}
+}
+
+func TestTurnWorkArchivedTaskSkipsStateSettlement(t *testing.T) {
+	manager, workspace, fake, client := workflowFixture(t)
+	message := queueWorkflowUser(t, manager, workspace, "archive", "Do some work")
+	reconcileWorkflow(t, manager, workspace, client)
+	work := *workFile(t, workspace).find(message.ID)
+	closeWorkflowTurn(fake, work, "completed", "Finished before archival.")
+	ws, err := app.OpenWorkspace(workspace.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.ArchiveResource("project1.task1"); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := manager.reconcileWorkspaceTurnWork(context.Background(), workspace, client); err != nil {
+			t.Fatal(err)
+		}
+	}
+	detail, _, err := taskDetail(workspace.Path, "project1.task1")
+	if err != nil || detail.State != app.TaskStateInProgress {
+		t.Fatalf("archived task was changed: %+v, %v", detail, err)
+	}
+	if !workFile(t, workspace).find(work.ID).OutputDone {
+		t.Fatal("archived work was not settled")
+	}
+	chat, err := loadDialogue(workspace.Path, dialoguePrefix+sharedChatID("project1.task1"))
+	if err != nil || len(chat.Messages) != 1 {
+		t.Fatalf("archived output was published: %+v, %v", chat.Messages, err)
+	}
+}
+
+func TestTurnWorkAuditContinuesAfterResourceFailure(t *testing.T) {
+	for _, failure := range []string{"invalid-json", "missing-resource"} {
+		t.Run(failure, func(t *testing.T) {
+			manager, workspace, fake, client := workflowFixture(t)
+			message := queueWorkflowUser(t, manager, workspace, "recover", "Do some work")
+			reconcileWorkflow(t, manager, workspace, client)
+			work := *workFile(t, workspace).find(message.ID)
+			closeWorkflowTurn(fake, work, "completed", "Recovered final reply.")
+			data := []byte("{")
+			if failure == "missing-resource" {
+				data = []byte(`{"version":1,"resourceId":"project999","works":[{"id":"missing"}]}`)
+			}
+			badPath := filepath.Join(filepath.Dir(turnWorkPath(workspace.Path, "project1.task1")), "000-broken.json")
+			if err := os.WriteFile(badPath, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			manager.waitBackground()
+			manager = newAgentManager(manager.server)
+			manager.server.agents = manager
+			for range 2 {
+				if err := manager.reconcileWorkspaceTurnWork(context.Background(), workspace, client); err == nil {
+					t.Fatal("resource failure was not reported")
+				}
+			}
+			if !workFile(t, workspace).find(work.ID).OutputDone {
+				t.Fatal("earlier resource failure blocked final reply recovery")
+			}
+			chat, err := loadDialogue(workspace.Path, dialoguePrefix+sharedChatID("project1.task1"))
+			if err != nil || len(chat.Messages) != 2 || chat.Messages[1].Text != "Recovered final reply." {
+				t.Fatalf("final reply missing or duplicated: %+v, %v", chat.Messages, err)
+			}
+		})
+	}
+}
+
+func TestTurnWorkFastPollRetriesOutputForStableSession(t *testing.T) {
+	manager, workspace, fake, client := workflowFixture(t)
+	message := queueWorkflowUser(t, manager, workspace, "stable", "Do some work")
+	reconcileWorkflow(t, manager, workspace, client)
+	work := *workFile(t, workspace).find(message.ID)
+	closeWorkflowTurn(fake, work, "completed", "Final reply after idle.")
+	fake.mu.Lock()
+	session := fake.sessions[work.SessionID]
+	fake.mu.Unlock()
+	var runtime *agentRuntime
+	for _, candidate := range manager.runtimeSnapshots() {
+		if candidate.snapshotGeneration().AgentHubSessionID == work.SessionID {
+			runtime = candidate
+			break
+		}
+	}
+	if runtime == nil {
+		t.Fatal("test session has no runtime")
+	}
+	runtime.mu.Lock()
+	runtime.agentHubState = "ready"
+	runtime.record.Status = "idle"
+	runtime.record.CurrentTurnID = ""
+	runtime.record.CompletionCursor = session.LastEventID
+	runtime.record.UpdatedAt = session.UpdatedAt
+	runtime.record.IdleDeadlineAt = ""
+	runtime.mu.Unlock()
+	if generationNeedsFastReconcile(manager, runtime, runtime.snapshotGeneration(), session, true) {
+		t.Fatal("test session must be stable before retrying pending output")
+	}
+	for range 2 {
+		if err := manager.pollFastAgentHubSessions(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !workFile(t, workspace).find(work.ID).OutputDone {
+		t.Fatal("stable session left final output pending")
+	}
+	chat, err := loadDialogue(workspace.Path, dialoguePrefix+sharedChatID("project1.task1"))
+	if err != nil || len(chat.Messages) != 2 || chat.Messages[1].Text != "Final reply after idle." {
+		t.Fatalf("final reply missing or duplicated: %+v, %v", chat.Messages, err)
 	}
 }
 

@@ -631,15 +631,21 @@ func (m *agentManager) reconcileWorkspaceTurnWork(ctx context.Context, workspace
 	if err != nil {
 		return err
 	}
+	var failures []error
 	for _, path := range paths {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(append(failures, err)...)
+		}
 		// Resource identity comes from persisted mailbox inputs, never filenames.
 		data, e := os.ReadFile(path)
 		if e != nil {
-			return e
+			failures = append(failures, fmt.Errorf("read Turn work %s: %w", path, e))
+			continue
 		}
 		var file turnWorkFile
 		if e = json.Unmarshal(data, &file); e != nil {
-			return e
+			failures = append(failures, fmt.Errorf("decode Turn work %s: %w", path, e))
+			continue
 		}
 		if len(file.Works) == 0 {
 			continue
@@ -654,10 +660,10 @@ func (m *agentManager) reconcileWorkspaceTurnWork(ctx context.Context, workspace
 			}
 			return m.reconcileResourceMailboxLocked(ctx, workspace, resource)
 		}); e != nil {
-			return e
+			failures = append(failures, fmt.Errorf("%s: %w", resource, e))
 		}
 	}
-	return nil
+	return errors.Join(failures...)
 }
 
 func cancelSuspendedTurnWork(root, resource, reason string) error {
@@ -696,7 +702,7 @@ func settleTurnTaskState(root, resource string, file turnWorkFile) error {
 	if err != nil || !task {
 		return err
 	}
-	if detail.State != app.TaskStateInProgress {
+	if detail.Archived || detail.State != app.TaskStateInProgress {
 		return nil
 	}
 	for _, work := range file.Works {

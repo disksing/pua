@@ -31,9 +31,10 @@ func (s *server) handleScheduler(w http.ResponseWriter, r *http.Request, workspa
 			writeJSON(w, config)
 		case http.MethodPost:
 			var body struct {
-				Description string `json:"description"`
-				Condition   string `json:"condition"`
-				Target      string `json:"target"`
+				Description string                     `json:"description"`
+				Condition   string                     `json:"condition"`
+				Target      string                     `json:"target"`
+				ExactTime   *app.ScheduleExactTimeSpec `json:"exactTime"`
 			}
 			decoder := json.NewDecoder(r.Body)
 			decoder.DisallowUnknownFields()
@@ -41,7 +42,7 @@ func (s *server) handleScheduler(w http.ResponseWriter, r *http.Request, workspa
 				writeError(w, decodeErr, http.StatusBadRequest)
 				return
 			}
-			created, createErr := puaWorkspace.AddSchedule(app.CreateScheduleInput{Description: body.Description, Condition: body.Condition, Target: body.Target})
+			created, createErr := puaWorkspace.AddSchedule(app.CreateScheduleInput{Description: body.Description, Condition: body.Condition, Target: body.Target, ExactTime: body.ExactTime})
 			if createErr != nil {
 				writeError(w, createErr, http.StatusBadRequest)
 				return
@@ -86,9 +87,10 @@ func (s *server) handleScheduler(w http.ResponseWriter, r *http.Request, workspa
 	switch r.Method {
 	case http.MethodPut:
 		var body struct {
-			Description *string `json:"description"`
-			Condition   *string `json:"condition"`
-			Target      *string `json:"target"`
+			Description *string                    `json:"description"`
+			Condition   *string                    `json:"condition"`
+			Target      *string                    `json:"target"`
+			ExactTime   *app.ScheduleExactTimeSpec `json:"exactTime"`
 		}
 		decoder := json.NewDecoder(r.Body)
 		decoder.DisallowUnknownFields()
@@ -96,7 +98,7 @@ func (s *server) handleScheduler(w http.ResponseWriter, r *http.Request, workspa
 			writeError(w, decodeErr, http.StatusBadRequest)
 			return
 		}
-		updated, updateErr := puaWorkspace.UpdateSchedule(app.UpdateScheduleInput{ID: id, Description: body.Description, Condition: body.Condition, Target: body.Target})
+		updated, updateErr := puaWorkspace.UpdateSchedule(app.UpdateScheduleInput{ID: id, Description: body.Description, Condition: body.Condition, Target: body.Target, ExactTime: body.ExactTime})
 		if updateErr != nil {
 			writeError(w, updateErr, http.StatusBadRequest)
 			return

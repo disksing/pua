@@ -28,10 +28,20 @@
 .schedule-dialog { background: var(--surface-raised, var(--panel)); color: var(--text-primary, var(--text)); border: 1px solid var(--border-subtle, var(--line-strong)); border-radius: 10px; padding: 0; width: min(580px, calc(100vw - 32px)); max-width: calc(100vw - 32px); max-height: calc(100vh - 32px); max-height: calc(100dvh - 32px); overflow: auto; }
 .schedule-dialog::backdrop { background: var(--backdrop); }
 .schedule-editor { display: grid; gap: 12px; padding: 18px; }
+.schedule-time-fields { display: grid; gap: 12px; }
+.schedule-editor select {
+  background: var(--surface, var(--panel));
+  border: 1px solid var(--border-subtle, var(--line-strong));
+  border-radius: 7px;
+  color: inherit;
+  font: inherit;
+  min-height: 44px;
+  padding: 8px 9px;
+}
 .schedule-editor-heading { align-items: flex-start; display: flex; gap: 12px; }
 .schedule-editor-heading > div { display: flex; flex: 1; flex-direction: column; gap: 3px; min-width: 0; }
 .schedule-editor-heading span { color: var(--text-muted); font-size: 12px; }
-.schedule-editor-heading button { min-height: 44px; }
+.schedule-editor-heading button { min-height: 44px; width: auto; }
 .schedule-editor label { display: grid; gap: 5px; min-width: 0; }
 .schedule-editor label > span { color: var(--text-muted); font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
 .schedule-field-error { color: var(--red, var(--accent-deep)); font-size: 12px; }

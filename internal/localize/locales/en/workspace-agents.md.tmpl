@@ -249,6 +249,8 @@ Scheduler is useful for timed triggers, conditional triggers, and work that need
 
 Schedules use natural-language conditions rather than cron expressions:
 
+For automatic time triggers, use `--at=<time>` (once) or `--daily=HH:MM` (daily) with an explicit IANA zone such as `--timezone=Asia/Shanghai`. The Server triggers these directly; condition is optional. After downtime, only the latest missed occurrence is sent. `--expires=<time>` sets a cutoff. `update --no-exact-time` removes the time trigger (a condition is then required); `--condition=` clears the optional note. A natural-language schedule still requires a condition. See `pua scheduler --help` for all options.
+
 ~~~sh
 pua scheduler list [--json]
 pua scheduler show --id=<schedule>

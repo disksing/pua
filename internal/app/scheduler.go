@@ -44,21 +44,21 @@ type SchedulerConfig struct {
 	Schedules           []Schedule   `json:"schedules"`
 }
 
-// Schedule deliberately contains no execution projection. The Scheduler Agent
-// interprets Condition and keeps optional execution context in scheduler.md.
 type Schedule struct {
-	ID          string `json:"id"`
-	Description string `json:"description"`
-	Condition   string `json:"condition"`
-	Target      string `json:"target"`
-	CreatedAt   string `json:"createdAt"`
-	UpdatedAt   string `json:"updatedAt"`
+	ID          string             `json:"id"`
+	Description string             `json:"description"`
+	Condition   string             `json:"condition"`
+	Target      string             `json:"target"`
+	CreatedAt   string             `json:"createdAt"`
+	UpdatedAt   string             `json:"updatedAt"`
+	ExactTime   *ScheduleExactTime `json:"exactTime,omitempty"`
 }
 
 type CreateScheduleInput struct {
 	Description string
 	Condition   string
 	Target      string
+	ExactTime   *ScheduleExactTimeSpec
 }
 
 type UpdateScheduleInput struct {
@@ -66,6 +66,7 @@ type UpdateScheduleInput struct {
 	Description *string
 	Condition   *string
 	Target      *string
+	ExactTime   *ScheduleExactTimeSpec
 }
 
 type SchedulerSettingsInput struct {
@@ -311,7 +312,7 @@ func validateSchedule(schedule Schedule) error {
 		"updatedAt":   schedule.UpdatedAt,
 	} {
 		value = strings.TrimSpace(value)
-		if value == "" {
+		if value == "" && (name != "condition" || schedule.ExactTime == nil) {
 			return fmt.Errorf("%s is required", name)
 		}
 		length := len(value)
@@ -328,7 +329,7 @@ func validateSchedule(schedule Schedule) error {
 	if _, err := time.Parse(time.RFC3339Nano, schedule.UpdatedAt); err != nil {
 		return errors.New("updatedAt must be RFC3339")
 	}
-	return nil
+	return validateStoredExactTime(schedule.ExactTime)
 }
 
 func writeSchedulerJSON(path string, config SchedulerConfig) error {
@@ -424,7 +425,11 @@ func (w *Workspace) AddSchedule(input CreateScheduleInput) (Schedule, error) {
 		if err != nil {
 			return err
 		}
-		description, condition, target, err := w.normalizeScheduleFields(input.Description, input.Condition, input.Target)
+		exact, err := normalizeScheduleExactTime(input.ExactTime)
+		if err != nil {
+			return err
+		}
+		description, condition, target, err := w.normalizeScheduleFields(input.Description, input.Condition, input.Target, exact)
 		if err != nil {
 			return err
 		}
@@ -440,6 +445,10 @@ func (w *Workspace) AddSchedule(input CreateScheduleInput) (Schedule, error) {
 		}
 		now := time.Now().Format(time.RFC3339Nano)
 		created = Schedule{ID: id, Description: description, Condition: condition, Target: target, CreatedAt: now, UpdatedAt: now}
+		if exact != nil {
+			exact.StartedAt = now
+			created.ExactTime = exact
+		}
 		config.Schedules = append(config.Schedules, created)
 		return writeSchedulerJSON(schedulerJSONPath(w.root), config)
 	})
@@ -454,7 +463,7 @@ func (w *Workspace) UpdateSchedule(input UpdateScheduleInput) (Schedule, error) 
 		return Schedule{}, err
 	}
 	input.ID = strings.TrimSpace(input.ID)
-	if input.ID == "" || (input.Description == nil && input.Condition == nil && input.Target == nil) {
+	if input.ID == "" || (input.Description == nil && input.Condition == nil && input.Target == nil && input.ExactTime == nil) {
 		return Schedule{}, &APIError{Operation: "update schedule", Kind: "scheduler", Workspace: w.root, Err: errors.New("schedule id and at least one updated field are required")}
 	}
 	var updated Schedule
@@ -478,7 +487,11 @@ func (w *Workspace) UpdateSchedule(input UpdateScheduleInput) (Schedule, error) 
 		if input.Target != nil {
 			target = *input.Target
 		}
-		description, condition, target, err = w.normalizeScheduleFields(description, condition, target)
+		exact, err := updatedScheduleExactTime(updated.ExactTime, input.ExactTime, time.Now(), strings.TrimSpace(target) != updated.Target)
+		if err != nil {
+			return err
+		}
+		description, condition, target, err = w.normalizeScheduleFields(description, condition, target, exact)
 		if err != nil {
 			return err
 		}
@@ -493,6 +506,7 @@ func (w *Workspace) UpdateSchedule(input UpdateScheduleInput) (Schedule, error) 
 			}
 		}
 		updated.Description, updated.Condition, updated.Target = description, condition, target
+		updated.ExactTime = exact
 		updated.UpdatedAt = time.Now().Format(time.RFC3339Nano)
 		config.Schedules[index] = updated
 		return writeSchedulerJSON(schedulerJSONPath(w.root), config)
@@ -572,12 +586,12 @@ func (w *Workspace) SetSchedulerSettings(input SchedulerSettingsInput) (Schedule
 	return result, err
 }
 
-func (w *Workspace) normalizeScheduleFields(description, condition, target string) (string, string, string, error) {
+func (w *Workspace) normalizeScheduleFields(description, condition, target string, exact *ScheduleExactTime) (string, string, string, error) {
 	description = strings.TrimSpace(description)
 	condition = strings.TrimSpace(condition)
 	target = strings.TrimSpace(target)
-	if description == "" || condition == "" || target == "" {
-		return "", "", "", errors.New("description, condition, and target are required")
+	if description == "" || target == "" || (condition == "" && exact == nil) {
+		return "", "", "", errors.New("description and target are required; condition is required unless exactTime is set")
 	}
 	if utf8.RuneCountInString(description) > maximumScheduleTextLength || utf8.RuneCountInString(condition) > maximumScheduleTextLength || len(target) > 200 ||
 		strings.ContainsRune(description, '\x00') || strings.ContainsRune(condition, '\x00') || strings.ContainsRune(target, '\x00') {

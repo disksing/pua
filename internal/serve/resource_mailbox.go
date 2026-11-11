@@ -34,6 +34,7 @@ const (
 	resourceMessageTypeTurnResult        = "turn_result"
 	resourceMessageTypeDeliveryTerminal  = "delivery_terminal_notice"
 	resourceMessageTypeSchedulerTick     = "scheduler_tick"
+	resourceMessageTypeScheduleExactDue  = "schedule_exact_due"
 	resourceMessageTypeTaskContinuation  = "task_state_continuation"
 	resourceMessageTypeTurnStallRecovery = "turn_stall_recovery"
 

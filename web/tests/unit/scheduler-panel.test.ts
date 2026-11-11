@@ -286,3 +286,90 @@ describe("SchedulerPanel validation", () => {
     expect(target.querySelector<HTMLButtonElement>(".schedule-editor > button")?.disabled).toBe(false);
   });
 });
+
+describe("SchedulerPanel exact times", () => {
+  async function chooseTrigger(target: HTMLElement, value: string): Promise<void> {
+    const select = target.querySelector<HTMLSelectElement>('select[aria-label="Trigger"]')!;
+    select.value = value;
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    await tick();
+  }
+
+  it("creates a daily schedule with no condition and blocks an invalid time zone", async () => {
+    const fetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetch);
+    const target = mountPanel();
+    await openAdd(target);
+    inputValue(target.querySelector<HTMLInputElement>('input[aria-label="Description"]')!, "Daily check");
+    await chooseTrigger(target, "daily");
+    inputValue(target.querySelector<HTMLInputElement>('input[aria-label="Time zone"]')!, "No/Zone");
+    await tick();
+    expect(target.querySelector<HTMLButtonElement>(".schedule-editor > button")!.disabled).toBe(true);
+    inputValue(target.querySelector<HTMLInputElement>('input[aria-label="Time zone"]')!, "Asia/Shanghai");
+    await tick();
+    const save = target.querySelector<HTMLButtonElement>(".schedule-editor > button")!;
+    expect(save.disabled).toBe(false);
+    save.click();
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+    expect(JSON.parse(String(fetch.mock.calls[0][1]?.body))).toEqual({
+      description: "Daily check", condition: "", target: "workspace",
+      exactTime: { timeOfDay: "09:00", timeZone: "Asia/Shanghai" }
+    });
+  });
+
+  it("creates a one-time trigger using a local date and the explicitly chosen zone", async () => {
+    const fetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetch);
+    const target = mountPanel();
+    await openAdd(target);
+    inputValue(target.querySelector<HTMLInputElement>('input[aria-label="Description"]')!, "Once");
+    await chooseTrigger(target, "once");
+    expect(target.querySelector<HTMLButtonElement>(".schedule-editor > button")!.disabled).toBe(true);
+    inputValue(target.querySelector<HTMLInputElement>('input[aria-label="Date and time"]')!, "2026-11-12T09:00");
+    inputValue(target.querySelector<HTMLInputElement>('input[aria-label="Time zone"]')!, "Asia/Shanghai");
+    await tick();
+    target.querySelector<HTMLButtonElement>(".schedule-editor > button")!.click();
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+    expect(JSON.parse(String(fetch.mock.calls[0][1]?.body)).exactTime).toEqual({ at: "2026-11-12T09:00", timeZone: "Asia/Shanghai" });
+  });
+
+  it("displays the configured zone and preserves the exact instant while editing a description", async () => {
+    const fetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetch);
+    const exactTime = { at: "2026-11-12T01:00:00.123Z", timeZone: "Asia/Shanghai", startedAt: "2026-11-11T00:00:00Z" };
+    const target = mountPanel({ ...config, schedules: [{
+      id: "schedule-once", description: "Once", condition: "", target: "workspace", createdAt: "", updatedAt: "", exactTime
+    }] });
+    await tick();
+    expect(target.textContent).toContain("2026-11-12 09:00:00 (Asia/Shanghai)");
+    target.querySelector<HTMLButtonElement>("tbody button")!.click();
+    await vi.waitFor(() => expect(target.querySelector<HTMLDialogElement>("dialog")?.open).toBe(true));
+    expect(target.querySelector<HTMLInputElement>('input[aria-label="Date and time"]')?.value).toBe("2026-11-12T09:00");
+    inputValue(target.querySelector<HTMLInputElement>('input[aria-label="Description"]')!, "Changed");
+    await tick();
+    target.querySelector<HTMLButtonElement>(".schedule-editor > button")!.click();
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+    expect(JSON.parse(String(fetch.mock.calls[0][1]?.body)).exactTime.at).toBe(exactTime.at);
+  });
+
+  it("requires a condition when changing a daily schedule back to natural language", async () => {
+    const fetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetch);
+    const target = mountPanel({ ...config, schedules: [{
+      id: "schedule-daily", description: "Daily", condition: "", target: "workspace", createdAt: "", updatedAt: "",
+      exactTime: { timeOfDay: "09:00", timeZone: "Asia/Shanghai", startedAt: "2026-11-11T00:00:00Z" }
+    }] });
+    await tick();
+    target.querySelector<HTMLButtonElement>("tbody button")!.click();
+    await vi.waitFor(() => expect(target.querySelector<HTMLDialogElement>("dialog")?.open).toBe(true));
+    await chooseTrigger(target, "condition");
+    const save = target.querySelector<HTMLButtonElement>(".schedule-editor > button")!;
+    expect(save.disabled).toBe(true);
+    inputValue(target.querySelector<HTMLTextAreaElement>("textarea")!, "when ready");
+    await tick();
+    expect(save.disabled).toBe(false);
+    save.click();
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+    expect(JSON.parse(String(fetch.mock.calls[0][1]?.body)).exactTime).toEqual({});
+  });
+});

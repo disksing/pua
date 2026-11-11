@@ -442,6 +442,12 @@ func (m *agentManager) nextSchedulerReconcileDeadline(now time.Time) time.Time {
 		if err != nil || len(config.Schedules) == 0 {
 			continue
 		}
+		if deadline := nextExactScheduleDeadline(config, now); !deadline.IsZero() && (earliest.IsZero() || deadline.Before(earliest)) {
+			earliest = deadline
+		}
+		if len(naturalLanguageSchedules(config).Schedules) == 0 {
+			continue
+		}
 		store, err := loadResourceMailboxStoreForRead(workspace.Path, app.SchedulerResourceID)
 		if err != nil || strings.TrimSpace(store.Scheduler.TurnTerminalAt) == "" || strings.TrimSpace(store.Scheduler.TurnStatus) != "completed" {
 			continue

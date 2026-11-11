@@ -249,6 +249,8 @@ Scheduler 适合定时触发、条件触发，以及需要长时间等待外部�
 
 Schedule 使用自然语言描述条件，不使用 cron 表达式：
 
+固定到点触发可用 `--at=<时间>`（一次性）或 `--daily=HH:MM`（每日），并显式指定 `--timezone=Asia/Shanghai` 等 IANA 时区。这类调度由 Server 自动触发，condition 可空；停机补发最近一次，跳过更早漏发。`--expires=<时间>` 设置截止时间。`update --no-exact-time` 移除时间类型（需保留 condition），`--condition=` 清空可选说明。仅创建自然语言调度时 condition 必填。用 `pua scheduler --help` 查看完整参数。
+
 ~~~sh
 pua scheduler list [--json]
 pua scheduler show --id=<schedule>

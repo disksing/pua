@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -265,6 +266,10 @@ func (m *agentManager) reconcileScheduler(ctx context.Context, workspace serveWo
 	if err != nil {
 		return err
 	}
+	if err := m.reconcileScheduleExactDue(ctx, workspace); err != nil {
+		log.Printf("reconcile exact-time schedules: %v", err)
+	}
+	config = naturalLanguageSchedules(config)
 	digest, err := schedulerConfigDigest(config)
 	if err != nil {
 		return err

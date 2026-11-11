@@ -65,6 +65,15 @@ export interface ScheduleRecord {
   target: string;
   createdAt: string;
   updatedAt: string;
+  exactTime?: {
+    at?: string;
+    timeOfDay?: string;
+    timeZone: string;
+    expiresAt?: string;
+    startedAt: string;
+    lastFiredAt?: string;
+    pending?: { occurrence: string; firedAt: string; description: string; target: string; language: string };
+  };
 }
 
 export interface SchedulerConfigRecord {

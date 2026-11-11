@@ -337,7 +337,7 @@ Commands:
     binding, repo.
 
   pua scheduler <command>
-    Manage natural-language schedules. Subcommands: list, show, add, update,
+    Manage time and condition schedules. Subcommands: list, show, add, update,
     remove.
 
   pua template <command>
@@ -583,8 +583,8 @@ func printSchedulerHelp() {
 	fmt.Print(`Usage:
   pua scheduler list [--json]
   pua scheduler show --id=<schedule>
-  pua scheduler add --description=<text> --condition=<text> --target=<resource>
-  pua scheduler update --id=<schedule> [--description=<text>] [--condition=<text>] [--target=<resource>]
+  pua scheduler add --description=<text> --target=<resource> [--condition=<text>] [--at=<time>|--daily=<HH:MM>] [--timezone=<IANA>] [--expires=<time>]
+  pua scheduler update --id=<schedule> [--description=<text>] [--condition=<text>] [--target=<resource>] [--at=<time>|--daily=<HH:MM>] [--timezone=<IANA>] [--expires=<time>] [--no-exact-time]
   pua scheduler remove --id=<schedule>
 
 Commands:
@@ -594,12 +594,19 @@ Commands:
   pua scheduler show --id=<schedule>
     Print one schedule as JSON.
 
-  pua scheduler add --description=<text> --condition=<text> --target=<resource>
-    Create a natural-language schedule. <resource> is a stable resource id such
-    as workspace or project1.task1.
+  pua scheduler add --description=<text> --target=<resource> [--condition=<text>] [--at=<time>|--daily=<HH:MM>] [--timezone=<IANA>] [--expires=<time>]
+    Create a schedule. --at fires once; --daily fires each day at HH:MM.
+    Time values accept RFC3339 or YYYY-MM-DDTHH:MM[:SS]. --timezone is an
+    IANA zone (default: server local zone, persisted when created).
+    Without an exact time, --condition is required and evaluated by the
+    Scheduler Agent. With an exact time, condition is an optional note.
+    Missed daily occurrences are coalesced to the latest one after downtime.
+    <resource> is a stable resource id such as workspace or project1.task1.
 
-  pua scheduler update --id=<schedule> [--description=<text>] [--condition=<text>] [--target=<resource>]
-    Update one or more fields of an existing schedule.
+  pua scheduler update --id=<schedule> [--description=<text>] [--condition=<text>] [--target=<resource>] [--at=<time>|--daily=<HH:MM>] [--timezone=<IANA>] [--expires=<time>] [--no-exact-time]
+    Update one or more fields. --no-exact-time removes the exact trigger
+    (requires a condition). --condition= clears an optional note;
+    --expires= clears the expiry. Time or target changes rearm the schedule.
 
   pua scheduler remove --id=<schedule>
     Remove a schedule.

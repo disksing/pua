@@ -1,10 +1,21 @@
+import { readFileSync } from "node:fs";
+
 import { mount, tick, unmount } from "svelte";
 import { afterEach, expect, it, vi } from "vitest";
 import PersistentChat from "../../src/components/PersistentChat.svelte";
 import { createPUAAppChannels } from "../../src/app-channels";
 
 const cleanups: Array<() => Promise<void>> = [];
-afterEach(async () => { while (cleanups.length) await cleanups.pop()?.(); vi.unstubAllGlobals(); document.body.replaceChildren(); });
+afterEach(async () => { while (cleanups.length) await cleanups.pop()?.(); vi.unstubAllGlobals(); delete window.marked; delete window.DOMPurify; document.body.replaceChildren(); });
+
+function loadVendor<T>(relativePath: string, globalName: string): T {
+ const source = readFileSync(new URL(relativePath, import.meta.url), "utf8");
+ return new Function("window", "globalThis", `const module=undefined,exports=undefined,define=undefined;${source}\nreturn globalThis[${JSON.stringify(globalName)}];`)(window, window) as T;
+}
+function installMarkdownVendors(): void {
+ window.marked = loadVendor<NonNullable<Window["marked"]>>("../../static/vendor/marked/marked.min.js", "marked");
+ window.DOMPurify = loadVendor<NonNullable<Window["DOMPurify"]>>("../../static/vendor/dompurify/purify.min.js", "DOMPurify");
+}
 function response(value: unknown, status = 200) { return new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } }); }
 function pathname(input: unknown) { return String(input).split("?")[0]; }
 function setup() {
@@ -136,4 +147,34 @@ it("keeps approval content outside the fixed heading and permits a response", as
  expect(target.querySelector(".chat-heading .session-controls")?.textContent).toContain("attention_required");
  button(target, "Allow once").click();
  await vi.waitFor(() => expect(approvalBody).toEqual({ requestId: "approval-1", decision: "accept" }));
+});
+
+it("opens a workspace file link from a chat message in a read-only preview", async () => {
+ installMarkdownVendors();
+ const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+  const path = String(input);
+  if (path.includes("/files?path=")) return response({
+   path: "project1-forge/task580/artifacts/report.md", name: "report.md", size: 18,
+   binary: false, image: false, truncated: false, mimeType: "text/markdown", contentHash: "hash", content: "# Previewed report",
+  });
+  if (path.endsWith("/status")) return response({ sessionState: "idle" });
+  return response({ id: "c", open: true, epoch: 1, unreadCount: 0, messages: [
+   { id: "m", role: "agent", text: "[report](/project1-forge/task580/artifacts/report.md)", createdAt: "2026-11-12T00:00:00Z" },
+  ] });
+ });
+ vi.stubGlobal("fetch", fetchMock);
+ const { channel, target } = setup();
+
+ const link = await vi.waitFor(() => {
+  const value = target.querySelector<HTMLAnchorElement>("a[href='/project1-forge/task580/artifacts/report.md']");
+  expect(value).not.toBeNull();
+  return value!;
+ });
+ const routeBefore = window.location.pathname;
+ link.click();
+
+ await vi.waitFor(() => expect(target.querySelector("[role='dialog'][aria-label='File preview']")?.textContent).toContain("Previewed report"));
+ expect(window.location.pathname).toBe(routeBefore);
+ expect(fetchMock.mock.calls.map(([input]) => String(input))).toContain("/api/workspaces/w/files?path=%2Fproject1-forge%2Ftask580%2Fartifacts%2Freport.md");
+ expect(target.querySelector("[role='dialog'] .markdown-editor-shell")).toBeNull();
 });

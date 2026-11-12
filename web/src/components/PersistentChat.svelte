@@ -1,8 +1,9 @@
 <script lang="ts">
   import ChatComposer from "./ChatComposer.svelte";
+  import FilePreviewModal from "./FilePreviewModal.svelte";
   import UploadDialog from "./UploadDialog.svelte";
   import { createModelChannel } from "./model-channel";
-  import type { ComposerModel, UploadDialogModel } from "./models";
+  import type { ComposerModel, FilePreviewModel, UploadDialogModel } from "./models";
   import SessionControls from "./SessionControls.svelte";
   import { onMount, tick, untrack } from "svelte";
   import { ApiClient } from "../api/client";
@@ -31,6 +32,7 @@
   let bindingSaving = $state(false);
   let pending = $state(false);
   let error = $state("");
+  let preview = $state<{ section: string; path: string; mode?: "edit" | "annotate" } | null>(null);
   let requestID = "", sentText = "", mutationRevision = 0;
   const client = new ApiClient();
   const base = $derived(`/api/workspaces/${encodeURIComponent(model.workspaceId)}/resources/${encodeURIComponent(model.resourceId)}/chat`);
@@ -186,6 +188,12 @@
       },
     };
   }
+  function openLinkedFile(path: string): void {
+    preview = { section: "Files", path };
+  }
+  function rejectReadOnlySave(): Promise<FilePreviewModel> {
+    return Promise.reject(new Error("Chat file previews are read-only."));
+  }
   function uploadModel(): UploadDialogModel {
     const key = identity, resourcePath = model.detail?.path || "";
     return {
@@ -226,7 +234,7 @@
     {#each chat?.messages || [] as message (message.id)}
       <article class:user-message={message.role === "user"}>
         <small>{message.role === "user" ? (message.sender || "User") : "Agent"} · {new Date(message.createdAt).toLocaleString()}</small>
-        <div class="markdown-rendered" use:markdownResourceNavigation={{ resolveResourceTitle: model.resolveResourceTitle, onNavigate: model.onNavigate }}>{@html markdownHTML(message.text, { resolveResourceTitle: model.resolveResourceTitle, workspaceId: model.workspaceId })}</div>
+        <div class="markdown-rendered" use:markdownResourceNavigation={{ resolveResourceTitle: model.resolveResourceTitle, onNavigate: model.onNavigate, onOpenFile: openLinkedFile }}>{@html markdownHTML(message.text, { resolveResourceTitle: model.resolveResourceTitle, workspaceId: model.workspaceId })}</div>
       </article>
     {/each}
     {#if chat && !chat.messages.length}<p class="chat-hint">Start a conversation about this resource. Execution events are available in their own tab.</p>{/if}
@@ -241,6 +249,7 @@
   {/if}
 </section>
 <div data-component-owner="upload-dialog" style="display: contents"><UploadDialog channel={upload} /></div>
+<FilePreviewModal {client} workspaceId={model.workspaceId} resourceId={model.resourceId} selection={preview} editable={false} resolveResourceTitle={model.resolveResourceTitle} onNavigate={model.onNavigate} onOpenFile={openLinkedFile} onSaveMarkdown={rejectReadOnlySave} onClose={() => preview = null} onError={model.onToast} />
 <style>
   .persistent-chat { display:flex; flex-direction:column; min-height:100%; gap:12px; padding:16px; }
   .persistent-chat :global(.chat-heading) { position:sticky; top:0; z-index:2; display:flex; flex-direction:column; gap:8px; margin:-16px -16px 0; padding:16px; background:var(--panel); border-bottom:1px solid var(--border-color, #8883); }

@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+umask 077
+for name in NOTARYTOOL_KEY_ID NOTARYTOOL_ISSUER NOTARYTOOL_KEY; do eval "value=\${$name:-}"; [ -n "$value" ] || { echo "$name is missing" >&2; exit 1; }; done
+keychain=$(cat "$RUNNER_TEMP/pua-signing-keychain-path")
+key_file=$RUNNER_TEMP/AuthKey_$NOTARYTOOL_KEY_ID.p8
+printf '%s' "$NOTARYTOOL_KEY" >"$key_file"
+xcrun notarytool store-credentials pua-notary --key "$key_file" --key-id "$NOTARYTOOL_KEY_ID" --issuer "$NOTARYTOOL_ISSUER" --keychain "$keychain"
+printf 'NOTARYTOOL_KEYCHAIN=%s\n' "$keychain" >>"$GITHUB_ENV"
+printf 'NOTARYTOOL_KEYCHAIN_PROFILE=pua-notary\n' >>"$GITHUB_ENV"

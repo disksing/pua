@@ -70,6 +70,10 @@ type workspacesResponse struct {
 }
 
 var workspaceIconFiles = map[string]string{
+	"pua-red":                 "pua-red.png",
+	"pua-green":               "pua-green.png",
+	"pua-blue":                "pua-blue.png",
+	"pua-purple":              "pua-purple.png",
 	"home-base":               "01-home-base.png",
 	"personal-tasks":          "02-personal-tasks.png",
 	"product-roadmap":         "03-product-roadmap.png",
@@ -108,31 +112,36 @@ type workspaceWiki struct {
 }
 
 type fileTreeEntry struct {
-	Name     string          `json:"name"`
-	Path     string          `json:"path"`
-	Type     string          `json:"type"`
-	Size     int64           `json:"size,omitempty"`
-	Modified string          `json:"modified,omitempty"`
-	Children []fileTreeEntry `json:"children,omitempty"`
+	Name      string          `json:"name"`
+	Path      string          `json:"path"`
+	Type      string          `json:"type"`
+	Size      int64           `json:"size,omitempty"`
+	Modified  string          `json:"modified,omitempty"`
+	Children  []fileTreeEntry `json:"children,omitempty"`
+	Truncated bool            `json:"truncated,omitempty"`
 }
 
 type resourceSnapshot struct {
-	ID               string                     `json:"id"`
-	Type             string                     `json:"type"`
-	Title            string                     `json:"title"`
-	Path             string                     `json:"path"`
-	Archived         bool                       `json:"archived"`
-	AgentBinding     app.AgentBinding           `json:"agentBinding"`
-	State            app.TaskState              `json:"state,omitempty"`
-	StateNote        string                     `json:"stateNote,omitempty"`
-	StateUpdatedAt   string                     `json:"stateUpdatedAt,omitempty"`
-	Runtime          *resourceRuntimeSnapshot   `json:"runtime,omitempty"`
-	UserState        *resourceUserStateSnapshot `json:"userState,omitempty"`
-	LatestTurnNumber int                        `json:"latestTurnNumber,omitempty"`
-	LatestTurnAt     string                     `json:"latestTurnAt,omitempty"`
-	LatestAgentName  string                     `json:"latestAgentName,omitempty"`
-	UnreadCount      int                        `json:"unreadCount,omitempty"`
-	Children         []resourceSnapshot         `json:"children,omitempty"`
+	ID                 string                     `json:"id"`
+	Type               string                     `json:"type"`
+	Title              string                     `json:"title"`
+	Path               string                     `json:"path"`
+	Archived           bool                       `json:"archived"`
+	AgentBinding       app.AgentBinding           `json:"agentBinding"`
+	State              app.TaskState              `json:"state,omitempty"`
+	StateNote          string                     `json:"stateNote,omitempty"`
+	StateUpdatedAt     string                     `json:"stateUpdatedAt,omitempty"`
+	Runtime            *resourceRuntimeSnapshot   `json:"runtime,omitempty"`
+	UserState          *resourceUserStateSnapshot `json:"userState,omitempty"`
+	LatestTurnNumber   int                        `json:"latestTurnNumber,omitempty"`
+	LatestChatAt       string                     `json:"latestChatAt,omitempty"`
+	LatestUnreadChatAt string                     `json:"latestUnreadChatAt,omitempty"`
+	LatestTurnAt       string                     `json:"latestTurnAt,omitempty"`
+	LatestAgentName    string                     `json:"latestAgentName,omitempty"`
+	UnreadCount        int                        `json:"unreadCount,omitempty"`
+	Chat               *chatSnapshot              `json:"chat,omitempty"`
+	DialogueEvents     *sessionReadSnapshot       `json:"dialogueEvents,omitempty"`
+	Children           []resourceSnapshot         `json:"children,omitempty"`
 }
 
 type filePreview struct {
@@ -179,14 +188,17 @@ type uiState struct {
 }
 
 type server struct {
-	addr             string
-	config           string
-	agentHubMode     string
-	agentHubEndpoint string
-	agents           *agentManager
-	doctor           *doctorMonitor
-	locks            *workspaceLockManager
-	uiStateMu        sync.Mutex
+	telegramMu         sync.Mutex
+	telegramSettingsMu sync.Mutex
+	telegramRuntimes   map[string]*telegramRuntime
+	addr               string
+	config             string
+	agentHubMode       string
+	agentHubEndpoint   string
+	agents             *agentManager
+	doctor             *doctorMonitor
+	locks              *workspaceLockManager
+	uiStateMu          sync.Mutex
 }
 
 const (
@@ -213,7 +225,7 @@ Options:
   --agenthub-mode <mode> AgentHub mode: embedded (default) or external
   --agenthub-endpoint    external AgentHub base URL ending in /agenthub;
                          required when --agenthub-mode=external
-  --version              print build-time branch and sha
+  --version              print product version and source build identity
 
 Workspace ownership:
   Each managed Workspace is exclusively owned by one pua serve process via
@@ -257,7 +269,7 @@ func Main(args []string) error {
 	flags.BoolVar(&noDefaultWorkspace, "no-default-workspace", false, "do not add the current directory to an empty config")
 	flags.StringVar(&agentHubMode, "agenthub-mode", agentHubModeEmbedded, "AgentHub mode: embedded or external")
 	flags.StringVar(&agentHubEndpoint, "agenthub-endpoint", "", "external AgentHub base URL ending in /agenthub")
-	flags.BoolVar(&showVersion, "version", false, "print build-time branch and sha")
+	flags.BoolVar(&showVersion, "version", false, "print product version and source build identity")
 	if err := flags.Parse(args); err != nil {
 		fmt.Fprint(os.Stderr, serveUsage)
 		return err
@@ -305,8 +317,8 @@ func Main(args []string) error {
 	defer configLock.Close()
 	var agentHubService *agenthubapp.Service
 	if agentHubMode == agentHubModeEmbedded {
-		info := buildinfo.Current()
-		agentHubService, err = agenthubapp.New(agenthubapp.Options{Address: addr, Version: info.SHA})
+		info := buildinfo.Current("pua")
+		agentHubService, err = agenthubapp.New(agenthubapp.Options{Address: addr, Version: info.EmbeddedAgentHubVersion})
 		if err != nil {
 			return fmt.Errorf("initialize embedded AgentHub: %w", err)
 		}
@@ -401,6 +413,7 @@ func Main(args []string) error {
 		}
 	}()
 	s.agents.startAgentRecovery(lifecycleContext)
+	s.startTelegram(lifecycleContext)
 	s.doctor = newDoctorMonitor(s)
 	s.doctor.start(lifecycleContext)
 	ready.ready.Store(true)
@@ -491,6 +504,10 @@ func (s *server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := parts[0]
+	if r.Header.Get("X-PUA-Chat-Token") != "" && r.Method != http.MethodGet && !(len(parts) >= 4 && parts[1] == "resources" && parts[3] == "chat") {
+		writeError(w, errors.New("dialogue mutations must use the chat API"), http.StatusForbidden)
+		return
+	}
 	if len(parts) == 1 {
 		if r.Method == http.MethodPut {
 			var body struct {
@@ -560,6 +577,9 @@ func (s *server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		}
 		s.updateWorkspaceStallWatchdogPolicy(w, r, id)
 		return
+	case "telegram":
+		s.handleTelegram(w, r, id, parts[2:])
+		return
 	case "tree":
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -581,7 +601,22 @@ func (s *server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, tree)
+	case "chats":
+		s.agents.handleChats(w, r, id)
+		return
 	case "resources":
+		if len(parts) == 4 && parts[3] == "turn-work" {
+			s.agents.handleTurnWork(w, r, id, parts[2])
+			return
+		}
+		if len(parts) > 2 && strings.HasPrefix(parts[2], dialoguePrefix) {
+			http.NotFound(w, r)
+			return
+		}
+		if len(parts) >= 4 && parts[3] == "chat" {
+			s.agents.handleChat(w, r, id, parts[2], parts[4:])
+			return
+		}
 		if len(parts) == 4 && parts[3] == "documents" {
 			s.saveResourceMarkdownFile(w, r, id, parts[2])
 			return
@@ -813,12 +848,45 @@ func (s *server) updateWorkspaceDefaults(w http.ResponseWriter, r *http.Request,
 }
 
 func (s *server) updateWorkspaceGenerationPolicy(w http.ResponseWriter, r *http.Request, workspaceID string) {
-	var policy app.GenerationPolicy
+	var request struct {
+		Enabled                   *bool `json:"enabled"`
+		BudgetEnabled             *bool `json:"budgetEnabled"`
+		MaxTurns                  *int  `json:"maxTurns"`
+		MaxAccumulatedTurnMinutes *int  `json:"maxAccumulatedTurnMinutes"`
+		InactivityEnabled         *bool `json:"inactivityEnabled"`
+		MaxInactivityMinutes      *int  `json:"maxInactivityMinutes"`
+	}
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&policy); err != nil {
+	if err := decoder.Decode(&request); err != nil {
 		writeError(w, err, http.StatusBadRequest)
 		return
+	}
+	policy := app.GenerationPolicy{
+		BudgetEnabled:             true,
+		MaxTurns:                  app.DefaultGenerationMaxTurns,
+		MaxAccumulatedTurnMinutes: app.DefaultGenerationMaxAccumulatedTurnMinutes,
+		InactivityEnabled:         true,
+		MaxInactivityMinutes:      app.DefaultGenerationMaxInactivityMinutes,
+	}
+	if request.Enabled != nil {
+		policy.BudgetEnabled = *request.Enabled
+		policy.InactivityEnabled = *request.Enabled
+	}
+	if request.BudgetEnabled != nil {
+		policy.BudgetEnabled = *request.BudgetEnabled
+	}
+	if request.MaxTurns != nil {
+		policy.MaxTurns = *request.MaxTurns
+	}
+	if request.MaxAccumulatedTurnMinutes != nil {
+		policy.MaxAccumulatedTurnMinutes = *request.MaxAccumulatedTurnMinutes
+	}
+	if request.InactivityEnabled != nil {
+		policy.InactivityEnabled = *request.InactivityEnabled
+	}
+	if request.MaxInactivityMinutes != nil {
+		policy.MaxInactivityMinutes = *request.MaxInactivityMinutes
 	}
 	workspace, err := s.workspace(workspaceID)
 	if err != nil {
@@ -1858,8 +1926,9 @@ func (s *server) treeAt(ctx context.Context, path string, userNames ...string) (
 			Task:    app.AgentBinding{Kind: "profile", Name: "default"},
 		}
 		tree.GenerationPolicy = app.GenerationPolicy{
-			Enabled: true, MaxTurns: app.DefaultGenerationMaxTurns,
+			BudgetEnabled: true, MaxTurns: app.DefaultGenerationMaxTurns,
 			MaxAccumulatedTurnMinutes: app.DefaultGenerationMaxAccumulatedTurnMinutes,
+			InactivityEnabled:         true, MaxInactivityMinutes: app.DefaultGenerationMaxInactivityMinutes,
 		}
 		tree.StallWatchdogPolicy = app.StallWatchdogPolicy{Enabled: true, TimeoutMinutes: app.DefaultStallWatchdogTimeoutMinutes}
 	}

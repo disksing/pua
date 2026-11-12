@@ -122,12 +122,12 @@ func TestAgentHubSettingsSaveValidatesCurrentConfig(t *testing.T) {
 	}
 }
 
-func TestAgentHubSettingsRoundTripsAgentHubConfigAndProviderToggle(t *testing.T) {
+func TestAgentHubSettingsRoundTripsAgentHubConfigAndProviderCommand(t *testing.T) {
 	var catalog agentHubCatalog
 	readJSONFixture(t, "agenthub-catalog.json", &catalog)
 	configured := agentHubConfiguredConfig{
 		Version:        1,
-		AgentProviders: []agentHubConfiguredProvider{{ID: "codex", Name: "Codex", Type: "codex", Enabled: true, Command: "codex"}},
+		AgentProviders: []agentHubConfiguredProvider{{ID: "codex", Name: "Codex", Type: "codex", Command: "codex"}},
 		Agents:         []agentHubConfiguredAgent{{Name: "Default", ProviderID: "codex", Options: map[string]string{"model": "gpt-test"}, Environment: map[string]string{"MODE": "test"}}},
 		OnWatch:        agentHubConfiguredOnWatch{ServerURL: "http://127.0.0.1:9211", AuthMode: "trusted_proxy", RefreshIntervalSeconds: 60},
 	}
@@ -155,12 +155,12 @@ func TestAgentHubSettingsRoundTripsAgentHubConfigAndProviderToggle(t *testing.T)
 			writeFakeAgentHubJSON(t, w, map[string]any{"config": saved})
 		case "/v1/config/providers/codex":
 			var request struct {
-				Enabled bool `json:"enabled"`
+				Command string `json:"command"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-				t.Errorf("decode provider toggle: %v", err)
+				t.Errorf("decode provider command: %v", err)
 			}
-			configured.AgentProviders[0].Enabled = request.Enabled
+			configured.AgentProviders[0].Command = request.Command
 			writeFakeAgentHubJSON(t, w, map[string]any{"provider": configured.AgentProviders[0]})
 		default:
 			http.NotFound(w, r)
@@ -173,7 +173,7 @@ func TestAgentHubSettingsRoundTripsAgentHubConfigAndProviderToggle(t *testing.T)
 	request := httptest.NewRequest(http.MethodPut, "/api/settings/agenthub", strings.NewReader(`{
 		"endpoint":`+strconv.Quote(fake.URL)+`,
 		"agentProfiles":[],
-		"agentProviders":[{"id":"codex","name":"Codex","type":"codex","enabled":false,"command":"/opt/homebrew/bin/codex"}],
+		"agentProviders":[{"id":"codex","name":"Codex","type":"codex","command":"/opt/homebrew/bin/codex"}],
 		"agents":[{"name":"Worker","providerId":"codex","options":{"model":"gpt-worker"},"environment":{"MODE":"ci"}}]
 	}`))
 	recorder := httptest.NewRecorder()
@@ -189,24 +189,24 @@ func TestAgentHubSettingsRoundTripsAgentHubConfigAndProviderToggle(t *testing.T)
 	if len(response.AgentConfig.Agents) != 1 || response.AgentConfig.Agents[0].Name != "Worker" {
 		t.Fatalf("save response did not project AgentHub config: %+v", response.AgentConfig)
 	}
-	if len(saved.Agents) != 1 || saved.Agents[0].Name != "Worker" || saved.AgentProviders[0].Enabled || saved.AgentProviders[0].Command != "/opt/homebrew/bin/codex" {
+	if len(saved.Agents) != 1 || saved.Agents[0].Name != "Worker" || saved.AgentProviders[0].Command != "/opt/homebrew/bin/codex" {
 		t.Fatalf("PUA did not save AgentHub config through the API: %+v", saved)
 	}
 
-	toggle := httptest.NewRequest(http.MethodPut, "/api/settings/agenthub/providers/codex", strings.NewReader(`{"enabled":false}`))
-	toggleRecorder := httptest.NewRecorder()
-	server.handleSettings(toggleRecorder, toggle)
-	if toggleRecorder.Code != http.StatusOK {
-		t.Fatalf("provider toggle returned %d: %s", toggleRecorder.Code, toggleRecorder.Body.String())
+	command := httptest.NewRequest(http.MethodPut, "/api/settings/agenthub/providers/codex", strings.NewReader(`{"command":"/usr/local/bin/codex"}`))
+	commandRecorder := httptest.NewRecorder()
+	server.handleSettings(commandRecorder, command)
+	if commandRecorder.Code != http.StatusOK {
+		t.Fatalf("provider command returned %d: %s", commandRecorder.Code, commandRecorder.Body.String())
 	}
-	var toggleResponse struct {
+	var commandResponse struct {
 		Provider agentHubConfiguredProvider `json:"provider"`
 	}
-	if err := json.Unmarshal(toggleRecorder.Body.Bytes(), &toggleResponse); err != nil {
+	if err := json.Unmarshal(commandRecorder.Body.Bytes(), &commandResponse); err != nil {
 		t.Fatal(err)
 	}
-	if toggleResponse.Provider.ID != "codex" || toggleResponse.Provider.Enabled {
-		t.Fatalf("unexpected provider toggle response: %+v", toggleResponse.Provider)
+	if commandResponse.Provider.ID != "codex" || commandResponse.Provider.Command != "/usr/local/bin/codex" {
+		t.Fatalf("unexpected provider command response: %+v", commandResponse.Provider)
 	}
 }
 
@@ -222,7 +222,7 @@ func TestAgentHubSettingsSaveAllowsUnavailableProfileTarget(t *testing.T) {
 			})
 		case "/v1/agents":
 			catalog.Agents[0].Available = false
-			catalog.Agents[0].UnavailableReason = "provider disabled"
+			catalog.Agents[0].UnavailableReason = "provider unavailable"
 			writeFakeAgentHubJSON(t, w, catalog)
 		default:
 			http.NotFound(w, r)

@@ -1,4 +1,4 @@
-import type { AgentHubConfigAgent, AgentHubConfigProvider, AgentOption, AppearanceSettings, NotificationPreferences, SettingsDraft, SettingsModel, WorkspaceOption } from "../components/models";
+import type { AgentHubConfigAgent, AgentHubConfigProvider, AgentOption, AppearanceSettings, NotificationPreferences, SettingsDraft, SettingsModel, SystemInfo, WorkspaceOption } from "../components/models";
 import { confirmDialog } from "./confirm-dialog-controller";
 import type { AgentConfig, AgentProfile, WorkspaceConfig } from "../models/workspace";
 
@@ -17,7 +17,7 @@ export interface AgentHubData {
 	error?: string;
 	status?: { apiVersion?: string; version?: string; capabilities?: string[] };
 	catalog?: {
-		providers?: Array<{ id: string; name?: string; type?: string; enabled?: boolean; command?: string }>;
+		providers?: Array<{ id: string; name?: string; type?: string; command?: string }>;
 		agents?: Array<{ name: string; providerId?: string; options?: Record<string, string>; environment?: Record<string, string>; available?: boolean; unavailableReason?: string }>;
 		probes?: Array<{ providerId: string; type?: string; command?: string; available?: boolean }>;
 	};
@@ -36,6 +36,7 @@ interface SettingsData {
 	agents?: SettingsAgent[];
 	agentProfiles?: SettingsProfile[];
 	agentHub?: AgentHubData;
+	system?: SystemInfo;
 	suggestedUserName?: string;
 }
 
@@ -43,6 +44,7 @@ export interface SettingsControllerDependencies {
 	config(): PUASettingsConfig;
 	setConfig(config: PUASettingsConfig): void;
 	activeWorkspaceId(): string;
+	workspaceUserName?(workspace: WorkspaceOption): string;
 	setActiveWorkspaceId(id: string): void;
 	selectWorkspaceResource(): void;
 	request<T>(path: string, init?: RequestInit): Promise<T>;
@@ -111,7 +113,7 @@ export function createSettingsController(dependencies: SettingsControllerDepende
 		open: false,
 		identity: 0,
 		dataVersion: 0,
-		tab: "workspace",
+		tab: "system",
 		data: null,
 		agentDirty: false,
 		workspacePath: "",
@@ -138,6 +140,7 @@ export function createSettingsController(dependencies: SettingsControllerDepende
 			dataVersion: state.dataVersion,
 			initialTab: state.tab,
 			workspaces: data.workspaces || [],
+			workspaceUserNames: Object.fromEntries((data.workspaces || []).map(workspace => [workspace.id, dependencies.workspaceUserName?.(workspace) || ""])),
 			// The settings marker describes the Workspace currently being browsed.
 			// `data.activeId` is the persisted fallback used when there is no route;
 			// it can differ from the route while the user is viewing another Workspace.
@@ -145,6 +148,7 @@ export function createSettingsController(dependencies: SettingsControllerDepende
 			workspaceIcons: dependencies.workspaceIcons,
 			workspaceIconSavingId: state.workspaceIconSavingId,
 			suggestedUserName: String(data.suggestedUserName || config.suggestedUserName || ""),
+			system: data.system || null,
 			appearance: dependencies.appearance(),
 			agentHub: {
 				mode: hub.mode || "embedded",
@@ -188,14 +192,14 @@ export function createSettingsController(dependencies: SettingsControllerDepende
 				render();
 			},
 			onSaveAgentHub: async (draft) => { syncDraft(draft); await saveAgentSettings(); },
-			onToggleProvider: toggleProvider,
+			onSetProviderCommand: setProviderCommand,
 			onBrowserNotifications: dependencies.setBrowserNotifications,
 			onCompletionSound: dependencies.setCompletionSound,
 			onToast: dependencies.toast
 		});
 	}
 
-	async function open(tab: SettingsDraft["tab"] = "workspace"): Promise<void> {
+	async function open(tab: SettingsDraft["tab"] = "system"): Promise<void> {
 		state.open = true;
 		state.identity = ++identity;
 		state.tab = tab;
@@ -215,11 +219,12 @@ export function createSettingsController(dependencies: SettingsControllerDepende
 	}
 
 	async function refresh(): Promise<void> {
-		const [base, agentHub] = await Promise.all([
+		const [base, agentHub, system] = await Promise.all([
 			dependencies.request<PUASettingsConfig>("/api/workspaces"),
-			dependencies.request<AgentHubData>("/api/settings/agenthub")
+			dependencies.request<AgentHubData>("/api/settings/agenthub"),
+			dependencies.request<SystemInfo>("/api/settings/system")
 		]);
-		state.data = { ...base, agentHub };
+		state.data = { ...base, agentHub, system };
 		state.dataVersion++;
 	}
 
@@ -381,10 +386,10 @@ export function createSettingsController(dependencies: SettingsControllerDepende
 		dependencies.toast("AgentHub settings saved.");
 	}
 
-	async function toggleProvider(providerID: string, enabled: boolean): Promise<AgentHubConfigProvider> {
+	async function setProviderCommand(providerID: string, command: string): Promise<AgentHubConfigProvider> {
 		const response = await dependencies.request<{ provider: AgentHubConfigProvider }>(`/api/settings/agenthub/providers/${encodeURIComponent(providerID)}`, {
 			method: "PUT",
-			body: JSON.stringify({ enabled })
+			body: JSON.stringify({ command })
 		});
 		const current = state.data?.agentHub?.agentConfig || { providers: [], agents: [] };
 		const providers = (current.providers || []).map((provider) => provider.id === response.provider.id ? { ...response.provider } : { ...provider });

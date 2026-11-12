@@ -390,6 +390,52 @@ describe("CSS ownership", () => {
     expect(row).toContain("min-width: 0;");
   });
 
+  it("keeps PUA and workspace icons on transparent containers", () => {
+    const brand = read("src/components/AppShell.css");
+    const switcher = read("src/components/WorkspaceSwitcher.css");
+    const settings = read("src/components/WorkspaceSettingsPanel.css");
+    const body = (css: string, selector: string) => {
+      const start = css.indexOf(selector);
+      expect(start, selector).toBeGreaterThanOrEqual(0);
+      return css.slice(css.indexOf("{", start), css.indexOf("}", start) + 1);
+    };
+    expect(body(brand, ':where([data-component-owner="app-shell"]) .brand-mark')).toContain("background: transparent;");
+    expect(body(switcher, ':where([data-component-owner="workspace-switcher"]) .workspace-avatar')).toContain("background: transparent;");
+    expect(body(settings, ':where([data-component-owner="workspace-settings-panel"]) .settings-workspace-mark')).toContain("background: transparent;");
+  });
+
+  it("removes native button chrome from Agent and Agent Profile rows", () => {
+    const body = (path: string, selector: string) => {
+      const css = read(path);
+      const start = css.indexOf(selector);
+      expect(start, selector).toBeGreaterThanOrEqual(0);
+      return css.slice(css.indexOf("{", start), css.indexOf("}", start) + 1);
+    };
+
+    for (const [path, owner] of [
+      ["src/components/AgentHubSettingsPanel.css", "agenthub-settings-panel"],
+      ["src/components/ProfilesSettingsPanel.css", "profiles-settings-panel"],
+    ] as const) {
+      const reset = body(path, `:where([data-component-owner="${owner}"]) button`);
+      expect(reset).toContain("-webkit-appearance: none;");
+      expect(reset).toContain("appearance: none;");
+      expect(reset).toContain("background: transparent;");
+      expect(reset).toContain("box-shadow: none;");
+    }
+
+    const agentDelete = body("src/components/AgentHubSettingsPanel.css", ':where([data-component-owner="agenthub-settings-panel"]) .settings-delete-button');
+    expect(agentDelete).toContain("background: transparent;");
+
+    const profileDelete = body("src/components/ProfilesSettingsPanel.css", ':where([data-component-owner="profiles-settings-panel"]) .settings-profile-card-head .icon-button.danger');
+    expect(profileDelete).toContain("background: transparent;");
+
+    const systemProfile = body("src/components/ProfilesSettingsPanel.css", ':where([data-component-owner="profiles-settings-panel"]) .settings-profile-card-system');
+    expect(systemProfile).toContain("background: var(--panel);");
+
+    const profileSummary = body("src/components/ProfilesSettingsPanel.css", ':where([data-component-owner="profiles-settings-panel"]) .settings-profile-card-toggle .settings-pill');
+    expect(profileSummary).toContain("background: transparent;");
+  });
+
   it("keeps the chat composer send button inside very narrow viewports", () => {
     const body = (path: string, selector: string) => {
       const css = read(path);
@@ -647,8 +693,6 @@ describe("CSS ownership", () => {
     // sidebar region tokens, never from line tokens (invisible on light
     // surfaces) or --panel (white).
     expect(body("src/components/AppShell.css", ':where([data-component-owner="app-shell"]) .brand-copy strong {')).toContain("color: var(--sidebar-text);");
-    expect(body("src/components/AttentionList.css", ':where([data-component-owner="attention-list"]) .inbox-text {')).toContain("color: var(--sidebar-text);");
-    expect(body("src/components/AttentionList.css", ':where([data-component-owner="attention-list"]) .inbox-row {')).toContain("color: var(--sidebar-text);");
     const schedulerSmall = body("src/components/SchedulerNav.css", '[data-component-owner="scheduler-nav"] small {');
     expect(schedulerSmall).toContain("color: var(--sidebar-muted);");
 

@@ -17,12 +17,16 @@ afterEach(async () => {
     open: true,
     identity: "settings-1",
     dataVersion: 1,
-    initialTab: "workspace",
+    initialTab: "system",
     workspaces: [{ id: "workspace-a", name: "Workspace A", path: "/tmp/a" }],
     activeWorkspaceId: "workspace-a",
     workspaceIcons: [{ id: "", label: "PUA default", src: "/favicon.svg" }],
     workspaceIconSavingId: "",
     suggestedUserName: "ServerUser",
+    system: {
+      pua: { address: "127.0.0.1", port: "4936", configPath: "/tmp/pua/serve.json", workspaces: [{ name: "Workspace A", path: "/tmp/a" }], buildBranch: "master", buildCommit: "pua-commit" },
+      agentHub: { mode: "embedded", address: "127.0.0.1", port: "4936", endpoint: "http://127.0.0.1:4936/agenthub", connected: true, compatible: true, version: "hub-commit", paths: { config: "/tmp/agenthub/config.json", sessions: "/tmp/agenthub/sessions", archive: "/tmp/agenthub/sessions/Archive", logs: "/tmp/agenthub/logs" }, error: "" },
+    },
     appearance: { layout: "auto", fontScales: { sidebar: 1, details: 1, chat: 1 }, theme: "default", themeOptions: [{ id: "default", label: "Default", description: "The standard PUA appearance" }] },
     agentHub: {
       mode: "external",
@@ -50,7 +54,7 @@ afterEach(async () => {
     onResetFontScales: vi.fn(),
     onThemePreference: vi.fn(),
     onSaveAgentHub: vi.fn(async () => undefined),
-    onToggleProvider: vi.fn(async (providerId, enabled) => ({ id: providerId, name: providerId, type: providerId, enabled })),
+    onSetProviderCommand: vi.fn(async (providerId) => ({ id: providerId, name: providerId, type: providerId })),
     onBrowserNotifications: vi.fn(),
     onCompletionSound: vi.fn(),
     onToast: vi.fn(),
@@ -76,7 +80,10 @@ describe("SettingsModal coordination", () => {
     expect(close.parentElement?.classList.contains("settings-header")).toBe(true);
     expect(close.closest(".settings-body")).toBeNull();
     const body = target.querySelector(".settings-body")!;
-    expect(body.querySelector("h2")?.textContent).toBe("Workspaces");
+    expect(body.querySelector("h2")?.textContent).toBe("System Information");
+    expect(body.querySelectorAll("input, select, textarea, [type=submit]")).toHaveLength(0);
+    expect(body.textContent).toContain("/tmp/pua/serve.json");
+    expect(body.textContent).toContain("/tmp/agenthub/sessions");
   });
 
   it("composes all domain panels and preserves a dirty focused draft across data refreshes", async () => {
@@ -89,7 +96,7 @@ describe("SettingsModal coordination", () => {
     await tick();
 
     const tabs = [...target.querySelectorAll<HTMLButtonElement>(".settings-tab")];
-    expect(tabs.map((tab) => tab.textContent?.trim())).toEqual(["Workspace", "Appearance", "Agents", "Profiles", "Notifications"]);
+    expect(tabs.map((tab) => tab.textContent?.trim())).toEqual(["System", "Workspace", "Appearance", "Agents", "Profiles", "Notifications"]);
     tabs.find((tab) => tab.textContent?.includes("Agents"))!.click();
     await tick();
 
@@ -178,4 +185,56 @@ describe("SettingsModal coordination", () => {
     expect(current.onClose).toHaveBeenNthCalledWith(1, true);
     expect(current.onClose).toHaveBeenNthCalledWith(2, true);
   });
+});
+
+it("preserves Telegram drafts and pairing across background settings publications", async () => {
+  const requests: string[] = [];
+  const telegram = { configured: true, enabled: true, botName: "test_bot", accounts: [{ user: "User", telegramId: 777 }], topicCount: 1, lastError: "", lastPoll: "", deliveryProblems: [] };
+  vi.stubGlobal("fetch", vi.fn(async (path: RequestInfo | URL) => {
+    requests.push(String(path));
+    const value = String(path).endsWith("/users") ? { users: [{ name: "User" }, { name: "disksing" }] }
+      : String(path).endsWith("/pair") ? { url: "https://t.me/test_bot?start=once", expiresAt: "2030-01-01T00:10:00Z" } : telegram;
+    return new Response(JSON.stringify(value), { headers: { "Content-Type": "application/json" } });
+  }));
+  cleanups.push(async () => { vi.unstubAllGlobals(); });
+  const initial = model({ initialTab: "workspace", workspaceUserNames: { "workspace-a": "disksing" } });
+  const channel = createModelChannel(initial);
+  const target = document.body.appendChild(document.createElement("div"));
+  const component = mount(SettingsModal, { target, props: { channel } });
+  cleanups.push(() => unmount(component)); await tick();
+  const details = target.querySelector<HTMLDetailsElement>(".telegram-settings")!;
+  details.open = true; details.dispatchEvent(new Event("toggle")); await tick();
+  await vi.waitFor(() => expect(details.querySelector("select")).not.toBeNull());
+  const selected = details.querySelector("select")!;
+  expect(selected.value).toBe("disksing");
+  expect(details.textContent).toContain("Telegram messages are sent as User; you are viewing the shared chat as disksing");
+  selected.value = "User"; selected.dispatchEvent(new Event("change", { bubbles: true })); await tick();
+  details.querySelectorAll("form")[1].dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  await vi.waitFor(() => expect(details.querySelector('a[href="https://t.me/test_bot?start=once"]')).not.toBeNull());
+  const token = details.querySelector<HTMLInputElement>('input[type="password"]')!;
+  input(token, "123:unsaved-secret"); token.focus();
+  const enabled = details.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+  enabled.checked = false; enabled.dispatchEvent(new Event("change", { bubbles: true })); await tick();
+  input(target.querySelector<HTMLInputElement>("#settingsWorkspacePath")!, "/tmp/unsaved-workspace");
+  target.querySelector<HTMLInputElement>("#settingsWorkspaceCreate")!.click(); await tick();
+  input(target.querySelector<HTMLInputElement>("#settingsWorkspaceInitialUser")!, "NewUser");
+  const language = target.querySelector<HTMLSelectElement>("#settingsWorkspaceLanguage")!;
+  language.value = "zh-CN"; language.dispatchEvent(new Event("change", { bubbles: true })); await tick();
+  token.focus();
+  const initialRequests = requests.length;
+  for (let i = 0; i < 3; i++) {
+    channel.publish({ ...initial, dataVersion: i + 2, workspaces: initial.workspaces.map(w => ({ ...w })), workspaceUserNames: { ...initial.workspaceUserNames } });
+    await tick();
+  }
+  expect(requests).toHaveLength(initialRequests);
+  expect(target.querySelector<HTMLInputElement>("#settingsWorkspacePath")!.value).toBe("/tmp/unsaved-workspace");
+  expect(target.querySelector<HTMLInputElement>("#settingsWorkspaceCreate")!.checked).toBe(true);
+  expect(target.querySelector<HTMLInputElement>("#settingsWorkspaceInitialUser")!.value).toBe("NewUser");
+  expect(language.value).toBe("zh-CN");
+  expect(token.value).toBe("123:unsaved-secret"); expect(enabled.checked).toBe(false);
+  expect(selected.value).toBe("User"); expect(document.activeElement).toBe(token);
+  expect(details.querySelector('a[href="https://t.me/test_bot?start=once"]')).not.toBeNull();
+  Array.from(details.querySelectorAll("button")).find(b => b.textContent === "Refresh status")!.click();
+  await vi.waitFor(() => expect(requests).toHaveLength(initialRequests + 1)); await tick();
+  expect(token.value).toBe("123:unsaved-secret"); expect(enabled.checked).toBe(false); expect(selected.value).toBe("User");
 });

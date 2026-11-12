@@ -1,6 +1,7 @@
 package serve
 
 import (
+	"encoding/json"
 	"reflect"
 	"testing"
 )
@@ -42,10 +43,10 @@ func TestProviderMessageTextDescribesLocalizedResponseAndInsertedConversation(t 
 			want: "Message from user \"disksing\" [sender receives: progress + final reply]:\nstart",
 		},
 		{
-			name: "English subscribed Agent opener",
+			name: "English legacy Agent opener",
 			message: resourceMailboxMessage{Text: "coordinate", Role: "agent", Sender: &agentHubMessageSender{ID: "project1.task347"},
 				ProviderContext: &providerMessageContext{Language: "en", OpenerRole: "agent", OpenerSender: &agentHubMessageSender{ID: "project1.task347"}, OpenerResponse: providerResponseFinalOnly}},
-			want: "Message from agent \"project1.task347\" [sender receives: final reply only]:\ncoordinate",
+			want: "Message from agent \"project1.task347\" [sender receives: no progress or final reply]:\ncoordinate",
 		},
 		{
 			name: "English unsubscribed Agent opener",
@@ -111,27 +112,20 @@ func TestProviderMessageTextDescribesLocalizedResponseAndInsertedConversation(t 
 	}
 }
 
-func TestProviderOpenerResponseUsesRoleAndEffectiveSubscription(t *testing.T) {
-	sender := &agentHubMessageSender{ID: "project1.task2"}
-	tests := []struct {
-		name    string
+func TestProviderOpenerResponseIsOneWayForAgents(t *testing.T) {
+	legacy := true
+	for _, test := range []struct {
 		role    string
 		message *resourceMailboxMessage
 		want    string
 	}{
-		{name: "user", role: "user", want: providerResponseProgressFinal},
-		{name: "system", role: "system", want: providerResponseNone},
-		{name: "subscribed Agent", role: "agent", message: &resourceMailboxMessage{Role: "agent", Sender: sender, SenderWorkspaceInstanceID: "instance-1", SubscribeResult: true}, want: providerResponseFinalOnly},
-		{name: "disabled Agent", role: "agent", message: &resourceMailboxMessage{Role: "agent", Sender: sender, SenderWorkspaceInstanceID: "instance-1", SubscribeResult: true, ResultSubscriptionStatus: resourceResultSubscriptionDisabled}, want: providerResponseNone},
-		{name: "unsubscribed Agent", role: "agent", message: &resourceMailboxMessage{Role: "agent", Sender: sender, SenderWorkspaceInstanceID: "instance-1"}, want: providerResponseNone},
-		{name: "invalid Agent sender", role: "agent", message: &resourceMailboxMessage{Role: "agent", Sender: &agentHubMessageSender{Name: "display"}, SenderWorkspaceInstanceID: "instance-1", SubscribeResult: true}, want: providerResponseNone},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if got := providerOpenerResponse(test.role, test.message); got != test.want {
-				t.Fatalf("response = %q, want %q", got, test.want)
-			}
-		})
+		{role: "user", want: providerResponseProgressFinal},
+		{role: "system", want: providerResponseNone},
+		{role: "agent", message: &resourceMailboxMessage{Role: "agent", SubscribeResult: &legacy}, want: providerResponseNone},
+	} {
+		if got := providerOpenerResponse(test.role, test.message); got != test.want {
+			t.Fatalf("%s response = %q, want %q", test.role, got, test.want)
+		}
 	}
 }
 
@@ -182,7 +176,7 @@ func TestCanonicalAgentHubMessageMatchesV2AndLegacyData(t *testing.T) {
 func TestCanonicalAgentHubMessageAcceptsPreUpgradeProviderEnvelope(t *testing.T) {
 	expected := resourceMailboxMessage{
 		ID: "msg-1", Text: "inspect", Role: "agent", Sender: &agentHubMessageSender{ID: "project1.task2"},
-		SenderWorkspaceInstanceID: "instance-1", SubscribeResult: true, ActualMode: resourceMessageModeSteer,
+		SenderWorkspaceInstanceID: "instance-1", ActualMode: resourceMessageModeSteer,
 		ProviderContext: &providerMessageContext{Language: "en", TurnID: "turn-1", OpenerRole: "user",
 			OpenerSender: &agentHubMessageSender{Name: "disksing"}, OpenerResponse: providerResponseProgressFinal},
 	}
@@ -197,6 +191,25 @@ func TestCanonicalAgentHubMessageAcceptsPreUpgradeProviderEnvelope(t *testing.T)
 	canonical.Text = "different"
 	if canonicalAgentHubMessageMatches(canonical, expected) {
 		t.Fatal("different provider envelope matched")
+	}
+}
+
+func TestCanonicalAgentHubMessageAcceptsLegacyResultEnvelope(t *testing.T) {
+	expected := resourceMailboxMessage{
+		ID: "msg-legacy", Text: "inspect", Role: "agent", Sender: &agentHubMessageSender{ID: "project1.task2"},
+		ActualMode:      resourceMessageModeEnqueue,
+		ProviderContext: &providerMessageContext{Language: "en", OpenerRole: "agent", OpenerResponse: providerResponseFinalOnly},
+	}
+	canonical, err := agentHubMailboxMessage(expected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical.Text = providerMessageTextWithLegacyContext(expected, false, true)
+	if canonical.Text == providerMessageTextWithContext(expected, false) {
+		t.Fatal("legacy context did not differ from the one-way presentation")
+	}
+	if !canonicalAgentHubMessageMatches(canonical, expected) {
+		t.Fatalf("previously accepted result envelope did not match: %#v", canonical)
 	}
 }
 
@@ -215,5 +228,27 @@ func TestPUAMessagePresentationDecodesV2AndKeepsLegacy(t *testing.T) {
 	text, role, sender = puaMessagePresentation("legacy", "system", legacySender, nil)
 	if text != "legacy" || role != "system" || sender != legacySender {
 		t.Fatalf("legacy presentation = %q %q %+v", text, role, sender)
+	}
+}
+
+func TestPUAMessagePresentationCorrectsHistoricalQueueAndChatRoles(t *testing.T) {
+	for _, tt := range []struct {
+		name, payload, text, role string
+	}{
+		{"preview", `{"schema":"pua.queue-preview.v1"}`, "queue notice", "system"},
+		{"user", `{"schema":"pua.resource-message.v1","role":"system","type":"user_chat_input","text":"question"}`, "question", "user"},
+		{"notification", `{"schema":"pua.resource-message.v1","role":"system","type":"chat_notification","text":"update"}`, "update", "system"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			text, role, _ := puaMessagePresentation("queue notice", "user", nil, json.RawMessage(tt.payload))
+			if text != tt.text || role != tt.role {
+				t.Fatalf("presentation = %q %q", text, role)
+			}
+			summary, err := historyTurnSummary("ws", "project1", generationRecord{GenerationID: "gen"},
+				agentHubTurn{ID: "turn", TriggerPreview: "queue notice", TriggerRole: "user", TriggerPayload: json.RawMessage(tt.payload)}, resourceMailbox{})
+			if err != nil || summary.TriggerRole != tt.role || summary.TriggerPreview != tt.text {
+				t.Fatalf("history summary = %+v %v", summary, err)
+			}
+		})
 	}
 }

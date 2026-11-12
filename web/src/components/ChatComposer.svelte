@@ -158,7 +158,7 @@
   </div>
 {/if}
 <form id="chatForm" class="chat-input" onsubmit={send}>
-    <textarea id="chatInput" bind:this={input} rows="1" autocomplete="off" data-agent-draft-key={model.draftKey} placeholder={model.unavailableReason || "Message this resource"} disabled={blocked} value={draft} oninput={(event) => updateDraft(event.currentTarget.value)} onkeydown={keydown}></textarea>
+    <textarea aria-label="Chat message" id="chatInput" bind:this={input} rows="1" autocomplete="off" data-agent-draft-key={model.draftKey} placeholder={model.unavailableReason || "Message this resource"} disabled={blocked} value={draft} oninput={(event) => updateDraft(event.currentTarget.value)} onkeydown={keydown}></textarea>
     <div class="chat-composer-bar">
       <button type="button" id="agentUploadButton" class="chat-upload-button" title="Upload files" aria-label="Upload files" disabled={Boolean(model.unavailableReason)} onclick={model.onOpenUpload}><Icon name="plus" /></button>
       <div class="chat-composer-options">

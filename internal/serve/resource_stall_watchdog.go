@@ -8,11 +8,31 @@ import (
 	"time"
 
 	"github.com/disksing/pua/internal/app"
+	"github.com/disksing/pua/internal/localize"
 )
 
-const stallWatchdogRecoveryText = "Automatic recovery detected that the previous Turn had no effective activity for the configured timeout. The Turn was stopped and this same Session was resumed. Inspect the current workspace and task state before continuing, and avoid blindly repeating a command that may be stuck."
+func stallWatchdogRecoveryText(language string) string {
+	return strings.TrimSpace(localize.MustRender(language, "turn-stall-recovery.md", nil))
+}
 
-// reconcileStallWatchdogLocked observes one Session's semantic activity clock.
+// frozenStallWatchdogRecoveryText preserves a message that was durably
+// accepted before a language migration or binary upgrade. The deterministic
+// message id must keep the original localized body across retries.
+func frozenStallWatchdogRecoveryText(workspacePath, messageID, language string) (string, error) {
+	localized := stallWatchdogRecoveryText(language)
+	existing, found, err := mailboxMessageByID(workspacePath, messageID)
+	if err != nil || !found || existing.Type != resourceMessageTypeTurnStallRecovery {
+		return localized, err
+	}
+	for _, supportedLanguage := range []string{localize.English, localize.SimplifiedChinese} {
+		if existing.Text == stallWatchdogRecoveryText(supportedLanguage) {
+			return existing.Text, nil
+		}
+	}
+	return localized, nil
+}
+
+// reconcileStallWatchdogLocked observes one Session's work progress clock.
 // It is called from the same resource controller that owns mailbox and
 // generation lifecycle work, so only one recovery chain can be created for a
 // resource at a time.
@@ -53,7 +73,7 @@ func (m *agentManager) reconcileStallWatchdogLocked(ctx context.Context, cfg con
 				})
 				return err
 			}
-			lastActivity := agentHubActivityTime(session, record)
+			lastActivity := agentHubProgressTime(session, record)
 			now := m.resourceNow()
 			if !lastActivity.IsZero() && !now.Before(lastActivity) && now.Sub(lastActivity) >= time.Duration(policy.TimeoutMinutes)*time.Minute {
 				_, err := rt.mutateGeneration(func(current *generationRecord) {
@@ -83,7 +103,7 @@ func (m *agentManager) reconcileStallWatchdogLocked(ctx context.Context, cfg con
 		return err
 	}
 
-	lastActivity := agentHubActivityTime(session, record)
+	lastActivity := agentHubProgressTime(session, record)
 	now := m.resourceNow()
 	if lastActivity.IsZero() || now.Before(lastActivity) || now.Sub(lastActivity) < time.Duration(policy.TimeoutMinutes)*time.Minute {
 		return nil
@@ -152,7 +172,7 @@ func (m *agentManager) startStallWatchdogRecoveryLocked(ctx context.Context, cfg
 	if !agentHubSessionExactlyMatchesGeneration(cfg, latest, current) {
 		return errors.New("AgentHub Session does not match the current generation for stall recovery")
 	}
-	lastActivity := agentHubActivityTime(current, latest)
+	lastActivity := agentHubProgressTime(current, latest)
 	now := m.resourceNow()
 	if lastActivity.IsZero() || now.Before(lastActivity) {
 		return nil
@@ -171,8 +191,16 @@ func (m *agentManager) startStallWatchdogRecoveryLocked(ctx context.Context, cfg
 	instanceID := strings.TrimSpace(runtimeConfig.InstanceID)
 	resourceID := normalizedResourceID(latest.ResourceID)
 	messageID := notificationMessageID(resourceMessageTypeTurnStallRecovery, instanceID, resourceID, latest.GenerationID, current.ID, turnID, "1")
+	language, err := puaWorkspace.Language()
+	if err != nil {
+		return err
+	}
+	recoveryText, err := frozenStallWatchdogRecoveryText(workspace.Path, messageID, language)
+	if err != nil {
+		return err
+	}
 	message := resourceMailboxMessage{
-		ID: messageID, ResourceID: resourceID, Text: stallWatchdogRecoveryText,
+		ID: messageID, ResourceID: resourceID, Text: recoveryText,
 		Role: "system", RequestedMode: resourceMessageModeEnqueue, ActualMode: resourceMessageModeEnqueue,
 		ModeFrozen: true, Type: resourceMessageTypeTurnStallRecovery,
 		Causation: &resourceMessageCausation{
@@ -232,4 +260,15 @@ func (m *agentManager) startStallWatchdogRecoveryLocked(ctx context.Context, cfg
 	})
 	rt.addPUANotice(m, "warning", "agenthub/turn-stall-watchdog", fmt.Sprintf("Turn %s had no effective activity and was stopped for automatic recovery.", turnID))
 	return nil
+}
+
+// Older AgentHub servers do not expose a separate progress clock. Preserve
+// their existing activity fallback during rolling upgrades; upgraded servers
+// rebuild active legacy snapshots and exclude input from LastProgressAt.
+func agentHubProgressTime(session agentHubSession, record generationRecord) time.Time {
+	if !generationTime(session.LastProgressAt).IsZero() {
+		session.LastActivityAt = session.LastProgressAt
+		session.LastActivityTurnID = session.LastProgressTurnID
+	}
+	return agentHubActivityTime(session, record)
 }

@@ -17,6 +17,10 @@ describe("SettingsController", () => {
 			request: async <T>(path: string): Promise<T> => {
 				if (path === "/api/workspaces") return base as T;
 				if (path === "/api/settings/agenthub") return {} as T;
+				if (path === "/api/settings/system") return {
+					pua: { address: "127.0.0.1", port: "4936", configPath: "/tmp/pua/serve.json", workspaces: [], buildBranch: "master", buildCommit: "pua-commit" },
+					agentHub: { mode: "embedded", address: "127.0.0.1", port: "4936", endpoint: "http://127.0.0.1:4936/agenthub", connected: true, compatible: true, version: "hub-commit", paths: { config: "", sessions: "", archive: "", logs: "" }, error: "" },
+				} as T;
 				throw new Error(`Unexpected request: ${path}`);
 			},
 			publish,
@@ -56,6 +60,8 @@ describe("SettingsController", () => {
 		await controller.open();
 
 		expect(published.at(-1)?.activeWorkspaceId).toBe("workspace-a");
+		expect(published.at(-1)?.initialTab).toBe("system");
+		expect(published.at(-1)?.system?.pua.configPath).toBe("/tmp/pua/serve.json");
 	});
 
 	it("keeps the routed Workspace marker aligned when route and persisted fallback match", async () => {
@@ -200,10 +206,10 @@ describe("SettingsController", () => {
 			connected: true,
 			compatible: true,
 			status: { apiVersion: "1", version: "test", capabilities: [] },
-			catalog: { providers: [{ id: "codex", name: "Codex", type: "codex", enabled: true }], agents: [], probes: [] },
+			catalog: { providers: [{ id: "codex", name: "Codex", type: "codex" }], agents: [], probes: [] },
 			config: { agentProfiles: [] },
 			agentConfig: {
-				providers: [{ id: "codex", name: "Codex", type: "codex", enabled: true }],
+				providers: [{ id: "codex", name: "Codex", type: "codex" }],
 				agents: [{ name: "Default", providerId: "codex" }],
 			},
 		};
@@ -222,11 +228,16 @@ describe("SettingsController", () => {
 				requests.push({ path, body });
 				const currentProvider = hub.agentConfig?.providers?.[0];
 				if (!currentProvider) throw new Error("missing test provider");
-				const provider = { ...currentProvider, enabled: body.enabled };
+				if (body.command === "/bad/path") throw new Error("codex executable \"/bad/path\" not found");
+				const provider = { ...currentProvider, command: body.command || undefined };
 				hub = { ...hub, agentConfig: { ...hub.agentConfig!, providers: [provider] } };
 				return { provider } as T;
 			}
 			if (path === "/api/settings/agenthub") return hub as T;
+			if (path === "/api/settings/system") return {
+				pua: { address: "", port: "", configPath: "", workspaces: [], buildBranch: "", buildCommit: "" },
+				agentHub: { mode: "", address: "", port: "", endpoint: "", connected: false, compatible: false, version: "", paths: { config: "", sessions: "", archive: "", logs: "" }, error: "" },
+			} as T;
 			throw new Error(`Unexpected request: ${path}`);
 		};
 		const controller = createSettingsController(dependencies);
@@ -238,12 +249,12 @@ describe("SettingsController", () => {
 		draft.dirty = true;
 		await published.at(-1)!.onSaveAgentHub(draft);
 		const savedBody = requests.find((request) => request.path === "/api/settings/agenthub")?.body as Record<string, unknown>;
-		expect(savedBody.agentProviders).toEqual([{ id: "codex", name: "Codex", type: "codex", enabled: true, command: "/opt/homebrew/bin/codex" }]);
+		expect(savedBody.agentProviders).toEqual([{ id: "codex", name: "Codex", type: "codex", command: "/opt/homebrew/bin/codex" }]);
 		expect(savedBody.agents).toEqual([{ name: "Worker", providerId: "codex" }]);
 
-		await published.at(-1)!.onToggleProvider("codex", false);
-		expect(requests.at(-1)).toEqual({ path: "/api/settings/agenthub/providers/codex", body: { enabled: false } });
-		expect(published.at(-1)?.agentHub.agentConfig?.providers[0]?.enabled).toBe(false);
+		await published.at(-1)!.onSetProviderCommand("codex", "/usr/local/bin/codex");
+		expect(requests.at(-1)).toEqual({ path: "/api/settings/agenthub/providers/codex", body: { command: "/usr/local/bin/codex" } });
+		expect(published.at(-1)?.agentHub.agentConfig?.providers[0]?.command).toBe("/usr/local/bin/codex");
 	});
 
 	it("externalSync refreshes an open modal with the latest server settings", async () => {

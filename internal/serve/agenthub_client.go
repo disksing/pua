@@ -12,11 +12,15 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/disksing/pua/agenthub/protocol"
+	"github.com/disksing/pua/internal/buildinfo"
+	productversion "github.com/disksing/pua/internal/version"
 )
 
 const (
 	defaultAgentHubEndpoint = "http://127.0.0.1:4646/agenthub"
-	agentHubAPIVersion      = "1"
+	agentHubAPIVersion      = protocol.APIMajor
 	agentHubRequestTimeout  = 30 * time.Second
 )
 
@@ -26,25 +30,7 @@ const (
 // guards against runaway memory usage. It is a variable so tests can lower it.
 var agentHubMaxResponseBytes int64 = 256 << 20
 
-var requiredAgentHubCapabilities = []string{
-	"session.source",
-	"session.source-metadata",
-	"session.idempotent-create",
-	"session.input-capabilities",
-	"messages.idempotent",
-	"messages.at-least-once",
-	"messages.opaque-payload-v2",
-	"turns.stable-index",
-	"turns.materialized",
-	"session.launch-environment",
-	"session.launch-environment-update",
-	"session.strict-stopped",
-	"events.lossless-replay",
-	"events.canonical-turn-terminals",
-	"events.semantic-v1",
-	"event.raw-v1",
-	"recovery.closed-turns",
-}
+var requiredAgentHubCapabilities = protocol.BaselineV1[:]
 
 type agentHubClient struct {
 	endpoint   string
@@ -83,14 +69,21 @@ type agentHubStatus struct {
 	Version      string          `json:"version"`
 	StartedAt    string          `json:"startedAt,omitempty"`
 	Uptime       int64           `json:"uptimeSeconds,omitempty"`
+	Paths        agentHubPaths   `json:"paths"`
 	Runtime      json.RawMessage `json:"runtime,omitempty"`
 }
 
+type agentHubPaths struct {
+	Config   string `json:"config"`
+	Sessions string `json:"sessions"`
+	Archive  string `json:"archive"`
+	Logs     string `json:"logs"`
+}
+
 type agentHubProvider struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Type    string `json:"type"`
-	Enabled bool   `json:"enabled"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Type string `json:"type"`
 }
 
 type agentHubAgent struct {
@@ -106,6 +99,7 @@ type agentHubProbe struct {
 	Type       string `json:"type"`
 	Command    string `json:"command,omitempty"`
 	Available  bool   `json:"available"`
+	Error      string `json:"error,omitempty"`
 }
 
 type agentHubCatalog struct {
@@ -122,7 +116,6 @@ type agentHubConfiguredProvider struct {
 	ID      string `json:"id"`
 	Name    string `json:"name"`
 	Type    string `json:"type"`
-	Enabled bool   `json:"enabled"`
 	Command string `json:"command,omitempty"`
 }
 
@@ -158,7 +151,8 @@ type agentHubSource struct {
 }
 
 type agentHubInputCapabilities struct {
-	Steer bool `json:"steer"`
+	Steer           bool `json:"steer"`
+	TurnScopedSteer bool `json:"turnScopedSteer,omitempty"`
 }
 
 type agentHubSession struct {
@@ -178,6 +172,8 @@ type agentHubSession struct {
 	LastEventID        int64                     `json:"lastEventId"`
 	LastActivityAt     string                    `json:"lastActivityAt,omitempty"`
 	LastActivityTurnID string                    `json:"lastActivityTurnId,omitempty"`
+	LastProgressAt     string                    `json:"lastProgressAt,omitempty"`
+	LastProgressTurnID string                    `json:"lastProgressTurnId,omitempty"`
 	CreatedAt          string                    `json:"createdAt"`
 	UpdatedAt          string                    `json:"updatedAt"`
 }
@@ -193,14 +189,15 @@ type agentHubMessageSender struct {
 // agentHubInboundMessage is the schema-v2 wire shape plus deprecated schema-v1
 // fields used to recognize existing durable inputs during rolling upgrades.
 type agentHubInboundMessage struct {
-	SchemaVersion int                    `json:"schemaVersion,omitempty"`
-	Text          string                 `json:"text"`
-	Payload       json.RawMessage        `json:"payload,omitempty"`
-	Role          string                 `json:"role,omitempty"`
-	Sender        *agentHubMessageSender `json:"sender,omitempty"`
-	Steer         bool                   `json:"steer,omitempty"`
-	MessageID     string                 `json:"messageId,omitempty"`
-	TurnID        string                 `json:"-"`
+	ExpectedTurnID string                 `json:"expectedTurnId,omitempty"`
+	SchemaVersion  int                    `json:"schemaVersion,omitempty"`
+	Text           string                 `json:"text"`
+	Payload        json.RawMessage        `json:"payload,omitempty"`
+	Role           string                 `json:"role,omitempty"`
+	Sender         *agentHubMessageSender `json:"sender,omitempty"`
+	Steer          bool                   `json:"steer,omitempty"`
+	MessageID      string                 `json:"messageId,omitempty"`
+	TurnID         string                 `json:"-"`
 }
 
 type agentHubCreateSessionRequest struct {
@@ -278,6 +275,7 @@ func semanticAgentHubEvent(event agentHubSemanticEvent) agentHubEvent {
 }
 
 type agentHubTurnItem struct {
+	Complete             bool                   `json:"complete,omitempty"`
 	Type                 string                 `json:"type"`
 	Role                 string                 `json:"role,omitempty"`
 	Sender               *agentHubMessageSender `json:"sender,omitempty"`
@@ -378,6 +376,9 @@ func validateAgentHubStatus(status agentHubStatus) error {
 	if status.APIVersion != agentHubAPIVersion {
 		return fmt.Errorf("incompatible AgentHub apiVersion %q; PUA requires %q", status.APIVersion, agentHubAPIVersion)
 	}
+	if err := validateAgentHubProductVersion(status.Version); err != nil {
+		return err
+	}
 	available := make(map[string]bool, len(status.Capabilities))
 	for _, capability := range status.Capabilities {
 		available[capability] = true
@@ -390,6 +391,30 @@ func validateAgentHubStatus(status agentHubStatus) error {
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("AgentHub is missing required capabilities: %s", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+func validateAgentHubProductVersion(value string) error {
+	puaInfo := buildinfo.Current("pua")
+	minimum, minimumErr := productversion.Parse(puaInfo.MinAgentHubVersion)
+	actual, actualErr := productversion.Parse(value)
+	if buildinfo.IsDevelopment(puaInfo) {
+		// Development checkouts may jointly implement an unreleased protocol.
+		// API major and the fixed safety baseline remain mandatory below.
+		return nil
+	}
+	if minimumErr != nil {
+		return fmt.Errorf("PUA has invalid minimum AgentHub version %q", puaInfo.MinAgentHubVersion)
+	}
+	if actualErr != nil {
+		return fmt.Errorf("AgentHub reports invalid product version %q; PUA requires at least %s", value, puaInfo.MinAgentHubVersion)
+	}
+	if productversion.IsDevelopment(actual) {
+		return fmt.Errorf("stable PUA refuses development AgentHub version %q", value)
+	}
+	if productversion.Compare(actual, minimum) < 0 {
+		return fmt.Errorf("AgentHub version %s is too old; PUA requires at least %s", value, puaInfo.MinAgentHubVersion)
 	}
 	return nil
 }
@@ -418,13 +443,13 @@ func (c *agentHubClient) SaveConfig(ctx context.Context, config agentHubConfigur
 	return response.Config, err
 }
 
-func (c *agentHubClient) SetProviderEnabled(ctx context.Context, id string, enabled bool) (agentHubConfiguredProvider, error) {
+func (c *agentHubClient) SetProviderCommand(ctx context.Context, id string, command string) (agentHubConfiguredProvider, error) {
 	var response struct {
 		Provider agentHubConfiguredProvider `json:"provider"`
 	}
 	err := c.doJSON(ctx, http.MethodPut, "/v1/config/providers/"+url.PathEscape(strings.TrimSpace(id)), struct {
-		Enabled bool `json:"enabled"`
-	}{Enabled: enabled}, &response)
+		Command string `json:"command"`
+	}{Command: command}, &response)
 	return response.Provider, err
 }
 

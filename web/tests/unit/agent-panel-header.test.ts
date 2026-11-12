@@ -32,6 +32,9 @@ function model(overrides: Partial<AgentPanelHeaderModel> = {}): AgentPanelHeader
     status: status(),
     submitting: false,
     agentName: "kimi-k3",
+    nextAgentName: "",
+    errorText: "",
+    retryAt: "",
     modelSummary: "Kimi · kimi-k2-0905",
     turnNumber: 3,
     turnStartedAt: new Date(Date.now() - 134_000).toISOString(),
@@ -113,6 +116,61 @@ describe("AgentPanelHeader", () => {
     expect(header.dataset.state).toBe("attention_required");
     expect(target.querySelector(".agent-header-state")?.textContent).toBe("Attention required");
     expect(target.querySelector(".agent-header-queued")?.textContent).toBe("· 1 queued");
+  });
+
+  it("shows the current generation Agent and the pending replacement Agent", async () => {
+    const { target } = mountModel(model({
+      agentName: "gpt-5.6-sol",
+      nextAgentName: "gpt-5.6-luna",
+      status: status({
+        sessionState: "idle",
+        generation: { generation: 1, generationId: "gen-1", agentName: "gpt-5.6-sol", status: "idle", replacementPending: true },
+      }),
+    }));
+    await tick();
+
+    const header = target.querySelector<HTMLElement>(".agent-panel-header")!;
+    expect(header.dataset.state).toBe("switching");
+    expect(target.querySelector(".agent-header-name")?.textContent).toBe("gpt-5.6-sol");
+    expect(target.querySelector(".agent-header-next")?.textContent).toBe("→ gpt-5.6-luna");
+    expect(target.querySelector(".agent-header-state")?.textContent).toBe("Switching agent");
+  });
+
+  it("shows durable Resume errors and the next retry boundary", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-24T10:00:00Z"));
+    const retryAt = "2026-08-24T10:05:00Z";
+    const { target } = mountModel(model({
+      errorText: "provider executable not found",
+      retryAt,
+      status: status({
+        sessionState: "idle",
+        waitingMessages: [{ messageId: "m1", text: "continue", status: "waiting", acceptedAt: "", requestedMode: "enqueue", actualMode: "enqueue" }],
+        generation: { generation: 1, generationId: "gen-1", status: "stopped", resumeFailureCount: 2, resumeRetryAt: retryAt, resumeLastError: "provider executable not found" },
+      }),
+    }));
+    await tick();
+
+    const header = target.querySelector<HTMLElement>(".agent-panel-header")!;
+    expect(header.dataset.state).toBe("retrying");
+    expect(target.querySelector(".agent-header-state")?.textContent).toBe("Retrying");
+    expect(target.querySelector(".agent-header-error")?.textContent).toBe("provider executable not found");
+    expect(target.querySelector(".agent-header-error")?.getAttribute("title")).toBe("provider executable not found");
+    expect(target.querySelector(".agent-header-turn")?.textContent).toMatch(/^Next retry /);
+  });
+
+  it("shows an idle queued continuation as continuing", async () => {
+    const { target } = mountModel(model({
+      status: status({
+        sessionState: "idle",
+        waitingMessages: [{ messageId: "m1", text: "continue", status: "waiting", acceptedAt: "", requestedMode: "enqueue", actualMode: "enqueue" }],
+        generation: { generation: 1, generationId: "gen-1", status: "idle" },
+      }),
+    }));
+    await tick();
+
+    expect(target.querySelector<HTMLElement>(".agent-panel-header")?.dataset.state).toBe("continuing");
+    expect(target.querySelector(".agent-header-state")?.textContent).toBe("Continuing");
   });
 
   it("renders an empty-state header when no resource is selected", async () => {

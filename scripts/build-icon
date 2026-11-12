@@ -1,0 +1,44 @@
+#!/bin/sh
+# build-icon generates a macOS .icns file from a single PNG source.
+#
+# Usage: scripts/build-icon <source.png> <output.icns>
+set -eu
+
+if [ "$#" -ne 2 ]; then
+	printf '%s\n' "usage: scripts/build-icon <source.png> <output.icns>" >&2
+	exit 1
+fi
+source_png=$1
+output_icns=$2
+
+for name in sips iconutil; do
+	command -v "$name" >/dev/null 2>&1 || { printf '%s\n' "build-icon: required command not found: $name" >&2; exit 1; }
+done
+
+stage=$(mktemp -d "${TMPDIR:-/tmp}/pua-icon.XXXXXX")
+cleanup() {
+	rm -rf -- "$stage"
+}
+trap cleanup EXIT HUP INT TERM
+
+iconset=$stage/App.iconset
+mkdir -p "$iconset"
+
+# iconutil requires the conventional iconset file names; pairs cover the
+# @2x retina variants. Sizes above the source resolution are resampled.
+for spec in \
+	"16 icon_16x16" \
+	"32 icon_16x16@2x" \
+	"32 icon_32x32" \
+	"64 icon_32x32@2x" \
+	"128 icon_128x128" \
+	"256 icon_128x128@2x" \
+	"256 icon_256x256" \
+	"512 icon_256x256@2x" \
+	"512 icon_512x512" \
+	"1024 icon_512x512@2x"; do
+	set -- $spec
+	sips -z "$1" "$1" "$source_png" --out "$iconset/$2.png" >/dev/null
+done
+
+iconutil -c icns "$iconset" -o "$output_icns"

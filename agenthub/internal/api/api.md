@@ -166,6 +166,13 @@ to any client that can read the session or its events. `lastEventId` is the id
 of the newest event in the session log and doubles as the resume cursor for
 the events endpoint.
 
+`lastActivityAt` / `lastActivityTurnId` 表示包含新输入在内的语义活动，继续供界面活跃度和空闲策略使用。
+`lastProgressAt` / `lastProgressTurnId` 表示工作进展：以 `turn.started` 为初始基准，
+由模型输出、工具事件、审批事件、错误和终态更新；新输入、投递回执、排队事件、stderr 不刷新此时间。
+看门狗应优先使用工作进展字段，避免持续收到消息掩盖执行停滞。字段缺失时表示旧版本或尚无可投影事件，
+不能当作当前时间；升级后的 daemon 会从事件日志补算活跃旧会话的进展时间。较旧 daemon 只提供活动时间时，
+PUA 保留旧计时行为，因此这项修复需要同时升级 PUA 与 AgentHub。
+
 ### Agents and providers
 
 Agents are referenced **by name only**. An agent has a `name` (required,
@@ -173,9 +180,11 @@ unique case-insensitively after trimming, at most 80 characters), a
 `providerId` naming one configured provider, and provider-specific `options`.
 There are no agent ids, agent profiles or tag-based routing; creating a
 session always requires an explicit agent name. The built-in provider ids
-are `codex`, `kimi`, `pi` and `opencode`; each can be enabled or disabled,
-and a disabled provider makes its agents unavailable for new work without
-disturbing sessions that are already running.
+are `codex`, `kimi`, `pi` and `opencode`; a provider is available whenever
+its executable resolves (from its configured `command`, or automatically
+from PATH and common install directories), and an unavailable provider
+makes its agents unavailable for new work without disturbing sessions that
+are already running.
 
 ### Durable source Events
 
@@ -273,6 +282,25 @@ Daemon status, effective data paths and runtime summary.
 }
 ```
 
+`sessionStore.diagnostics` 另返回进程内聚合诊断信息：`openNanos`、
+`snapshotCheckNanos`、`trustedSnapshots`、`fallbackReplays`、`historyLoads`、
+`historyLoadErrors`、`historyLoadNanos`、`cachedEventPayloadBytes`、
+`metadataQueries`、`metadataQueryNanos`、`turnCacheHits`、`turnCacheEntries`、
+`turnCacheEstimatedBytes`、`turnCacheBudgetBytes`、`turnProjectionReads`、
+`turnBuilds`、`turnBuildNanos`、`turnRebuilds`、`turnProjectionWrites`。
+时间字段以纳秒为单位；除 `openNanos` 为本次 Store 打开总耗时，其余时间为累计耗时。
+`runtime.startupRecoveryNanos` 为本次 runtime 初始化与恢复总耗时。
+计数在进程 / Store 重建时清零，不是持久审计数据；字段为并发近似快照。
+`historyLoads` 统计向事件缓存加载历史的成功次数；`cachedEventPayloadBytes`
+仅统计已缓存 Event.Data 的长度，不包括结构体、切片容量、字符串、临时缓冲，
+不能当作 Go heap 或 RSS。Turn 缓存按保守估算的 8 MiB 总预算和最多 64 项限制；
+超限结果绕过缓存，但同一进程内已重建的内容版本仍不重复重建或写盘。
+缓存命中保留投影文件存在性、文件身份、大小与修改时间校验，以支持删除后修复。
+这些信息不包含 session ID、事件正文或环境变量；没有新增 pprof 网络入口。
+
+会话列表和 metadata GET 读取不可变的持久事件投影，不等待历史加载、Turn 重建
+或 snapshot 写盘锁。列表先筛选和分页，再复制响应行；无分页参数时仍返回完整列表。
+
   `runtime` is `{"available": false}` when the daemon runs without a
   session runtime. Such an instance also omits the runtime-backed
   capabilities described under
@@ -310,7 +338,7 @@ only writer) and applies it in memory.
   "config": {
     "version": 1,
     "agentProviders": [
-      {"id": "codex", "name": "Codex app-server", "type": "codex", "enabled": true, "command": "codex"}
+      {"id": "codex", "name": "Codex app-server", "type": "codex", "command": "codex"}
     ],
     "agents": [
       {"name": "Codex", "providerId": "codex", "options": {"approval": "never", "sandbox": "danger-full-access"}, "environment": {"FOO": "bar"}}
@@ -362,25 +390,29 @@ curl -s -X PUT "$BASE/v1/config" \
 
 ### PUT /v1/config/providers/{id}
 
-Enable or disable one built-in provider without touching the rest of the
-configuration. This is the contract behind the four switches of the Web
-settings UI. The provider's other fields survive a disable/enable cycle; a
-built-in provider missing from an old configuration is created with its
-canonical defaults.
+Replace the executable path of one built-in provider without touching the
+rest of the configuration. This is the contract behind the provider rows of
+the Web settings UI. A non-empty `command` must resolve to an executable on
+the daemon host and is rejected otherwise; an empty `command` clears the
+override so the provider falls back to automatic detection from PATH and
+common install directories. A built-in provider missing from an old
+configuration is created with its canonical defaults.
 
 - **Path parameters:** `id` — one of `codex`, `kimi`, `pi`, `opencode`.
-- **Request body:** `{"enabled": true}` — `enabled` is required.
-- **Success `200`:** `{"provider": {"id", "name", "type", "enabled", "command?"}}`.
-- **Errors:** `400 invalid_request` (missing `enabled`), `415 json_required`,
-  `404 unknown_provider`, `422 invalid_config`, `503 runtime_unavailable`.
-- **Effect:** agents of a disabled provider report `available: false` from
-  `GET /v1/agents` and are rejected for new sessions; running sessions keep
-  running.
+- **Request body:** `{"command": "/opt/homebrew/bin/kimi"}` — `command` is
+  required and may be empty.
+- **Success `200`:** `{"provider": {"id", "name", "type", "command?"}}`.
+- **Errors:** `400 invalid_request` (missing `command`), `415 json_required`,
+  `404 unknown_provider`, `422 invalid_command` (the path does not resolve
+  to an executable), `422 invalid_config`, `503 runtime_unavailable`.
+- **Effect:** the provider's availability is re-probed; agents of a provider
+  whose executable does not resolve report `available: false` from
+  `GET /v1/agents`, while running sessions keep running.
 
 ```bash
 curl -s -X PUT "$BASE/v1/config/providers/kimi" \
   -H "Content-Type: application/json" \
-  -d '{"enabled": false}'
+  -d '{"command": "/opt/homebrew/bin/kimi"}'
 ```
 
 ### POST /v1/onwatch/test
@@ -445,7 +477,7 @@ changes.
 - **Success `200`:** `{"provider": {"id", "name", "type"}, "models": [...]}`;
   each model is `{"id", "label", "default?"}`, where `id` is the value the
   agent `model` option accepts. An empty `models` array is a valid result.
-- **Errors:** `404 unknown_provider`, `409 provider_disabled`,
+- **Errors:** `404 unknown_provider`,
   `503 provider_unavailable` (provider CLI missing or failed to start),
   `504 provider_timeout`, `502 provider_error` (provider ran but reported an
   error or returned unreadable data), `503 runtime_unavailable`.
@@ -457,13 +489,13 @@ curl -s "$BASE/v1/providers/codex/models"
 ### GET /v1/agents
 
 List configured providers and agents with their effective availability, plus
-CLI availability probes for enabled providers.
+CLI availability probes for every provider.
 
 - **Success `200`:**
 
 ```json
 {
-  "providers": [{"id": "codex", "name": "Codex app-server", "type": "codex", "enabled": true}],
+  "providers": [{"id": "codex", "name": "Codex app-server", "type": "codex"}],
   "agents": [
     {
       "name": "Codex",
@@ -477,8 +509,8 @@ CLI availability probes for enabled providers.
 }
 ```
 
-  An agent whose provider is missing or disabled reports `available: false`
-  with an `unavailableReason`.
+  An agent whose provider is missing or whose executable does not resolve
+  reports `available: false` with an `unavailableReason`.
 - **Errors:** `503 runtime_unavailable`.
 
 ```bash
@@ -502,13 +534,23 @@ default.
     `source.externalId` match.
     Source filters can be combined with each other and with archive and state
     filters. Sessions created without `source` never match a source filter.
-- **Success `200`:** `{"sessions": [...]}` — an array of session objects.
+  - `limit=<n>` — opt in to cursor pagination with a page size from 1 to 500.
+    When `cursor` is present and `limit` is omitted, the page size is 50.
+  - `cursor=<opaque>` — continue from the `page.nextCursor` returned by the
+    previous response. Cursors are opaque and should not be parsed or edited.
+- **Success `200`:** `{"sessions": [...], "page": {"limit": 50,
+  "hasMore": true, "nextCursor": "..."}}`. Results have a stable
+  `updatedAt` descending, Session ID descending order. Calls that omit both
+  pagination parameters retain the historical unbounded result for existing
+  clients; their `page.hasMore` is false.
+- **Errors:** `400 invalid_session_limit`, `400 invalid_session_cursor`.
 
 ```bash
 curl -s "$BASE/v1/sessions"
 curl -s "$BASE/v1/sessions?archived=true"
 curl -s "$BASE/v1/sessions?state=running,waiting_approval"
 curl -s "$BASE/v1/sessions?sourceApp=pua&sourceInstanceId=mac-mini&state=ready"
+curl -s "$BASE/v1/sessions?limit=50"
 ```
 
 ### POST /v1/sessions
@@ -543,7 +585,7 @@ turn before the response returns.
 - **Fields:**
   - `agentName` (required) — the unique name of a configured agent; matched
     case-insensitively, and the session records the canonical configured
-    spelling. The agent's provider must be enabled.
+    spelling.
   - `cwd` (required) — working directory for the agent; must exist and be a
     directory (symlinks are resolved).
   - `title` (optional) — display title.
@@ -579,7 +621,7 @@ turn before the response returns.
   `Location: /v1/sessions/{id}` header.
 - **Idempotent replay `200`:** `{"session": {...}, "created": false}`.
 - **Errors:** `400 invalid_request` (malformed body or removed/unknown fields), `415 json_required`, `422 agent_required`,
-  `422 invalid_agent` (unknown agent or disabled provider),
+  `422 invalid_agent` (unknown agent or unconfigured provider),
   `422 invalid_cwd`,
   `422 invalid_launch_environment` (an environment name is empty or contains
   `=`/NUL, or a value contains NUL),
@@ -765,6 +807,7 @@ SemanticEvent {
 | --- | --- |
 | `message.input` | `role`, `text`, `steer`, optional opaque `payload`, `sender`, `messageId`, `replyTo`, `correlationId` |
 | `message.assistant.delta`, `message.reasoning.delta` | `text` |
+| `message.assistant.completed` | 空对象；结束当前助手文本块，不产生独立消息或错误提示 |
 | `tool.call` | `schemaVersion: 1`, `callId`, `operation`, optional `toolKind`, `name`, `summary`, `status`, `output`, `error` |
 | `approval.requested` | `approvalId`, `kind`, `title`, `detail`, `question`, `options[]` |
 | `approval.resolved` | `approvalId`, `decision`, optional `optionId`, `text`, `reason` |
@@ -1051,8 +1094,10 @@ restarts. Safe to call when the provider is already running.
   unknown fields), `404 session_not_found`,
   `422 invalid_launch_environment` (an empty variable name, `=` or NUL in a
   name, or NUL in a value), `409 session_archived`, `409 session_stopping`,
-  `409 runtime_operation_failed` (the provider could not start, for example
-  because the recorded agent no longer exists),
+  `409 runtime_operation_failed` (another runtime operation failed),
+  `502 provider_start_failed` (the provider handshake failed; the response
+  `details.sessionId` names the session retained in `stopped` state with
+  `stopReason: "startup_error"`),
   `503 runtime_unavailable`.
 
 ```bash
@@ -1230,3 +1275,9 @@ curl -fsS -X POST "$BASE/v1/sessions/$SESSION/stop" \
 curl -fsS -X POST "$BASE/v1/sessions/$SESSION/resume" \
   -H "Content-Type: application/json" -d '{}'
 ```
+
+## Turn 限定预告与普通文本边界
+
+新增能力 `messages.turn-scoped-steer`。schema v2 输入可携带 `expectedTurnId`，只能与 `steer: true` 同用。Session 另以 `inputCapabilities.turnScopedSteer` 表示 Provider 是否保证只投向当前 Turn；第一版为 Codex。没有活动 Turn、Turn 不匹配或 Provider 不支持时拒绝，绝不自动开启新 Turn。预告有独立 `messageId`，重复相同输入沿用既有 receipt；旧 Turn 已终结的待投递预告标为 cancelled，不启动 Provider 或恢复旧 Turn。Provider 拒绝或结果不明时终止该预告的自动重试，调用方保留正式业务输入。
+
+新增 canonical `message.assistant.completed` 事件（无必填正文），表示当前普通助手文本块完成。Codex `item/completed` 的 agentMessage 与 Pi `text_end` 产生此边界。物化 Turn 的 message item 新增可选 `complete: true`；其后普通文本开始新 item。没有此边界的旧记录仍使用后续 item 或 Turn terminal 判断完整性。消费者必须读取最新物化文本，不能仅用最后一个事件 ID 判断内容是否更新（同游标 delta 仍可合并）。推理与工具事件不属于普通助手输出。

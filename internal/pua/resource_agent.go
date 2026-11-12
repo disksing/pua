@@ -31,7 +31,7 @@ const (
 	projectStatusUsage              = "usage: pua project status [--project=<project>] [--server=<url>]"
 	taskStatusUsage                 = "usage: pua task status [--project=<project>] [--task=<task>] [--server=<url>]"
 	taskStateUsage                  = "usage: pua task state [--project=<project>] [--task=<task>] [--server=<url>] | pua task state set <waiting|blocked|paused|completed> [--note=<text>] [--project=<project>] [--task=<task>] [--server=<url>]"
-	messageSendUsage                = "usage: pua message send --to=<resource|user> [--mode=steer|enqueue|interrupt] [--subscribe-result=false] [--server=<url>] <message>"
+	messageSendUsage                = "usage: pua message send --to=<resource|user> [--mode=steer|enqueue|interrupt] [--server=<url>] <message>"
 	messageShowUsage                = "usage: pua message show --id=<message-id> [--server=<url>]"
 	workspaceHistoryUsage           = "usage: pua workspace history [--cursor=<cursor>] [--limit=<n>] [--server=<url>] [--json]"
 	projectHistoryUsage             = "usage: pua project history [--project=<project>] [--cursor=<cursor>] [--limit=<n>] [--server=<url>] [--json]"
@@ -40,12 +40,11 @@ const (
 )
 
 type resourceServerOptions struct {
-	ID              string
-	Mode            string
-	ModeSet         bool
-	ServerURL       string
-	Text            string
-	SubscribeResult *bool
+	ID        string
+	Mode      string
+	ModeSet   bool
+	ServerURL string
+	Text      string
 }
 
 type resourceHistoryOptions struct {
@@ -62,6 +61,8 @@ type serveLockMetadata struct {
 }
 
 type resourceServerClient struct {
+	chatID      string
+	chatToken   string
 	baseURL     string
 	workspaceID string
 	http        *http.Client
@@ -112,25 +113,6 @@ func parseMessageServerArgs(args []string, command string) (resourceServerOption
 			index++
 			options.Mode = strings.ToLower(strings.TrimSpace(args[index]))
 			options.ModeSet = true
-		case strings.HasPrefix(arg, "--subscribe-result=") && command == "send":
-			if options.SubscribeResult != nil {
-				return resourceServerOptions{}, errors.New(usage)
-			}
-			value, parseErr := strconv.ParseBool(strings.TrimSpace(strings.TrimPrefix(arg, "--subscribe-result=")))
-			if parseErr != nil {
-				return resourceServerOptions{}, errors.New(usage)
-			}
-			options.SubscribeResult = &value
-		case arg == "--subscribe-result" && command == "send":
-			if index+1 >= len(args) || strings.HasPrefix(args[index+1], "--") || options.SubscribeResult != nil {
-				return resourceServerOptions{}, errors.New(usage)
-			}
-			index++
-			value, parseErr := strconv.ParseBool(strings.TrimSpace(args[index]))
-			if parseErr != nil {
-				return resourceServerOptions{}, errors.New(usage)
-			}
-			options.SubscribeResult = &value
 		case strings.HasPrefix(arg, "--server="):
 			if options.ServerURL != "" {
 				return resourceServerOptions{}, errors.New(usage)
@@ -311,6 +293,15 @@ func (client *resourceServerClient) request(ctx context.Context, method, path st
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
+	if os.Getenv("PUA_CHANNEL") == "dialogue" {
+		request.Header.Set("X-PUA-Chat", os.Getenv("PUA_CHAT_ID"))
+		request.Header.Set("X-PUA-Chat-Token", os.Getenv("PUA_CHAT_TOKEN"))
+		request.Header.Set("X-PUA-Chat-Generation", os.Getenv("PUA_CHAT_GENERATION"))
+	}
+	if client.chatToken != "" {
+		request.Header.Set("X-PUA-Chat", client.chatID)
+		request.Header.Set("X-PUA-Chat-Token", client.chatToken)
+	}
 	response, err := client.http.Do(request)
 	if err != nil {
 		return fmt.Errorf("contact PUA Server %s: %w; verify the owner is running or use --server=<url>", client.baseURL, err)
@@ -486,6 +477,9 @@ func runMessageSend(args []string) error {
 		options.Text = text
 	}
 	warnLiteralEscapeSequences(options.Text)
+	if os.Getenv("PUA_CHANNEL") == "dialogue" {
+		return errors.New("dialogue Sessions are retired; send user requests through resource Chat")
+	}
 	senderID, senderInstanceID, err := resolveMessageSender()
 	if err != nil {
 		return err
@@ -501,9 +495,6 @@ func runMessageSend(args []string) error {
 		"text": options.Text, "mode": options.Mode, "role": "agent",
 		"sender":                    map[string]string{"id": senderID, "name": senderID},
 		"senderWorkspaceInstanceId": senderInstanceID,
-	}
-	if options.SubscribeResult != nil {
-		body["subscribeResult"] = *options.SubscribeResult
 	}
 	var response map[string]any
 	path := fmt.Sprintf("/api/workspaces/%s/resources/%s/messages", url.PathEscape(client.workspaceID), url.PathEscape(options.ID))
@@ -570,31 +561,16 @@ func numberedResourcePart(value, prefix string) bool {
 	return true
 }
 
-// runUserMessageSend delivers an agent-to-user message into the target user's
-// durable inbox. Mode and result subscription are resource mailbox concepts
-// and do not apply to user delivery.
-func runUserMessageSend(client *resourceServerClient, options resourceServerOptions, senderID, senderInstanceID string) error {
-	userName := options.ID
-	if err := app.ValidateUserName(userName); err != nil {
-		return fmt.Errorf("invalid user target %q: %w", userName, err)
+// Legacy user targets stay removed. User replies use the explicit Chat
+// capability carried by a user input rather than an Inbox address.
+func runUserMessageSend(_ *resourceServerClient, options resourceServerOptions, _, _ string) error {
+	if err := app.ValidateUserName(options.ID); err != nil {
+		return fmt.Errorf("invalid user target %q: %w", options.ID, err)
 	}
 	if options.ModeSet {
 		return errors.New("--mode applies only to resource targets")
 	}
-	if options.SubscribeResult != nil {
-		return errors.New("--subscribe-result applies only to resource targets")
-	}
-	body := map[string]any{
-		"text":                      options.Text,
-		"sender":                    map[string]string{"id": senderID, "name": senderID},
-		"senderWorkspaceInstanceId": senderInstanceID,
-	}
-	var response map[string]any
-	path := fmt.Sprintf("/api/workspaces/%s/users/%s/messages", url.PathEscape(client.workspaceID), url.PathEscape(userName))
-	if err := client.request(context.Background(), http.MethodPost, path, body, &response); err != nil {
-		return err
-	}
-	return printJSON(response)
+	return errors.New("Inbox was removed; reply to user Chat inputs with the explicit pua chat publish command supplied in that input")
 }
 
 func resolveMessageSender() (string, string, error) {

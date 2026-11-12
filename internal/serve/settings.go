@@ -31,6 +31,10 @@ func (s *server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		s.handleAgentHubSettings(w, r)
 		return
 	}
+	if path == "system" {
+		s.handleSystemSettings(w, r)
+		return
+	}
 	if strings.HasPrefix(path, "agenthub/providers/") {
 		providerID, err := url.PathUnescape(strings.TrimPrefix(path, "agenthub/providers/"))
 		if err != nil || strings.TrimSpace(providerID) == "" || strings.Contains(providerID, "/") {

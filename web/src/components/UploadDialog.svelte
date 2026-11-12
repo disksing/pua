@@ -100,6 +100,7 @@
     const request = new XMLHttpRequest();
     requests.set(item.id, request);
     request.open("POST", `/api/workspaces/${encodeURIComponent(workspaceId)}/resources/${encodeURIComponent(resourceId)}/uploads`);
+    if (model.currentUserName) request.setRequestHeader("X-PUA-User", model.currentUserName);
     request.responseType = "json";
     request.upload.addEventListener("progress", (event) => {
       if (model.identity !== requestIdentity || !event.lengthComputable) return;

@@ -8,6 +8,8 @@
 	<string>PUA</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.disksing.pua.desktop</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
@@ -22,5 +24,19 @@
 	<string>11.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUAutomaticallyUpdate</key>
+	<false/>
+	<key>SUVerifyUpdateBeforeExtraction</key>
+	<true/>
+	<key>SURequireSignedFeed</key>
+	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
+	<key>SUFeedURL</key>
+	<string>https://pua.dev/updates/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>RELEASE_BUILD_MUST_SET_SPARKLE_PUBLIC_KEY</string>
 </dict>
 </plist>

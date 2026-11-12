@@ -270,5 +270,11 @@ func (s *server) acquireConfiguredWorkspaceLocks() error {
 			return fmt.Errorf("acquire workspace ownership: %w", err)
 		}
 	}
+	for _, canonical := range canonicalPaths {
+		if err := discardLegacyInbox(canonical); err != nil {
+			s.locks.closeAll()
+			return err
+		}
+	}
 	return nil
 }

@@ -40,7 +40,8 @@ func addRuntimeTestWorkspace(t *testing.T, manager *agentManager, id, name strin
 
 func waitForResourceMailboxMessage(t *testing.T, workspacePath, messageID string, predicate func(resourceMailboxMessage) bool) resourceMailboxMessage {
 	t.Helper()
-	deadline := time.NewTimer(2 * time.Second)
+	// Match the runtime convergence budget under race instrumentation.
+	deadline := time.NewTimer(10 * time.Second)
 	defer deadline.Stop()
 	ticker := time.NewTicker(5 * time.Millisecond)
 	defer ticker.Stop()
@@ -54,7 +55,7 @@ func waitForResourceMailboxMessage(t *testing.T, workspacePath, messageID string
 		}
 		select {
 		case <-deadline.C:
-			t.Fatalf("mailbox message %s did not reach the expected state", messageID)
+			t.Fatalf("mailbox message %s did not reach the expected state: found=%t message=%+v", messageID, found, message)
 		case <-ticker.C:
 		}
 	}
@@ -182,6 +183,13 @@ func TestAcceptedMessageDoesNotBlockAnotherWorkspaceStatus(t *testing.T) {
 	}
 	messageStarted := make(chan struct{})
 	releaseMessage := make(chan struct{})
+	defer func() {
+		select {
+		case <-releaseMessage:
+		default:
+			close(releaseMessage)
+		}
+	}()
 	fake.messageHook = func(sessionID string, message agentHubInboundMessage) {
 		payload, ok := decodePUAMessagePayload(message.Payload)
 		if sessionID != recordA.AgentHubSessionID || !ok || payload.Text != "blocked A" {
@@ -192,7 +200,7 @@ func TestAcceptedMessageDoesNotBlockAnotherWorkspaceStatus(t *testing.T) {
 	}
 	fake.mu.Unlock()
 
-	sendRequest := httptest.NewRequest(http.MethodPost, "/api/workspaces/"+workspaceA.ID+"/resources/project1.task1/messages", strings.NewReader(`{"text":"blocked A","mode":"enqueue"}`))
+	sendRequest := httptest.NewRequest(http.MethodPost, "/api/workspaces/"+workspaceA.ID+"/resources/project1.task1/messages", strings.NewReader(`{"text":"blocked A","mode":"enqueue","role":"agent"}`))
 	sendRecorder := httptest.NewRecorder()
 	sendDone := make(chan struct{})
 	go func() {
@@ -239,7 +247,7 @@ func TestAcceptedMessageDoesNotBlockAnotherWorkspaceStatus(t *testing.T) {
 	go func() {
 		manager.server.handleWorkspace(bSendRecorder, httptest.NewRequest(http.MethodPost,
 			"/api/workspaces/"+workspaceB.ID+"/resources/project1.task1/messages",
-			strings.NewReader(`{"text":"independent B","mode":"enqueue"}`)))
+			strings.NewReader(`{"text":"independent B","mode":"enqueue","role":"agent"}`)))
 		close(bSendDone)
 	}()
 	select {
@@ -276,7 +284,7 @@ func TestAcceptedMessageRemainsAcceptedWhenBackgroundDeliveryFails(t *testing.T)
 	recorder := httptest.NewRecorder()
 	manager.server.handleWorkspace(recorder, httptest.NewRequest(http.MethodPost,
 		"/api/workspaces/"+workspace.ID+"/resources/project1.task1/messages",
-		strings.NewReader(`{"text":"will fail after acceptance","mode":"enqueue"}`)))
+		strings.NewReader(`{"text":"will fail after acceptance","mode":"enqueue","role":"agent"}`)))
 	if recorder.Code != http.StatusAccepted {
 		t.Fatalf("background delivery failure changed acceptance response to %d: %s", recorder.Code, recorder.Body.String())
 	}

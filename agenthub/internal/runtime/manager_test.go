@@ -239,7 +239,7 @@ func (f *fakeSession) Close() error {
 func testConfig() config.Config {
 	return config.Config{
 		Version:        1,
-		AgentProviders: []config.Provider{{ID: "provider", Type: "pi", Enabled: true}},
+		AgentProviders: []config.Provider{{ID: "provider", Type: "pi"}},
 		Agents:         []config.Agent{{Name: "Slow", ProviderID: "provider"}, {Name: "Fast Agent", ProviderID: "provider"}},
 	}
 }
@@ -287,7 +287,7 @@ func TestManagerRunsExplicitAgentAndResumes(t *testing.T) {
 	for _, event := range events {
 		types = append(types, event.Type)
 	}
-	expected := []string{"session.created", "message.input", "turn.started", "session.state", "session.provider", "session.state", "message.delivery", "message.assistant.delta", "provider.turn.completed", "turn.completed", "message.delivery"}
+	expected := []string{"session.created", "message.input", "turn.started", "message.delivery", "session.state", "session.provider", "session.state", "message.delivery", "message.assistant.delta", "provider.turn.completed", "turn.completed", "message.delivery"}
 	if string(mustJSON(types)) != string(mustJSON(expected)) {
 		t.Fatalf("event types = %v", types)
 	}
@@ -332,7 +332,7 @@ func TestManagerMergesAgentEnvironmentWithSessionLaunchEnvironment(t *testing.T)
 	}
 	cfg := config.Config{
 		Version:        1,
-		AgentProviders: []config.Provider{{ID: "provider", Type: "pi", Enabled: true}},
+		AgentProviders: []config.Provider{{ID: "provider", Type: "pi"}},
 		Agents: []config.Agent{{
 			Name:        "Env Agent",
 			ProviderID:  "provider",
@@ -755,9 +755,11 @@ func TestInterruptClassifiesProviderCompletionAsCancelled(t *testing.T) {
 	for _, test := range []struct {
 		name          string
 		suppressReply bool
+		providerFails bool
 	}{
 		{name: "without final reply", suppressReply: true},
 		{name: "with final reply", suppressReply: false},
+		{name: "failure while cancelling retry", suppressReply: true, providerFails: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			store, err := session.Open(t.TempDir())
@@ -789,11 +791,18 @@ func TestInterruptClassifiesProviderCompletionAsCancelled(t *testing.T) {
 			adapter.onInterrupt = func() {
 				// Codex and other adapters may report a provider completion as the
 				// response to an interrupt request. It must remain cancelled.
-				adapter.hooks.Event(provider.Event{
+				event := provider.Event{
 					Type:     "provider.turn.completed",
 					Data:     map[string]any{"nativeTurnId": "provider-private"},
 					TurnDone: true,
-				})
+				}
+				if test.providerFails {
+					// Pi may settle with its last assistant error when an abort
+					// cancels retry backoff before a new response starts.
+					event.Type, event.TurnFailed = "provider.error", true
+					event.Data = map[string]any{"message": "overloaded"}
+				}
+				adapter.hooks.Event(event)
 			}
 			if err := manager.Interrupt(value.ID); err != nil {
 				t.Fatal(err)
@@ -810,11 +819,13 @@ func TestInterruptClassifiesProviderCompletionAsCancelled(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var completed, cancelled int
+			var completed, cancelled, failed int
 			for _, event := range events {
 				switch event.Type {
 				case session.EventTurnCompleted:
 					completed++
+				case session.EventTurnFailed:
+					failed++
 				case session.EventTurnCancelled:
 					cancelled++
 					if event.TurnID != activeTurnID || string(event.Data) != `{"reason":"interrupted"}` {
@@ -822,8 +833,8 @@ func TestInterruptClassifiesProviderCompletionAsCancelled(t *testing.T) {
 					}
 				}
 			}
-			if completed != 0 || cancelled != 1 {
-				t.Fatalf("terminal events = completed:%d cancelled:%d; all events=%+v", completed, cancelled, events)
+			if completed != 0 || failed != 0 || cancelled != 1 {
+				t.Fatalf("terminal events = completed:%d failed:%d cancelled:%d; all events=%+v", completed, failed, cancelled, events)
 			}
 			summary, err := store.Turn(value.ID, activeTurnID)
 			if err != nil {

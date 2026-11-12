@@ -31,14 +31,10 @@ const (
 )
 
 const (
-	resourceResultSubscriptionPending  = "pending"
-	resourceResultSubscriptionDisabled = "disabled"
-	resourceResultSubscriptionNone     = "none"
-	resourceResultSubscriptionComplete = "complete"
-
 	resourceMessageTypeTurnResult        = "turn_result"
 	resourceMessageTypeDeliveryTerminal  = "delivery_terminal_notice"
 	resourceMessageTypeSchedulerTick     = "scheduler_tick"
+	resourceMessageTypeScheduleExactDue  = "schedule_exact_due"
 	resourceMessageTypeTaskContinuation  = "task_state_continuation"
 	resourceMessageTypeTurnStallRecovery = "turn_stall_recovery"
 
@@ -47,6 +43,10 @@ const (
 	resourceNotificationDelivered = "delivered"
 	resourceNotificationTerminal  = "terminal"
 )
+
+func isLegacyTurnResultType(messageType string) bool {
+	return messageType == resourceMessageTypeTurnResult || messageType == "creator_turn_result"
+}
 
 const (
 	resourceMessageReasonNoActiveTurn        = "no_active_turn"
@@ -68,6 +68,13 @@ type resourceMailbox struct {
 // AgentHub persists that payload opaquely for history, while this context is
 // only PUA's deterministic retry input.
 type providerMessageContext struct {
+	ParentWork     string                 `json:"parentWork,omitempty"`
+	ParentHistory  string                 `json:"parentHistory,omitempty"`
+	PreviousResult string                 `json:"previousResult,omitempty"`
+	Protocol       int                    `json:"protocol,omitempty"`
+	WorkID         string                 `json:"workId,omitempty"`
+	ChatEpoch      uint64                 `json:"chatEpoch,omitempty"`
+	ChatVisible    bool                   `json:"chatVisible,omitempty"`
 	Language       string                 `json:"language"`
 	TurnID         string                 `json:"turnId,omitempty"`
 	OpenerRole     string                 `json:"openerRole"`
@@ -88,7 +95,7 @@ type resourceMailboxMessage struct {
 	Role                      string                       `json:"role"`
 	Sender                    *agentHubMessageSender       `json:"sender,omitempty"`
 	SenderWorkspaceInstanceID string                       `json:"senderWorkspaceInstanceId,omitempty"`
-	SubscribeResult           bool                         `json:"subscribeResult"`
+	SubscribeResult           *bool                        `json:"subscribeResult,omitempty"`
 	ResultSubscriptionStatus  string                       `json:"resultSubscriptionStatus,omitempty"`
 	ResultOperationID         string                       `json:"resultOperationId,omitempty"`
 	Type                      string                       `json:"type,omitempty"`
@@ -117,35 +124,11 @@ type resourceMailboxMessage struct {
 	LastError                 string                       `json:"lastError,omitempty"`
 	LastErrorCode             string                       `json:"lastErrorCode,omitempty"`
 	receipt                   bool
-	subscribeResultPresent    bool
-}
-
-// UnmarshalJSON keeps the public default (omitted subscribeResult means true)
-// for messages written by older PUA versions while preserving explicit false.
-func (message *resourceMailboxMessage) UnmarshalJSON(data []byte) error {
-	type mailboxMessageAlias resourceMailboxMessage
-	var decoded mailboxMessageAlias
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		return err
-	}
-	var fields map[string]json.RawMessage
-	if err := json.Unmarshal(data, &fields); err != nil {
-		return err
-	}
-	_, present := fields["subscribeResult"]
-	decoded.subscribeResultPresent = present
-	if !present {
-		decoded.SubscribeResult = true
-	}
-	if decoded.Role == "system" {
-		decoded.SubscribeResult = false
-		decoded.ResultSubscriptionStatus = resourceResultSubscriptionDisabled
-	}
-	*message = resourceMailboxMessage(decoded)
-	return nil
 }
 
 type resourceMessageCausation struct {
+	ChatEpoch                 uint64   `json:"chatEpoch,omitempty"`
+	AutomaticChat             bool     `json:"automaticChat,omitempty"`
 	Type                      string   `json:"type"`
 	SourceWorkspaceInstanceID string   `json:"sourceWorkspaceInstanceId"`
 	SourceResourceID          string   `json:"sourceResourceId"`
@@ -190,6 +173,7 @@ type resourceMailboxCounts struct {
 type resourceGenerationStatus struct {
 	Generation              int    `json:"generation"`
 	GenerationID            string `json:"generationId"`
+	AgentName               string `json:"agentName,omitempty"`
 	Status                  string `json:"status"`
 	CompletionState         string `json:"completionState,omitempty"`
 	CompletionHasFinalReply bool   `json:"completionHasFinalReply"`
@@ -200,15 +184,20 @@ type resourceGenerationStatus struct {
 	IdleSinceAt             string `json:"idleSinceAt,omitempty"`
 	IdleDeadlineAt          string `json:"idleDeadlineAt,omitempty"`
 	IdleSleepRequested      bool   `json:"idleSleepRequested,omitempty"`
+	ResumeFailureCount      int    `json:"resumeFailureCount,omitempty"`
+	ResumeRetryAt           string `json:"resumeRetryAt,omitempty"`
+	ResumeLastError         string `json:"resumeLastError,omitempty"`
 	TurnNumber              int    `json:"turnNumber,omitempty"`
 	AgentHubSessionID       string `json:"agentHubSessionId,omitempty"`
 }
 
 type resourceSessionStatus struct {
-	ID                string                    `json:"id,omitempty"`
-	State             string                    `json:"state,omitempty"`
-	CurrentTurnID     string                    `json:"currentTurnId,omitempty"`
-	InputCapabilities agentHubInputCapabilities `json:"inputCapabilities"`
+	PendingApprovalIDs []string                  `json:"pendingApprovalIds,omitempty"`
+	ID                 string                    `json:"id,omitempty"`
+	State              string                    `json:"state,omitempty"`
+	StopReason         string                    `json:"stopReason,omitempty"`
+	CurrentTurnID      string                    `json:"currentTurnId,omitempty"`
+	InputCapabilities  agentHubInputCapabilities `json:"inputCapabilities"`
 }
 
 type resourceStatusResponse struct {
@@ -236,7 +225,6 @@ type resourceMessageRequest struct {
 	Role                      string                 `json:"role,omitempty"`
 	Sender                    *agentHubMessageSender `json:"sender,omitempty"`
 	SenderWorkspaceInstanceID string                 `json:"senderWorkspaceInstanceId,omitempty"`
-	SubscribeResult           *bool                  `json:"subscribeResult,omitempty"`
 }
 
 type resourceMessageResponse struct {
@@ -254,7 +242,7 @@ type resourceMessageResponse struct {
 	GenerationID             string                       `json:"generationId,omitempty"`
 	AgentHubSessionID        string                       `json:"agentHubSessionId,omitempty"`
 	TurnID                   string                       `json:"turnId,omitempty"`
-	SubscribeResult          bool                         `json:"subscribeResult"`
+	SubscribeResult          *bool                        `json:"subscribeResult,omitempty"`
 	ResultSubscriptionStatus string                       `json:"resultSubscriptionStatus,omitempty"`
 	ResultOperationID        string                       `json:"resultOperationId,omitempty"`
 	LastError                string                       `json:"lastError,omitempty"`
@@ -297,30 +285,6 @@ func numericResourcePart(value, prefix string) bool {
 		}
 	}
 	return true
-}
-
-func bindMailboxResultSubscription(message *resourceMailboxMessage, turnID string) {
-	if !message.SubscribeResult {
-		message.ResultSubscriptionStatus = resourceResultSubscriptionDisabled
-		message.ResultOperationID = ""
-		return
-	}
-	// A steer joins an already-running Turn; it does not own that Turn's final
-	// result. Callers that need a direct reply to a steer must receive a new
-	// explicit resource message from the target agent.
-	if message.ActualMode == resourceMessageModeSteer {
-		message.ResultSubscriptionStatus = resourceResultSubscriptionNone
-		message.ResultOperationID = ""
-		return
-	}
-	if message.Role != "agent" || message.Sender == nil || !isStablePUAResourceID(message.Sender.ID) ||
-		strings.TrimSpace(message.SenderWorkspaceInstanceID) == "" || strings.TrimSpace(turnID) == "" {
-		message.ResultSubscriptionStatus = resourceResultSubscriptionNone
-		message.ResultOperationID = ""
-		return
-	}
-	message.ResultSubscriptionStatus = resourceResultSubscriptionPending
-	message.ResultOperationID = ""
 }
 
 func normalizeResourceMessageMode(mode string) (string, error) {
@@ -495,23 +459,10 @@ func acceptMailboxMessage(workspacePath, resourceID string, request resourceMess
 	}
 	resourceID = normalizedResourceID(resourceID)
 	now := time.Now().Format(time.RFC3339Nano)
-	subscribeResult := true
-	if request.SubscribeResult != nil {
-		subscribeResult = *request.SubscribeResult
-	}
-	if role == "system" {
-		subscribeResult = false
-	}
-	resultSubscriptionStatus := ""
-	if !subscribeResult {
-		resultSubscriptionStatus = resourceResultSubscriptionDisabled
-	}
 	message := resourceMailboxMessage{
 		ID: "msg-" + newGenerationRecordID(), ResourceID: resourceID, Text: text,
-		Role: role, Sender: request.Sender, SenderWorkspaceInstanceID: strings.TrimSpace(request.SenderWorkspaceInstanceID), SubscribeResult: subscribeResult,
-		ResultSubscriptionStatus: resultSubscriptionStatus, RequestedMode: mode, ActualMode: mode,
-		subscribeResultPresent: true,
-		Status:                 resourceMessageQueued, AcceptedAt: now, UpdatedAt: now,
+		Role: role, Sender: request.Sender, SenderWorkspaceInstanceID: strings.TrimSpace(request.SenderWorkspaceInstanceID),
+		RequestedMode: mode, ActualMode: mode, Status: resourceMessageQueued, AcceptedAt: now, UpdatedAt: now,
 	}
 	_, err = mutateResourceMailboxForResource(workspacePath, resourceID, func(mailbox *resourceMailbox) error {
 		mailbox.NextSequence++
@@ -549,10 +500,12 @@ func acceptGeneratedMailboxMessage(workspacePath string, expected resourceMailbo
 		return resourceMailboxMessage{}, &resourceAPIError{Code: "invalid_request", Message: "generated mailbox messages may use only steer or enqueue"}
 	}
 	expected.Role = "system"
-	expected.SubscribeResult = false
-	expected.ResultSubscriptionStatus = resourceResultSubscriptionDisabled
-	expected.ResultOperationID = ""
-	expected.subscribeResultPresent = true
+	if expected.Type == "user_chat_input" && expected.Causation != nil && expected.Causation.AutomaticChat {
+		expected.Role = "user"
+	}
+	if isLegacyTurnResultType(expected.Type) {
+		return resourceMailboxMessage{}, errors.New("automatic Turn results are no longer supported")
+	}
 	expected.RequestedMode = requestedMode
 	if expected.ModeFrozen {
 		expected.ActualMode = actualMode
@@ -577,7 +530,11 @@ func acceptGeneratedMailboxMessage(workspacePath string, expected resourceMailbo
 			if current.ID != expected.ID {
 				continue
 			}
-			if current.ResourceID != expected.ResourceID || (current.Text != "" && current.Text != expected.Text) || current.Role != expected.Role ||
+			// Keep the original receipt and wire identity when accepting a retry
+			// of a Chat input created before generated user roles were corrected.
+			compatibleRole := current.Role == expected.Role ||
+				(expected.Role == "user" && expected.Type == "user_chat_input" && current.Role == "system")
+			if current.ResourceID != expected.ResourceID || (current.Text != "" && current.Text != expected.Text) || !compatibleRole ||
 				current.Type != expected.Type || current.SenderWorkspaceInstanceID != expected.SenderWorkspaceInstanceID ||
 				!reflect.DeepEqual(current.Sender, expected.Sender) || !reflect.DeepEqual(current.Causation, expected.Causation) {
 				return &resourceAPIError{Code: "message_conflict", Message: "stable generated message id conflicts with a different mailbox message"}
@@ -623,6 +580,14 @@ func markResourceMailboxArchived(workspacePath, resourceID string) error {
 
 func resourceExistsAndArchived(workspacePath, resourceID string) (bool, bool, app.AgentBinding, error) {
 	resourceID = normalizedResourceID(resourceID)
+	if strings.HasPrefix(resourceID, dialoguePrefix) {
+		c, err := loadDialogue(workspacePath, resourceID)
+		if err != nil {
+			return false, false, app.AgentBinding{}, err
+		}
+		exists, _, _, err := resourceExistsAndArchived(workspacePath, c.ResourceID)
+		return exists, true, c.Binding, err
+	}
 	puaWorkspace, err := app.OpenWorkspace(workspacePath)
 	if err != nil {
 		return false, false, app.AgentBinding{}, err
@@ -687,6 +652,14 @@ func publicSessionState(archived bool, unavailableReason string, generation *res
 	return "idle"
 }
 
+func terminalMailboxRuntimeError(code, message string) string {
+	switch strings.ToLower(strings.TrimSpace(code)) {
+	case "task_state_retry_exhausted", "generation_start_retry_exhausted":
+		return strings.TrimSpace(message)
+	}
+	return ""
+}
+
 func (m *agentManager) resourceStatus(ctx context.Context, workspace serveWorkspace, resourceID string) (resourceStatusResponse, error) {
 	resourceID = normalizedResourceID(resourceID)
 	exists, archived, binding, err := resourceExistsAndArchived(workspace.Path, resourceID)
@@ -699,6 +672,7 @@ func (m *agentManager) resourceStatus(ctx context.Context, workspace serveWorksp
 		return resourceStatusResponse{}, err
 	}
 	status.Messages, status.LastError, status.LastErrorCode = mailboxCounts(mailbox, resourceID)
+	terminalRuntimeError := terminalMailboxRuntimeError(status.LastErrorCode, status.LastError)
 	status.WaitingMessages = waitingMailboxMessages(mailbox, resourceID)
 	cfg, client, cfgErr := m.agentHubRuntimeConfig()
 	unavailableReason := ""
@@ -722,22 +696,26 @@ func (m *agentManager) resourceStatus(ctx context.Context, workspace serveWorksp
 		return resourceStatusResponse{}, loadErr
 	}
 	if !found {
-		status.SessionState = publicSessionState(archived, unavailableReason, nil, nil, "")
+		status.SessionState = publicSessionState(archived, unavailableReason, nil, nil, terminalRuntimeError)
 		return status, nil
 	}
 	status.Generation = &resourceGenerationStatus{
 		Generation: record.Generation, GenerationID: record.GenerationID,
-		Status: record.Status, ReplacementPending: record.ReplacementPending,
+		AgentName: record.AgentHubAgentName,
+		Status:    record.Status, ReplacementPending: record.ReplacementPending,
 		CompletionState: record.CompletionState, CompletionHasFinalReply: record.CompletionHasFinalReply,
 		IdleSuspended:     record.Status == "idle-suspended" || (record.IdleSleepStopRequested && record.Status == "stopped"),
 		ResumeUnavailable: record.SessionResumeUnavailable,
 		IdleSinceAt:       record.IdleSinceAt, IdleDeadlineAt: record.IdleDeadlineAt,
 		IdleSleepRequested: record.IdleSleepStopRequested,
+		ResumeFailureCount: record.ResumeFailureCount,
+		ResumeRetryAt:      record.ResumeRetryAt,
+		ResumeLastError:    record.ResumeLastError,
 		TurnNumber:         record.TurnNumber,
 		AgentHubSessionID:  record.AgentHubSessionID,
 	}
 	if strings.TrimSpace(record.AgentHubSessionID) == "" || cfgErr != nil {
-		status.SessionState = publicSessionState(archived, unavailableReason, status.Generation, nil, "")
+		status.SessionState = publicSessionState(archived, unavailableReason, status.Generation, nil, terminalRuntimeError)
 		return status, nil
 	}
 	session, sessionErr := client.GetSession(ctx, record.AgentHubSessionID)
@@ -749,12 +727,13 @@ func (m *agentManager) resourceStatus(ctx context.Context, workspace serveWorksp
 		return status, nil
 	}
 	status.Session = &resourceSessionStatus{
-		ID: session.ID, State: session.State, CurrentTurnID: session.CurrentTurnID,
-		InputCapabilities: session.InputCapabilities,
+		ID: session.ID, State: session.State, StopReason: session.StopReason, CurrentTurnID: session.CurrentTurnID,
+		InputCapabilities:  session.InputCapabilities,
+		PendingApprovalIDs: session.PendingApprovalIDs,
 	}
 	status.Generation.Resumable = session.State == "stopped" && !record.SessionResumeUnavailable && !record.ReplacementPending && !record.ArchivedTaskStopRequested
 	status.CanSteerWaiting = !archived && !record.ReplacementPending && (session.State == "running" || session.State == "waiting_approval") && session.InputCapabilities.Steer
-	status.SessionState = publicSessionState(archived, unavailableReason, status.Generation, status.Session, "")
+	status.SessionState = publicSessionState(archived, unavailableReason, status.Generation, status.Session, terminalRuntimeError)
 	return status, nil
 }
 
@@ -778,8 +757,14 @@ func mailboxPriority(message resourceMailboxMessage) int {
 	}
 }
 
-func findCanonicalAgentHubMessage(ctx context.Context, client *agentHubClient, sessionID string, expected resourceMailboxMessage) (agentHubInboundMessage, bool, error) {
-	cursor := int64(0)
+// findCanonicalAgentHubMessage locates the durable message.input event for
+// expected by scanning semantic frames after the given cursor. A delivery
+// that just appended its canonical event passes the pre-delivery
+// LastEventID so large sessions do not pay a full-history rescan on every
+// message; recovery paths that may look for an event written by an earlier
+// attempt must pass 0.
+func findCanonicalAgentHubMessage(ctx context.Context, client *agentHubClient, sessionID string, expected resourceMailboxMessage, after int64) (agentHubInboundMessage, bool, error) {
+	cursor := after
 	for {
 		frames, latest, err := client.SessionFrames(ctx, sessionID, cursor, agentHubEventMaxCount)
 		if err != nil {
@@ -816,7 +801,9 @@ func findCanonicalAgentHubMessage(ctx context.Context, client *agentHubClient, s
 // exact response remains unsubscribed until a later canonical observation.
 func deliveredMailboxTurnID(ctx context.Context, client *agentHubClient, sessionID string, message resourceMailboxMessage, delivered, before agentHubSession) string {
 	if client != nil && strings.TrimSpace(sessionID) != "" {
-		if canonical, found, err := findCanonicalAgentHubMessage(ctx, client, sessionID, message); err == nil && found {
+		// The canonical message.input event was appended by the delivery that
+		// just returned, so it must sit after the pre-delivery cursor.
+		if canonical, found, err := findCanonicalAgentHubMessage(ctx, client, sessionID, message, before.LastEventID); err == nil && found {
 			if turnID := strings.TrimSpace(canonical.TurnID); turnID != "" {
 				return turnID
 			}
@@ -900,7 +887,20 @@ func (m *agentManager) ensureMailboxGeneration(ctx context.Context, workspace se
 		if cfgErr != nil {
 			return record, nil, nil, cfgErr
 		}
-		return record, m.ensureRuntime(workspace, record, client), client, nil
+		rt := m.ensureRuntime(workspace, record, client)
+		if strings.HasPrefix(resourceID, dialoguePrefix) {
+			c, chatErr := loadDialogue(workspace.Path, resourceID)
+			if chatErr != nil {
+				return record, rt, client, chatErr
+			}
+			if !c.Open || c.Epoch != record.ChatEpoch {
+				record, err = rt.mutateGeneration(func(current *generationRecord) { current.ArchivedTaskStopRequested = true })
+				if err != nil {
+					return record, rt, client, err
+				}
+			}
+		}
+		return record, rt, client, nil
 	}
 	cfg, client, err := m.agentHubRuntimeConfig()
 	if err != nil {
@@ -1105,6 +1105,9 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 		return resourceErr
 	}
 	if archived {
+		if err := cancelSuspendedTurnWork(workspace.Path, resourceID, "resource archived"); err != nil {
+			return err
+		}
 		mailbox, mailboxErr := loadHotResourceMailbox(workspace.Path, resourceID)
 		if mailboxErr != nil {
 			return mailboxErr
@@ -1119,13 +1122,57 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 		return nil
 	}
 	for iteration := 0; iteration < 32; iteration++ {
+		if iteration == 0 {
+			works, e := loadTurnWork(workspace.Path, resourceID)
+			if e != nil {
+				return e
+			}
+			if len(works.Works) > 0 {
+				_, client, e := m.agentHubRuntimeConfig()
+				if e != nil {
+					return e
+				}
+				if e = m.reconcileTurnWorkLocked(ctx, workspace, resourceID, client); e != nil {
+					return e
+				}
+			}
+		}
 		mailbox, err := loadHotResourceMailbox(workspace.Path, resourceID)
 		if err != nil {
 			return err
 		}
 		message, found := selectPendingMailboxMessage(mailbox, resourceID)
+		selectedID, selectErr := selectedTurnWorkInput(workspace.Path, resourceID)
+		if selectErr != nil {
+			return selectErr
+		}
+		if selectedID != "" && (!found || (message.Status == resourceMessageQueued && message.RequestedMode != resourceMessageModeInterrupt)) {
+			for _, candidate := range mailbox.Messages {
+				if candidate.ID == selectedID && candidate.Status == resourceMessageQueued {
+					message, found = candidate, true
+					break
+				}
+			}
+		}
 		if !found {
 			return nil
+		}
+		if isLegacyTurnResultType(message.Type) {
+			_, err = updateMailboxMessage(workspace.Path, message.ID, func(current *resourceMailboxMessage) {
+				current.TerminalAt = time.Now().Format(time.RFC3339Nano)
+				current.LastErrorCode = "result_subscription_removed"
+				if current.Status == resourceMessageDelivering {
+					current.Status = resourceMessageDeliveryUnknown
+					current.LastError = "Automatic Turn results were removed; a previous delivery attempt may already have been accepted."
+				} else {
+					current.Status = resourceMessageCancelled
+					current.LastError = "Automatic Turn results were removed before delivery."
+				}
+			})
+			if err != nil {
+				return err
+			}
+			continue
 		}
 		var record generationRecord
 		var rt *agentRuntime
@@ -1219,6 +1266,40 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 		rt.applyAgentHubSessionState(m, session)
 		record = rt.snapshotGeneration()
 		active := session.State == "running" || session.State == "waiting_approval"
+		workFile, workErr := loadTurnWork(workspace.Path, resourceID)
+		if workErr != nil {
+			return workErr
+		}
+		if active && (workFile.active(session.ID, session.CurrentTurnID) != nil ||
+			(message.Causation != nil && message.Causation.AutomaticChat)) &&
+			message.Status == resourceMessageQueued && message.RequestedMode != resourceMessageModeInterrupt {
+			if !message.ModeFrozen || message.ActualMode != resourceMessageModeEnqueue {
+				_, err = updateMailboxMessage(workspace.Path, message.ID, func(current *resourceMailboxMessage) {
+					current.ActualMode, current.ModeFrozen = resourceMessageModeEnqueue, true
+					current.DowngradeReason = "fixed_turn_audience"
+				})
+				if err != nil {
+					return err
+				}
+			}
+			previewCount := 0
+			for _, queued := range mailbox.Messages {
+				if queued.Status == resourceMessageQueued && queued.RequestedMode != resourceMessageModeInterrupt {
+					if !workFile.canPreview(workFile.active(session.ID, session.CurrentTurnID), queued.ID) {
+						continue
+					}
+					previewCount++
+					if previewCount > 8 {
+						break
+					}
+					if err := m.previewQueuedInput(ctx, workspace, session, client, queued); err != nil {
+						recordMailboxFailure(workspace.Path, queued.ID, err)
+						return err
+					}
+				}
+			}
+			return nil
+		}
 		// A queued non-steer input at an inactive boundary is about to create a
 		// new Turn (including a steer that must be downgraded, and an interrupt
 		// after its old Turn has stopped). Evaluate the generation budget and
@@ -1245,8 +1326,16 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 		case GenerationOperationResumeSession:
 			resumed, terminal, resumeErr := m.resumeStoppedGenerationLocked(ctx, workspace, record, rt, client, lifecyclePlan)
 			if terminal {
+				recordMailboxFailure(workspace.Path, message.ID, resumeErr)
+				exhausted, stateErr := m.recordTaskStartFailure(workspace, message, resumeErr)
+				if stateErr != nil {
+					return stateErr
+				}
 				if retireErr := m.retireUnresumableGenerationLocked(ctx, rt, client, resumeErr); retireErr != nil {
 					return retireErr
+				}
+				if exhausted {
+					return nil
 				}
 				continue
 			}
@@ -1425,6 +1514,9 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 		if err != nil {
 			return err
 		}
+		if err := prepareTurnWork(workspace.Path, resourceID, record.GenerationID, session.ID, message); err != nil {
+			return err
+		}
 		deliveryPlan := lifecyclePlan
 		if err := m.prepareTaskWorkChain(workspace, message, rt); err != nil {
 			return err
@@ -1462,7 +1554,10 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 			var canonicalFound bool
 			var canonicalErr error
 			if conflict {
-				canonical, canonicalFound, canonicalErr = findCanonicalAgentHubMessage(ctx, client, session.ID, message)
+				// The conflicting canonical event may come from an earlier
+				// attempt that predates the session snapshot taken by this pass,
+				// so the recovery scan cannot use the pre-delivery cursor hint.
+				canonical, canonicalFound, canonicalErr = findCanonicalAgentHubMessage(ctx, client, session.ID, message, 0)
 			}
 			if canonicalErr == nil && canonicalFound {
 				stillCurrent, guardErr := legacyLifecyclePlanStillCurrent(workspace, deliveryPlan, &session)
@@ -1494,7 +1589,6 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 						turnID = strings.TrimSpace(session.CurrentTurnID)
 					}
 					current.TurnID = turnID
-					bindMailboxResultSubscription(current, turnID)
 				})
 				if persistErr != nil {
 					return persistErr
@@ -1520,7 +1614,6 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 			current.DeliveredAt = time.Now().Format(time.RFC3339Nano)
 			current.TerminalAt = current.DeliveredAt
 			current.TurnID = turnID
-			bindMailboxResultSubscription(current, turnID)
 			current.LastError = ""
 			current.LastErrorCode = ""
 		})
@@ -1528,6 +1621,9 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 			return err
 		}
 		rt.applyAgentHubSessionState(m, delivered)
+		if err := bindTurnWork(workspace.Path, resourceID, message.ID, turnID); err != nil {
+			return err
+		}
 		if delivered.State == "running" || delivered.State == "waiting_approval" {
 			// More eligible steer inputs may enter this Turn; enqueue inputs wait.
 			continue
@@ -1676,6 +1772,11 @@ func (m *agentManager) handleTaskState(w http.ResponseWriter, r *http.Request, w
 			return &resourceAPIError{Code: "invalid_request", Message: setErr.Error()}
 		}
 		response = taskStateResponse{ResourceID: task.ID, State: task.State, Note: task.StateNote, StateUpdatedAt: task.StateUpdatedAt}
+		if body.State == app.TaskStatePaused {
+			if err := cancelSuspendedTurnWork(workspace.Path, resourceID, "task paused"); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	if err != nil {
@@ -1700,6 +1801,15 @@ func (m *agentManager) handleResourceMessages(w http.ResponseWriter, r *http.Req
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil {
 		writeError(w, &resourceAPIError{Code: "invalid_request", Message: err.Error()}, http.StatusBadRequest)
+		return
+	}
+	role, roleErr := normalizeResourceMessageRole(request.Role)
+	if roleErr != nil {
+		writeError(w, roleErr, http.StatusBadRequest)
+		return
+	}
+	if role == "user" {
+		writeError(w, &resourceAPIError{Code: "chat_required", Message: "user messages must use resource chat"}, http.StatusGone)
 		return
 	}
 	resourceID = normalizedResourceID(resourceID)

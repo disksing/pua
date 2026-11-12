@@ -25,7 +25,7 @@ func TestGenerationUsageCountsCanonicalTerminalTurnsAndDuration(t *testing.T) {
 }
 
 func TestGenerationPolicyUsesIndependentOrBudgets(t *testing.T) {
-	policy := app.GenerationPolicy{Enabled: true, MaxTurns: 20, MaxAccumulatedTurnMinutes: 120}
+	policy := app.GenerationPolicy{BudgetEnabled: true, MaxTurns: 20, MaxAccumulatedTurnMinutes: 120, MaxInactivityMinutes: 1440}
 	tests := []struct {
 		name  string
 		usage generationUsage
@@ -37,14 +37,41 @@ func TestGenerationPolicyUsesIndependentOrBudgets(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if got := generationPolicyReached(policy, test.usage); got != test.want {
-				t.Fatalf("generationPolicyReached() = %v, want %v", got, test.want)
+			if got := generationBudgetReached(policy, test.usage); got != test.want {
+				t.Fatalf("generationBudgetReached() = %v, want %v", got, test.want)
 			}
 		})
 	}
-	policy.Enabled = false
-	if generationPolicyReached(policy, generationUsage{CompletedTurns: 100, TurnDurationMS: int64(300 * time.Minute / time.Millisecond)}) {
+	policy.BudgetEnabled = false
+	if generationBudgetReached(policy, generationUsage{CompletedTurns: 100, TurnDurationMS: int64(300 * time.Minute / time.Millisecond)}) {
 		t.Fatal("disabled policy reached a budget")
+	}
+}
+
+func TestGenerationInactivityUsesLastSemanticActivity(t *testing.T) {
+	now := time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC)
+	policy := app.GenerationPolicy{InactivityEnabled: true, MaxInactivityMinutes: 1440}
+	tests := []struct {
+		name       string
+		activityAt string
+		enabled    bool
+		want       bool
+	}{
+		{name: "below threshold", activityAt: now.Add(-24*time.Hour + time.Nanosecond).Format(time.RFC3339Nano), enabled: true},
+		{name: "at threshold", activityAt: now.Add(-24 * time.Hour).Format(time.RFC3339Nano), enabled: true, want: true},
+		{name: "above threshold", activityAt: now.Add(-48 * time.Hour).Format(time.RFC3339Nano), enabled: true, want: true},
+		{name: "missing activity", enabled: true},
+		{name: "future activity", activityAt: now.Add(time.Minute).Format(time.RFC3339Nano), enabled: true},
+		{name: "disabled", activityAt: now.Add(-48 * time.Hour).Format(time.RFC3339Nano)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			policy.InactivityEnabled = test.enabled
+			session := agentHubSession{LastActivityAt: test.activityAt}
+			if got := generationInactivityReached(policy, session, now); got != test.want {
+				t.Fatalf("generationInactivityReached() = %v, want %v", got, test.want)
+			}
+		})
 	}
 }
 
@@ -57,7 +84,7 @@ func TestGenerationPolicyDoesNotRotateIdleGenerationWithoutNewTurn(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := puaWorkspace.SetGenerationPolicy(app.GenerationPolicy{Enabled: true, MaxTurns: 2, MaxAccumulatedTurnMinutes: 120}); err != nil {
+	if _, err := puaWorkspace.SetGenerationPolicy(app.GenerationPolicy{BudgetEnabled: true, MaxTurns: 2, MaxAccumulatedTurnMinutes: 120, InactivityEnabled: true, MaxInactivityMinutes: 1440}); err != nil {
 		t.Fatal(err)
 	}
 	record := generationRecord{
@@ -68,7 +95,8 @@ func TestGenerationPolicyDoesNotRotateIdleGenerationWithoutNewTurn(t *testing.T)
 	}
 	session := agentHubSession{
 		ID: "ses-policy", State: "ready", LastEventID: 4,
-		CreatedAt: "2026-08-01T00:00:00Z", UpdatedAt: "2026-08-01T00:02:00Z",
+		LastActivityAt: "2026-07-30T00:00:00Z",
+		CreatedAt:      "2026-08-01T00:00:00Z", UpdatedAt: "2026-08-01T00:02:00Z",
 	}
 	seedPollerGeneration(t, fake, workspace, record, session)
 	fake.mu.Lock()
@@ -103,7 +131,7 @@ func TestGenerationPolicyRotatesReadyGenerationAtNewTurnBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := puaWorkspace.SetGenerationPolicy(app.GenerationPolicy{Enabled: true, MaxTurns: 2, MaxAccumulatedTurnMinutes: 120}); err != nil {
+	if _, err := puaWorkspace.SetGenerationPolicy(app.GenerationPolicy{BudgetEnabled: true, MaxTurns: 2, MaxAccumulatedTurnMinutes: 120, InactivityEnabled: true, MaxInactivityMinutes: 1440}); err != nil {
 		t.Fatal(err)
 	}
 	setRuntimeTestProfiles(t, configPath, []agentHubProfileRoute{{Key: "default", AgentName: "replacement-agent"}})
@@ -115,7 +143,8 @@ func TestGenerationPolicyRotatesReadyGenerationAtNewTurnBoundary(t *testing.T) {
 	}
 	session := agentHubSession{
 		ID: "ses-policy-ready", State: "ready", LastEventID: 4,
-		CreatedAt: "2026-08-01T00:00:00Z", UpdatedAt: "2026-08-01T00:02:00Z",
+		LastActivityAt: "2026-07-30T00:00:00Z",
+		CreatedAt:      "2026-08-01T00:00:00Z", UpdatedAt: "2026-08-01T00:02:00Z",
 	}
 	seedPollerGeneration(t, fake, workspace, record, session)
 	fake.mu.Lock()
@@ -139,7 +168,7 @@ func TestGenerationPolicyRotatesReadyGenerationAtNewTurnBoundary(t *testing.T) {
 			updated.GenerationID == current.GenerationID
 	})
 	retired, found, err := generationRecordByID(workspace.Path, record.GenerationID)
-	if err != nil || !found || !retired.Retired || retired.RetireReason != generationPolicyRetireReason ||
+	if err != nil || !found || !retired.Retired || retired.RetireReason != generationBudgetRetireReason ||
 		retired.GenerationCompletedTurns != 2 || retired.GenerationTurnDurationMS != 120_000 {
 		t.Fatalf("retired ready generation = %#v, found=%v err=%v", retired, found, err)
 	}
@@ -161,7 +190,7 @@ func TestGenerationPolicyReusesGenerationBelowBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := puaWorkspace.SetGenerationPolicy(app.GenerationPolicy{Enabled: true, MaxTurns: 2}); err != nil {
+	if _, err := puaWorkspace.SetGenerationPolicy(app.GenerationPolicy{BudgetEnabled: true, MaxTurns: 2, MaxInactivityMinutes: 1440}); err != nil {
 		t.Fatal(err)
 	}
 	record := generationRecord{
@@ -200,7 +229,7 @@ func TestGenerationPolicyRotatesStoppedGenerationBeforeResume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := puaWorkspace.SetGenerationPolicy(app.GenerationPolicy{Enabled: true, MaxTurns: 2, MaxAccumulatedTurnMinutes: 120}); err != nil {
+	if _, err := puaWorkspace.SetGenerationPolicy(app.GenerationPolicy{BudgetEnabled: true, MaxTurns: 2, MaxAccumulatedTurnMinutes: 120, MaxInactivityMinutes: 1440}); err != nil {
 		t.Fatal(err)
 	}
 	record := generationRecord{
@@ -239,6 +268,71 @@ func TestGenerationPolicyRotatesStoppedGenerationBeforeResume(t *testing.T) {
 	}
 }
 
+func TestGenerationInactivityRotatesBeforeNewTurnForReadyAndStoppedSessions(t *testing.T) {
+	for _, state := range []string{"ready", "stopped"} {
+		t.Run(state, func(t *testing.T) {
+			fake := newRuntimeFakeAgentHub()
+			hub := httptest.NewServer(fake)
+			defer hub.Close()
+			manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+			puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := puaWorkspace.SetGenerationPolicy(app.GenerationPolicy{InactivityEnabled: true, MaxInactivityMinutes: 1440}); err != nil {
+				t.Fatal(err)
+			}
+			status := "idle"
+			idleSleepRequested := false
+			if state == "stopped" {
+				status = "idle-suspended"
+				idleSleepRequested = true
+			}
+			record := generationRecord{
+				ID: "gen-inactivity-" + state, WorkspaceID: workspace.ID, ResourceID: "project1.task1", Generation: 1,
+				GenerationID: "gen-inactivity-" + state, AgentHubSessionID: "ses-inactivity-" + state, AgentHubAgentName: "fake-agent",
+				SourceExternalID: workspace.ID + "/gen-inactivity-" + state, Status: status, IdleSleepStopRequested: idleSleepRequested,
+				CreatedAt: "2026-07-30T00:00:00Z", UpdatedAt: "2026-08-01T00:00:00Z",
+			}
+			session := agentHubSession{
+				ID: "ses-inactivity-" + state, State: state, AgentName: "fake-agent",
+				LastActivityAt: "2026-07-30T00:00:00Z",
+				CreatedAt:      "2026-07-30T00:00:00Z", UpdatedAt: "2026-08-01T00:00:00Z",
+			}
+			seedPollerGeneration(t, fake, workspace, record, session)
+
+			message, err := manager.acceptResourceMessage(context.Background(), workspace, record.ResourceID, resourceMessageRequest{
+				Text: "start after inactivity", Mode: resourceMessageModeEnqueue,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			waitForRuntimeTest(t, func() bool {
+				current, found, loadErr := currentResourceGeneration(workspace.Path, record.ResourceID)
+				updated, messageFound, messageErr := mailboxMessageByID(workspace.Path, message.ID)
+				return loadErr == nil && found && current.Generation == 2 && messageErr == nil && messageFound &&
+					updated.Status == resourceMessageDelivered && updated.GenerationID == current.GenerationID
+			})
+			retired, found, err := generationRecordByID(workspace.Path, record.GenerationID)
+			if err != nil || !found || !retired.Retired || retired.RetireReason != generationInactivityRetireReason {
+				t.Fatalf("inactivity retirement = %#v, found=%v err=%v", retired, found, err)
+			}
+			fake.mu.Lock()
+			resumeCount := len(fake.resumeEnvironments)
+			stopCalls := fake.stopCalls
+			archived := fake.sessions[session.ID]
+			fake.mu.Unlock()
+			wantStops := 1
+			if state == "stopped" {
+				wantStops = 0
+			}
+			if resumeCount != 0 || stopCalls != wantStops || archived.State != "archived" {
+				t.Fatalf("inactivity lifecycle: resumes=%d stops=%d wantStops=%d state=%q", resumeCount, stopCalls, wantStops, archived.State)
+			}
+		})
+	}
+}
+
 func TestGenerationPolicyKeepsActiveTurnSteerOnCurrentGeneration(t *testing.T) {
 	fake := newRuntimeFakeAgentHub()
 	hub := httptest.NewServer(fake)
@@ -248,7 +342,7 @@ func TestGenerationPolicyKeepsActiveTurnSteerOnCurrentGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := puaWorkspace.SetGenerationPolicy(app.GenerationPolicy{Enabled: true, MaxTurns: 1}); err != nil {
+	if _, err := puaWorkspace.SetGenerationPolicy(app.GenerationPolicy{BudgetEnabled: true, MaxTurns: 1, InactivityEnabled: true, MaxInactivityMinutes: 1440}); err != nil {
 		t.Fatal(err)
 	}
 	record := generationRecord{
@@ -261,6 +355,7 @@ func TestGenerationPolicyKeepsActiveTurnSteerOnCurrentGeneration(t *testing.T) {
 	session := agentHubSession{
 		ID: "ses-policy-active", State: "running", CurrentTurnID: "turn-active",
 		InputCapabilities: agentHubInputCapabilities{Steer: true},
+		LastActivityAt:    "2026-07-30T00:00:00Z",
 		CreatedAt:         "2026-08-01T00:00:00Z", UpdatedAt: "2026-08-01T00:02:00Z",
 	}
 	seedPollerGeneration(t, fake, workspace, record, session)
@@ -294,7 +389,7 @@ func TestGenerationPolicyCompletesFailedTurnBeforeContinuationRotation(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := puaWorkspace.SetGenerationPolicy(app.GenerationPolicy{Enabled: true, MaxAccumulatedTurnMinutes: 1}); err != nil {
+	if _, err := puaWorkspace.SetGenerationPolicy(app.GenerationPolicy{BudgetEnabled: true, MaxAccumulatedTurnMinutes: 1, MaxInactivityMinutes: 1440}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := puaWorkspace.SetTaskState("project1.task1", app.TaskStateInProgress, ""); err != nil {
@@ -340,7 +435,7 @@ func TestGenerationPolicyCompletesFailedTurnBeforeContinuationRotation(t *testin
 			continuation.Status == resourceMessageDelivered && continuation.GenerationID == current.GenerationID
 	})
 	retired, found, err := generationRecordByID(workspace.Path, record.GenerationID)
-	if err != nil || !found || !retired.Retired || retired.RetireReason != generationPolicyRetireReason ||
+	if err != nil || !found || !retired.Retired || retired.RetireReason != generationBudgetRetireReason ||
 		retired.CompletionMarker != marker || retired.CompletionPending ||
 		retired.TaskStateCompletionMarker != marker || retired.TaskStateContinuationCount != 1 {
 		t.Fatalf("failed Turn completion was not finalized before rotation: generation=%#v found=%v err=%v", retired, found, err)
@@ -356,7 +451,7 @@ func TestGenerationPolicyCompletesFailedTurnBeforeContinuationRotation(t *testin
 	}
 }
 
-func TestGenerationPolicyReplacementIntentSurvivesRestart(t *testing.T) {
+func TestGenerationInactivityReplacementIntentSurvivesRestart(t *testing.T) {
 	fake := newRuntimeFakeAgentHub()
 	hub := httptest.NewServer(fake)
 	defer hub.Close()
@@ -365,7 +460,7 @@ func TestGenerationPolicyReplacementIntentSurvivesRestart(t *testing.T) {
 		ID: "gen-policy-restart", WorkspaceID: workspace.ID, ResourceID: "project1.task1", Generation: 1,
 		GenerationID: "gen-policy-restart", AgentHubSessionID: "ses-policy-restart", AgentHubAgentName: "fake-agent",
 		SourceExternalID: workspace.ID + "/gen-policy-restart", Status: "idle",
-		ReplacementPending: true, RetireReason: generationPolicyRetireReason,
+		ReplacementPending: true, RetireReason: generationInactivityRetireReason,
 		GenerationUsageReady: true, GenerationCompletedTurns: 2,
 		CreatedAt: "2026-08-01T00:00:00Z", UpdatedAt: "2026-08-01T00:02:00Z",
 	}
@@ -392,7 +487,7 @@ func TestGenerationPolicyReplacementIntentSurvivesRestart(t *testing.T) {
 			updated.Status == resourceMessageDelivered && updated.GenerationID == current.GenerationID
 	})
 	retired, found, err := generationRecordByID(workspace.Path, record.GenerationID)
-	if err != nil || !found || !retired.Retired || retired.RetireReason != generationPolicyRetireReason {
+	if err != nil || !found || !retired.Retired || retired.RetireReason != generationInactivityRetireReason {
 		t.Fatalf("restart lost policy replacement intent: generation=%#v found=%v err=%v", retired, found, err)
 	}
 	fake.mu.Lock()

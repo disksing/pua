@@ -34,6 +34,7 @@ interface EventPage {
 }
 
 interface ResourceChatContext {
+  completedTurnNumber?: number;
   key: string;
   workspaceId: string;
   resourceId: string;
@@ -80,11 +81,15 @@ export interface ChatSessionControllerOptions {
   eventSourceFactory?: EventSourceFactory;
   onEvent?: (workspaceId: string, resourceId: string, event: AgentEvent) => void;
   onNotice?: (workspaceId: string, resourceId: string, notice: AgentNotice) => void;
+  onStatus?: (workspaceId: string, resourceId: string, status: ResourceMessageStatus) => void;
   streamBatchWindowMs?: number;
   statusSyncIntervalMs?: number;
   terminalRetryDelaysMs?: number[];
   noticeTimeoutMs?: number;
   realtime?: boolean;
+  /** Event audit panes disable role-based Turn folding, including terminal updates. */
+  collapseNonUserTurns?: boolean;
+  trackReadState?: boolean;
 }
 
 // The public name is retained to avoid churn in embedders. Its identity and
@@ -96,11 +101,14 @@ export class ChatSessionController {
   private readonly listeners = new Set<SnapshotListener>();
   private readonly onEvent?: ChatSessionControllerOptions["onEvent"];
   private readonly onNotice?: ChatSessionControllerOptions["onNotice"];
+  private readonly onStatus?: ChatSessionControllerOptions["onStatus"];
   private readonly streamBatchWindowMs: number;
   private readonly statusSyncIntervalMs: number;
   private readonly terminalRetryDelaysMs: number[];
   private readonly noticeTimeoutMs: number;
   private readonly realtime: boolean;
+  private readonly collapseNonUserTurns: boolean;
+  private readonly trackReadState: boolean;
   private activeKey = "";
   private disposed = false;
 
@@ -109,11 +117,14 @@ export class ChatSessionController {
     this.eventSourceFactory = options.eventSourceFactory ?? ((url) => new EventSource(url));
     this.onEvent = options.onEvent;
     this.onNotice = options.onNotice;
+    this.onStatus = options.onStatus;
     this.streamBatchWindowMs = Math.max(0, options.streamBatchWindowMs ?? STREAM_BATCH_WINDOW_MS);
     this.statusSyncIntervalMs = Math.max(1, options.statusSyncIntervalMs ?? STATUS_SYNC_INTERVAL_MS);
     this.terminalRetryDelaysMs = (options.terminalRetryDelaysMs ?? TERMINAL_RETRY_DELAYS_MS).map((value) => Math.max(0, value));
     this.noticeTimeoutMs = Math.max(0, options.noticeTimeoutMs ?? NOTICE_TIMEOUT_MS);
     this.realtime = options.realtime !== false;
+    this.collapseNonUserTurns = options.collapseNonUserTurns !== false;
+    this.trackReadState = options.trackReadState === true;
   }
 
   subscribe(listener: SnapshotListener): () => void {
@@ -164,6 +175,20 @@ export class ChatSessionController {
       this.connect(context);
     }
     if (contextChanged || generationChanged) this.emit();
+  }
+
+  async refresh(): Promise<void> {
+    const context = this.activeContext();
+    if (!context) return;
+    await this.refreshHead(context);
+    if (this.activeContext() !== context) return;
+    // Read-only event panes still refresh an expanded, unfinished Turn.
+    // Closed history stays cached; only live snapshots need a new detail read.
+    for (const [reference, detail] of [...context.details]) {
+      if (detail.turn.closed || !context.expandedTurns.has(reference)) continue;
+      context.details.delete(reference);
+      await this.loadTurn(reference);
+    }
   }
 
   async loadOlder(): Promise<boolean> {
@@ -305,6 +330,7 @@ export class ChatSessionController {
     const context = this.activeContext();
     if (!context) return emptySnapshot();
     return {
+      completedTurnNumber: context.completedTurnNumber,
       identity: context.key,
       workspaceId: context.workspaceId,
       resourceId: context.resourceId,
@@ -359,6 +385,7 @@ export class ChatSessionController {
       context.expandedTurns.clear();
       context.liveEvents.clear();
       context.orphanEvents.clear();
+      context.completedTurnNumber = page.completedTurnNumber;
       this.mergePage(context, page);
       context.loaded = true;
       this.connect(context);
@@ -431,10 +458,10 @@ export class ChatSessionController {
       for (const turn of [...(segment.turns || [])].sort((left, right) => left.startEventId - right.startEventId)) {
         const detail = context.details.get(turn.reference);
         const live = context.liveEvents.get(turn.reference);
-        // Closed non-user Turns stay as summary cards until the user expands
+        // When enabled, closed non-user Turns stay as cards until the user expands
         // them; loaded details and leftover live events stay attached to the
         // context but out of the projection. Open Turns always stream live.
-        const collapsed = turnIsCollapsedByPolicy(turn) && !context.expandedTurns.has(turn.reference);
+        const collapsed = turnIsCollapsedByPolicy(turn, this.collapseNonUserTurns) && !context.expandedTurns.has(turn.reference);
         generationBlocks.push({
           kind: "turn", key: `${segment.generation.generationId}:${turn.turnId}`, generation: segment.generation, turn,
           items: !collapsed && detail && !live ? compactTurnItems(detail, segment.generation.generationId) : undefined,
@@ -547,6 +574,7 @@ export class ChatSessionController {
     try {
       const status = await this.api.latest<ResourceMessageStatus>(`${resourceBase(context)}/status`, { scope: requestScope(context, "status") });
       if (!this.isCurrent(context, generation) || !status.generation?.generationId) return;
+      this.onStatus?.(context.workspaceId, context.resourceId, status);
       const nextGeneration = String(status.generation.generationId);
       if (nextGeneration !== context.generationId && (context.generationId || context.loaded)) {
         this.activate(context.workspaceId, context.resourceId, status);
@@ -554,8 +582,12 @@ export class ChatSessionController {
       }
       const previousGenerationId = context.generationId;
       const previousSessionId = String(context.status?.session?.id || "");
+      const completedStateChanged = context.status?.generation?.turnNumber !== status.generation?.turnNumber
+        || context.status?.generation?.status !== status.generation?.status
+        || context.status?.generation?.completionState !== status.generation?.completionState;
       context.status = status;
       context.generationId = nextGeneration;
+      if (completedStateChanged && context.loaded && this.trackReadState) void this.refreshHead(context);
       const nextSessionId = String(status.session?.id || "");
       const nextGenerationStatus = String(status.generation?.status || "");
       if (context.stream && (!isStreamable(status) || (previousSessionId && previousSessionId !== nextSessionId))) this.closeStream(context);
@@ -638,6 +670,7 @@ export class ChatSessionController {
           context.liveEvents.delete(detail.turn.reference);
           this.clearTerminalErrorIfHealed(context);
           this.emit();
+          if (this.trackReadState) void this.refreshHead(context);
           return;
         } catch (error) {
           if (error instanceof StaleResponseError || !this.isCurrent(context, generation)) return;
@@ -686,6 +719,7 @@ export class ChatSessionController {
     try {
       const page = await this.api.latest<ResourceHistoryPage>(historyPath(context), { scope: requestScope(context, "stream-head") });
       if (this.isCurrent(context, generation)) {
+        context.completedTurnNumber = page.completedTurnNumber;
         this.mergePage(context, page);
         this.retryPendingTerminals(context);
         this.emit();
@@ -868,9 +902,9 @@ export class ChatSessionController {
 // timeline renders as summary cards until the user expands them. Turns with
 // an empty trigger role predate role tracking and keep the legacy
 // auto-expanding behavior; open Turns always render live.
-export function turnIsCollapsedByPolicy(turn: Pick<ResourceHistoryTurnSummary, "closed" | "triggerRole">): boolean {
+export function turnIsCollapsedByPolicy(turn: Pick<ResourceHistoryTurnSummary, "closed" | "triggerRole">, collapseNonUserTurns = true): boolean {
   const role = String(turn.triggerRole || "").toLowerCase();
-  return turn.closed && role !== "" && role !== "user";
+  return collapseNonUserTurns && turn.closed && role !== "" && role !== "user";
 }
 
 function compactTurnItems(detail: ResourceHistoryTurnDetail, generationId: string): TimelineItem[] {
@@ -963,7 +997,7 @@ function statusGeneration(context: ResourceChatContext): ResourceHistoryGenerati
     status: generation.status,
     createdAt: "",
     updatedAt: "",
-    agentName: context.status?.resolvedAgent,
+    agentName: generation.agentName || context.status?.resolvedAgent,
     resolvedProfile: context.status?.resolvedProfile,
     replacementPending: generation.replacementPending,
   };

@@ -33,4 +33,4 @@ project, err := workspace.CreateProjectWithInput(app.CreateProjectInput{
 
 Workspace、Project 和 Task 的新建接口把 ID 分配、全部资源文件一起放在 mutation lock 的同一提交边界内。Project/Task 先写同文件系统 staging 目录，再原子 rename；Workspace 初始化使用 `.pua/initializing.json` 作为可恢复标记。旧 resource JSON 中的 creator/createdBy 字段只由一次性迁移清理，正常 API 不读取或写入这些字段。
 
-Scheduler 是固定 ID `scheduler` 的 Workspace 特殊资源，工作目录为 `scheduler/`。初始化和迁移只创建缺失文件、校验冲突并刷新 `AGENTS.md` 的 PUA managed block，不覆盖 `scheduler.md` 或已有调度项。`scheduler.json` 使用严格 schema 和格式化 JSON；所有修改与其他 Workspace 写入共享 mutation lock，并通过同目录临时文件、fsync、rename 和目录 fsync 原子提交。应用层只校验同 Workspace 的开放目标资源，不解释自然语言条件或 generation 执行状态。
+Scheduler 是固定 ID `scheduler` 的 Workspace 特殊资源，工作目录为 `scheduler/`。初始化和迁移只创建缺失文件、校验冲突并刷新 `AGENTS.md` 的 PUA managed block，不覆盖 `scheduler.md` 或已有调度项。`scheduler.json` 使用严格 schema 和格式化 JSON；所有修改与其他 Workspace 写入共享 mutation lock，并通过同目录临时文件、fsync、rename 和目录 fsync 原子提交。应用层只校验同 Workspace 的开放目标资源，不解释自然语言条件或 generation 执行状态。`conditionMaxChars` 默认 128，`descriptionMaxChars` 默认 32，均可配置为 1–65536；仅在新增或显式修改对应字段时按去除首尾空白后的 Unicode 码点校验。已有超长内容保留可读、可删除，降低上限不会截断既有内容。description 只作简短说明，备忘应写在目标 Task 的 task.md 或 Project 的 project.md。

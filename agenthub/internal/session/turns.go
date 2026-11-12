@@ -100,7 +100,7 @@ func (s *Store) projectTurnEventLocked(state *sessionState, id string, event Eve
 	if event.TurnID == "" || (event.Type != "turn.started" && event.Type != EventTurnCompleted && event.Type != EventTurnFailed && event.Type != EventTurnCancelled) {
 		return nil
 	}
-	turns := buildTurnSummaries(state.events)
+	turns := s.buildTurns(state.events)
 	for i := len(turns) - 1; i >= 0; i-- {
 		if turns[i].ID != event.TurnID {
 			continue
@@ -109,14 +109,23 @@ func (s *Store) projectTurnEventLocked(state *sessionState, id string, event Eve
 		if err != nil {
 			return err
 		}
-		return appendDurable(s.turnsPath(id), append(encoded, '\n'))
+		if err := appendDurable(s.turnsPath(id), append(encoded, '\n')); err != nil {
+			return err
+		}
+		s.metrics.turnProjectionWrites.Add(1)
+		return nil
 	}
 	return nil
 }
 
 func (s *Store) turnRecordsLocked(state *sessionState, id string) ([]TurnSummary, error) {
 	path := s.turnsPathFor(state, id)
-	_, statErr := os.Stat(path)
+	info, statErr := os.Stat(path)
+	if turns, ok := s.turnCache.get(id, state.revision, info); ok {
+		s.metrics.turnCacheHits.Add(1)
+		return turns, nil
+	}
+	s.metrics.turnProjectionReads.Add(1)
 	turns, err := readTurnRecordsRepairTail(path)
 	needsRebuild := err != nil || errors.Is(statErr, os.ErrNotExist) || (len(turns) == 0 && state.session.CurrentTurnID != "")
 	if !needsRebuild {
@@ -127,21 +136,30 @@ func (s *Store) turnRecordsLocked(state *sessionState, id string) ([]TurnSummary
 			}
 		}
 	}
-	if state.session.CurrentTurnID != "" {
-		// The opened record is intentionally minimal. Active content is folded
-		// from its stable Event range so callers see current messages and tools.
+	if state.session.CurrentTurnID != "" &&
+		(state.turnProjectionRevision != state.revision || !sameProjectionFile(state.turnProjectionFile, info)) {
+		// A durable content revision includes same-ID delta merges. A matching
+		// persisted stamp also avoids rebuilds when a large result is not cached.
 		needsRebuild = true
 	}
 	if !needsRebuild {
+		// Tail repair may have changed the file; stamp the repaired version.
+		info, _ = os.Stat(path)
+		s.turnCache.put(id, state.revision, info, turns)
 		return turns, nil
 	}
 	if err := s.ensureEventsLocked(state, id); err != nil {
 		return nil, err
 	}
-	turns = buildTurnSummaries(state.events)
-	if err := writeTurnRecordsAtomic(s.turnsPathFor(state, id), turns); err != nil {
+	turns = s.buildTurns(state.events)
+	if err := writeTurnRecordsAtomic(path, turns); err != nil {
 		return nil, fmt.Errorf("rebuild turn projection: %w", err)
 	}
+	s.metrics.turnRebuilds.Add(1)
+	s.metrics.turnProjectionWrites.Add(1)
+	state.turnProjectionRevision = state.revision
+	state.turnProjectionFile, _ = os.Stat(path)
+	s.turnCache.put(id, state.revision, state.turnProjectionFile, turns)
 	return turns, nil
 }
 
@@ -283,6 +301,10 @@ func buildTurnSummaries(events []Event) []TurnSummary {
 			}
 		case "message.reasoning.delta":
 			appendThinkingActivity(turn, event)
+		case "message.assistant.completed":
+			if n := len(turn.Items); n > 0 && turn.Items[n-1].Role == MessageRoleAssistant {
+				turn.Items[n-1].Complete = true
+			}
 		case "tool.event", "tool.call":
 			turn.ToolEventCount++
 			appendToolActivity(turn, event, toolIdentities)
@@ -488,7 +510,7 @@ func appendMessageItem(turn *TurnSummary, event Event, role MessageRole, text st
 func appendAssistantItem(turn *TurnSummary, event Event, text string) {
 	if len(turn.Items) > 0 {
 		last := &turn.Items[len(turn.Items)-1]
-		if last.Type == "message" && last.Role == MessageRoleAssistant {
+		if last.Type == "message" && last.Role == MessageRoleAssistant && !last.Complete {
 			last.Text += text
 			last.EndEventID = event.ID
 			last.EndedAt = event.Time
@@ -635,6 +657,7 @@ func (s *Store) DurableMessages(id string) ([]DurableMessage, error) {
 func buildDurableMessages(events []Event) []DurableMessage {
 	messages := make([]DurableMessage, 0)
 	byEventID := make(map[int64]int)
+	byTurnID := make(map[string][]int)
 	for _, event := range events {
 		switch event.Type {
 		case EventMessageInput:
@@ -643,6 +666,7 @@ func buildDurableMessages(events []Event) []DurableMessage {
 				continue
 			}
 			byEventID[event.ID] = len(messages)
+			byTurnID[event.TurnID] = append(byTurnID[event.TurnID], len(messages))
 			messages = append(messages, DurableMessage{EventID: event.ID, TurnID: event.TurnID, Input: input})
 		case EventMessageDelivery:
 			var delivery MessageDeliveryEventData
@@ -653,11 +677,41 @@ func buildDurableMessages(events []Event) []DurableMessage {
 			if !ok {
 				continue
 			}
+			if messages[index].Terminal && !(messages[index].State == MessageDeliveryClosed && delivery.State == MessageDeliveryAccepted) {
+				continue
+			}
 			if delivery.Attempt > messages[index].Attempt {
 				messages[index].Attempt = delivery.Attempt
 			}
 			if delivery.State == MessageDeliveryAccepted {
 				messages[index].Delivered = true
+				messages[index].Terminal = true
+			}
+			messages[index].State = delivery.State
+			messages[index].Error = delivery.Error
+			messages[index].StartupAttempts = delivery.StartupAttempts
+			messages[index].RetryAt = delivery.RetryAt
+			if delivery.State == MessageDeliveryFailed || delivery.State == MessageDeliveryCancelled {
+				messages[index].Terminal = true
+			}
+		case EventTurnCompleted, EventTurnFailed, EventTurnCancelled:
+			// A closed Turn must never be reopened by replaying an unconfirmed
+			// input, including old logs predating delivery terminal events.
+			var terminal TurnTerminalEventData
+			_ = json.Unmarshal(event.Data, &terminal)
+			for _, index := range byTurnID[event.TurnID] {
+				if !messages[index].Terminal {
+					messages[index].Terminal = true
+					messages[index].RetryAt = ""
+					messages[index].Error = terminal.Error
+					if event.Type == EventTurnCompleted {
+						messages[index].State = MessageDeliveryClosed
+					} else if event.Type == EventTurnFailed {
+						messages[index].State = MessageDeliveryFailed
+					} else {
+						messages[index].State = MessageDeliveryCancelled
+					}
+				}
 			}
 		}
 	}

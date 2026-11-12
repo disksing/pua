@@ -1,8 +1,8 @@
 package session
 
-// IsActivityEvent reports whether an event represents effective agent work
-// within a Turn. It is shared by the session projection and the API activity
-// stream so a watchdog and a UI monitor use the same semantic boundary.
+// IsActivityEvent reports Turn activity, including incoming messages, for the
+// session projection and the API activity stream. Watchdogs use IsProgressEvent
+// so receiving more work cannot hide an agent that is not making progress.
 func IsActivityEvent(event Event) bool {
 	if event.TurnID == "" {
 		return false
@@ -23,4 +23,10 @@ func IsActivityEvent(event Event) bool {
 	default:
 		return false
 	}
+}
+
+// IsProgressEvent records the initial Turn boundary and subsequent work, but
+// excludes input: accepting or queuing a message does not prove its consumption.
+func IsProgressEvent(event Event) bool {
+	return event.Type != EventMessageInput && IsActivityEvent(event)
 }

@@ -1,10 +1,12 @@
 <script lang="ts">
   import "./ResourceSettingsPanel.css";
 
+  import { untrack } from "svelte";
   import { ApiClient } from "../api/client";
   import type { ResourceAgentBindingModel } from "../models/detail";
   import AgentBindingSelector from "./AgentBindingSelector.svelte";
   import Icon from "./Icon.svelte";
+  import TelegramSettings from "./TelegramSettings.svelte";
   import type { DetailPanelModel } from "./models";
   import { sanitizeUserNameInput, validateUserName } from "../controllers/user-settings-controller";
 
@@ -14,9 +16,13 @@
 
   let pending = $state("");
   let interval = $state(30);
-  let generationPolicyEnabled = $state(true);
+  let conditionMaxChars = $state(128);
+  let descriptionMaxChars = $state(32);
+  let generationBudgetEnabled = $state(true);
   let generationMaxTurns = $state(20);
   let generationMaxMinutes = $state(120);
+  let generationInactivityEnabled = $state(true);
+  let generationMaxInactivityMinutes = $state(1440);
   let stallWatchdogEnabled = $state(true);
   let stallWatchdogMinutes = $state(30);
   let nameEditing = $state(false);
@@ -27,18 +33,39 @@
   let descInput = $state<HTMLInputElement | null>(null);
   let preferenceDrafts = $state<Record<string, string>>({});
   let newUserName = $state("");
+  const savedSettingsKey = $derived(JSON.stringify({
+    identity: model.identity,
+    interval: model.detail?.scheduler?.wakeIntervalMinutes ?? 30,
+    conditionMaxChars: model.detail?.scheduler?.conditionMaxChars ?? 128,
+    descriptionMaxChars: model.detail?.scheduler?.descriptionMaxChars ?? 32,
+    generationBudgetEnabled: model.generationPolicy.budgetEnabled,
+    generationMaxTurns: model.generationPolicy.maxTurns,
+    generationMaxMinutes: model.generationPolicy.maxAccumulatedTurnMinutes,
+    generationInactivityEnabled: model.generationPolicy.inactivityEnabled,
+    generationMaxInactivityMinutes: model.generationPolicy.maxInactivityMinutes,
+    stallWatchdogEnabled: model.stallWatchdogPolicy.enabled,
+    stallWatchdogMinutes: model.stallWatchdogPolicy.timeoutMinutes,
+  }));
+  let previousSettings: Record<string, string | number | boolean> | null = null;
   $effect(() => {
-    const wake = model.detail?.scheduler?.wakeIntervalMinutes;
-    if (typeof wake === "number") interval = wake;
-  });
-  $effect(() => {
-    generationPolicyEnabled = model.generationPolicy.enabled;
-    generationMaxTurns = model.generationPolicy.maxTurns;
-    generationMaxMinutes = model.generationPolicy.maxAccumulatedTurnMinutes;
-  });
-  $effect(() => {
-    stallWatchdogEnabled = model.stallWatchdogPolicy.enabled;
-    stallWatchdogMinutes = model.stallWatchdogPolicy.timeoutMinutes;
+    const saved: Record<string, string | number | boolean> = JSON.parse(savedSettingsKey);
+    untrack(() => {
+      // Refresh untouched fields, preserving edits even when another client saves.
+      // Moving to another resource always starts with that resource's settings.
+      const next = <T extends number | boolean>(key: string, draft: T): T =>
+        !previousSettings || previousSettings.identity !== saved.identity || draft === previousSettings[key] ? saved[key] as T : draft;
+      interval = next("interval", interval);
+      conditionMaxChars = next("conditionMaxChars", conditionMaxChars);
+      descriptionMaxChars = next("descriptionMaxChars", descriptionMaxChars);
+      generationBudgetEnabled = next("generationBudgetEnabled", generationBudgetEnabled);
+      generationMaxTurns = next("generationMaxTurns", generationMaxTurns);
+      generationMaxMinutes = next("generationMaxMinutes", generationMaxMinutes);
+      generationInactivityEnabled = next("generationInactivityEnabled", generationInactivityEnabled);
+      generationMaxInactivityMinutes = next("generationMaxInactivityMinutes", generationMaxInactivityMinutes);
+      stallWatchdogEnabled = next("stallWatchdogEnabled", stallWatchdogEnabled);
+      stallWatchdogMinutes = next("stallWatchdogMinutes", stallWatchdogMinutes);
+      previousSettings = saved;
+    });
   });
   $effect(() => {
     if (nameEditing && nameInput) nameInput.focus();
@@ -49,6 +76,9 @@
 
   const schedulerConfig = $derived(model.detail?.scheduler);
   const schedulerIntervalValid = $derived(Number.isInteger(interval) && interval >= 1 && interval <= 10080);
+  const schedulerConditionLimitValid = $derived(Number.isInteger(conditionMaxChars) && conditionMaxChars >= 1 && conditionMaxChars <= 65536);
+  const schedulerDescriptionLimitValid = $derived(Number.isInteger(descriptionMaxChars) && descriptionMaxChars >= 1 && descriptionMaxChars <= 65536);
+  const savedDescriptionLimit = $derived(schedulerConfig?.descriptionMaxChars ?? 32);
   const taskDefault = $derived<ResourceAgentBindingModel>(model.detail?.taskDefault?.name ? { kind: model.detail.taskDefault.kind, name: model.detail.taskDefault.name } : { kind: "profile", name: "" });
   const description = $derived(model.detail?.description || "");
 
@@ -103,10 +133,13 @@
   function saveGenerationPolicy(): void {
     if (!Number.isInteger(generationMaxTurns) || generationMaxTurns < 1 || generationMaxTurns > 100000) return;
     if (!Number.isInteger(generationMaxMinutes) || generationMaxMinutes < 1 || generationMaxMinutes > 525600) return;
+    if (!Number.isInteger(generationMaxInactivityMinutes) || generationMaxInactivityMinutes < 1 || generationMaxInactivityMinutes > 525600) return;
     void run("generationPolicy", () => model.onSaveGenerationPolicy({
-      enabled: generationPolicyEnabled,
+      budgetEnabled: generationBudgetEnabled,
       maxTurns: generationMaxTurns,
       maxAccumulatedTurnMinutes: generationMaxMinutes,
+      inactivityEnabled: generationInactivityEnabled,
+      maxInactivityMinutes: generationMaxInactivityMinutes,
     }));
   }
 
@@ -190,38 +223,86 @@
     }
   }
 
+  function schedulerSettingsBody(overrides: { wakeIntervalMinutes?: number; conditionMaxChars?: number; descriptionMaxChars?: number } = {}) {
+    const config = schedulerConfig;
+    if (!config) return null;
+    return {
+      agentBinding: config.agentBinding,
+      wakeIntervalMinutes: overrides.wakeIntervalMinutes ?? config.wakeIntervalMinutes,
+      conditionMaxChars: overrides.conditionMaxChars ?? config.conditionMaxChars,
+      descriptionMaxChars: overrides.descriptionMaxChars ?? config.descriptionMaxChars ?? 32,
+    };
+  }
+
   function saveSchedulerInterval(): void {
     const config = schedulerConfig;
     if (!config || !schedulerIntervalValid) return;
     void run("interval", async () => {
       await client.request(`/api/workspaces/${encodeURIComponent(model.workspaceId)}/scheduler/settings`, {
         method: "PUT",
-        body: JSON.stringify({ agentBinding: config.agentBinding, wakeIntervalMinutes: interval }),
+        body: JSON.stringify(schedulerSettingsBody({ wakeIntervalMinutes: interval })),
       });
       await model.onRefreshScheduler?.();
       model.onToast("Scheduler interval saved.");
+    });
+  }
+
+  function saveSchedulerConditionLimit(): void {
+    const config = schedulerConfig;
+    if (!config || !schedulerConditionLimitValid) return;
+    void run("conditionLimit", async () => {
+      await client.request(`/api/workspaces/${encodeURIComponent(model.workspaceId)}/scheduler/settings`, {
+        method: "PUT",
+        body: JSON.stringify(schedulerSettingsBody({ conditionMaxChars })),
+      });
+      await model.onRefreshScheduler?.();
+      model.onToast("Scheduler condition limit saved.");
+    });
+  }
+
+  function saveSchedulerDescriptionLimit(): void {
+    const config = schedulerConfig;
+    if (!config || !schedulerDescriptionLimitValid) return;
+    void run("descriptionLimit", async () => {
+      await client.request(`/api/workspaces/${encodeURIComponent(model.workspaceId)}/scheduler/settings`, {
+        method: "PUT",
+        body: JSON.stringify(schedulerSettingsBody({ descriptionMaxChars })),
+      });
+      await model.onRefreshScheduler?.();
+      model.onToast("Scheduler description limit saved.");
     });
   }
 </script>
 
 <div class="resource-settings" data-component-owner="resource-settings-panel">
   {#if model.resourceType === "workspace"}
+    <TelegramSettings workspaceId={model.workspaceId} workspaceName={model.workspaceName} currentUserName={model.currentUserName} />
     <section class="resource-settings-section">
       <div class="resource-settings-section-head">
         <strong>Generation lifecycle</strong>
-        <span>Start a fresh Generation after either completed-Turn budget is reached. Active Turns and approvals are never interrupted.</span>
+        <span>Start a fresh Generation before the next Turn when a usage budget or inactivity limit is reached. Active Turns and approvals are never interrupted.</span>
       </div>
       <div class="resource-settings-list">
         <label class="resource-settings-row resource-settings-policy-toggle">
-          <span class="resource-settings-row-label"><strong>Automatic rotation</strong><span>Stop, archive, and retire the current Generation at its next safe terminal boundary.</span></span>
-          <input type="checkbox" bind:checked={generationPolicyEnabled} disabled={Boolean(pending)} aria-label="Enable automatic Generation rotation" />
+          <span class="resource-settings-row-label"><strong>Usage-based rotation</strong><span>Rotate before a new Turn after either completed-Turn budget is reached.</span></span>
+          <input type="checkbox" bind:checked={generationBudgetEnabled} disabled={Boolean(pending)} aria-label="Enable usage-based Generation rotation" />
         </label>
         <div class="resource-settings-row resource-settings-policy-budgets">
           <div class="resource-settings-row-label"><strong>Budgets</strong><span>Rotate after either limit: completed Turns or accumulated active Turn time. Idle time is excluded.</span></div>
           <div class="resource-settings-policy-controls">
             <label><input type="number" min="1" max="100000" step="1" bind:value={generationMaxTurns} disabled={Boolean(pending)} aria-label="Maximum Turns per Generation" /><span>Turns</span></label>
             <label><input type="number" min="1" max="525600" step="1" bind:value={generationMaxMinutes} disabled={Boolean(pending)} aria-label="Maximum accumulated Turn minutes per Generation" /><span>minutes</span></label>
-            <button type="button" class="secondary-button" disabled={Boolean(pending) || !Number.isInteger(generationMaxTurns) || generationMaxTurns < 1 || !Number.isInteger(generationMaxMinutes) || generationMaxMinutes < 1 || (generationPolicyEnabled === model.generationPolicy.enabled && generationMaxTurns === model.generationPolicy.maxTurns && generationMaxMinutes === model.generationPolicy.maxAccumulatedTurnMinutes)} onclick={saveGenerationPolicy}><Icon name="save" /><span>Save</span></button>
+          </div>
+        </div>
+        <label class="resource-settings-row resource-settings-policy-toggle">
+          <span class="resource-settings-row-label"><strong>Inactivity-based rotation</strong><span>Rotate before resuming or starting a new Turn after the Session has been inactive for the configured time.</span></span>
+          <input type="checkbox" bind:checked={generationInactivityEnabled} disabled={Boolean(pending)} aria-label="Enable inactivity-based Generation rotation" />
+        </label>
+        <div class="resource-settings-row resource-settings-policy-budgets">
+          <div class="resource-settings-row-label"><strong>Inactivity limit</strong><span>Measured from AgentHub's latest semantic Turn activity. Background lifecycle and Provider noise do not refresh it.</span></div>
+          <div class="resource-settings-policy-controls resource-settings-generation-controls">
+            <label><input type="number" min="1" max="525600" step="1" bind:value={generationMaxInactivityMinutes} disabled={Boolean(pending)} aria-label="Maximum inactivity minutes per Generation" /><span>minutes</span></label>
+            <button type="button" class="secondary-button" disabled={Boolean(pending) || !Number.isInteger(generationMaxTurns) || generationMaxTurns < 1 || !Number.isInteger(generationMaxMinutes) || generationMaxMinutes < 1 || !Number.isInteger(generationMaxInactivityMinutes) || generationMaxInactivityMinutes < 1 || (generationBudgetEnabled === model.generationPolicy.budgetEnabled && generationMaxTurns === model.generationPolicy.maxTurns && generationMaxMinutes === model.generationPolicy.maxAccumulatedTurnMinutes && generationInactivityEnabled === model.generationPolicy.inactivityEnabled && generationMaxInactivityMinutes === model.generationPolicy.maxInactivityMinutes)} onclick={saveGenerationPolicy}><Icon name="save" /><span>Save</span></button>
           </div>
         </div>
       </div>
@@ -272,7 +353,7 @@
       </div>
       <div class="resource-settings-list">
         <div class="resource-settings-row resource-settings-user-controls">
-          <label class="resource-settings-row-label" for="workspaceCurrentUser"><strong>Current user</strong><span>Controls personal read state, preferences, and inbox in this browser.</span></label>
+          <label class="resource-settings-row-label" for="workspaceCurrentUser"><strong>Current user</strong><span>Controls personal read state, preferences, and chats in this browser.</span></label>
           <select id="workspaceCurrentUser" value={model.currentUserName} disabled={Boolean(pending)} onchange={(event) => switchUser((event.currentTarget as HTMLSelectElement).value)}>
             {#each model.workspaceUsers as user (user.name)}<option value={user.name}>{user.name}</option>{/each}
           </select>
@@ -322,9 +403,25 @@
           <div class="resource-settings-row">
             <div class="resource-settings-row-label"><strong>Wake interval</strong><span>Minutes after the previous Server-triggered Scheduler Turn completes. Empty schedule lists do not wake.</span></div>
             <div class="resource-settings-interval">
-              <label><input type="number" min="1" max="10080" step="1" bind:value={interval} aria-label="Scheduler wake interval in minutes" aria-invalid={schedulerIntervalValid ? undefined : "true"} aria-describedby={schedulerIntervalValid ? undefined : "schedulerIntervalError"} /><span>minutes</span></label>
+              <label><input type="number" min="1" max="10080" step="1" bind:value={interval} disabled={Boolean(pending)} aria-label="Scheduler wake interval in minutes" aria-invalid={schedulerIntervalValid ? undefined : "true"} aria-describedby={schedulerIntervalValid ? undefined : "schedulerIntervalError"} /><span>minutes</span></label>
               <button type="button" class="secondary-button" disabled={Boolean(pending) || !schedulerIntervalValid || interval === schedulerConfig.wakeIntervalMinutes} onclick={saveSchedulerInterval}><Icon name="save" /><span>Save</span></button>
               {#if !schedulerIntervalValid}<span id="schedulerIntervalError" class="resource-settings-field-error" role="alert">Enter a whole number between 1 and 10080 minutes.</span>{/if}
+            </div>
+          </div>
+          <div class="resource-settings-row">
+            <div class="resource-settings-row-label"><strong>Condition character limit</strong><span>Maximum characters when adding or changing a condition. Existing conditions are preserved.</span></div>
+            <div class="resource-settings-interval resource-settings-condition-limit">
+              <label><input type="number" min="1" max="65536" step="1" bind:value={conditionMaxChars} disabled={Boolean(pending)} aria-label="Scheduler condition character limit" aria-invalid={schedulerConditionLimitValid ? undefined : "true"} aria-describedby={schedulerConditionLimitValid ? undefined : "schedulerConditionLimitError"} /><span>characters</span></label>
+              <button type="button" class="secondary-button" disabled={Boolean(pending) || !schedulerConditionLimitValid || conditionMaxChars === schedulerConfig.conditionMaxChars} onclick={saveSchedulerConditionLimit}><Icon name="save" /><span>Save</span></button>
+              {#if !schedulerConditionLimitValid}<span id="schedulerConditionLimitError" class="resource-settings-field-error" role="alert">Enter a whole number between 1 and 65536 characters.</span>{/if}
+            </div>
+          </div>
+          <div class="resource-settings-row">
+            <div class="resource-settings-row-label"><strong>Description character limit</strong><span>Maximum characters when adding or changing a description. Existing descriptions are preserved.</span></div>
+            <div class="resource-settings-interval resource-settings-description-limit">
+              <label><input type="number" min="1" max="65536" step="1" bind:value={descriptionMaxChars} disabled={Boolean(pending)} aria-label="Scheduler description character limit" aria-invalid={schedulerDescriptionLimitValid ? undefined : "true"} aria-describedby={schedulerDescriptionLimitValid ? undefined : "schedulerDescriptionLimitError"} /><span>characters</span></label>
+              <button type="button" class="secondary-button" disabled={Boolean(pending) || !schedulerDescriptionLimitValid || descriptionMaxChars === savedDescriptionLimit} onclick={saveSchedulerDescriptionLimit}><Icon name="save" /><span>Save</span></button>
+              {#if !schedulerDescriptionLimitValid}<span id="schedulerDescriptionLimitError" class="resource-settings-field-error" role="alert">Enter a whole number between 1 and 65536 characters.</span>{/if}
             </div>
           </div>
         </div>

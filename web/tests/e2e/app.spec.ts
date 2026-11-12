@@ -72,6 +72,7 @@ type MockActivityResource = {
   userState?: { readTurnNumber?: number };
   latestTurnNumber?: number;
   unreadCount?: number;
+  chat?: { open: boolean; unreadCount: number };
   runtime?: { activeTurn?: boolean; [key: string]: unknown };
 };
 
@@ -172,6 +173,20 @@ async function json(route: Route, body: unknown, status = 200) {
   await route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 }
 
+function mockSystemInfo(workspaces: Array<{ name: string; path: string }>) {
+  return {
+    pua: {
+      address: "127.0.0.1", port: "4936", configPath: "/tmp/pua/serve.json", workspaces,
+      buildBranch: "master", buildCommit: "pua-commit",
+    },
+    agentHub: {
+      mode: "embedded", address: "127.0.0.1", port: "4936", endpoint: "http://127.0.0.1:4936/agenthub",
+      connected: true, compatible: true, version: "hub-commit", error: "",
+      paths: { config: "/tmp/agenthub/config.json", sessions: "/tmp/agenthub/sessions", archive: "/tmp/agenthub/sessions/Archive", logs: "/tmp/agenthub/logs" },
+    },
+  };
+}
+
 async function installMockApi(page: Page, lastResourceId = "project1.task1", withWaitingMessage = false, initialTurnRunning = false, startWithoutRuntime = false, extraAgents: string[] = [], initialIdleStatus: "idle" | "idle-suspended" = "idle", settingsRefreshDelayMs = 0, conversationFixture: ConversationFixture = "default"): Promise<Harness> {
   const harness: Harness = { inputBodies: [], taskBodies: [], previewBodies: [], settingsBodies: [], uploadNames: [], streamRequests: [], treeRequests: 0, agentsBodies: [], uiStateBodies: [], steeredMessageIds: [], schedulerBodies: [], bindingBodies: [], resourceStateBodies: [], markdownBodies: [], finishTurn: () => undefined };
   let waitingMessages = withWaitingMessage ? [{ messageId: "msg-waiting", resourceId: "project1.task1", text: "Review the mailbox change now", status: "waiting", acceptedAt: now, requestedMode: "enqueue", actualMode: "enqueue" }] : [];
@@ -194,6 +209,8 @@ async function installMockApi(page: Page, lastResourceId = "project1.task1", wit
     schemaVersion: 1,
     agentBinding: { kind: "profile" as const, name: "fast" },
     wakeIntervalMinutes: 30,
+    conditionMaxChars: 128,
+    descriptionMaxChars: 32,
     schedules: [] as Array<{
       id: string;
       description: string;
@@ -217,6 +234,9 @@ async function installMockApi(page: Page, lastResourceId = "project1.task1", wit
         agentProfiles: [{ key: "default", agentName: "test-agent" }, { key: "fast", agentName: "test-agent" }, { key: "review", agentName: "other-agent" }],
       });
     }
+    if (path === "/api/settings/system" && method === "GET") {
+      return json(route, mockSystemInfo([{ name: "Isolated E2E", path: "/tmp/pua-e2e" }]));
+    }
     if (path === "/api/doctor") {
       if (method === "POST") return route.fulfill({ status: 202 });
       return json(route, { checkedAt: now, checking: false, complete: true, summary: { errors: 0, warnings: 0 }, workspaces: [] });
@@ -234,7 +254,7 @@ async function installMockApi(page: Page, lastResourceId = "project1.task1", wit
         connected: true,
         compatible: true,
         catalog: {
-          providers: [{ id: "test", name: "Test Provider", enabled: true }],
+          providers: [{ id: "test", name: "Test Provider" }],
           agents: ["test-agent", "other-agent", ...extraAgents].map((name) => ({ name, providerId: "test", available: true })),
           probes: [],
         },
@@ -297,7 +317,7 @@ async function installMockApi(page: Page, lastResourceId = "project1.task1", wit
       const activityCandidates: MockActivityResource[] = [projectSnapshot, ...projectSnapshot.children].map((item) => ({ ...item, children: undefined }));
       const activity = {
         running: activityCandidates.filter((item) => item.runtime?.activeTurn),
-        unread: activityCandidates.filter((item) => Number(item.unreadCount || 0) > 0),
+        unread: activityCandidates.filter((item) => item.chat),
         problems: activityCandidates.filter((item) => item.type === "task" && (item.state === "blocked" || item.state === "error")),
       };
       return json(route, {
@@ -346,6 +366,8 @@ async function installMockApi(page: Page, lastResourceId = "project1.task1", wit
         ...schedulerConfig,
         agentBinding: body.agentBinding as typeof schedulerConfig.agentBinding,
         wakeIntervalMinutes: Number(body.wakeIntervalMinutes),
+        conditionMaxChars: Number(body.conditionMaxChars ?? schedulerConfig.conditionMaxChars),
+        descriptionMaxChars: Number(body.descriptionMaxChars ?? schedulerConfig.descriptionMaxChars),
       };
       return json(route, schedulerConfig);
     }
@@ -471,6 +493,9 @@ async function installMockApi(page: Page, lastResourceId = "project1.task1", wit
         });
       }
       const resourceId = decodeURIComponent(resourceMatch[1]);
+      // Chat and runtime subpaths are not resource documents. Returning 404
+      // avoids failing the route handler while the details UI still loads.
+      if (resourceId.includes("/")) return json(route, { error: "not found" }, 404);
       const value = createdProject?.id === resourceId
         ? resourceDetail(createdProject)
         : createdTask?.id === resourceId
@@ -583,6 +608,9 @@ async function installShellMockApi(page: Page): Promise<ShellHarness> {
     }
     if (path === "/api/settings/agenthub") {
       return json(route, { config: { agentProfiles: [] }, connected: false, compatible: false, catalog: { providers: [], agents: [], probes: [] } });
+    }
+    if (path === "/api/settings/system" && method === "GET") {
+      return json(route, mockSystemInfo([{ name: "Workspace A", path: "/tmp/ws-a" }, { name: "Workspace B", path: "/tmp/ws-b" }]));
     }
     if (/^\/api\/workspaces\/ws-[ab]\/users$/.test(path)) {
       if (method === "POST") return json(route, { version: 1, name: "User", preference: "" });
@@ -721,6 +749,7 @@ test("opens the cached Doctor report from the brand reminder", async ({ page }) 
   await page.goto("/w/ws-test/r/project1.task1");
   await expect(page.locator("#doctorButton")).toHaveAttribute("aria-label", "12 errors and 0 warnings");
   await page.locator("#mobileMenuButton").click();
+  await page.locator("#mobileSidebar").evaluate((node) => Promise.all(node.getAnimations().map((animation) => animation.finished.catch(() => undefined))));
 
   const brandBand = page.locator("#mobileSidebar .brand-band");
   const brandBandBox = (await brandBand.boundingBox())!;
@@ -1065,7 +1094,7 @@ test("always shows all Activity tab counts and supports resizing the panel", asy
   await page.goto("/w/ws-test/r/project1");
 
   await expect(page.getByRole("tab", { name: "Running 0", exact: true })).toBeVisible();
-  await expect(page.getByRole("tab", { name: "Unread 0", exact: true })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Chat 0", exact: true })).toBeVisible();
   await expect(page.getByRole("tab", { name: "Issues 0", exact: true })).toBeVisible();
   await expect(page.getByRole("tab", { name: "Inbox 0", exact: true })).toBeVisible();
 
@@ -1150,36 +1179,139 @@ test("keeps a newly created task Activity row aligned when its first turn starts
   expect(Math.abs(layout.titleTop - layout.statusTop)).toBeLessThan(2);
 });
 
-test("does not count a running Turn as unread, then clears it after completion when clicked again", async ({ page }) => {
-  const harness = await installMockApi(page, "project1.task1");
-  await page.goto("/w/ws-test/r/project1.task1");
+for (const viewport of [{ width: 1500, height: 800 }, { width: 440, height: 844 }]) {
+  test(`pages public chat history and keeps controls visible at ${viewport.width}px`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await installMockApi(page);
+    const messages = Array.from({ length: 120 }, (_, index) => ({
+      id: `m${index}`, role: "agent", text: `Paginated message ${index}: chat history`, createdAt: now,
+    }));
+    const requests: URL[] = [];
+    let open = true;
+    await page.route("**/api/workspaces/ws-test/resources/project1.task1/chat**", async route => {
+      const req = route.request(), url = new URL(req.url());
+      if (!["/chat", "/chat/open", "/chat/close", "/chat/read"].some(suffix => url.pathname.endsWith(suffix))) return route.fallback();
+      requests.push(url);
+      if (url.pathname.endsWith("/chat/close")) open = false;
+      if (url.pathname.endsWith("/chat/open")) open = true;
+      const limit = Number(url.searchParams.get("limit") || messages.length);
+      const before = url.searchParams.get("before"), after = url.searchParams.get("after");
+      let start = 0, end = messages.length;
+      if (before) end = messages.findIndex(message => message.id === before);
+      if (after) start = messages.findIndex(message => message.id === after) + 1;
+      if (after) end = Math.min(end, start + limit);
+      else start = Math.max(start, end - limit);
+      return json(route, { id: "paged-chat", open, epoch: 1, unreadCount: 0, messages: messages.slice(start, end), hasOlder: start > 0, hasNewer: end < messages.length });
+    });
+    await page.goto("/w/ws-test/r/project1.task1");
+    const scroller = page.locator("#chatTimeline");
+    const heading = scroller.locator(".chat-heading");
+    const articles = scroller.locator(".public-messages article");
+    await expect(articles).toHaveCount(40);
+    await expect(articles.first()).toContainText("Paginated message 80:");
+    expect(requests[0].searchParams.get("limit")).toBe("40");
+    await expect.poll(() => scroller.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
+    await expect(scroller.getByLabel("Execution controls")).toBeVisible();
+    const bottomHeadingY = (await heading.boundingBox())!.y;
+    const beforeY = await scroller.evaluate(element => {
+      element.scrollTop = 0;
+      return [...element.querySelectorAll("article")].find(article => article.textContent?.includes("Paginated message 80:"))!.getBoundingClientRect().top;
+    });
+    await expect(articles).toHaveCount(80);
+    const afterY = await articles.filter({ hasText: "Paginated message 80:" }).evaluate(element => element.getBoundingClientRect().top);
+    expect(Math.abs(afterY - beforeY)).toBeLessThan(2);
+    expect(Math.abs((await heading.boundingBox())!.y - bottomHeadingY)).toBeLessThan(2);
+    expect(requests.some(url => url.searchParams.get("before") === "m80")).toBe(true);
+    await scroller.getByRole("button", { name: "Close chat" }).click();
+    await expect(scroller.getByRole("button", { name: "Reopen chat" })).toBeVisible();
+    await expect(articles).toHaveCount(80);
+  });
+}
 
-  const taskRow = page.locator("#projectTree .task-item", { hasText: "Infrastructure task" });
-  await expect(taskRow.locator(".unread-badge")).toHaveCount(0);
-
-  await page.locator("#chatInput").fill("Start a new turn while this task stays selected");
-  await page.locator("#chatInput").press("Enter");
-  await expect.poll(() => harness.inputBodies.length).toBe(1);
-  await expect(page.getByRole("tab", { name: "Running 1", exact: true })).toBeVisible();
-  await expect(page.getByRole("tab", { name: "Unread 0", exact: true })).toBeVisible();
-  await expect(taskRow.locator(".unread-badge")).toHaveCount(0);
-  expect(harness.resourceStateBodies.filter((entry) => entry.path.endsWith("/read"))).toHaveLength(0);
-
-  harness.finishTurn();
-  await expect(taskRow.locator(".unread-badge")).toHaveText("1", { timeout: 8_000 });
-  await expect(page.getByRole("tab", { name: "Running 0", exact: true })).toBeVisible();
-  await expect(page.getByRole("tab", { name: "Unread 1", exact: true })).toBeVisible();
-
-  await taskRow.click();
-  await expect(taskRow.locator(".unread-badge")).toHaveCount(0);
-  await expect(page.getByRole("tab", { name: "Unread 0", exact: true })).toBeVisible();
-  expect(harness.resourceStateBodies.filter((entry) => entry.path.endsWith("/read"))).toEqual([
-    {
-      method: "PUT",
-      path: "/api/workspaces/ws-test/resources/project1.task1/read",
-      body: { throughTurnNumber: 1 },
-    },
-  ]);
+test("keeps public chat unread and both event cursors independent in the resource tree", async ({ page }, testInfo) => {
+  test.setTimeout(60_000);
+  await installMockApi(page, "project1.task2");
+  const writes: Array<{ user: string; resource: string; op: string; through?: number }> = [];
+  const states = new Map<string, { open: boolean; unread: number; execution: number; dialogue: number; readExecution: number; readDialogue: number }>();
+  const state = (user: string, resource: string) => {
+    const key = `${user}:${resource}`;
+    if (!states.has(key)) states.set(key, { open: user === "User" && resource === "project1.task1", unread: user === "User" && resource === "project1.task1" ? 2 : 0, execution: 3, dialogue: 4, readExecution: 0, readDialogue: 0 });
+    return states.get(key)!;
+  };
+  await page.route("**/api/workspaces/ws-test/**", async route => {
+    const req = route.request(), path = new URL(req.url()).pathname, user = req.headers()["x-pua-user"] || "User";
+    if (path.endsWith("/users")) return json(route, { users: [{ name: "User", version: 1 }, { name: "Other", version: 1 }] });
+    if (path.endsWith("/tree")) {
+      const item = (resource: MockResource) => {
+        const s = state(user,resource.id);
+        return { ...resource, latestTurnNumber:s.execution, unreadCount:s.execution-s.readExecution, userState:{readTurnNumber:s.readExecution},
+          ...(s.open || s.unread ? {chat:{open:s.open,unreadCount:s.unread}} : {}),
+          dialogueEvents:{latestTurnNumber:s.dialogue,readTurnNumber:s.readDialogue,unreadCount:s.dialogue-s.readDialogue} };
+      };
+      return json(route, { projects:[{...item(project),children:project.children.map(item)}], workspace:{id:"workspace",type:"workspace",title:"Isolated E2E"}, activity:{running:[],unread:[],problems:[]} });
+    }
+    const match = path.match(/\/resources\/([^/]+)(\/chat\/runtime)?\/(.*)$/);
+    if (!match) return route.fallback();
+    const resource=match[1], dialogue=Boolean(match[2]), op=match[3], s=state(user,resource);
+    const chat = () => ({id:`${user}-${resource}`,resourceId:resource,open:s.open,epoch:resource==="project1.task1"&&user==="User"?1:0,unreadCount:s.unread,binding:{kind:"profile",name:"default"},messages:resource==="project1.task1"&&user==="User"?[{id:"public-1",role:"agent",text:"Public history preserved",createdAt:now}]:[]});
+    if (op==="chat") return json(route,chat());
+    if (op==="chat/read") {writes.push({user,resource,op});s.unread=0;return json(route,chat());}
+    if (op==="chat/open"||op==="chat/close") {s.open=op.endsWith("open");return json(route,chat());}
+    const count=dialogue?s.dialogue:s.execution;
+    const channel=dialogue?"dialogue":"execution";
+    const generation={generation:1,generationId:`gen-${channel}-${resource}`,status:"idle",turnNumber:count,createdAt:now};
+    const turn={reference:`ref-${channel}-${count}`,turnId:`turn-${count}`,closed:true,status:"completed",triggerRole:"system",startEventId:1,lastEventId:2,generation};
+    if(op==="status")return json(route,{resourceId:resource,generation,sessionState:"idle",session:{state:"idle"},waitingMessages:[]});
+    if(op==="history/turns")return json(route,{resourceId:resource,completedTurnNumber:count,segments:[{generation,turns:[turn]}],page:{hasMore:false}});
+    if(op.startsWith("history/turns/"))return json(route,{turn,latestEventId:2,items:[{type:"message",role:"assistant",text:`${channel} completed ${count}`,startEventId:1,endEventId:2}]});
+    if(op==="read") {const through=req.postDataJSON().throughTurnNumber;writes.push({user,resource,op:dialogue?"dialogue-read":"execution-read",through});if(dialogue)s.readDialogue=through;else s.readExecution=through;return json(route,{readTurnNumber:through});}
+    if(op==="stream")return route.fulfill({status:200,contentType:"text/event-stream",body:"retry: 1000\n\n"});
+    if(op==="events")return json(route,{schema:"agenthub.semantic-events.v1",frames:[],page:{hasMore:false}});
+    return route.fallback();
+  });
+  await page.goto("/w/ws-test/r/project1.task2");
+  await page.getByRole("button",{name:"U User No preference set",exact:true}).click();
+  const row=page.locator('#projectTree [data-task-id="project1.task1"]');
+  await expect(row.locator('.unread-badge')).toHaveText('2');
+  await expect(row.locator('.chat-open-icon')).toBeVisible();
+  await expect(page.locator('.chat-list,[aria-label="Chats"]')).toHaveCount(0);
+  const position=await row.evaluate(el=>{
+    const title=el.querySelector('.name-text')!,icon=el.querySelector('.chat-open-icon')!,badge=el.querySelector('.unread-badge')!;
+    return {trailing:title.parentElement?.nextElementSibling?.classList.contains('resource-chat-status'),gap:badge.getBoundingClientRect().left-icon.getBoundingClientRect().right};
+  });
+  expect(position.trailing).toBe(true);expect(position.gap).toBeLessThan(6);
+  state('User','project1.task1').unread=3;
+  await expect(row.locator('.unread-badge')).toHaveText('3',{timeout:10_000});
+  await page.screenshot({path:testInfo.outputPath('unread-tree.png')});
+  await row.click();
+  const details=page.locator('#detailsPanel');
+  const execution=details.getByRole('tab',{name:/^Execution events/}),dialogue=details.getByRole('tab',{name:/^Dialog events/});
+  await expect(row.locator('.unread-badge')).toHaveCount(0);
+  await expect(execution).toContainText('3');await expect(dialogue).toHaveCount(0);
+  expect(writes.filter(w=>w.op.endsWith('-read'))).toHaveLength(0);
+  await execution.click();await expect(details).toContainText('execution completed 3');
+  await expect(execution.locator('.event-unread-count')).toHaveCount(0);
+  await expect(dialogue).toHaveCount(0);
+  await details.getByRole('tab',{name:'Task',exact:true}).click();
+  state('User','project1.task1').dialogue=5;state('User','project1.task1').execution=4;
+  await expect(execution).toContainText('1',{timeout:10_000});
+  expect(state('User','project1.task1').readExecution).toBe(3);
+  expect(state('User','project1.task1').readDialogue).toBe(0);
+  await page.getByRole('button',{name:'Close chat',exact:true}).click();
+  await expect(row.locator('.chat-open-icon')).toHaveCount(0);
+  await expect(page.locator('#chatTimeline')).toContainText('Public history preserved');
+  await page.getByRole('button',{name:'Reopen chat',exact:true}).click();
+  await expect(row.locator('.chat-open-icon')).toBeVisible();
+  await page.screenshot({path:testInfo.outputPath('unread-channels.png')});
+  await details.getByRole('tab',{name:'Task',exact:true}).click();
+  await page.locator('#workspaceOpen').click();
+  await details.getByRole('tab',{name:'Settings',exact:true}).click();
+  await page.locator('#workspaceCurrentUser').selectOption('Other');
+  await expect(row.locator('.chat-open-icon')).toHaveCount(0);
+  await row.click();
+  await expect(execution).toContainText('3');await expect(dialogue).toHaveCount(0);
+  await expect(page.locator('#chatTimeline')).not.toContainText('Public history preserved');
+  expect(writes.filter(w=>w.user==='Other'&&w.op.endsWith('-read'))).toHaveLength(0);
 });
 
 test("manages natural-language schedules from the fixed Scheduler resource", async ({ page }) => {
@@ -1189,14 +1321,15 @@ test("manages natural-language schedules from the fixed Scheduler resource", asy
   await page.locator('[data-component-owner="scheduler-nav"] button').click();
   await expect(page).toHaveURL(/\/w\/ws-test\/r\/scheduler$/);
   await expect(page.getByRole("heading", { name: /Scheduler/ }).first()).toBeVisible();
-  await expect(page.locator(".details-tabs [role=\"tab\"]")).toHaveText(["Schedules", "Context", "Settings"]);
+  await expect(page.locator(".details-tabs [role=\"tab\"]")).toHaveText(["Schedules", "Context", "Execution events", "Settings"]);
   await expect(page.getByRole("tab", { name: "Schedules" })).toHaveAttribute("aria-selected", "true");
   await expect(page.getByText("No schedules. The Server will not create empty Scheduler Turns.")).toBeVisible();
 
-  await page.getByLabel("Description").fill("Notify when the release is ready");
-  await page.getByLabel("Condition").fill("When the release branch is green after 09:00 Shanghai time");
+  await page.locator(".schedule-list-heading").getByRole("button", { name: "Add schedule" }).click();
+  await page.getByLabel("Description", { exact: true }).fill("Notify when the release is ready");
+  await page.getByLabel("Condition", { exact: true }).fill("When the release branch is green after 09:00 Shanghai time");
   const target = page.getByLabel("Target resource ID");
-  const addSchedule = page.getByRole("button", { name: "Add schedule", exact: true });
+  const addSchedule = page.getByRole("dialog").getByRole("button", { name: "Add schedule", exact: true });
   await target.fill("not-a-resource");
   await expect(target).toHaveAttribute("aria-invalid", "true");
   await expect(target).toHaveAttribute("aria-describedby", "schedule-target-error");
@@ -1205,24 +1338,33 @@ test("manages natural-language schedules from the fixed Scheduler resource", asy
   await target.fill("project1.task1");
   await expect(target).toHaveAttribute("aria-invalid", "false");
   await addSchedule.click();
-  await expect(page.locator(".schedule-list article")).toContainText("Notify when the release is ready");
-  await expect(page.locator(".schedule-list article")).toContainText("project1.task1");
+  await expect(page.locator(".schedule-table tbody tr")).toContainText("Notify when the release is ready");
+  await expect(page.locator(".schedule-table tbody tr")).toContainText("project1.task1");
+  await expect(page.locator(".schedule-target-cell strong")).toHaveText("Infrastructure task");
+  await expect(page.getByRole("dialog")).not.toBeVisible();
 
   await page.getByRole("tab", { name: "Settings" }).click();
   const interval = page.getByLabel("Scheduler wake interval in minutes");
   await interval.fill("45");
-  await page.locator(".resource-settings-interval").getByRole("button", { name: "Save" }).click();
+  await page.locator(".resource-settings-interval:not(.resource-settings-condition-limit):not(.resource-settings-description-limit)").getByRole("button", { name: "Save" }).click();
   await expect(interval).toHaveValue("45");
   await page.getByRole("tab", { name: "Schedules" }).click();
 
-  await page.locator(".schedule-list article").getByRole("button", { name: "Edit" }).click();
-  await page.getByLabel("Description").fill("Notify after release verification");
+  const editButton = page.locator(".schedule-table tbody tr").getByRole("button", { name: "Edit" });
+  await editButton.click();
+  await expect(page.getByRole("dialog", { name: "Edit schedule" })).toBeVisible();
+  await expect(page.getByLabel("Description", { exact: true })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog")).not.toBeVisible();
+  await expect(editButton).toBeFocused();
+  await page.locator(".schedule-table tbody tr").getByRole("button", { name: "Edit" }).click();
+  await page.getByLabel("Description", { exact: true }).fill("Notify after verification");
   await page.getByRole("button", { name: "Update schedule" }).click();
-  await expect(page.locator(".schedule-list article")).toContainText("Notify after release verification");
+  await expect(page.locator(".schedule-table tbody tr")).toContainText("Notify after verification");
 
-  await page.locator(".schedule-list article").getByRole("button", { name: "Remove" }).click();
+  await page.locator(".schedule-table tbody tr").getByRole("button", { name: "Remove" }).click();
   await page.getByRole("alertdialog", { name: "Remove schedule" }).getByRole("button", { name: "Remove" }).click();
-  await expect(page.locator(".schedule-list article")).toHaveCount(0);
+  await expect(page.locator(".schedule-table tbody tr")).toHaveCount(0);
   expect(harness.schedulerBodies.map(({ method }) => method)).toEqual(["POST", "PUT", "PUT", "DELETE"]);
   expect(harness.schedulerBodies[0].body).toEqual({
     description: "Notify when the release is ready",
@@ -1239,7 +1381,7 @@ test("keeps Scheduler schedules content inside a 440px viewport", async ({ page 
 
   const measureSchedulerOverflow = async () => page.locator("#detailsContent").evaluate((root) => [
     { name: "details-content", element: root },
-    ...Array.from(root.querySelectorAll<HTMLElement>(".schedule-editor, .schedule-list, .schedule-list > *"))
+    ...Array.from(root.querySelectorAll<HTMLElement>(".schedule-editor, .schedule-list"))
       .map((element) => ({ name: element.className || element.tagName.toLowerCase(), element })),
   ].map(({ name, element }) => ({ name, clientWidth: element.clientWidth, scrollWidth: element.scrollWidth })));
   const expectNoSchedulerOverflow = async () => {
@@ -1259,11 +1401,27 @@ test("keeps Scheduler schedules content inside a 440px viewport", async ({ page 
   await expect(page.getByText("No schedules. The Server will not create empty Scheduler Turns.")).toBeVisible();
   await expectNoSchedulerOverflow();
 
-  await page.getByLabel("Description").fill("Notify when the release is ready");
-  await page.getByLabel("Condition").fill("When the release branch is green after 09:00 Shanghai time and the deployment checklist is complete");
-  await page.getByRole("button", { name: "Add schedule", exact: true }).click();
-  await expect(page.locator(".schedule-list article")).toContainText("Notify when the release is ready");
+  await page.locator(".schedule-list-heading").getByRole("button", { name: "Add schedule" }).click();
   await expectNoSchedulerOverflow();
+  await page.getByLabel("Description", { exact: true }).fill("Notify when the release is ready");
+  await page.getByLabel("Condition", { exact: true }).fill("When the release branch is green after 09:00 Shanghai time and the deployment checklist is complete");
+  await page.getByRole("dialog").getByRole("button", { name: "Add schedule", exact: true }).click();
+  await expect(page.locator(".schedule-table tbody tr")).toContainText("Notify when the release is ready");
+  await expectNoSchedulerOverflow();
+  const table = page.locator(".schedule-table-scroll");
+  const tableSize = await table.evaluate((element) => ({ client: element.clientWidth, scroll: element.scrollWidth }));
+  expect(tableSize.scroll).toBeGreaterThan(tableSize.client);
+  for (const name of ["Edit", "Remove"]) {
+    const button = table.getByRole("button", { name, exact: true });
+    const box = await button.boundingBox();
+    expect(box!.height).toBeGreaterThanOrEqual(44);
+    const textLines = await button.locator("span").evaluate((element) => {
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      return range.getClientRects().length;
+    });
+    expect(textLines).toBe(1);
+  }
 });
 
 test("keeps Scheduler schedule controls at a 44px touch size on a 440px viewport", async ({ page }) => {
@@ -1271,11 +1429,12 @@ test("keeps Scheduler schedule controls at a 44px touch size on a 440px viewport
   await page.setViewportSize({ width: 440, height: 844 });
   await page.goto("/w/ws-test/r/scheduler");
 
+  await page.locator(".schedule-list-heading").getByRole("button", { name: "Add schedule" }).click();
   const editor = page.locator(".schedule-editor");
   const description = page.getByRole("textbox", { name: "Description", exact: true });
   const condition = page.getByRole("textbox", { name: "Condition", exact: true });
   const target = page.getByRole("textbox", { name: "Target resource ID", exact: true });
-  const addSchedule = page.getByRole("button", { name: "Add schedule", exact: true });
+  const addSchedule = page.getByRole("dialog").getByRole("button", { name: "Add schedule", exact: true });
 
   await expect(description).toHaveAttribute("placeholder", "What should the Scheduler understand?");
   await expect(condition).toHaveAttribute("placeholder", "For example: when the release branch is green after 09:00 Shanghai time");
@@ -1544,18 +1703,28 @@ test("multiline send restores single-line Enter and explicitly resumes timeline 
   await expect.poll(() => timeline.evaluate((log) => log.scrollHeight - log.scrollTop - log.clientHeight)).toBeGreaterThan(32);
 
   const input = page.locator("#chatInput");
+  await input.fill("delete the newline");
+  await input.press("Shift+Enter");
+  await expect(input).toHaveValue("delete the newline\n");
+  await input.press("Backspace");
+  await expect(input).toHaveValue("delete the newline");
+  await input.press("Enter");
+  await expect.poll(() => harness.inputBodies.length).toBe(1);
+  expect(harness.inputBodies[0]).toMatchObject({ text: "delete the newline" });
+  await expect(input).toHaveValue("");
+
   await input.fill("first line\nsecond line");
   await input.press("Control+Enter");
-  await expect.poll(() => harness.inputBodies.length).toBe(1);
-  expect(harness.inputBodies[0]).toMatchObject({ text: "first line\nsecond line" });
+  await expect.poll(() => harness.inputBodies.length).toBe(2);
+  expect(harness.inputBodies[1]).toMatchObject({ text: "first line\nsecond line" });
   await expect(input).toHaveValue("");
   await expect.poll(() => timeline.evaluate((log) => log.scrollHeight - log.scrollTop - log.clientHeight)).toBeLessThanOrEqual(1);
   await expect.poll(() => page.evaluate(() => window.getSelection()?.toString() || "")).toBe("");
 
   await input.fill("next single-line message");
   await input.press("Enter");
-  await expect.poll(() => harness.inputBodies.length).toBe(2);
-  expect(harness.inputBodies[1]).toMatchObject({ text: "next single-line message" });
+  await expect.poll(() => harness.inputBodies.length).toBe(3);
+  expect(harness.inputBodies[2]).toMatchObject({ text: "next single-line message" });
 });
 
 test("shows waiting messages above the composer and inserts one through steer", async ({ page }) => {
@@ -1634,6 +1803,20 @@ test("switches wizard templates and ignores an older preview response", async ({
 
 test("creates and starts a task with a chosen agent from the wizard", async ({ page }) => {
   const harness = await installMockApi(page, "project1");
+  const chatMutations: string[] = [];
+  await page.route("**/api/workspaces/ws-test/resources/project1.task3/**", async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (path.includes("/chat")) {
+      if (request.method() === "POST") chatMutations.push(path);
+      return json(route, { id: "task3-chat", open: false, messages: [], unreadCount: 0 });
+    }
+    if (path.endsWith("/messages") && request.method() === "POST") {
+      if (request.postDataJSON().role === "user") return json(route, { code: "chat_required", error: "user messages must use resource chat" }, 410);
+      expect(harness.bindingBodies).toEqual([{ kind: "agent", name: "other-agent" }]);
+    }
+    return route.fallback();
+  });
   await page.goto("/w/ws-test/r/project1");
   await page.getByRole("button", { name: "New Task" }).click();
 
@@ -1657,7 +1840,10 @@ test("creates and starts a task with a chosen agent from the wizard", async ({ p
   await expect.poll(() => harness.taskBodies.length).toBe(1);
   // The binding is switched before the start prompt is sent.
   await expect.poll(() => harness.bindingBodies).toEqual([{ kind: "agent", name: "other-agent" }]);
-  await expect.poll(() => harness.inputBodies.some((body) => body.resourceId === "project1.task3" && typeof body.text === "string" && body.text.length > 0)).toBe(true);
+  await expect.poll(() => harness.inputBodies.length).toBe(1);
+  expect(harness.inputBodies[0]).toEqual({ resourceId: "project1.task3", text: expect.any(String), role: "system", sender: { name: "PUA Task Start" } });
+  expect(String(harness.inputBodies[0].text).trim()).not.toBe("");
+  expect(chatMutations).toEqual([]);
   await expect(page.locator("#toast")).toContainText("Task created and started");
   await expect(page).toHaveURL(/project1\.task3/);
 });
@@ -1725,20 +1911,20 @@ test("keeps the Create task wizard usable across desktop and mobile layouts", as
   expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(844);
 });
 
-test("shows the normalized User name in the input after saving", async ({ page }) => {
+test("normalizes a Workspace user name in the input before saving", async ({ page }) => {
   await installMockApi(page);
-  await page.goto("/w/ws-test/r/project1.task1");
+  await page.goto("/w/ws-test");
 
-  await page.getByRole("button", { name: "Settings" }).click();
-  const settings = page.getByRole("dialog", { name: "System Settings" });
-  await settings.getByRole("button", { name: "User" }).click();
-  const name = settings.getByLabel("Name");
+  const details = page.locator("#detailsPanel");
+  await details.getByRole("tab", { name: "Settings", exact: true }).click();
+  const name = details.locator("#workspaceNewUser");
 
   await name.fill("bad name");
   await expect(name).toHaveValue("badname");
-  await settings.getByRole("button", { name: "Save" }).click();
-  await expect(page.locator("#toast")).toContainText("User name saved as badname.");
-  await expect(name).toHaveValue("badname");
+  await details.getByRole("button", { name: "Add", exact: true }).click();
+  await expect(page.locator("#toast")).toContainText("User badname added.");
+  await expect(name).toHaveValue("");
+  await expect(details.locator("#workspaceCurrentUser")).toContainText("badname");
 });
 
 test("preserves composer draft through upload and Settings", async ({ page }) => {
@@ -1761,36 +1947,6 @@ test("preserves composer draft through upload and Settings", async ({ page }) =>
 
   await page.getByRole("button", { name: "Settings" }).click();
   const settings = page.getByRole("dialog", { name: "System Settings" });
-  await settings.getByRole("button", { name: "User" }).click();
-  const name = settings.getByLabel("Name");
-  await page.evaluate(() => {
-    const state = window as Window & { __settingsPublicationTimer?: number };
-    state.__settingsPublicationTimer = window.setInterval(() => window.dispatchEvent(new StorageEvent("storage", {
-      key: "pua.web.user.v1",
-      newValue: JSON.stringify({ version: 1, name: "Remote_User" }),
-    })), 10);
-  });
-  try {
-    await name.fill("Locator-Probe");
-    await page.waitForTimeout(100);
-    await expect(name).toHaveValue("Locator-Probe");
-  } finally {
-    await page.evaluate(() => {
-      const state = window as Window & { __settingsPublicationTimer?: number };
-      if (state.__settingsPublicationTimer) window.clearInterval(state.__settingsPublicationTimer);
-      delete state.__settingsPublicationTimer;
-    });
-  }
-  await name.fill("");
-  await name.pressSequentially("Sequential_Probe");
-  await expect(name).toHaveValue("Sequential_Probe");
-  await name.fill("");
-  await name.focus();
-  await page.keyboard.type("Native-Probe");
-  await expect(name).toHaveValue("Native-Probe");
-  await name.fill("Migration-User");
-  await expect(name).toHaveValue("Migration-User");
-  await settings.getByRole("button", { name: "Save" }).click();
   await settings.getByRole("button", { name: "Agents" }).click();
   await expect(settings.getByLabel("Endpoint")).toHaveCount(0);
   await expect(settings).not.toContainText("API unknown · AgentHub unknown");
@@ -1810,7 +1966,7 @@ test("manages users in the Workspace resource settings instead of System Setting
   await page.getByRole("tab", { name: "Settings", exact: true }).click();
   const details = page.locator("#detailsPanel");
   await expect(details.locator(".resource-settings-section-head strong", { hasText: "Users" })).toBeVisible();
-  await expect(details.getByText("User", { exact: true })).toBeVisible();
+  await expect(details.locator(".resource-settings-user-row > .resource-settings-user-head > strong", { hasText: "User" })).toBeVisible();
   await expect(details.getByTitle("Switch to another user before deleting this user")).toBeDisabled();
 
   await details.getByLabel("Preference for User").fill("Prefer concise replies");
@@ -2027,7 +2183,7 @@ test("keeps the Scheduler navigation drawer entry at a 44px touch size", async (
   await expect(scheduler).toBeEnabled();
   await expect(scheduler).toHaveAttribute("title", "Workspace Scheduler");
   await expect(scheduler).toHaveAttribute("type", "button");
-  await expect(scheduler).toHaveAccessibleName("Scheduler Natural-language schedules");
+  await expect(scheduler).toHaveAccessibleName("Scheduler Time and condition triggers");
 
   // The drawer slides in, so wait for its transform to settle before comparing
   // the entry's geometry with the drawer bounds.
@@ -2419,7 +2575,7 @@ test("keeps the Workspace Generation lifecycle Save target at 44px in a 440px vi
   await expect(settingsTab).toBeVisible();
   await settingsTab.click();
 
-  const save = panel.locator(".resource-settings-policy-controls").getByRole("button", { name: "Save", exact: true });
+  const save = panel.locator(".resource-settings-generation-controls").getByRole("button", { name: "Save", exact: true });
   await expect(save).toBeDisabled();
   const saveBox = (await save.boundingBox())!;
   expect(saveBox.height).toBeGreaterThanOrEqual(44);
@@ -2475,7 +2631,7 @@ test("keeps Scheduler Settings controls at a 44px touch size in a 440px viewport
   const contentBox = (await content.boundingBox())!;
   const binding = panel.getByRole("button", { name: "Scheduler Agent binding", exact: true });
   const interval = panel.getByRole("spinbutton", { name: "Scheduler wake interval in minutes" });
-  const save = panel.locator(".resource-settings-interval").getByRole("button", { name: "Save", exact: true });
+  const save = panel.locator(".resource-settings-interval:not(.resource-settings-condition-limit):not(.resource-settings-description-limit)").getByRole("button", { name: "Save", exact: true });
 
   await expect(binding).toHaveAttribute("type", "button");
   await expect(binding).toHaveAttribute("aria-haspopup", "listbox");
@@ -2485,7 +2641,16 @@ test("keeps Scheduler Settings controls at a 44px touch size in a 440px viewport
   await expect(save).toHaveAttribute("type", "button");
   await expect(save).toBeDisabled();
 
-  for (const control of [binding, interval, save]) {
+  const conditionLimit = panel.getByRole("spinbutton", { name: "Scheduler condition character limit" });
+  const limitSave = panel.locator(".resource-settings-condition-limit").getByRole("button", { name: "Save", exact: true });
+  await expect(conditionLimit).toHaveValue("128");
+  await expect(limitSave).toBeDisabled();
+  const descriptionLimit = panel.getByRole("spinbutton", { name: "Scheduler description character limit" });
+  const descriptionSave = panel.locator(".resource-settings-description-limit").getByRole("button", { name: "Save", exact: true });
+  await expect(descriptionLimit).toHaveValue("32");
+  await expect(descriptionSave).toBeDisabled();
+
+  for (const control of [binding, interval, save, conditionLimit, limitSave, descriptionLimit, descriptionSave]) {
     const box = await control.boundingBox();
     expect(box).not.toBeNull();
     expect(box!.height).toBeGreaterThanOrEqual(44);
@@ -2514,6 +2679,40 @@ test("keeps Scheduler Settings controls at a 44px touch size in a 440px viewport
   await expect(interval).toHaveValue("45");
   await expect(save).toBeDisabled();
 
+  await expect(conditionLimit).toBeEnabled();
+  await conditionLimit.fill("0");
+  await expect(conditionLimit).toHaveAttribute("aria-invalid", "true");
+  await expect(limitSave).toBeDisabled();
+  await conditionLimit.fill("2");
+  await expect(limitSave).toBeEnabled();
+  await limitSave.click();
+  await expect.poll(() => harness.schedulerBodies.length).toBe(2);
+  expect(harness.schedulerBodies[1].body).toMatchObject({ wakeIntervalMinutes: 45, conditionMaxChars: 2, descriptionMaxChars: 32 });
+  await expect(limitSave).toBeDisabled();
+  await expect(conditionLimit).toBeEnabled();
+  await descriptionLimit.fill("0");
+  await expect(descriptionLimit).toHaveAttribute("aria-invalid", "true");
+  await expect(descriptionSave).toBeDisabled();
+  await descriptionLimit.fill("2");
+  await expect(descriptionSave).toBeEnabled();
+  await descriptionSave.click();
+  await expect.poll(() => harness.schedulerBodies.length).toBe(3);
+  expect(harness.schedulerBodies[2].body).toMatchObject({ wakeIntervalMinutes: 45, conditionMaxChars: 2, descriptionMaxChars: 2 });
+  await expect(descriptionSave).toBeDisabled();
+  await expect(descriptionLimit).toBeEnabled();
+  await panel.getByRole("tab", { name: "Schedules", exact: true }).click();
+  await page.locator(".schedule-list-heading").getByRole("button", { name: "Add schedule" }).click();
+  const addSchedule = page.getByRole("dialog").getByRole("button", { name: "Add schedule", exact: true });
+  await page.getByLabel("Description", { exact: true }).fill("Check");
+  await page.getByLabel("Condition", { exact: true }).fill("\u4e2d😀\u4e2d");
+  await expect(addSchedule).toBeDisabled();
+  await page.getByLabel("Condition", { exact: true }).fill("\u4e2d😀");
+  await expect(addSchedule).toBeDisabled();
+  await page.getByLabel("Description", { exact: true }).fill(" \u4e2d😀 ");
+  await expect(page.getByRole("dialog").getByText("Description (2/2)")).toBeVisible();
+  await expect(addSchedule).toBeEnabled();
+  await page.getByRole("dialog").getByRole("button", { name: "Cancel", exact: true }).click();
+  await panel.getByRole("tab", { name: "Settings", exact: true }).click();
   const detailsSize = await content.evaluate((node) => ({ clientWidth: node.clientWidth, scrollWidth: node.scrollWidth }));
   expect(detailsSize.scrollWidth).toBeLessThanOrEqual(detailsSize.clientWidth);
   const documentSize = await page.evaluate(() => ({
@@ -2527,6 +2726,45 @@ test("keeps Scheduler Settings controls at a 44px touch size in a 440px viewport
   expect(documentSize.scrollWidth).toBeLessThanOrEqual(documentSize.clientWidth);
 });
 
+test("opens read-only System information by default", async ({ page }) => {
+  await installMockApi(page, "project1");
+  await page.goto("/w/ws-test/r/project1");
+
+  await page.locator("#systemSettingsButton").click();
+  const settings = page.getByRole("dialog", { name: "System Settings" });
+  await expect(settings.getByRole("button", { name: "System" })).toHaveAttribute("aria-current", "page");
+  const panel = settings.locator('[data-component-owner="system-info-panel"]');
+  await expect(panel.getByRole("heading", { name: "System Information" })).toBeVisible();
+  await expect(panel).toContainText("/tmp/pua/serve.json");
+  await expect(panel).toContainText("/tmp/pua-e2e");
+  await expect(panel).toContainText("/tmp/agenthub/sessions");
+  await expect(panel.locator("input, select, textarea, [type=submit]")).toHaveCount(0);
+
+  const cards = panel.locator(".system-info-card");
+  await expect(cards).toHaveCount(2);
+  const puaBox = (await cards.nth(0).boundingBox())!;
+  const agentHubBox = (await cards.nth(1).boundingBox())!;
+  expect(agentHubBox.y).toBeGreaterThanOrEqual(puaBox.y + puaBox.height);
+});
+
+test("shows an unavailable AgentHub without hiding PUA system information", async ({ page }) => {
+  await installMockApi(page, "project1");
+  await page.route("**/api/settings/system", (route) => json(route, {
+    ...mockSystemInfo([{ name: "Isolated E2E", path: "/tmp/pua-e2e" }]),
+    agentHub: {
+      mode: "external", address: "127.0.0.1", port: "4646", endpoint: "http://127.0.0.1:4646/agenthub",
+      connected: false, compatible: false, version: "", paths: { config: "", sessions: "", archive: "", logs: "" }, error: "connection refused",
+    },
+  }));
+  await page.goto("/w/ws-test/r/project1");
+
+  await page.locator("#systemSettingsButton").click();
+  const panel = page.locator('[data-component-owner="system-info-panel"]');
+  await expect(panel).toContainText("Unavailable");
+  await expect(panel).toContainText("connection refused");
+  await expect(panel).toContainText("/tmp/pua/serve.json");
+});
+
 test("keeps every System Settings tab reachable without horizontal scrolling in a 390px mobile viewport", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await installMockApi(page, "project1");
@@ -2537,7 +2775,7 @@ test("keeps every System Settings tab reachable without horizontal scrolling in 
   const settings = page.getByRole("dialog", { name: "System Settings" });
   const tabs = settings.locator(".settings-tabs");
   await expect(tabs).toBeVisible();
-  await expect(tabs.locator(".settings-tab")).toHaveText(["Workspace", "User", "Appearance", "Agents", "Profiles", "Notifications"]);
+  await expect(tabs.locator(".settings-tab")).toHaveText(["System", "Workspace", "Appearance", "Agents", "Profiles", "Notifications"]);
 
   // The tab strip itself must not overflow the modal horizontally.
   const tabStrip = await tabs.evaluate((node) => ({ client: node.clientWidth, scroll: node.scrollWidth }));
@@ -2567,11 +2805,12 @@ test("keeps the System Settings close control in the dialog header at a 220px vi
   const settings = page.getByRole("dialog", { name: "System Settings" });
   const close = settings.locator(".settings-close");
   await expect(close).toBeVisible();
-  const heading = settings.locator("h2", { hasText: "Workspaces" });
+  const heading = settings.locator("h2", { hasText: "System Information" });
   await expect(heading).toBeVisible();
 
   // The close control keeps its own header row above the content heading
   // instead of sharing the heading's line (the 220px regression).
+  await expect.poll(async () => Math.round((await close.boundingBox())?.width || 0)).toBe(44);
   const closeBox = (await close.boundingBox())!;
   const headingBox = (await heading.boundingBox())!;
   expect(closeBox.width).toBe(44);
@@ -2582,6 +2821,8 @@ test("keeps the System Settings close control in the dialog header at a 220px vi
   const modalBox = (await settings.boundingBox())!;
   expect(closeBox.x).toBeGreaterThanOrEqual(modalBox.x);
   expect(closeBox.x + closeBox.width).toBeLessThanOrEqual(modalBox.x + modalBox.width + 1);
+  const contentOverflow = await settings.locator(".settings-content").evaluate((node) => node.scrollWidth - node.clientWidth);
+  expect(contentOverflow).toBeLessThanOrEqual(0);
 
   // Scrolling the panel content does not move the close control.
   await settings.locator(".settings-body").evaluate((node) => node.scrollTo(0, 400));
@@ -2626,7 +2867,7 @@ test("keeps Profiles settings cards inside the 390px mobile viewport without hor
         connected: true,
         compatible: true,
         catalog: {
-          providers: [{ id: "test", name: "Test Provider", enabled: true }],
+          providers: [{ id: "test", name: "Test Provider" }],
           agents: ["test-agent", "other-agent"].map((name) => ({ name, providerId: "test", available: true })),
           probes: [],
         },
@@ -2673,8 +2914,8 @@ test("keeps Profiles settings cards inside the 390px mobile viewport without hor
   await assertNoHorizontalOverflow();
 });
 
-test("keeps Workspace settings card actions inside a 220px mobile viewport without left clipping", async ({ page }) => {
-  await page.setViewportSize({ width: 220, height: 844 });
+test("keeps Workspace settings card actions inside a 440px mobile viewport without clipping", async ({ page }) => {
+  await page.setViewportSize({ width: 440, height: 844 });
   await installMockApi(page, "project1");
   // Later-registered routes win: list several workspaces like the production
   // environment that surfaced the clipped "PUA default" action buttons.
@@ -2700,6 +2941,7 @@ test("keeps Workspace settings card actions inside a 220px mobile viewport witho
   await page.getByRole("button", { name: "Open navigation" }).click();
   await page.locator("#systemSettingsButton").click();
   const settings = page.getByRole("dialog", { name: "System Settings" });
+  await settings.getByRole("button", { name: "Workspace", exact: true }).click();
   const entries = settings.locator(".settings-workspace-entry");
   await expect(entries).toHaveCount(3);
 
@@ -2720,3 +2962,403 @@ test("keeps Workspace settings card actions inside a 220px mobile viewport witho
     }
   }
 });
+
+test("execution events stay live and read-only without a dialogue runtime", async ({ page }, testInfo) => {
+  const harness = await installMockApi(page);
+  let revision = 10;
+  let open = true;
+  let running = true;
+  let dialogueBinding = { kind: "profile", name: "default" };
+  const writes: string[] = [];
+  const streams: string[] = [];
+  await page.addInitScript(() => {
+    const NativeEventSource = window.EventSource;
+    const records: Array<{ url: string; closed: boolean }> = [];
+    (window as unknown as { eventStreams: typeof records }).eventStreams = records;
+    window.EventSource = class extends NativeEventSource {
+      record: { url: string; closed: boolean };
+      constructor(url: string | URL, init?: EventSourceInit) {
+        super(url, init);
+        this.record = { url: String(url), closed: false }; records.push(this.record);
+      }
+      close() { this.record.closed = true; super.close(); }
+    };
+  });
+  await page.route("**/api/workspaces/ws-test/**", async route => {
+    const req = route.request(), url = new URL(req.url()), path = url.pathname;
+    if (req.method() !== "GET") writes.push(path);
+    if (path.endsWith("/chats")) return json(route, { chats: [] });
+    const match = path.match(/\/resources\/([^/]+)(\/chat\/runtime)?\/(.*)$/);
+    if (!match) return route.fallback();
+    const resourceId = decodeURIComponent(match[1]), dialogue = Boolean(match[2]), op = match[3];
+    const channel = dialogue ? "dialogue" : "execution";
+    const generationId = `gen-${channel}-${resourceId}`, sessionId = `session-${channel}-${resourceId}`;
+    const generation = { generation: 1, generationId, status: running ? "running" : "idle", agentName: "test-agent", createdAt: now };
+    const turn = { reference: `ref-${channel}`, turnId: "turn-1", closed: false, status: "active", startEventId: 1, lastEventId: 3, startedAt: now, generation };
+    const chat = () => ({id:"chat-test",resourceId,open,epoch:1,binding:dialogueBinding,intervalSeconds:0,messages:[{id:"public-1",role:"agent",text:"Public conversation remains separate",createdAt:now}]});
+    if (op === "chat") return json(route, chat());
+    if (op === "chat/read") return json(route, chat());
+    if (op === "chat/close" || op === "chat/open") { open = op.endsWith("open"); return json(route,chat()); }
+    if (op === "chat/binding") { dialogueBinding=req.postDataJSON().binding;return json(route,chat()); }
+    if (op === "status") return json(route,{resourceId,generation,sessionState:running?"working":"idle",session:{id:sessionId,state:running?"running":"idle",currentTurnId:running?"turn-1":""},waitingMessages:[],acceptsMessages:true});
+    if (op === "history/turns") return json(route,{resourceId,segments:[{generation,turns:[turn]}],page:{hasMore:false}});
+    if (op.startsWith("history/turns/ref-")) return json(route,{turn,latestEventId:3,items:[
+      {type:"message",role:"user",text:`${channel} trigger for ${resourceId}`,startEventId:1,endEventId:1},
+      {type:"message",role:"assistant",text:Array.from({length:20},(_,i)=>`${channel} history paragraph ${i+1}`).join("\n\n"),startEventId:2,endEventId:2},
+      {type:"tool",callId:"tool-1",name:"Command",summary:`echo ${channel}`,status:"completed",startEventId:3,endEventId:3},
+    ]});
+    if (op === "events") {
+      const events = [
+        {id:1,type:"message.user",data:{role:"user",text:`${channel} trigger for ${resourceId}`}},
+        {id:2,type:"message.assistant.delta",data:{role:"assistant",text:Array.from({length:20},(_,i)=>`${channel} history paragraph ${i+1}`).join("\n\n")}},
+        {id:3,type:"tool.call",data:{schemaVersion:1,callId:"tool-1",operation:"finish",toolKind:"command",name:"Command",summary:`echo ${channel}`,status:"completed",output:{text:"tool output verified",mode:"replace"}}},
+      ];
+      const frames=events.filter(e=>e.id>Number(url.searchParams.get("after")||0)).map(e=>({schema:"agenthub.semantic-events.v1",cursor:e.id,mode:"replace",source:{eventId:e.id,type:e.type,sessionId,turnId:"turn-1",time:now},events:[{id:`sem_${e.id}_0`,sourceEventId:e.id,index:0,type:e.type,sessionId,turnId:"turn-1",time:now,data:e.data}]}));
+      return json(route,{schema:"agenthub.semantic-events.v1",frames,latestCursor:3,page:{hasMore:false,nextAfter:3}});
+    }
+    if (op === "stream") {
+      streams.push(req.url());
+      const type="message.assistant.delta";
+      const frame={schema:"agenthub.semantic-events.v1",cursor:revision,mode:"replace",source:{eventId:revision,type,sessionId,turnId:"turn-1",time:now},events:[{id:`sem_${revision}_0`,sourceEventId:revision,index:0,type,sessionId,turnId:"turn-1",time:now,data:{role:"assistant",text:`${channel} live revision ${revision}`}}]};
+      return route.fulfill({status:200,contentType:"text/event-stream",body:`retry: 200\nid: ${revision}\ndata: ${JSON.stringify(frame)}\n\n`});
+    }
+    return route.fallback();
+  });
+  await page.goto("/w/ws-test/r/project1.task1");
+  const details=page.locator("#detailsPanel");
+  await details.getByRole("tab",{name:"Execution events",exact:true}).click();
+  await expect(details).toContainText("execution live revision 10");
+  await expect(details.locator('[data-component-owner="event-timeline"]').first()).toBeVisible();
+  await expect(details.locator("textarea,input")).toHaveCount(0);
+  await expect(details.getByRole("button",{name:"Execution model",exact:true})).toBeVisible();
+  await expect(details.locator(".agent-message-row")).toContainText(["execution trigger", "execution history paragraph", "execution live revision"]);
+  const geometry=await details.locator(".channel-timeline").evaluate(el=>({client:el.clientHeight,scroll:el.scrollHeight,overflow:getComputedStyle(el).overflowY}));
+  expect(geometry.client).toBeGreaterThan(100);expect(geometry.scroll).toBeGreaterThan(geometry.client);expect(geometry.overflow).toBe("auto");
+  revision=11;
+  await expect(details).toContainText("execution live revision 11");
+  await details.locator(".agent-activity-group > summary").click();
+  await details.locator(".agent-tool-item > summary").click();
+  await expect(details.getByText("tool output verified",{exact:true})).toBeVisible();
+  await page.screenshot({path:testInfo.outputPath("execution-events.png")});
+  await expect(details.getByRole("tab",{name:"Dialog events",exact:true})).toHaveCount(0);
+  expect(streams.some(s=>s.includes("/chat/runtime/"))).toBe(false);
+  await expect(page.getByLabel("Dialogue controls")).toHaveCount(0);
+  await expect(page.getByLabel("Execution controls")).toBeVisible();
+  running=false;
+  await expect(details.locator(".turn-working-indicator")).toHaveCount(0);
+  expect(writes.filter(p=>/\/(timer|messages|approval)$/.test(p))).toEqual([]);
+  expect(harness.inputBodies).toHaveLength(0);
+  await page.getByRole("button",{name:"Close chat",exact:true}).click();
+  await expect(page.getByText("Public conversation remains separate",{exact:true})).toBeVisible();
+  await expect(details).toContainText("execution history paragraph");
+  await page.getByRole("button",{name:"Reopen chat",exact:true}).click();
+  await expect(page.getByText("Public conversation remains separate",{exact:true})).toBeVisible();
+});
+
+for (const sidebarWidth of [280, 220]) {
+  test(`aligns resource chat markers at the right edge in a ${sidebarWidth}px sidebar`, async ({ page }, testInfo) => {
+    await installMockApi(page, "project1.task2");
+    await page.addInitScript(width => localStorage.setItem("pua.web.paneSizes", JSON.stringify({sidebarWidth:width,chatWidth:420,sidebarAttentionHeight:210})), sidebarWidth);
+    await page.route("**/api/workspaces/ws-test/**", async route => {
+      const path = new URL(route.request().url()).pathname;
+      if (path.endsWith("/ui-state")) return json(route, {version:2,expandedProjects:["project1"],lastResourceId:"project1.task2",folders:[{id:"vf-layout",projectId:"project1",name:"Nested tasks",expanded:true}],taskOrder:{project1:["project1.task1","project1.task2","vf-layout"]},folderOrder:{"vf-layout":["project1.task3"]}});
+      if (path.endsWith("/tree")) return json(route, {
+        projects:[{...project,title:"A project with a long descriptive title",chat:{open:true,unreadCount:5},children:[
+          {...project.children[0],title:"A very long task title that must truncate before the chat markers",chat:{open:true,unreadCount:120}},
+          {...project.children[1],title:"Short",chat:{open:true,unreadCount:0}},
+          {...project.children[0],id:"project1.task3",title:"Nested task with another very long title",chat:{open:true,unreadCount:3}},
+        ]}],workspace:{id:"workspace",type:"workspace",title:"Isolated E2E"},activity:{running:[],unread:[],problems:[]},
+      });
+      if (path.endsWith("/chat")) return json(route,{id:"layout-chat",open:true,epoch:1,unreadCount:0,messages:[],binding:{kind:"profile",name:"default"}});
+      return route.fallback();
+    });
+    await page.goto("/w/ws-test/r/project1.task2");
+    const markers = page.locator('#projectTree .resource-chat-status');
+    await expect(markers).toHaveCount(4);
+    const geometry = await markers.evaluateAll(elements => elements.map(group => {
+      const row=group.parentElement!,name=row.querySelector('.name')!,title=name.querySelector('.name-text')!,icon=group.querySelector('.chat-open-icon')!,badge=group.querySelector('.unread-badge');
+      return {right:group.getBoundingClientRect().right,rowRight:row.getBoundingClientRect().right-parseFloat(getComputedStyle(row).paddingRight),left:group.getBoundingClientRect().left,nameRight:name.getBoundingClientRect().right,
+        gap:badge?badge.getBoundingClientRect().left-icon.getBoundingClientRect().right:0,truncated:title.scrollWidth>title.clientWidth,overflow:row.scrollWidth-row.clientWidth};
+    }));
+    for(const g of geometry) {
+      expect(Math.abs(g.right-g.rowRight)).toBeLessThan(1);
+      expect(Math.abs(g.right-geometry[0].right)).toBeLessThan(1);
+      expect(g.nameRight).toBeLessThanOrEqual(g.left-5);
+      expect(g.gap).toBeGreaterThanOrEqual(0);expect(g.gap).toBeLessThanOrEqual(4);
+      expect(g.overflow).toBeLessThanOrEqual(1);
+    }
+    expect(geometry[1].truncated).toBe(true);expect(geometry[3].truncated).toBe(true);
+    await expect(page.locator('[data-task-id="project1.task1"] .unread-badge')).toHaveText('99+');
+    await expect(page.locator('[data-task-id="project1.task2"] .unread-badge')).toHaveCount(0);
+    await page.screenshot({path:testInfo.outputPath(`chat-markers-${sidebarWidth}.png`)});
+    await page.locator('#treeEditButton').click();
+    await expect(markers).toHaveCount(0);
+    const overlaps=await page.locator('#projectTree .tree-item').evaluateAll(rows=>rows.some(row=>{
+      const name=row.querySelector('.name')!,actions=row.querySelector('.row-actions'),drag=row.querySelector('.drag-handle');
+      return (actions && name.getBoundingClientRect().right>actions.getBoundingClientRect().left+1)||(drag && drag.getBoundingClientRect().right>row.getBoundingClientRect().right+1);
+    }));
+    expect(overlaps).toBe(false);
+    await page.locator('#treeEditButton').click();await expect(markers).toHaveCount(4);
+  });
+}
+
+test("Activity Chat keeps read and closed chats with unread message pills and independent event cursors", async ({ page }, testInfo) => {
+  test.setTimeout(120_000);
+  await installMockApi(page, "project1.task2");
+  let newestTaskFirst = false;
+  const writes: Array<{ user: string; resource: string; op: string; through?: number }> = [];
+  const states = new Map<string, { open: boolean; unread: number; execution: number; dialogue: number; readExecution: number; readDialogue: number }>();
+  const state = (user: string, resource: string) => {
+    const key = `${user}:${resource}`;
+    if (!states.has(key)) states.set(key, { open: user === "User" && resource === "project1.task1", unread: user === "User" ? resource === "project1.task1" ? 2 : resource === "project1" ? 5 : 0 : 0, execution: 3, dialogue: 4, readExecution: 0, readDialogue: 0 });
+    return states.get(key)!;
+  };
+  await page.route("**/api/workspaces/ws-test/**", async route => {
+    const req = route.request(), path = new URL(req.url()).pathname, user = req.headers()["x-pua-user"] || "User";
+    if (path.endsWith("/users")) return json(route, { users: [{ name: "User", version: 1 }, { name: "Other", version: 1 }] });
+    if (path.endsWith("/tree")) {
+      const item = (resource: MockResource) => {
+        const s = state(user,resource.id);
+        return { ...resource, latestAgentName:"Codex", latestTurnNumber:s.execution, unreadCount:s.execution-s.readExecution, userState:{readTurnNumber:s.readExecution},
+          ...(user === "User" ? {chat:{open:s.open,unreadCount:s.unread}} : {}),
+          dialogueEvents:{latestTurnNumber:s.dialogue,readTurnNumber:s.readDialogue,unreadCount:s.dialogue-s.readDialogue} };
+      };
+      return json(route, { projects:[{...item(project),children:project.children.map(item)}], workspace:{id:"workspace",type:"workspace",title:"Isolated E2E"}, activity:{
+        running:[{...item(project.children[1]), runtime:{activeTurn:true,turnNumber:7,turnStartedAt:now}}],
+        unread:(newestTaskFirst ? [item(project.children[1]),item(project.children[0]),item(project)] : [item(project),...project.children.map(item)]).filter(r=>r.chat),
+        problems:[{...item(project.children[1]),state:"blocked",stateNote:"Needs review"}]
+      } });
+    }
+    const match = path.match(/\/resources\/([^/]+)(\/chat\/runtime)?\/(.*)$/);
+    if (!match) return route.fallback();
+    const resource=match[1], dialogue=Boolean(match[2]), op=match[3], s=state(user,resource);
+    if (/chat\/(open|close|messages|timer)$/.test(op)) writes.push({user,resource,op});
+    const chat = () => ({id:`${user}-${resource}`,resourceId:resource,open:s.open,epoch:resource==="project1.task1"&&user==="User"?1:0,unreadCount:s.unread,binding:{kind:"profile",name:"default"},messages:resource==="project1.task1"&&user==="User"?[{id:"public-1",role:"agent",text:"Public history preserved",createdAt:now}]:[]});
+    if (op==="chat") return json(route,chat());
+    if (op==="chat/read") {writes.push({user,resource,op});s.unread=0;return json(route,chat());}
+    if (op==="chat/open"||op==="chat/close") {s.open=op.endsWith("open");return json(route,chat());}
+    const count=dialogue?s.dialogue:s.execution;
+    const channel=dialogue?"dialogue":"execution";
+    const generation={generation:1,generationId:`gen-${channel}-${resource}`,status:"idle",turnNumber:count,createdAt:now};
+    const turn={reference:`ref-${channel}-${count}`,turnId:`turn-${count}`,closed:true,status:"completed",triggerRole:"system",startEventId:1,lastEventId:2,generation};
+    if(op==="status")return json(route,{resourceId:resource,generation,sessionState:"idle",session:{state:"idle"},waitingMessages:[]});
+    if(op==="history/turns")return json(route,{resourceId:resource,completedTurnNumber:count,segments:[{generation,turns:[turn]}],page:{hasMore:false}});
+    if(op.startsWith("history/turns/"))return json(route,{turn,latestEventId:2,items:[{type:"message",role:"assistant",text:`${channel} completed ${count}`,startEventId:1,endEventId:2}]});
+    if(op==="read") {const through=req.postDataJSON().throughTurnNumber;writes.push({user,resource,op:dialogue?"dialogue-read":"execution-read",through});if(dialogue)s.readDialogue=through;else s.readExecution=through;return json(route,{readTurnNumber:through});}
+    if(op==="stream")return route.fulfill({status:200,contentType:"text/event-stream",body:"retry: 1000\n\n"});
+    if(op==="events")return json(route,{schema:"agenthub.semantic-events.v1",frames:[],page:{hasMore:false}});
+    return route.fallback();
+  });
+  await page.goto("/w/ws-test/r/project1.task2");
+  await page.getByRole("button",{name:"U User No preference set",exact:true}).click();
+  const activity=page.locator('.attention-section');
+  await expect(activity.getByRole('tab',{name:'Running 1',exact:true})).toBeVisible();
+  await expect(activity.locator('.activity-meta')).toContainText('Turn 7');
+  await activity.getByRole('tab',{name:'Issues 1',exact:true}).click();
+  await expect(activity.locator('.activity-meta')).toContainText('Turn 3');
+  await activity.getByRole('tab',{name:'Chat 2',exact:true}).click();
+  await expect(activity.locator('button.activity-row')).toHaveCount(3);
+  await expect(activity.locator('.activity-chat-unread-count')).toHaveText(['5', '2']);
+  await expect(activity.locator('.activity-meta').first()).toContainText('Turn 3');
+  await expect(activity.locator('.activity-meta').nth(1)).toContainText('Agent Codex');
+  await expect(activity.locator('.activity-meta').nth(2)).toContainText('Not started');
+  await expect(activity.locator('button.activity-row').nth(2).locator('.activity-chat-unread-count')).toHaveCount(0);
+  await activity.locator('button.activity-row').nth(1).click();
+  const chat=page.getByRole('region',{name:'Resource chat',exact:true});
+  await expect(chat).toBeFocused();
+  await expect(activity.getByRole('tab',{name:'Chat 1',exact:true})).toBeVisible();
+  await expect(activity.locator('button.activity-row')).toHaveCount(3);
+  await expect(activity.locator('.activity-chat-unread-count')).toHaveText(['5']);
+  expect(writes.filter(w=>w.op.endsWith('-read'))).toHaveLength(0);
+  const details=page.locator('#detailsPanel');
+  await details.getByRole('tab',{name:/^Execution events/}).click();
+  await expect.poll(()=>state('User','project1.task1').readExecution).toBe(3);
+  await page.locator('#projectTree [data-task-id="project1.task2"]').click();
+  const target=state('User','project1.task1');
+  target.open=false;target.unread=2;target.execution=4;
+  await expect(activity.getByRole('tab',{name:'Chat 2',exact:true})).toBeVisible({timeout:10_000});
+  await expect(activity.locator('button.activity-row')).toHaveCount(3);
+  await expect(activity.locator('.activity-chat-unread-count')).toHaveText(['5', '2']);
+  await page.screenshot({path:testInfo.outputPath('chat-list-unread.png')});
+  const originalTitle=project.title;
+  project.title="A long chat title that must truncate while keeping the unread badge visible";
+  state('User','project1').unread=12345;
+  await expect(activity.locator('.activity-chat-unread-count').first()).toHaveText('12345',{timeout:10_000});
+  for (const theme of ['default','slate','riso']) {
+    await page.evaluate(({theme})=>{document.documentElement.dataset.theme=theme;document.documentElement.style.setProperty('--sidebar-width','220px');},{theme});
+    const pill=activity.locator('.activity-chat-unread-count').first();
+    await expect(pill).toHaveCSS('border-radius','999px');
+    const fits=await pill.evaluate(el=>{const row=el.closest('button')!;return el.getBoundingClientRect().right<=row.getBoundingClientRect().right && el.scrollWidth<=el.clientWidth;});
+    expect(fits).toBe(true);
+    await activity.screenshot({path:testInfo.outputPath(`chat-list-${theme}-220.png`)});
+  }
+  project.title=originalTitle;
+  state('User','project1').unread=0;
+  await expect(activity.getByRole('tab',{name:'Chat 1',exact:true})).toBeVisible({timeout:10_000});
+  const readCount=writes.filter(w=>w.op.endsWith('-read')).length;
+  await activity.locator('button.activity-row').nth(1).click();
+  await expect(chat).toBeFocused();
+  await expect(chat).toContainText('Public history preserved');
+  await expect(chat.getByRole('button',{name:'Reopen chat',exact:true})).toBeVisible();
+  await expect(details.getByRole('tab',{name:'Task',exact:true})).toHaveAttribute('aria-selected','true');
+  await expect(details.getByRole('tab',{name:/^Execution events/})).toContainText('1');
+  await expect(details.getByRole('tab',{name:/^Dialog events/})).toHaveCount(0);
+  await expect(activity.getByRole('tab',{name:'Chat 0',exact:true})).toBeVisible();
+  await expect(activity.locator('button.activity-row')).toHaveCount(3);
+  await expect(activity.locator('.activity-chat-unread-count')).toHaveCount(0);
+  expect(writes.filter(w=>w.op.endsWith('-read'))).toHaveLength(readCount);
+  expect(writes.filter(w=>/chat\/(open|close|messages|timer)$/.test(w.op))).toEqual([]);
+  expect(target.open).toBe(false);
+  newestTaskFirst = true;
+  await expect(activity.locator('.activity-title strong')).toHaveText(['Follow-up task', 'Infrastructure task', originalTitle], {timeout:10_000});
+  await expect(activity.locator('.activity-chat-unread-count')).toHaveCount(0);
+  await activity.getByRole('tab',{name:'Running 1',exact:true}).click();
+  await expect(activity.locator('.activity-meta')).toContainText('Turn 7');
+  await activity.getByRole('tab',{name:'Issues 1',exact:true}).click();
+  await expect(activity.locator('.activity-meta')).toContainText('Turn 3');
+  await page.screenshot({path:testInfo.outputPath('chat-list-focus.png')});
+});
+
+test("public Chat restores the upload dialog, send card and execution model selector", async ({ page }, testInfo) => {
+  test.setTimeout(120_000);
+  const harness = await installMockApi(page);
+  const chat = { id: "composer-chat", open: true, epoch: 1, unreadCount: 0, messages: [] as Array<{ id: string; role: string; text: string; createdAt: string }> };
+  let selectedBinding = { kind: "profile", name: "default" };
+  const sends: Array<{ id: string; text: string }> = [];
+  const uploads: Array<{ name: string; user: string | undefined }> = [];
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  await page.route("**/api/workspaces/ws-test/**", async route => {
+    const request = route.request(), path = new URL(request.url()).pathname;
+    if (path.endsWith("/tree")) return json(route, {
+      root: "/tmp/pua-e2e",
+      workspace: { id: "workspace", type: "workspace", title: "Isolated E2E", path: "." },
+      projects: [{ ...project, children: project.children.map(task => ({ ...task, agentBinding: selectedBinding })) }],
+      activity: { running: [], unread: [], problems: [] },
+    });
+    if (path.endsWith("/agent-binding") && request.method() === "PUT") {
+      selectedBinding = request.postDataJSON();
+      return route.fallback();
+    }
+    if (path === "/api/workspaces/ws-test/resources/project1.task1" && request.method() === "GET") {
+      return json(route, { ...resourceDetail(project.children[0]), agentBinding: selectedBinding });
+    }
+    if (path.endsWith("/chat/messages")) {
+      const body = request.postDataJSON(); sends.push(body);
+      chat.messages.push({ ...body, role: "user", createdAt: now });
+      return json(route, chat);
+    }
+    if (path.endsWith("/chat/close") || path.endsWith("/chat/open")) {
+      chat.open = path.endsWith("/open"); return json(route, chat);
+    }
+    if (path.endsWith("/chat") || path.endsWith("/chat/read")) return json(route, chat);
+    if (path.endsWith("/uploads")) {
+      const name = (request.postData() || "").match(/filename="([^"]+)"/)?.[1] || "unknown";
+      uploads.push({ name, user: request.headers()["x-pua-user"] });
+      if (name === "failed.txt") return json(route, { error: "Upload rejected" }, 400);
+      return json(route, { name, path: `artifacts/upload/${name}` }, 201);
+    }
+    return route.fallback();
+  });
+  await page.goto("/w/ws-test/r/project1.task1");
+  const input = page.getByRole("textbox", { name: "Chat message" });
+  const send = page.getByRole("button", { name: "Send input", exact: true });
+  await expect(input).toBeVisible(); await expect(send).toBeDisabled();
+  await input.fill("Please review these files");
+  await page.getByRole("button", { name: "Upload files", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Upload files" });
+  await expect(dialog.getByText("Paste files from the clipboard")).toBeVisible();
+  await page.locator("#agentUploadInput").setInputFiles([
+    { name: "notes (1).txt", mimeType: "text/plain", buffer: Buffer.from("selected") },
+    { name: "failed.txt", mimeType: "text/plain", buffer: Buffer.from("failure") },
+  ]);
+  await page.locator("#agentUploadDropZone").evaluate(element => {
+    const data = new DataTransfer(); data.items.add(new File(["dropped"], "dropped.txt", { type: "text/plain" }));
+    element.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: data }));
+    const clipboard = new DataTransfer(); clipboard.items.add(new File(["pasted"], "pasted.txt", { type: "text/plain" }));
+    document.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: clipboard }));
+  });
+  await expect(dialog.getByText("3 uploaded · 1 failed.", { exact: false })).toBeVisible();
+  await expect(dialog.getByText("Upload rejected", { exact: true })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("composer-upload.png") });
+  await dialog.getByRole("button", { name: "Done", exact: true }).click();
+  await expect(input).toHaveValue(/Please review these files\n\[notes \(1\).txt\].*notes%20%281%29.txt/);
+  await expect(input).toHaveValue(/\[dropped.txt\]/); await expect(input).toHaveValue(/\[pasted.txt\]/);
+  expect(await input.inputValue()).not.toContain("failed.txt");
+  expect(uploads.every(upload => upload.user === "User")).toBe(true);
+  await page.getByRole("button", { name: "Binding target", exact: true }).click();
+  await page.locator('[role="option"][data-binding="profile:review"]').click();
+  await expect.poll(() => harness.bindingBodies).toEqual([{ kind: "profile", name: "review" }]);
+  await expect(page.getByRole("button", { name: "Binding target", exact: true })).toContainText("review");
+  await page.screenshot({ path: testInfo.outputPath("composer-ready.png") });
+  await input.press("Enter"); expect(sends).toHaveLength(0);
+  await input.press("Control+Enter");
+  await expect.poll(() => sends.length).toBe(1); await expect(input).toHaveValue("");
+  await input.fill("Second message"); await send.click();
+  await expect.poll(() => sends.length).toBe(2); await expect(input).toHaveValue("");
+  expect(harness.inputBodies).toHaveLength(0);
+  await expect(page.getByRole("tab", { name: /Dialog events/ })).toHaveCount(0);
+  for (const theme of ["default", "slate", "riso"]) {
+    await page.evaluate(theme => {
+      document.documentElement.dataset.theme = theme;
+      const chatPanel = document.getElementById("agentPanel")!;
+      chatPanel.style.width = "260px"; chatPanel.style.minWidth = "260px";
+    }, theme);
+    await input.fill("A draft in the restored composer");
+    const bounds = await page.locator(".public-chat-composer").evaluate(element => {
+      const form = element.querySelector("form")!, send = element.querySelector(".chat-send-button")!;
+      return { overflow: form.scrollWidth - form.clientWidth, right: send.getBoundingClientRect().right, edge: element.getBoundingClientRect().right };
+    });
+    expect(bounds.overflow).toBeLessThanOrEqual(1); expect(bounds.right).toBeLessThanOrEqual(bounds.edge);
+    await page.screenshot({ path: testInfo.outputPath(`composer-${theme}-narrow.png`) });
+  }
+  await page.getByRole("button", { name: "Close chat", exact: true }).click();
+  await expect(input).toHaveCount(0); await expect(page.getByText("Second message", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Reopen chat", exact: true }).click(); await expect(input).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+for (const width of [1500, 390]) {
+  test(`configures Telegram in Workspace Settings at ${width}px`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width, height: 900 });
+    const harness = await installMockApi(page, "workspace");
+    await page.addInitScript(() => localStorage.setItem("pua.web.users.v2", JSON.stringify({ version: 2, selections: { "ws-test": "disksing" } })));
+    await page.route("**/api/workspaces/ws-test/users", route => json(route, { users: [{ version: 1, name: "User", preference: "" }, { version: 1, name: "disksing", preference: "" }] }));
+    const saved: Array<Record<string, unknown>> = [];
+    let configured = false;
+    await page.route("**/api/workspaces/ws-test/telegram**", async (route) => {
+      const request = route.request();
+      const path = new URL(request.url()).pathname;
+      if (path.endsWith("/pair")) return json(route, { url: "https://t.me/example_bot?start=example", expiresAt: "2030-01-01T00:10:00Z" });
+      if (request.method() === "PUT") { saved.push(request.postDataJSON()); configured = true; }
+      return json(route, { configured, enabled: configured, botName: configured ? "example_bot" : "", accounts: [], topicCount: 0, lastError: "", lastPoll: "", deliveryProblems: [] });
+    });
+    await page.goto("/w/ws-test");
+    if (width < 700) await page.getByRole("button", { name: "Open navigation" }).click();
+    await page.locator("#systemSettingsButton").click();
+    const settings = page.getByRole("dialog", { name: "System Settings" });
+    await settings.getByRole("button", { name: "Workspace", exact: true }).click();
+    await settings.locator(".telegram-settings summary").click();
+    await settings.getByLabel("Bot token", { exact: true }).fill("123:example-token-for-test-only");
+    await settings.getByLabel("Enable Telegram connection").check();
+    await settings.getByRole("button", { name: "Save connection" }).click();
+    await expect(settings.locator(".telegram-settings")).toContainText("@example_bot");
+    await expect(settings.getByLabel("Bot token", { exact: true })).toHaveValue("");
+    expect(saved).toEqual([{ token: "123:example-token-for-test-only", enabled: true }]);
+    await expect(settings.getByRole("combobox", { name: "Workspace user", exact: true })).toHaveValue("disksing");
+    await settings.getByRole("combobox", { name: "Workspace user", exact: true }).selectOption("User");
+    await settings.getByLabel("Bot token", { exact: true }).fill("123:unsaved-token");
+    await settings.getByLabel("Enable Telegram connection").uncheck();
+    const polls = harness.treeRequests;
+    await expect.poll(() => harness.treeRequests, { timeout: 20000 }).toBeGreaterThan(polls + 1);
+    await expect(settings.getByLabel("Bot token", { exact: true })).toHaveValue("123:unsaved-token");
+    await expect(settings.getByRole("combobox", { name: "Workspace user", exact: true })).toHaveValue("User");
+    await expect(settings.getByLabel("Enable Telegram connection")).not.toBeChecked();
+    await settings.getByRole("combobox", { name: "Workspace user", exact: true }).selectOption("disksing");
+    await settings.getByRole("button", { name: "Create pairing link" }).click();
+    await expect(settings.getByRole("link", { name: "Open Telegram to pair this account" })).toHaveAttribute("href", "https://t.me/example_bot?start=example");
+    const overflow = await settings.locator(".settings-content").evaluate((node) => node.scrollWidth - node.clientWidth);
+    expect(overflow).toBeLessThanOrEqual(1);
+    await settings.locator(".telegram-settings").screenshot({ path: testInfo.outputPath(`telegram-settings-${width}.png`) });
+  });
+}

@@ -83,8 +83,8 @@ func TestResourceReadAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tree.Activity.Unread) != 1 || tree.Activity.Unread[0].ID != "project1" || tree.Projects[0].UnreadCount != 1 {
-		t.Fatalf("resource should become unread after next Turn: %#v", tree.Activity.Unread)
+	if len(tree.Activity.Unread) != 0 || tree.Projects[0].UnreadCount != 1 {
+		t.Fatalf("event unread should increase without entering chat activity: %#v", tree.Activity.Unread)
 	}
 }
 
@@ -168,7 +168,7 @@ func TestActiveTurnDoesNotCountAsUnreadAndCannotBeMarkedRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tree.Activity.Running) != 0 || len(tree.Activity.Unread) != 1 || tree.Projects[0].UnreadCount != 1 || tree.Projects[0].LatestTurnNumber != 2 {
+	if len(tree.Activity.Running) != 0 || len(tree.Activity.Unread) != 0 || tree.Projects[0].UnreadCount != 1 || tree.Projects[0].LatestTurnNumber != 2 {
 		t.Fatalf("completed Turn did not become unread: project=%#v activity=%#v", tree.Projects[0], tree.Activity)
 	}
 	recorder = attentionRequest(t, server, http.MethodPut, "/api/workspaces/workspace-one/resources/project1/read", `{"throughTurnNumber":2}`)
@@ -189,7 +189,7 @@ func TestActiveTurnDoesNotCountAsUnreadAndCannotBeMarkedRead(t *testing.T) {
 	}
 }
 
-func TestSchedulerNeverCountsAsUnread(t *testing.T) {
+func TestSchedulerCountsUnreadInEventTabs(t *testing.T) {
 	server, workspace := attentionTestServer(t)
 	now := "2026-08-13T00:00:00Z"
 	if err := rewriteTestGenerationRecords(workspace, []generationRecord{
@@ -210,11 +210,11 @@ func TestSchedulerNeverCountsAsUnread(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tree.Scheduler.UnreadCount != 0 || tree.Scheduler.LatestTurnNumber != 3 {
-		t.Fatalf("scheduler must not count unread Turns: %#v", tree.Scheduler)
+	if tree.Scheduler.UnreadCount != 3 || tree.Scheduler.LatestTurnNumber != 3 {
+		t.Fatalf("scheduler must count unread event Turns: %#v", tree.Scheduler)
 	}
-	if len(tree.Activity.Unread) != 1 || tree.Activity.Unread[0].ID != "project1" {
-		t.Fatalf("scheduler leaked into the unread list: %#v", tree.Activity.Unread)
+	if len(tree.Activity.Unread) != 0 {
+		t.Fatalf("event unread must not enter chat activity: %#v", tree.Activity.Unread)
 	}
 }
 
@@ -241,7 +241,7 @@ func TestActivityUsesLatestTurnAcrossRetiredGenerations(t *testing.T) {
 	if len(tree.Activity.Running) != 0 {
 		t.Fatalf("retired older generation must be excluded from Running: %#v", tree.Activity.Running)
 	}
-	if len(tree.Activity.Unread) != 1 || tree.Activity.Unread[0].LatestTurnNumber != 4 {
+	if len(tree.Activity.Unread) != 0 || tree.Projects[0].LatestTurnNumber != 4 {
 		t.Fatalf("latest historical Turn must remain unread: %#v", tree.Activity.Unread)
 	}
 }
@@ -313,7 +313,7 @@ func TestResourceActivityListsAndSortsIndependentCategories(t *testing.T) {
 	for _, item := range tree.Activity.Unread {
 		unread = append(unread, item.ID)
 	}
-	if wantUnread := []string{resourceIDs[3], resourceIDs[2]}; !slices.Equal(unread, wantUnread) {
+	if wantUnread := []string{}; !slices.Equal(unread, wantUnread) {
 		t.Fatalf("Unread order = %v, want %v", unread, wantUnread)
 	}
 	running := []string{}
@@ -401,4 +401,166 @@ func TestTurnOrdinalChangesOnlyForNewAgentHubTurn(t *testing.T) {
 
 func intPointer(value int) *int {
 	return &value
+}
+
+func TestActivityChatIncludesReadAndClosedChatsForCurrentUser(t *testing.T) {
+	s, workspace := attentionTestServer(t)
+	user := app.LegacyDefaultUserName
+	ids := []string{"workspace", "scheduler", "project1", "project1.task1"}
+	for i, id := range ids {
+		c := resourceChat{ID: chatID(id, user), ResourceID: id, User: user, Epoch: 1, Open: i%2 == 0, ReadThrough: 1,
+			Messages: []chatMessage{
+				{ID: "read", Role: "agent", CreatedAt: "2099-01-01T00:00:00Z"},
+				{ID: "unread", Role: "agent", CreatedAt: fmt.Sprintf("2026-10-14T00:00:0%dZ", i)},
+				{ID: "mine", Role: "user", CreatedAt: fmt.Sprintf("2099-01-02T00:00:0%dZ", i)},
+			}}
+		if err := saveChatLocked(workspace, c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, id := range []string{"project1.task2", "project1.task3"} {
+		c := resourceChat{ID: chatID(id, user), ResourceID: id, User: user, Epoch: 1, Open: true,
+			Messages: []chatMessage{{ID: "mine", Role: "user"}}}
+		if id == "project1.task3" {
+			c.Open = false
+			c.Messages[0].Role = "agent"
+			c.ReadThrough = 1
+		}
+		if err := saveChatLocked(workspace, c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	records := []generationRecord{{ID: "event-only", GenerationID: "event-only", AgentHubSessionID: "session-events", Generation: 1, ResourceID: "project1.task4", Status: "idle", TurnNumber: 9}}
+	privateChat, err := loadChatLocked(workspace, chatID("project1.task2", user))
+	if err != nil {
+		t.Fatal(err)
+	}
+	records = append(records, generationRecord{ID: "dialogue-only", GenerationID: "dialogue-only", AgentHubSessionID: "session-dialogue", Generation: 1, ResourceID: privateChat.address(), Status: "idle", TurnNumber: 5})
+	if err := rewriteTestGenerationRecords(workspace, records); err != nil {
+		t.Fatal(err)
+	}
+	makeTree := func() workspaceTree {
+		return workspaceTree{
+			Workspace: resourceSnapshot{ID: "workspace", Type: "workspace"},
+			Scheduler: resourceSnapshot{ID: "scheduler", Type: "scheduler"},
+			Projects: []resourceSnapshot{{ID: "project1", Type: "project", Children: []resourceSnapshot{
+				{ID: "project1.task1", Type: "task"}, {ID: "project1.task2", Type: "task"}, {ID: "project1.task3", Type: "task"},
+				{ID: "project1.task4", Type: "task", State: app.TaskStateBlocked, Runtime: &resourceRuntimeSnapshot{ActiveTurn: true}},
+			}}},
+		}
+	}
+	tree := makeTree()
+	if err := s.enrichTreeResourceActivity(workspace, &tree, user); err != nil {
+		t.Fatal(err)
+	}
+	got := []string{}
+	for _, item := range tree.Activity.Unread {
+		got = append(got, item.ID)
+		if item.Chat.UnreadCount > 0 && item.LatestUnreadChatAt == "" {
+			t.Fatalf("invalid chat activity: %+v", item)
+		}
+	}
+	if !slices.Equal(got, []string{"project1.task1", "project1", "scheduler", "workspace", "project1.task2", "project1.task3"}) {
+		t.Fatalf("chat order/membership: %v", got)
+	}
+	if tree.Projects[0].Children[1].DialogueEvents.UnreadCount != 5 {
+		t.Fatal("dialogue-only unread must stay in event tab")
+	}
+	if tree.Activity.Unread[0].Chat.Open {
+		t.Fatal("closed chat must remain closed")
+	}
+	if tree.Projects[0].Chat.UnreadCount != 1 || tree.Projects[0].LatestUnreadChatAt != "" {
+		t.Fatal("tree chat must not aggregate or change its snapshot")
+	}
+	if len(tree.Activity.Running) != 1 || len(tree.Activity.Problems) != 1 || tree.Activity.Running[0].ID != "project1.task4" || tree.Activity.Problems[0].LatestTurnNumber != 9 {
+		t.Fatalf("Running/Issues changed: %+v", tree.Activity)
+	}
+	other := makeTree()
+	if err := s.enrichTreeResourceActivity(workspace, &other, "other"); err != nil {
+		t.Fatal(err)
+	}
+	if len(other.Activity.Unread) != 6 || other.Projects[0].Children[3].UnreadCount != 9 || other.Projects[0].Chat == nil {
+		t.Fatal("shared chat visibility or event counts changed")
+	}
+	for _, id := range ids {
+		c, err := loadChatLocked(workspace, sharedChatID(id))
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.markRead(user, "mine")
+		if err := saveChatLocked(workspace, c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tree = makeTree()
+	if err := s.enrichTreeResourceActivity(workspace, &tree, user); err != nil {
+		t.Fatal(err)
+	}
+	if len(tree.Activity.Unread) != 6 || len(tree.Activity.Running) != 1 || len(tree.Activity.Problems) != 1 {
+		t.Fatal("reading chat must preserve all chat activity")
+	}
+	for _, item := range tree.Activity.Unread {
+		if item.Chat.UnreadCount != 0 {
+			t.Fatalf("read chat still has unread messages: %+v", item)
+		}
+	}
+}
+
+func TestActivityChatSortsByLatestMessageRegardlessOfReadState(t *testing.T) {
+	s, workspace := attentionTestServer(t)
+	user := app.LegacyDefaultUserName
+	chats := []resourceChat{
+		{ResourceID: "project1", Messages: []chatMessage{{Role: "agent", CreatedAt: "2026-10-19T01:00:00Z"}}},
+		{ResourceID: "project1.task1", ReadThrough: 1, Messages: []chatMessage{{Role: "agent", CreatedAt: "2026-10-19T01:00:02Z"}}},
+		{ResourceID: "project1.task2", Messages: []chatMessage{{Role: "user", CreatedAt: "2026-10-19T09:00:01+08:00"}}},
+		{ResourceID: "project1.task3"},
+		{ResourceID: "project1.task4", Messages: []chatMessage{{Role: "user", CreatedAt: "invalid"}}},
+	}
+	for i := range chats {
+		chats[i].ID = sharedChatID(chats[i].ResourceID)
+		chats[i].Version = 4
+		chats[i].ReadCursors = map[string]int{user: chats[i].ReadThrough}
+		chats[i].Epoch = 1
+		chats[i].Open = true
+		if err := saveChatLocked(workspace, chats[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check := func(want []string) {
+		t.Helper()
+		tree := workspaceTree{Projects: []resourceSnapshot{{ID: "project1", Type: "project", Children: []resourceSnapshot{
+			{ID: "project1.task1", Type: "task"}, {ID: "project1.task2", Type: "task"},
+			{ID: "project1.task3", Type: "task"}, {ID: "project1.task4", Type: "task"},
+		}}}}
+		if err := s.enrichTreeResourceActivity(workspace, &tree, user); err != nil {
+			t.Fatal(err)
+		}
+		got := []string{}
+		for _, item := range tree.Activity.Unread {
+			got = append(got, item.ID)
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("chat order = %v, want %v", got, want)
+		}
+	}
+	original := []string{"project1.task1", "project1.task2", "project1", "project1.task3", "project1.task4"}
+	check(original)
+	// Reading and closing a chat must not demote its latest message.
+	for i := range chats {
+		chats[i].ReadCursors[user] = len(chats[i].Messages)
+		chats[i].Open = false
+		if err := saveChatLocked(workspace, chats[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check(original)
+	// Both a user input and an agent reply move the updated chat to the top.
+	for _, role := range []string{"user", "agent"} {
+		chats[0].Messages = append(chats[0].Messages, chatMessage{Role: role, CreatedAt: "2026-10-19T01:00:03Z"})
+		if err := saveChatLocked(workspace, chats[0]); err != nil {
+			t.Fatal(err)
+		}
+		check([]string{"project1", "project1.task1", "project1.task2", "project1.task3", "project1.task4"})
+		chats[0].Messages = chats[0].Messages[:1]
+	}
 }

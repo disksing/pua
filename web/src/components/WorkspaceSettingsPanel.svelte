@@ -2,6 +2,7 @@
   import "./WorkspaceSettingsPanel.css";
 
   import Icon from "./Icon.svelte";
+  import TelegramSettings from "./TelegramSettings.svelte";
   import type { SettingsDraft, SettingsModel } from "./models";
   import { cloneSettingsDraft, settingsErrorMessage } from "./settings-draft";
   import { sanitizeUserNameInput, validateUserName } from "../controllers/user-settings-controller";
@@ -9,6 +10,7 @@
   let {
     workspaces,
     activeWorkspaceId,
+    workspaceUserNames = {},
     workspaceIcons,
     draft = $bindable(),
     pending = $bindable(),
@@ -20,6 +22,7 @@
   }: {
     workspaces: SettingsModel["workspaces"];
     activeWorkspaceId: string;
+    workspaceUserNames?: Record<string, string>;
     workspaceIcons: SettingsModel["workspaceIcons"];
     draft: SettingsDraft;
     pending: string;
@@ -214,6 +217,7 @@
             {/each}
           </div>
         {/if}
+        <TelegramSettings workspaceId={workspace.id} workspaceName={workspace.name} currentUserName={workspaceUserNames[workspace.id] || ""} />
       </div>
     {:else}
       <div class="settings-empty">No workspaces managed by PUA.</div>

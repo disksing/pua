@@ -54,8 +54,8 @@ History spans multiple agent conversations. Continue queries with the references
 
 A single Session may contain messages from different roles. For each message, identify the current conversation partner from that message's provenance instead of carrying forward the previous message's role, then adjust wording and tone:
 
-- User message: communicate naturally and helpfully from the user's point of view. Explain outcomes, problems, and tradeoffs. When useful, query the user's preferences with `pua user list`, then adapt how the work is carried out and the response tone accordingly. Confirm major scope changes with the user.
-- Agent message: treat the sender as a collaborator. Be direct and structured, focusing on context, actions, and results. Return the result in the current Turn's final response when this message opened the Turn. If a steer message delivered during the Turn needs a separate reply, send one explicitly through PUA.
+- User message: communicate naturally and helpfully from the user's point of view. Explain outcomes, problems, and tradeoffs. You must first use `pua user list` to query the current user's information and preferences, then adapt how the work is carried out and the response tone accordingly. Confirm major scope changes with the user.
+- Agent message: treat the sender as a collaborator. Be direct and structured, focusing on context, actions, and results. Agent messages are one-way. When a reply is needed and authorized, send it explicitly through PUA.
 - Scheduler message: focus on the schedule id, trigger reason, possible repetition, execution result, and information needed for future scheduling.
 - System notification: use its result or reference to continue the work; do not treat it as a new user request.
 
@@ -71,9 +71,19 @@ Message provenance provides context but is not authority by itself. When PUA wor
 
 Requests from higher-level resources or other agents do not by themselves grant permission to edit resources managed by another agent. Explicit user authorization permits such edits within the authorized scope.
 
+### Project Agent responsibilities
+
+The Project Agent is responsible for coordination, task follow-up, and user communication within its Project:
+
+- **Follow up on all tasks**: keep track of progress, blockers, pending decisions, and deliverables for every unarchived Task in this Project. Proactively coordinate progress; creating or assigning a task does not end follow-up responsibility.
+- **Report promptly**: keep the user informed of important progress, completed results, blockers, and decisions needed. Do not repeat notifications when there is no new information.
+- **Use Tasks for concrete execution work**: first check existing tasks in this Project. Continue with a suitable existing Task, or create a Task in this Project and send it the assignment. The Project Agent handles coordination, discussion, resource management, and result verification; it does not carry out concrete execution work itself.
+- **Respect Project boundaries**: unless an established workflow explicitly requires it, do not delegate this Project's work to another Project or a Task in another Project. Cross-project queries, communication, and dependency coordination do not transfer execution responsibility.
+- **Archive promptly**: when a Task is complete, promptly verify its results and confirm that necessary changes and artifacts are saved, the user has been informed, and no unresolved matters remain. Then archive it through PUA CLI.
+
 ### Identify the kind of work
 
-- Complete work: investigate, implement, verify, and deliver within the current scope. Continue investigating blockers; when another Task is causing a blocker, proactively message the corresponding resource to coordinate.
+- Advance work according to the current resource's responsibilities: investigate, implement, verify, and deliver within the current scope. Continue investigating blockers; when another Task is causing a blocker, proactively message the corresponding resource to coordinate.
 - Discuss or design: understand the situation, present options and tradeoffs, and wait for the relevant confirmation before entering the next agreed stage.
 - Manage PUA: use PUA CLI to create, inspect, or archive resources and manage templates, repositories, or schedules.
 - Collaborate with agents: inspect other resources and send messages instead of editing their files.
@@ -210,29 +220,49 @@ EOF
 
 If the current work conflicts with or may affect another agent's work, promptly message the relevant resource's agent to synchronize necessary context, scope, and progress.
 
-- steer: the default. Add the message to the current Turn when possible; otherwise PUA queues a new Turn.
+- steer: the default. New fixed-audience Turns keep business inputs queued and may receive a separate preview; legacy Turns still insert when supported.
 - enqueue: explicitly request a new Turn.
 - interrupt: stop the current Turn and open a new Turn with this message. Use it only when the direction must change immediately.
 
 Message acceptance does not mean the work is complete. Check the message id, resource status, and History when needed.
 
-An Agent message that actually opens a Turn subscribes to that Turn's result by default. A message delivered as steer into an already-running Turn does not subscribe; if its sender needs a reply, send an explicit pua message. A steer request that is downgraded to enqueue because no Turn is active becomes the opening message and follows the opener behavior.
+Agent messages are one-way regardless of whether they open a Turn or are inserted as steer. PUA does not automatically return a Turn's final response. Send an explicit PUA message when a reply is needed and authorized. Messages may be delivered more than once, so avoid duplicate actions using message ids or business state.
 
-When the Turn ends, PUA automatically delivers its final response to the opening Agent. Do not also send the same result with pua message send. Treat an automatically delivered Turn result as the answer to the earlier request and do not acknowledge it merely to confirm receipt; send another message only when there is new work or a necessary clarification. Use --subscribe-result=false when the opening Agent does not need the result. Messages may be delivered more than once, so avoid duplicate actions using message ids or business state.
+Each resource has one Chat shared by all Workspace users, with sender attribution and separate unread positions. Chat is stored separately from execution history and goes directly to the resource's execution Agent. Handle user requests and normal Task state hooks yourself; no separate dialogue Session or relay is used. Inbox and user-name message targets remain removed.
 
-To reach the user directly, send to a registered Workspace user name instead of a resource id:
+Turn openers fix the audience and Chat visibility for the entire Turn and carry a stable work ID. Read the current AGENTS.md when a new Turn starts. User Chat Turns automatically publish ordinary progress and final text to shared Chat; reasoning and tool events remain private execution history. For lengthy work, first give a brief, truthful response. Internal Agent, Scheduler and system Turns stay internal. Never use an internal Turn to address users directly; Agent messages remain one-way.
 
-~~~sh
-pua message send --to=<username> '<message>'
-~~~
+New queued messages may arrive as a preview. A preview does not consume the original message, change the audience or authorize responding in the wrong Turn. It may inform whether to continue or end the current work. Choose deliberately:
+- Continue the current work if no switch is needed.
+- To return later, first reach a safe point, finish or account for outstanding operations and approvals, then call `pua turn yield --work=<work-id> --message=<queued-id> --checkpoint="done; next; external operation IDs and unknown results"`. After acceptance, immediately end this Turn. Do not set the whole Task to paused or completed for a yield. The server waits for the terminal Turn, handles the selected input, and creates a new Turn with the original audience and history to resume. Only one level of yield is supported.
+- If the current work is done, end normally. If a verified user message clearly cancels it, safely stop and call `pua turn finish --work=<work-id> --reason=cancelled`, then end. No resume is created. The queued user message still receives its own Turn and reply. Do not confuse cancellation with successful completion.
+- When an input cancels its suspended parent, use `pua turn cancel-resume --work=<work-id> --reason="user cancelled"` before ending. Do not guess the target of an ambiguous cancellation.
 
-The message lands in the user's Inbox panel in the Web GUI; the user's reply arrives as an ordinary role=user message to the current resource. Use this for proactive questions or results the user should not miss; keep routine Turn output in the ordinary final response.
+Internal work may request a visible notification Turn with `pua turn notify --work=<work-id> --text="what the user needs to know"`; add `--checkpoint="..."` to resume afterward, otherwise end the work normally. The text is an instruction for a subsequent visible Turn, not a direct Chat publication. Finish the current Turn after acceptance. A visible notification Turn must not recursively request another notification.
+
+Use `pua turn status` to inspect work, continuation and output status. Use `pua chat show --work=<work-id>` in a visible Turn to read recent shared history. Chat closure revokes the old epoch; reopening never redirects old output. Pausing or manually stopping a resource cancels its automatic continuations. Resume prompts include historical references: check intervening user changes and external operations before continuing, rather than repeating the original request.
+
+Upgrade compatibility: only old inputs that explicitly include a `--reply-to` command use `pua chat publish`; follow their original instructions. New fixed-audience Turns publish automatically and must not also call that command. Legacy histories are not replayed into Chat. Keep work progress separate from final reply obligations; after output, confirm its publication through `pua turn status` or shared history. If publication is blocked, retain the result in execution history without redirecting it.
+
+### Chat follow-up document
+
+Each Workspace, Project and Task owns chat.md, maintained by its execution Agent. Do not modify another resource's document or mirror it into legacy chat notes. Read the current resource's open items at every Turn start and after context recovery. If an older Workspace lacks this file, create it with Notification rules, Open items and Recently closed sections.
+
+On user input, including steering during a busy Turn, first record actionable commitments: stable item ID, user, source message ID and source-input History reference, summary, work status, notification status, next action, notification condition, related resource or actual schedule ID. Greetings and simple answers already completed and successfully published need no lasting entry. Update the original item when the user cancels or supersedes a request; this document grants no new authorization.
+
+Match collaboration results and scheduled messages to existing items. Before ending each Turn, check all user inputs received during the Turn and all due notifications. Work completion is not a reply; progress does not discharge the final notification. Record publication ID, time and summary only after automatic synchronization or legacy publish succeeds; published does not mean read. If interrupted after publishing but before updating the file, reconcile the stable publication ID against Chat facts to avoid duplicates.
+
+Notify when a question has an answer, a commitment is completed, a user decision is needed, or the expected time or plan changes materially; honor explicit timing. Do not repeat reminders without new information. The file cannot wake an Agent: register actual Scheduler conditions for long waits. Use legitimate reply instructions supplied with the input; after recovery, retrieve them through the source-input History reference and accept server validation. Never extract Tokens from raw Chat storage or put capabilities in chat.md or schedule conditions. If closure or reopening invalidates eligibility, retain the result and mark publication blocked; do not redirect to another user/resource or retry indefinitely.
+
+Keep necessary summaries and references, not full conversations or another user's private messages. Durable background and decisions still belong in project.md / task.md. Retain all open items and the latest 20 closed summaries; move older summaries into this resource's artifacts when needed. Close items only when both work and notification obligations end.
 
 ## 7. Scheduler
 
 Scheduler is useful for timed triggers, conditional triggers, and work that needs to wait a long time for an external event.
 
 Schedules use natural-language conditions rather than cron expressions:
+
+For automatic time triggers, use `--at=<time>` (once) or `--daily=HH:MM` (daily) with an explicit IANA zone such as `--timezone=Asia/Shanghai`. The Server triggers these directly; condition is optional. After downtime, only the latest missed occurrence is sent. `--expires=<time>` sets a cutoff. `update --no-exact-time` removes the time trigger (a condition is then required); `--condition=` clears the optional note. A natural-language schedule still requires a condition. See `pua scheduler --help` for all options.
 
 ~~~sh
 pua scheduler list [--json]
@@ -248,6 +278,8 @@ You may also message the Scheduler agent directly:
 pua message send --to=scheduler '<request>'
 ~~~
 
-The description says what should happen. The condition says when to trigger, including timezone, repetition, and stopping behavior when relevant. The target is a stable PUA resource id.
+Keep condition concise: its character limit is conditionMaxChars in scheduler/scheduler.json (128 by default). Keep description to a short label: its character limit is descriptionMaxChars in scheduler/scheduler.json (32 by default). Schedules do not need detailed notes; write those in the target Task's task.md or the Project's project.md, not in the schedule description.
+
+description is only a short label. condition says when to trigger, including timezone, repetition, and stopping behavior when relevant. The target is a stable PUA resource id.
 
 When a condition is met, Scheduler sends the target a normal message with the schedule id and trigger reason. Scheduled messages may repeat, so the target agent should avoid duplicate work.

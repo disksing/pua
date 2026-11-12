@@ -13,6 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: scripts/test-release-local
+      - run: scripts/test-release-site
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -25,7 +26,6 @@ jobs:
           cache: npm
           cache-dependency-path: |
             web/package-lock.json
-            agenthub/frontend/package-lock.json
       - run: npm ci
         working-directory: web
       - run: npm run check
@@ -34,12 +34,6 @@ jobs:
         working-directory: web
       - run: npm run build
         working-directory: web
-      - run: npm ci
-        working-directory: agenthub/frontend
-      - run: npm test
-        working-directory: agenthub/frontend
-      - run: npm run test:sites
-        working-directory: agenthub/frontend
       - run: npx playwright install --with-deps chromium
         working-directory: web
       - run: npm run test:e2e

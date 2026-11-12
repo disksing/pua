@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+component=${1:-}
+mode=${2:-dev}
+
+case "$component" in
+macapp|pua|agenthub) ;;
+*) printf '%s\n' "usage: scripts/version macapp|pua|agenthub [dev|stable]" >&2; exit 2 ;;
+esac
+
+version_file=$component
+if [ "$mode" = dev ]; then
+	version_file=release
+fi
+target=$(tr -d '[:space:]' <"$root/versions/$version_file")
+if ! printf '%s\n' "$target" | awk -F. '
+	NF != 3 { exit 1 }
+	{ for (i = 1; i <= 3; i++) if ($i !~ /^(0|[1-9][0-9]*)$/) exit 1 }
+'; then
+	printf '%s\n' "invalid target version in versions/$version_file: $target" >&2
+	exit 1
+fi
+
+if [ "$mode" = stable ]; then
+	printf '%s\n' "$target"
+	exit 0
+fi
+if [ "$mode" != dev ]; then
+	printf '%s\n' "usage: scripts/version macapp|pua|agenthub [dev|stable]" >&2
+	exit 2
+fi
+
+sha=$(git -C "$root" rev-parse --short=12 HEAD 2>/dev/null || printf unknown)
+count=$(git -C "$root" rev-list --count HEAD 2>/dev/null || printf 0)
+metadata="g$sha"
+if [ -n "$(git -C "$root" status --porcelain 2>/dev/null || true)" ]; then
+	metadata="$metadata.dirty"
+fi
+printf '%s-dev.%s+%s\n' "$target" "$count" "$metadata"

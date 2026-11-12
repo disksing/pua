@@ -38,3 +38,21 @@ func TestNormalizeLanguage(t *testing.T) {
 		t.Fatal("expected unsupported language error")
 	}
 }
+
+func TestWorkspaceAgentInstructionsRequireUserLookup(t *testing.T) {
+	for _, test := range []struct {
+		language string
+		want     string
+	}{
+		{English, "You must first use `pua user list` to query the current user's information and preferences"},
+		{SimplifiedChinese, "必须先使用 `pua user list` 查询当前用户的信息和偏好"},
+	} {
+		rendered, err := Render(test.language, "workspace-agents.md", nil)
+		if err != nil {
+			t.Fatalf("Render(%q): %v", test.language, err)
+		}
+		if !strings.Contains(rendered, test.want) {
+			t.Fatalf("Render(%q) does not contain required user lookup instruction %q", test.language, test.want)
+		}
+	}
+}

@@ -36,7 +36,6 @@ export interface AgentHubProviderInfo {
   id: string;
   name?: string;
   type?: string;
-  enabled?: boolean;
   command?: string;
 }
 
@@ -54,13 +53,13 @@ export interface AgentHubProbeInfo {
   type?: string;
   command?: string;
   available?: boolean;
+  error?: string;
 }
 
 export interface AgentHubConfigProvider {
   id: string;
   name: string;
   type: string;
-  enabled: boolean;
   command?: string;
 }
 
@@ -84,8 +83,30 @@ export interface AppearanceSettings {
   themeOptions: ThemeOption[];
 }
 
+export interface SystemInfo {
+  pua: {
+    address: string;
+    port: string;
+    configPath: string;
+    workspaces: Array<{ name: string; path: string }>;
+    buildBranch: string;
+    buildCommit: string;
+  };
+  agentHub: {
+    mode: string;
+    address: string;
+    port: string;
+    endpoint: string;
+    connected: boolean;
+    compatible: boolean;
+    version: string;
+    paths: { config: string; sessions: string; archive: string; logs: string };
+    error: string;
+  };
+}
+
 export interface SettingsDraft {
-  tab: "workspace" | "appearance" | "agenthub" | "profiles" | "notifications";
+  tab: "system" | "workspace" | "appearance" | "agenthub" | "profiles" | "notifications";
   workspacePath: string;
   createWorkspace: boolean;
   workspaceLanguage: "en" | "zh-CN";
@@ -104,9 +125,11 @@ export interface SettingsModel {
   initialTab: SettingsDraft["tab"];
   workspaces: WorkspaceOption[];
   activeWorkspaceId: string;
+  workspaceUserNames?: Record<string, string>;
   workspaceIcons: Array<{ id: string; label: string; src: string }>;
   workspaceIconSavingId: string;
   suggestedUserName: string;
+  system: SystemInfo | null;
   appearance: AppearanceSettings;
   agentHub: AgentHubSettings;
   profiles: ProfileDraft[];
@@ -122,7 +145,7 @@ export interface SettingsModel {
   onResetFontScales: () => void;
   onThemePreference: (theme: string) => void;
   onSaveAgentHub: (draft: SettingsDraft) => Promise<void>;
-  onToggleProvider: (providerId: string, enabled: boolean) => Promise<AgentHubConfigProvider>;
+  onSetProviderCommand: (providerId: string, command: string) => Promise<AgentHubConfigProvider>;
   onBrowserNotifications: (enabled: boolean) => void;
   onCompletionSound: (enabled: boolean) => void;
   onToast: (message: string) => void;

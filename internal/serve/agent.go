@@ -28,6 +28,10 @@ import (
 // generation. ID is an implementation key only; resource APIs address
 // records by GenerationID.
 type generationRecord struct {
+	RuntimeChannel     string `json:"runtimeChannel,omitempty"`
+	ChatToken          string `json:"chatToken,omitempty"`
+	OwnerResourceID    string `json:"ownerResourceId,omitempty"`
+	ChatEpoch          uint64 `json:"chatEpoch,omitempty"`
 	ID                 string `json:"id"`
 	WorkspaceID        string `json:"workspaceId"`
 	ResourceID         string `json:"resourceId,omitempty"`
@@ -205,7 +209,9 @@ type agentRuntime struct {
 type agentManager struct {
 	server                *server
 	mu                    sync.Mutex
+	backgroundMu          sync.Mutex
 	backgroundWork        sync.WaitGroup
+	backgroundClosing     bool
 	resourceControllersMu sync.Mutex
 	resourceControllers   map[string]*resourceController
 	runtimes              map[string]*agentRuntime
@@ -231,15 +237,31 @@ func (m *agentManager) runBackground(fn func()) {
 	if fn == nil {
 		return
 	}
-	m.backgroundWork.Add(1)
+	done, ok := m.beginBackground()
+	if !ok {
+		return
+	}
 	go func() {
-		defer m.backgroundWork.Done()
+		defer done()
 		fn()
 	}()
 }
 
 func (m *agentManager) waitBackground() {
+	m.backgroundMu.Lock()
+	m.backgroundClosing = true
+	m.backgroundMu.Unlock()
 	m.backgroundWork.Wait()
+}
+
+func (m *agentManager) beginBackground() (func(), bool) {
+	m.backgroundMu.Lock()
+	defer m.backgroundMu.Unlock()
+	if m.backgroundClosing {
+		return nil, false
+	}
+	m.backgroundWork.Add(1)
+	return m.backgroundWork.Done, true
 }
 
 func newAgentManager(s *server) *agentManager {
@@ -399,6 +421,13 @@ func generationMatchesResource(record generationRecord, resourceID string) bool 
 }
 
 func (m *agentManager) generationCwd(ctx context.Context, workspace serveWorkspace, resourceID, requested string) (string, error) {
+	if strings.HasPrefix(resourceID, dialoguePrefix) {
+		c, err := loadDialogue(workspace.Path, resourceID)
+		if err != nil {
+			return "", err
+		}
+		resourceID = c.ResourceID
+	}
 	if strings.TrimSpace(requested) != "" {
 		return agentCwd(workspace.Path, requested)
 	}

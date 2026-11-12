@@ -3,7 +3,7 @@ import type { ToastModel } from "./models/common";
 import type { CreateDialogModel, TaskTemplate } from "./models/create";
 import type { DetailPanelModel } from "./models/detail";
 import type { SettingsModel } from "./models/settings";
-import type { AppShellModel, DoctorSnapshotModel, ShellActivityItem, ShellActivityLists, ShellDragTarget, ShellInboxMessage, ShellResourceItem, ShellStatusPresentation } from "./models/shell";
+import type { AppShellModel, DoctorSnapshotModel, ShellActivityItem, ShellActivityLists, ShellDragTarget, ShellResourceItem, ShellStatusPresentation } from "./models/shell";
 import type { AgentConfig, AgentProfile, DiffRecord, ResourceRecord, WorkspaceConfig, WorkspaceFileRecord, WorkspaceTree, WorkspaceUser } from "./models/workspace";
 import type { ApiErrorResponse, ArchiveResponse } from "./api/types";
 import { createAgentDraftController } from "./controllers/agent-draft-controller";
@@ -34,6 +34,7 @@ import { ApiError } from "./api/client";
 import { errorMessage } from "./runtime/errors";
 import { ResourceScope } from "./runtime/resource-scope";
 import { projectConversationEvents } from "./components/timeline-events";
+import { WORKSPACE_ICONS, workspaceIconOption } from "./models/workspace-icons";
 
 export interface PUAViewPublisher {
   renderAppShell(model: AppShellModel): void;
@@ -50,25 +51,14 @@ export interface PUAViewPublisher {
 let publisher: PUAViewPublisher;
 let lifecycle: ResourceScope | null = null;
 
-interface InboxMessageRecord {
-	messageId: string;
-	text: string;
-	sourceResourceId: string;
-	senderName?: string;
-	createdAt?: string;
-	readAt?: string;
-	repliedAt?: string;
-	unread?: boolean;
-}
-
 interface ControllerState {
 	config: WorkspaceConfig | null;
 	settingsRevision: string;
 	doctor: DoctorSnapshotModel;
 	tree: WorkspaceTree | null;
-	inbox: InboxMessageRecord[];
 	details: Record<string, ResourceRecord>;
 	workspaceAgents: WorkspaceFileRecord | null;
+	workspaceChat: WorkspaceFileRecord | null;
 	workspaceUsers: WorkspaceUser[];
 	currentUserName: string;
 	userGate: { mode: "" | "create" | "select" | "loading"; suggestedUserName: string; missingUserName: string };
@@ -95,6 +85,7 @@ interface ControllerState {
 	autoRefreshVersion: number;
 	treeRequestVersion: number;
 	navigationVersion: number;
+	chatFocusRequest: number;
 	detailRequestVersion: number;
 	workspaceAgentsRequestVersion: number;
 	diffRequestVersion: number;
@@ -128,9 +119,9 @@ const controllerState: ControllerState = {
 	settingsRevision: "",
 	doctor: { checking: true, complete: false, summary: { errors: 0, warnings: 0 }, workspaces: [] },
 	tree: null,
-	inbox: [] as InboxMessageRecord[],
 	details: {},
 	workspaceAgents: null,
+	workspaceChat: null,
 	workspaceUsers: [],
 	currentUserName: "",
 	userGate: { mode: "", suggestedUserName: "", missingUserName: "" },
@@ -163,6 +154,7 @@ const controllerState: ControllerState = {
 	autoRefreshVersion: 0,
 	treeRequestVersion: 0,
 	navigationVersion: 0,
+	chatFocusRequest: 0,
 	detailRequestVersion: 0,
 	workspaceAgentsRequestVersion: 0,
 	diffRequestVersion: 0,
@@ -242,8 +234,7 @@ const createDialogController = createCreateDialogController({
 		const projectDefault = controllerState.details[projectId]?.taskDefault;
 		if (projectDefault?.name) return projectDefault;
 		return controllerState.tree?.resourceDefaults?.task || { kind: "profile" as const, name: "default" };
-	},
-	currentUserName
+	}
 });
 const elementById = <ElementType extends HTMLElement = HTMLElement>(id: string): ElementType | null => document.getElementById(id) as ElementType | null;
 const AUTO_REFRESH_INTERVAL_MS = 5e3;
@@ -251,103 +242,12 @@ interface LoadTreeOptions { updateURL?: boolean; replaceURL?: boolean }
 interface LoadDetailOptions { force?: boolean }
 interface FetchDetailOptions {}
 interface WorkspaceAgentsOptions { force?: boolean }
-interface SelectResourceOptions { clearUnread?: boolean; forceDetail?: boolean }
+interface SelectResourceOptions { clearUnread?: boolean; forceDetail?: boolean; focusChat?: boolean }
 interface RenderOptions { skipDraftSync?: boolean }
 interface UploadContext { workspaceId?: string; resourceId?: string }
-interface WorkspaceIconOption { id: string; label: string; src: string; type?: string }
-const DEFAULT_WORKSPACE_ICON: WorkspaceIconOption = {
-	id: "",
-	label: "PUA default",
-	src: "/favicon.svg",
-	type: "image/svg+xml"
-};
-const WORKSPACE_ICONS: WorkspaceIconOption[] = [
-	{
-		id: "home-base",
-		label: "Home base",
-		src: "/workspace-icons/01-home-base.png"
-	},
-	{
-		id: "personal-tasks",
-		label: "Personal tasks",
-		src: "/workspace-icons/02-personal-tasks.png"
-	},
-	{
-		id: "product-roadmap",
-		label: "Product roadmap",
-		src: "/workspace-icons/03-product-roadmap.png"
-	},
-	{
-		id: "software-engineering",
-		label: "Software engineering",
-		src: "/workspace-icons/04-software-engineering.png"
-	},
-	{
-		id: "design-studio",
-		label: "Design studio",
-		src: "/workspace-icons/05-design-studio.png"
-	},
-	{
-		id: "marketing-campaign",
-		label: "Marketing campaign",
-		src: "/workspace-icons/06-marketing-campaign.png"
-	},
-	{
-		id: "sales-pipeline",
-		label: "Sales pipeline",
-		src: "/workspace-icons/07-sales-pipeline.png"
-	},
-	{
-		id: "operations",
-		label: "Operations",
-		src: "/workspace-icons/08-operations.png"
-	},
-	{
-		id: "finance",
-		label: "Finance",
-		src: "/workspace-icons/09-finance.png"
-	},
-	{
-		id: "research-lab",
-		label: "Research lab",
-		src: "/workspace-icons/10-research-lab.png"
-	},
-	{
-		id: "learning-education",
-		label: "Learning and education",
-		src: "/workspace-icons/11-learning-education.png"
-	},
-	{
-		id: "customer-support",
-		label: "Customer support",
-		src: "/workspace-icons/12-customer-support.png"
-	},
-	{
-		id: "events-calendar",
-		label: "Events and calendar",
-		src: "/workspace-icons/13-events-calendar.png"
-	},
-	{
-		id: "documentation-knowledge",
-		label: "Documentation and knowledge",
-		src: "/workspace-icons/14-documentation-knowledge.png"
-	},
-	{
-		id: "analytics",
-		label: "Analytics",
-		src: "/workspace-icons/15-analytics.png"
-	},
-	{
-		id: "community-team",
-		label: "Community and team",
-		src: "/workspace-icons/16-community-team.png"
-	}
-];
-const WORKSPACE_ICON_BY_ID = new Map(WORKSPACE_ICONS.map((item) => [item.id, item]));
 const {
 	applyCustomOrder,
 	archiveRedirectTarget,
-	aggregatedUnreadCount,
 	moveIdInList,
 	projectTaskSummary,
 	resourceRefText,
@@ -370,12 +270,13 @@ const settingsController = createSettingsController({
 		if (config.revision) controllerState.settingsRevision = config.revision;
 	},
 	activeWorkspaceId: () => controllerState.activeWorkspaceId,
+	workspaceUserName: (workspace) => workspace.id === controllerState.activeWorkspaceId ? currentUserName() : userSettingsController?.selected(workspace.instanceId || workspace.id) || "",
 	setActiveWorkspaceId: (id) => { controllerState.activeWorkspaceId = id; },
 	selectWorkspaceResource: () => { controllerState.selectedId = "workspace"; },
 	request: (path, init) => api(path, init),
 	publish: (model) => publisher.renderSettings(model),
 	agentOptions: svelteAgentOptions,
-	workspaceIcons: [DEFAULT_WORKSPACE_ICON, ...WORKSPACE_ICONS],
+	workspaceIcons: WORKSPACE_ICONS,
 	appearance: () => {
 		const snapshot = paneLayoutController.snapshot();
 		return {
@@ -520,7 +421,6 @@ function beginWorkspaceUserTransition(name: string): void {
 	controllerState.detailRequestVersion++;
 	selectWorkspaceUser(name);
 	controllerState.tree = null;
-	controllerState.inbox = [];
 	clearResourceDetailState();
 	controllerState.navigationLoading = true;
 	controllerState.navigationError = "";
@@ -564,7 +464,6 @@ async function resolveWorkspaceIdentity(workspaceId = controllerState.activeWork
 	}
 	controllerState.currentUserName = "";
 	controllerState.tree = null;
-	controllerState.inbox = [];
 	clearResourceDetailState();
 	controllerState.navigationLoading = false;
 	controllerState.navigationError = "";
@@ -691,6 +590,7 @@ async function load() {
 		controllerState.tree = null;
 		clearResourceDetailState();
 		controllerState.workspaceAgents = null;
+		controllerState.workspaceChat = null;
 		controllerState.workspaceUsers = [];
 		controllerState.diff = null;
 		resetAgentState();
@@ -727,6 +627,7 @@ async function loadTree(options: LoadTreeOptions = {}) {
 	controllerState.tree = tree;
 	clearResourceDetailState();
 	controllerState.workspaceAgents = null;
+	controllerState.workspaceChat = null;
 	controllerState.diff = null;
 	ensureValidSelection();
 	ensureSelectedProjectExpanded(false);
@@ -743,9 +644,7 @@ async function loadTree(options: LoadTreeOptions = {}) {
 	if (options.updateURL !== false) syncURL({ replace: Boolean(options.replaceURL) });
 	await refreshResourceMessageStatus(workspaceId, selectedAgentResourceId());
 	if (!isCurrentWorkspaceView(workspaceId, navigationVersion, treeRequestVersion)) return;
-	await refreshInbox(workspaceId);
 	if (!isCurrentWorkspaceView(workspaceId, navigationVersion, treeRequestVersion)) return;
-	await markSelectedResourceRead();
 	if (!isCurrentWorkspaceView(workspaceId, navigationVersion, treeRequestVersion)) return;
 	establishNotificationBaseline();
 	controllerState.navigationLoading = false;
@@ -770,18 +669,15 @@ async function loadWorkspaceAgents(options: WorkspaceAgentsOptions = {}) {
 	const workspaceId = controllerState.activeWorkspaceId;
 	const navigationVersion = controllerState.navigationVersion;
 	const requestVersion = ++controllerState.workspaceAgentsRequestVersion;
-	try {
-		const agents = await api<WorkspaceFileRecord>(`/api/workspaces/${workspaceId}/files?path=${encodeURIComponent("AGENTS.md")}`);
-		if (!isCurrentWorkspaceView(workspaceId, navigationVersion) || requestVersion !== controllerState.workspaceAgentsRequestVersion) return null;
-		controllerState.workspaceAgents = agents;
-	} catch (err) {
-		if (!isCurrentWorkspaceView(workspaceId, navigationVersion) || requestVersion !== controllerState.workspaceAgentsRequestVersion) return null;
-		controllerState.workspaceAgents = {
-			path: "AGENTS.md",
-			name: "AGENTS.md",
-			error: errorMessage(err)
-		};
-	}
+	const results = await Promise.allSettled(["AGENTS.md", "chat.md"].map((path) =>
+		api<WorkspaceFileRecord>(`/api/workspaces/${workspaceId}/files?path=${encodeURIComponent(path)}`)));
+	if (!isCurrentWorkspaceView(workspaceId, navigationVersion) || requestVersion !== controllerState.workspaceAgentsRequestVersion) return null;
+	const document = (index: number, path: string): WorkspaceFileRecord => {
+		const result = results[index];
+		return result.status === "fulfilled" ? result.value : { path, name: path, error: errorMessage(result.reason) };
+	};
+	controllerState.workspaceAgents = document(0, "AGENTS.md");
+	controllerState.workspaceChat = document(1, "chat.md");
 	return controllerState.workspaceAgents;
 }
 async function loadUIState(workspaceId = controllerState.activeWorkspaceId, navigationVersion = controllerState.navigationVersion) {
@@ -871,9 +767,10 @@ async function autoRefresh() {
 		changed = changed || expandedCount !== controllerState.expandedProjects.size;
 		if (controllerState.selectedId === "workspace") {
 			const previousAgents = controllerState.workspaceAgents;
+			const previousChat = controllerState.workspaceChat;
 			await loadWorkspaceAgents({ force: true });
 			if (!isCurrentAutoRefresh(workspaceId, navigationVersion, refreshVersion)) return;
-			if (!sameJSON(previousAgents, controllerState.workspaceAgents)) changed = true;
+			if (!sameJSON(previousAgents, controllerState.workspaceAgents) || !sameJSON(previousChat, controllerState.workspaceChat)) changed = true;
 		} else if (selectedId) {
 			const detailRequestVersion = ++controllerState.detailRequestVersion;
 			const detail = await fetchDetail(selectedId, workspaceId);
@@ -883,7 +780,6 @@ async function autoRefresh() {
 			if (!sameJSON(previousDetail, resourceDetailSnapshot(selectedId))) changed = true;
 		}
 		observeCompletionProjections(resourceNotificationProjections(tree));
-		if (await refreshInbox(workspaceId)) changed = true;
 		if (await refreshResourceMessageStatus(workspaceId, selectedAgentResourceId())) changed = true;
 		if (taskOperationalStateKey() !== controllerState.taskOperationalStateKey) changed = true;
 		if (changed) publishViewModels();
@@ -910,9 +806,6 @@ function isCurrentWorkspaceView(workspaceId: string, navigationVersion: number, 
 function isCurrentAutoRefresh(workspaceId: string, navigationVersion: number, refreshVersion: number): boolean {
 	return isCurrentWorkspaceView(workspaceId, navigationVersion) && refreshVersion === controllerState.autoRefreshVersion;
 }
-function workspaceIconOption(workspace: { icon?: string } | null | undefined): WorkspaceIconOption {
-	return WORKSPACE_ICON_BY_ID.get(String(workspace?.icon || "").trim()) || DEFAULT_WORKSPACE_ICON;
-}
 function updateWorkspaceFavicon(workspace: { icon?: string } | null | undefined): void {
 	const option = workspaceIconOption(workspace);
 	let link = document.querySelector<HTMLLinkElement>("link[rel=\"icon\"]");
@@ -922,7 +815,7 @@ function updateWorkspaceFavicon(workspace: { icon?: string } | null | undefined)
 		document.head.appendChild(link);
 	}
 	link.type = "type" in option ? String(option.type || "image/png") : "image/png";
-	link.href = option.src;
+	link.href = option.faviconSrc || option.src;
 }
 function renderWorkspaceSelect() {
 	const active = controllerState.config?.workspaces?.find((workspace) => workspace.id === controllerState.activeWorkspaceId);
@@ -934,12 +827,8 @@ function appShellResourceModel(item: ResourceRecord, kind: "project" | "task", p
 	const expanded = kind === "project" && isProjectExpanded(item.id);
 	const summary = kind === "project" ? projectTaskSummary(item) : null;
 	const title = item.title || item.id;
-	// A collapsed Project aggregates its Tasks' unread Turns into its own
-	// badge; expanded Projects show only their own because each visible Task
-	// renders its own badge.
-	const unreadCount = kind === "project"
-		? aggregatedUnreadCount(Number(item.unreadCount) || 0, item.children || [], expanded)
-		: Number(item.unreadCount) || 0;
+	// Each resource owns its public chat; child chats are never aggregated.
+	const unreadCount = Number(item.chat?.unreadCount) || 0;
 	return {
 		id: item.id,
 		type: kind,
@@ -951,7 +840,7 @@ function appShellResourceModel(item: ResourceRecord, kind: "project" | "task", p
 			title,
 			summary?.ariaLabel,
 			taskState.label,
-			unreadCount ? `${unreadCount} unread ${unreadCount === 1 ? "Turn" : "Turns"}` : ""
+			unreadCount ? `${unreadCount} unread chat ${unreadCount === 1 ? "message" : "messages"}` : ""
 		].filter(Boolean).join(". "),
 		statusLabel: taskState.label || "",
 		status: appShellStatusModel(taskState.statusPresentation),
@@ -962,6 +851,7 @@ function appShellResourceModel(item: ResourceRecord, kind: "project" | "task", p
 		} : null,
 		children: kind === "project" ? appShellProjectChildrenModel(item) : [],
 		projectId,
+		chatOpen: Boolean(item.chat?.open),
 		unreadCount
 	};
 }
@@ -997,8 +887,7 @@ function appShellFolderModel(folder: SidebarFolder, project: ResourceRecord, tas
 	);
 	const children = taskIds.map((id) => taskById.get(id)).filter((task): task is ResourceRecord => Boolean(task)).map((task) => appShellResourceModel(task, "task", project.id));
 	const title = folder.name || SIDEBAR_FOLDER_DEFAULT_NAME;
-	// A collapsed folder aggregates the unread Turns of the Tasks it hides.
-	const unreadCount = aggregatedUnreadCount(0, children, folder.expanded);
+	const unreadCount = 0;
 	return {
 		id: folder.id,
 		type: "folder",
@@ -1009,7 +898,7 @@ function appShellFolderModel(folder: SidebarFolder, project: ResourceRecord, tas
 		ariaLabel: [
 			`Folder ${title}`,
 			`${children.length} ${children.length === 1 ? "task" : "tasks"}`,
-			unreadCount ? `${unreadCount} unread ${unreadCount === 1 ? "Turn" : "Turns"}` : ""
+			unreadCount ? `${unreadCount} unread chat ${unreadCount === 1 ? "message" : "messages"}` : ""
 		].filter(Boolean).join(". "),
 		statusLabel: "",
 		status: appShellStatusModel(noTaskOperationalState().statusPresentation),
@@ -1038,7 +927,7 @@ function appShellSchedulerModel(item: ResourceRecord | null | undefined): ShellR
 	};
 }
 function appShellActivityModel(item: ResourceRecord, category: keyof ShellActivityLists): ShellActivityItem {
-	const state = item.type === "task" && (item.state === "blocked" || item.state === "error") ? taskWorkflowState(item) : taskOperationalState(item);
+	const state = item.type === "task" && (category === "unread" || item.state === "blocked" || item.state === "error") ? taskWorkflowState(item) : taskOperationalState(item);
 	const type = item.type === "scheduler" || item.type === "project" || item.type === "task" ? item.type : "workspace";
 	const title = item.title || item.id;
 	return {
@@ -1048,24 +937,11 @@ function appShellActivityModel(item: ResourceRecord, category: keyof ShellActivi
 		ref: type === "project" || type === "task" ? resourceRefText(item.id) : "",
 		selected: controllerState.selectedId === item.id,
 		activeTurn: Boolean(item.runtime?.activeTurn),
-		unreadCount: Number(item.unreadCount) || 0,
+		unreadCount: Number(category === "unread" ? item.chat?.unreadCount : item.unreadCount) || 0,
 		turnNumber: category === "running" ? Number(item.runtime?.turnNumber) || 0 : Number(item.latestTurnNumber) || 0,
 		agentName: String(item.runtime?.agentName || item.latestAgentName || "").trim(),
-		statusLabel: state.label || (category === "unread" ? `${Number(item.unreadCount) || 0} unread` : "Active turn"),
+		statusLabel: state.label || (category === "unread" ? "Idle" : "Active turn"),
 		status: appShellStatusModel(state.statusPresentation)
-	};
-}
-function appShellInboxModel(message: InboxMessageRecord): ShellInboxMessage {
-	const resource = findResource(message.sourceResourceId || "");
-	return {
-		id: message.messageId,
-		resourceId: message.sourceResourceId || "",
-		resourceTitle: resource?.title || message.sourceResourceId || "",
-		senderName: String(message.senderName || message.sourceResourceId || "").trim(),
-		text: message.text || "",
-		timeLabel: relativeTime(message.createdAt),
-		unread: message.unread === true || !message.readAt,
-		replied: Boolean(message.repliedAt)
 	};
 }
 function renderAppShell() {
@@ -1076,9 +952,6 @@ function renderAppShell() {
 		unread: activitySource?.unread?.map((item) => appShellActivityModel(item, "unread")) || [],
 		problems: activitySource?.problems?.map((item) => appShellActivityModel(item, "problems")) || [],
 	};
-	// The inbox lists newest messages first; the Server returns them in
-	// acceptance order.
-	const inbox: ShellInboxMessage[] = (controllerState.inbox || []).slice().reverse().map(appShellInboxModel);
 	if (controllerState.tree) controllerState.taskOperationalStateKey = taskOperationalStateKey();
 	const workspaceState = resourceNavigationState(controllerState.tree?.workspace);
 	publisher.renderAppShell({
@@ -1102,7 +975,6 @@ function renderAppShell() {
 		projects,
 		treeEditing: controllerState.treeEditing,
 		activity,
-		inbox,
 		doctor: doctorSnapshotForWorkspace(controllerState.doctor, controllerState.activeWorkspaceId),
 		...paneLayoutController.snapshot(),
 		route: routeController.projection(),
@@ -1115,6 +987,7 @@ function renderAppShell() {
 		onRefreshDoctor: requestDoctorRefresh,
 		onToggleProject: (id) => toggleProject(id),
 		onSelectResource: (id) => selectResource(id),
+		onSelectChat: (id) => selectResource(id, { focusChat: true, clearUnread: false }),
 		onReorder: (drag, target, after) => commitListDrag(drag, target, after),
 		onDragState: (drag) => {
 			controllerState.listDrag = drag;
@@ -1124,9 +997,6 @@ function renderAppShell() {
 		onRenameFolder: (id, name) => renameFolder(id, name),
 		onDeleteFolder: (id) => deleteFolder(id),
 		onToggleFolder: (id) => toggleFolder(id),
-		onOpenInboxMessage: (id) => openInboxMessage(id),
-		onReplyInboxMessage: (id, text) => replyInboxMessage(id, text),
-		onDeleteInboxMessage: (id) => deleteInboxMessage(id),
 		onPanePreview: (name, value) => setPaneSize(name, value),
 		onPaneCommit: (name) => savePaneSize(name),
 		onPaneViewport: () => syncPaneViewport(),
@@ -1155,7 +1025,6 @@ async function switchWorkspace(id: string): Promise<void> {
 	controllerState.activeWorkspaceId = id;
 	controllerState.selectedId = "workspace";
 	controllerState.tree = null;
-	controllerState.inbox = [];
 	controllerState.treeEditing = false;
 	controllerState.navigationLoading = true;
 	controllerState.navigationError = "";
@@ -1291,6 +1160,7 @@ async function toggleFolder(id: string): Promise<void> {
 	});
 }
 async function selectResource(id: string, options: SelectResourceOptions = {}): Promise<void> {
+	if (options.focusChat) controllerState.chatFocusRequest++;
 	const selectionChanged = controllerState.selectedId !== id;
 	if (options.clearUnread !== false) clearUnreadForResource(id);
 	const forceDetail = selectionChanged || Boolean(options.forceDetail);
@@ -1333,14 +1203,13 @@ async function selectResource(id: string, options: SelectResourceOptions = {}): 
 	);
 	await detailPromise;
 	if (!isCurrentWorkspaceView(controllerState.activeWorkspaceId, controllerState.navigationVersion)) return;
-	// Details are independent of the status/read side effects below. Render
+	// Details are independent of the status request below. Render
 	// them immediately so selection remains usable when the status endpoint is
 	// delayed by resource reconciliation.
 	renderSelectionPanels();
 	const statusResult = await statusPromise;
 	if (!statusResult.ok) throw statusResult.error;
 	if (!isCurrentWorkspaceView(controllerState.activeWorkspaceId, controllerState.navigationVersion)) return;
-	await markSelectedResourceRead();
 	renderSelectionPanels();
 }
 async function toggleProject(id: string): Promise<void> {
@@ -1358,7 +1227,30 @@ async function toggleProject(id: string): Promise<void> {
 }
 function detailPanelModel(): DetailPanelModel {
 	const workspaceId = controllerState.activeWorkspaceId || "";
+	const resourceId = controllerState.selectedId || "";
+	const userName = currentUserName();
+	const unreadResource = findTreeResource(resourceId);
 	const base: DetailPanelModel = {
+		chatFocusRequest: controllerState.chatFocusRequest,
+		executionUnreadCount: unreadResource?.unreadCount || 0,
+		dialogueUnreadCount: unreadResource?.dialogueEvents?.unreadCount || 0,
+		onChatState: (chat) => {
+			if (workspaceId !== controllerState.activeWorkspaceId || userName !== currentUserName()) return;
+			const item = findTreeResource(resourceId);
+			if (!item || (!item.chat && !chat.open && !chat.unreadCount) || sameJSON(item.chat, chat)) return;
+			controllerState.treeRequestVersion++;
+			item.chat = chat;
+			if (controllerState.tree?.activity) {
+				const entry = controllerState.tree.activity.unread.find(entry => entry.id === resourceId);
+				if (entry) entry.chat = chat;
+			}
+			renderAppShell();
+			void refreshTreeAfterResourceMutation().then(() => publishViewModels()).catch(err => console.warn("chat state refresh failed", err));
+		},
+		onSessionRead: () => {
+			if (workspaceId !== controllerState.activeWorkspaceId || userName !== currentUserName()) return;
+			void refreshTreeAfterResourceMutation().then(() => publishViewModels()).catch(err => console.warn("read state refresh failed", err));
+		},
 		identity: workspaceId ? `${workspaceId}:${controllerState.selectedId || "workspace"}` : "empty",
 		workspaceId,
 		workspaceName: workspaceName(),
@@ -1370,13 +1262,14 @@ function detailPanelModel(): DetailPanelModel {
 		detail: null,
 		wiki: controllerState.tree?.wiki || null,
 		workspaceAgents: controllerState.workspaceAgents,
+		workspaceChat: controllerState.workspaceChat,
 		workspaceDefaults: {
 			project: controllerState.tree?.resourceDefaults?.project || { kind: "profile", name: "default" },
 			task: controllerState.tree?.resourceDefaults?.task || { kind: "profile", name: "default" }
 		},
 		workspaceUsers: controllerState.workspaceUsers,
 		currentUserName: currentUserName(),
-		generationPolicy: controllerState.tree?.generationPolicy || { enabled: true, maxTurns: 20, maxAccumulatedTurnMinutes: 120 },
+			generationPolicy: controllerState.tree?.generationPolicy || { budgetEnabled: true, maxTurns: 20, maxAccumulatedTurnMinutes: 120, inactivityEnabled: true, maxInactivityMinutes: 1440 },
 		stallWatchdogPolicy: controllerState.tree?.stallWatchdogPolicy || { enabled: true, timeoutMinutes: 30 },
 		agentBinding: controllerState.selectedId === "workspace"
 			? controllerState.tree?.agentBinding || { kind: "profile", name: "default" }
@@ -1558,7 +1451,7 @@ async function saveWorkspaceAgentsFromDetail(content: string, expectedContentHas
 async function saveMarkdownFileFromDetail(path: string, content: string, expectedContentHash: string): Promise<WorkspaceFileRecord> {
 	const workspaceId = controllerState.activeWorkspaceId;
 	const resourceId = controllerState.selectedId;
-	if (!workspaceId || !resourceId || resourceId === "workspace" || resourceId === "scheduler") throw new Error("No editable resource is selected.");
+	if (!workspaceId || !resourceId || resourceId === "scheduler" || (resourceId === "workspace" && path !== "chat.md")) throw new Error("No editable resource is selected.");
 	const navigationVersion = controllerState.navigationVersion;
 	if (path.includes("/templates/")) {
 		const name = path.split("/").pop()?.replace(/\.(md|markdown|mdown|mkdn)$/i, "") || "template";
@@ -1573,7 +1466,8 @@ async function saveMarkdownFileFromDetail(path: string, content: string, expecte
 		body: JSON.stringify({ content, expectedContentHash })
 	});
 	if (!isCurrentWorkspaceView(workspaceId, navigationVersion) || controllerState.selectedId !== resourceId) throw new Error("The resource changed before the Markdown file finished saving.");
-	await loadDetail(resourceId, { force: true });
+	if (resourceId === "workspace") controllerState.workspaceChat = saved;
+	else await loadDetail(resourceId, { force: true });
 	publishViewModels();
 	return saved;
 }
@@ -1610,104 +1504,11 @@ async function fetchCurrentTree(workspaceId = controllerState.activeWorkspaceId)
 	}
 	return isCurrentWorkspaceView(workspaceId, navigationVersion, requestVersion) ? tree : null;
 }
-// refreshInbox loads the current user's durable agent-to-user inbox. The
-// inbox is Workspace-scoped but user-specific; fetch failures are silent so a
-// missing user profile never breaks the surrounding refresh cycle.
-async function refreshInbox(workspaceId = controllerState.activeWorkspaceId): Promise<boolean> {
-	if (!workspaceId) return false;
-	try {
-		const response = await api<{ messages?: InboxMessageRecord[] }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/users/${encodeURIComponent(currentUserName())}/messages`);
-		if (workspaceId !== controllerState.activeWorkspaceId) return false;
-		const messages = Array.isArray(response.messages) ? response.messages : [];
-		if (sameJSON(controllerState.inbox, messages)) return false;
-		controllerState.inbox = messages;
-		return true;
-	} catch (err) {
-		console.warn("inbox refresh failed", err);
-		return false;
-	}
-}
-async function openInboxMessage(messageId: string): Promise<void> {
-	const workspaceId = controllerState.activeWorkspaceId;
-	const message = controllerState.inbox.find((item) => item.messageId === messageId);
-	if (!workspaceId || !message) return;
-	if (message.unread || !message.readAt) {
-		try {
-			await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/users/${encodeURIComponent(currentUserName())}/messages/${encodeURIComponent(messageId)}/read`, { method: "PUT" });
-		} catch (err) {
-			console.warn("failed to mark inbox message read", err);
-		}
-	}
-	if (message.sourceResourceId) await selectResource(message.sourceResourceId);
-	await refreshInbox(workspaceId);
-	publishViewModels();
-}
-async function replyInboxMessage(messageId: string, text: string): Promise<void> {
-	const workspaceId = controllerState.activeWorkspaceId;
-	const message = controllerState.inbox.find((item) => item.messageId === messageId);
-	if (!workspaceId || !message || !text.trim()) return;
-	await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/users/${encodeURIComponent(currentUserName())}/messages/${encodeURIComponent(messageId)}/reply`, {
-		method: "POST", body: JSON.stringify({ text: text.trim() })
-	});
-	await refreshInbox(workspaceId);
-	if (message.sourceResourceId && message.sourceResourceId === selectedAgentResourceId()) {
-		await refreshResourceMessageStatus(workspaceId, message.sourceResourceId);
-	}
-	publishViewModels();
-	toast("Reply sent.");
-}
-async function deleteInboxMessage(messageId: string): Promise<void> {
-	const workspaceId = controllerState.activeWorkspaceId;
-	if (!workspaceId) return;
-	const confirmed = await confirmDialog({ title: "Delete message", message: "Delete this inbox message? This cannot be undone.", confirmLabel: "Delete", danger: true });
-	if (!confirmed) return;
-	await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/users/${encodeURIComponent(currentUserName())}/messages/${encodeURIComponent(messageId)}`, { method: "DELETE" });
-	await refreshInbox(workspaceId);
-	publishViewModels();
-}
+
 async function refreshTreeAfterResourceMutation(): Promise<void> {
 	if (!controllerState.activeWorkspaceId || !controllerState.tree) return;
 	const tree = await fetchCurrentTree(controllerState.activeWorkspaceId);
 	if (tree) controllerState.tree = tree;
-}
-async function markSelectedResourceRead(): Promise<boolean> {
-	const workspaceId = controllerState.activeWorkspaceId;
-	const resourceId = selectedAgentResourceId();
-	if (!workspaceId || !resourceId || !controllerState.tree) return false;
-	const item = findTreeResource(resourceId);
-	if (!item) return false;
-	const turnNumber = Number(item.latestTurnNumber) || 0;
-	const readTurnNumber = Number(item.userState?.readTurnNumber) || 0;
-	if (turnNumber <= 0 || turnNumber <= readTurnNumber) return false;
-	const navigationVersion = controllerState.navigationVersion;
-	const userState = await api<{ readTurnNumber?: number }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/resources/${encodeURIComponent(resourceId)}/read`, {
-		method: "PUT",
-		body: JSON.stringify({ throughTurnNumber: turnNumber })
-	});
-	if (!isCurrentWorkspaceView(workspaceId, navigationVersion) || selectedAgentResourceId() !== resourceId) return false;
-	updateResourceReadState(resourceId, userState);
-	return true;
-}
-
-function updateResourceReadState(resourceId: string, userState: { readTurnNumber?: number }): void {
-	const tree = controllerState.tree;
-	if (!tree) return;
-	const update = (item: ResourceRecord | null | undefined): void => {
-		if (!item || item.id !== resourceId) return;
-		item.userState = userState;
-		item.unreadCount = Math.max(0, (Number(item.latestTurnNumber) || 0) - (Number(userState.readTurnNumber) || 0));
-	};
-	update(tree.workspace);
-	update(tree.scheduler);
-	for (const project of tree.projects || []) {
-		update(project);
-		for (const task of project.children || []) update(task);
-	}
-	if (!tree.activity) return;
-	for (const items of Object.values(tree.activity)) {
-		for (const item of items) update(item);
-	}
-	tree.activity.unread = tree.activity.unread.filter((item) => item.id !== resourceId);
 }
 async function refreshResourceMessageStatus(workspaceId = controllerState.activeWorkspaceId, resourceId = selectedAgentResourceId()): Promise<boolean> {
 	if (!workspaceId || !resourceId) return false;
@@ -1820,9 +1621,15 @@ function renderChatPanel(_options: RenderOptions = {}): void {
 	renderChatComposer();
 	const resourceId = selectedAgentResourceId();
 	const status = controllerState.messageStatusKey === `${controllerState.activeWorkspaceId}:${resourceId}` ? controllerState.messageStatus : null;
-	const configured = (controllerState.config?.agents || []).find((agent) => agent.id === status?.resolvedAgent);
-	const agent = configured || selectedAgentConfig();
 	const runtime = findResource(resourceId)?.runtime;
+	const configuredAgents = controllerState.config?.agents || [];
+	const targetAgentId = String(status?.resolvedAgent || "").trim();
+	const currentAgentId = String(status?.generation?.agentName || runtime?.agentName || targetAgentId).trim();
+	const currentAgent = configuredAgents.find((agent) => agent.id === currentAgentId) || (currentAgentId ? null : selectedAgentConfig());
+	const targetAgent = configuredAgents.find((agent) => agent.id === targetAgentId);
+	const currentAgentName = currentAgent ? agentDisplayName(currentAgent) : currentAgentId || "Agent";
+	const targetAgentName = targetAgent ? agentDisplayName(targetAgent) : targetAgentId;
+	const nextAgentName = currentAgentId && targetAgentId && currentAgentId.toLowerCase() !== targetAgentId.toLowerCase() ? targetAgentName : "";
 	const submitting = agentOperations.isSending(resourceMutationKey(controllerState.activeWorkspaceId, resourceId));
 	publisher.renderAgentPanelHeader({
 		identity: `${controllerState.activeWorkspaceId}:${resourceId}`,
@@ -1830,8 +1637,11 @@ function renderChatPanel(_options: RenderOptions = {}): void {
 		resourceId,
 		status,
 		submitting,
-		agentName: agentDisplayName(agent),
-		modelSummary: agentConfigSummary(agent),
+		agentName: currentAgentName,
+		nextAgentName,
+		errorText: String(status?.lastError || status?.generation?.resumeLastError || status?.configError || "").trim(),
+		retryAt: String(status?.generation?.resumeRetryAt || ""),
+		modelSummary: agentConfigSummary(currentAgent),
 		turnNumber: Number(status?.generation?.turnNumber) || Number(runtime?.turnNumber) || 0,
 		turnStartedAt: String(runtime?.turnStartedAt || "")
 	});
@@ -1841,7 +1651,7 @@ function renderChatPanel(_options: RenderOptions = {}): void {
 		resourceId,
 		status,
 		submitting,
-		agentName: agentDisplayName(agent),
+		agentName: currentAgentName,
 		resolveResourceTitle,
 		onNavigate: (targetResourceId: string) => selectResource(targetResourceId).catch((err) => toast(errorMessage(err))),
 		project: projectConversationEvents,
@@ -2057,7 +1867,14 @@ async function submitChatInput(rawText: string, context: ComposerContext): Promi
 		const clear = clearResourceDraftAfterAccepted({ workspaceId: context.workspaceId, resourceId: context.resourceId, key: context.draftKey, text: rawText, version });
 		if (clear) controllerState.agent.chatDraftResetVersion++;
 		if (clear && controllerState.stopNotice?.key === `${context.workspaceId}:${context.resourceId}`) controllerState.stopNotice = null;
-		await Promise.all([refreshResourceMessageStatus(context.workspaceId, context.resourceId), refreshTreeAfterResourceMutation()]);
+		// The message is durably accepted once the POST returns. Resolve the
+		// send immediately so the composer clears its submitting state, and
+		// refresh status/tree in the background: those requests share the
+		// resource's server-side job queue and can lag behind long-running
+		// reconciliation work (for example first-turn setup on large sessions).
+		void Promise.all([refreshResourceMessageStatus(context.workspaceId, context.resourceId), refreshTreeAfterResourceMutation()])
+			.then(publishViewModels)
+			.catch((err) => console.warn("post-send refresh failed", err));
 		publishViewModels();
 		return { accepted, clear };
 	} finally {
@@ -2237,7 +2054,7 @@ function configuredAgentProfileName(profiles: AgentProfile[] | undefined, key: s
 	const profile = (profiles || []).find((item) => String(item.key || "").trim().toLowerCase() === normalizedKey);
 	return String(profile?.agentName || "").trim();
 }
-async function openSettings(tab: SettingsModel["initialTab"] = "workspace"): Promise<void> {
+async function openSettings(tab: SettingsModel["initialTab"] = "system"): Promise<void> {
 	return settingsController.open(tab);
 }
 function closeSettings(dirty = false): void {

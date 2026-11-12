@@ -60,15 +60,20 @@ func TestWorkspaceDefaultsAndProjectTaskDefaultHTTPAPI(t *testing.T) {
 		t.Fatalf("unknown Profile default = %d %s", unknownProfile.Code, unknownProfile.Body.String())
 	}
 
-	policyResponse := request(http.MethodPut, "/api/workspaces/workspace-defaults/generation-policy", `{"enabled":false,"maxTurns":25,"maxAccumulatedTurnMinutes":150}`)
+	policyResponse := request(http.MethodPut, "/api/workspaces/workspace-defaults/generation-policy", `{"budgetEnabled":false,"maxTurns":25,"maxAccumulatedTurnMinutes":150,"inactivityEnabled":true,"maxInactivityMinutes":1440}`)
 	var policyBody struct {
 		GenerationPolicy app.GenerationPolicy `json:"generationPolicy"`
 	}
 	policyErr := json.Unmarshal(policyResponse.Body.Bytes(), &policyBody)
-	if policyResponse.Code != http.StatusOK || policyErr != nil || policyBody.GenerationPolicy != (app.GenerationPolicy{Enabled: false, MaxTurns: 25, MaxAccumulatedTurnMinutes: 150}) {
+	if policyResponse.Code != http.StatusOK || policyErr != nil || policyBody.GenerationPolicy != (app.GenerationPolicy{BudgetEnabled: false, MaxTurns: 25, MaxAccumulatedTurnMinutes: 150, InactivityEnabled: true, MaxInactivityMinutes: 1440}) {
 		t.Fatalf("update Generation policy = %d %s", policyResponse.Code, policyResponse.Body.String())
 	}
-	invalidPolicy := request(http.MethodPut, "/api/workspaces/workspace-defaults/generation-policy", `{"enabled":true,"maxTurns":0,"maxAccumulatedTurnMinutes":0}`)
+	legacyPolicy := request(http.MethodPut, "/api/workspaces/workspace-defaults/generation-policy", `{"enabled":false,"maxTurns":25,"maxAccumulatedTurnMinutes":150}`)
+	legacyPolicyErr := json.Unmarshal(legacyPolicy.Body.Bytes(), &policyBody)
+	if legacyPolicy.Code != http.StatusOK || legacyPolicyErr != nil || policyBody.GenerationPolicy != (app.GenerationPolicy{BudgetEnabled: false, MaxTurns: 25, MaxAccumulatedTurnMinutes: 150, InactivityEnabled: false, MaxInactivityMinutes: 1440}) {
+		t.Fatalf("legacy Generation policy = %d %s", legacyPolicy.Code, legacyPolicy.Body.String())
+	}
+	invalidPolicy := request(http.MethodPut, "/api/workspaces/workspace-defaults/generation-policy", `{"budgetEnabled":true,"maxTurns":0,"maxAccumulatedTurnMinutes":0,"inactivityEnabled":true,"maxInactivityMinutes":1440}`)
 	if invalidPolicy.Code != http.StatusBadRequest {
 		t.Fatalf("invalid Generation policy = %d %s", invalidPolicy.Code, invalidPolicy.Body.String())
 	}

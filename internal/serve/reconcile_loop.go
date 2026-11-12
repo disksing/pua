@@ -281,10 +281,14 @@ func (m *agentManager) pollFastAgentHubSessions(ctx context.Context) error {
 			byExternalID[sourceLookupKey(session.Source.InstanceID, session.Source.ExternalID)] = session
 		}
 	}
+	var failures []error
 	for _, rt := range m.runtimeSnapshots() {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(append(failures, err)...)
+		}
 		record := rt.snapshotGeneration()
 		workspace := rt.workspace
-		if !m.server.ownsWorkspace(workspace.Path) || !isAgentHubGeneration(record) {
+		if !m.server.ownsWorkspace(workspace.Path) || !isAgentHubGeneration(record) || record.Retired {
 			continue
 		}
 		session, found := byExternalID[sourceLookupKey(generationSourceInstanceID(cfg, record), record.SourceExternalID)]
@@ -292,11 +296,30 @@ func (m *agentManager) pollFastAgentHubSessions(ctx context.Context) error {
 			session, found = byID[strings.TrimSpace(record.AgentHubSessionID)]
 		}
 		if !generationNeedsFastReconcile(m, rt, record, session, found) {
-			continue
+			file, err := loadTurnWork(workspace.Path, record.ResourceID)
+			if err != nil {
+				failures = append(failures, fmt.Errorf("%s/%s: %w", workspace.ID, record.ResourceID, err))
+				continue
+			}
+			pendingOutput := false
+			for _, work := range file.Works {
+				if !work.OutputDone {
+					pendingOutput = true
+					break
+				}
+			}
+			if !pendingOutput {
+				continue
+			}
 		}
 		m.reconcileAgentHubGeneration(ctx, cfg, workspace, record, byExternalID, byID, client)
+		if err := m.withResourceController(ctx, workspace, record.ResourceID, func() error {
+			return m.reconcileResourceMailboxLocked(ctx, workspace, record.ResourceID)
+		}); err != nil {
+			failures = append(failures, fmt.Errorf("%s/%s: %w", workspace.ID, record.ResourceID, err))
+		}
 	}
-	return nil
+	return errors.Join(failures...)
 }
 
 func (m *agentManager) agentHubFastWorkPending() bool {
@@ -345,6 +368,10 @@ func (m *agentManager) reconcileOwnedWorkspaceMailboxes(ctx context.Context) err
 	var failures []string
 	for _, workspace := range cfg.Workspaces {
 		if m.server.ownsWorkspace(workspace.Path) {
+			if err := m.reconcileWorkspaceChats(ctx, workspace); err != nil {
+				failures = append(failures, fmt.Sprintf("%s chats: %v", workspace.ID, err))
+				continue
+			}
 			if err := m.reconcileWorkspaceMailboxes(ctx, workspace); err != nil {
 				failures = append(failures, fmt.Sprintf("%s: %v", workspace.ID, err))
 			}
@@ -413,6 +440,12 @@ func (m *agentManager) nextSchedulerReconcileDeadline(now time.Time) time.Time {
 		}
 		config, err := puaWorkspace.Scheduler()
 		if err != nil || len(config.Schedules) == 0 {
+			continue
+		}
+		if deadline := nextExactScheduleDeadline(config, now); !deadline.IsZero() && (earliest.IsZero() || deadline.Before(earliest)) {
+			earliest = deadline
+		}
+		if len(naturalLanguageSchedules(config).Schedules) == 0 {
 			continue
 		}
 		store, err := loadResourceMailboxStoreForRead(workspace.Path, app.SchedulerResourceID)

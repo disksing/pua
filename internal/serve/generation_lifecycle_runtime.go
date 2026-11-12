@@ -33,6 +33,9 @@ func resumeRetryDelay(failureCount int) time.Duration {
 // resource, while turnActionMu serializes this Session with direct Turn
 // actions. No store write is held across the AgentHub request.
 func (m *agentManager) resumeStoppedGenerationLocked(ctx context.Context, workspace serveWorkspace, record generationRecord, rt *agentRuntime, client *agentHubClient, plan GenerationLifecyclePlan) (bool, bool, error) {
+	if strings.HasPrefix(record.ResourceID, dialoguePrefix) {
+		return false, false, nil
+	}
 	if rt == nil || client == nil || plan.Operation != GenerationOperationResumeSession || strings.TrimSpace(record.AgentHubSessionID) == "" {
 		return false, false, nil
 	}
@@ -64,6 +67,9 @@ func (m *agentManager) resumeStoppedGenerationLocked(ctx context.Context, worksp
 	if !agentHubSessionExactlyMatchesGeneration(cfg, latest, observed) {
 		return false, true, fmt.Errorf("AgentHub Session %s does not match generation %s for Resume", observed.ID, latest.GenerationID)
 	}
+	if agentHubSessionStartupFailed(observed) {
+		return false, true, providerStartupFailure(observed, nil)
+	}
 
 	receipt := lifecycleResumeReceipt(plan)
 	if _, err := rt.mutateGeneration(func(current *generationRecord) {
@@ -80,6 +86,17 @@ func (m *agentManager) resumeStoppedGenerationLocked(ctx context.Context, worksp
 	resumed, resumeErr := client.Resume(ctx, observed.ID, nil)
 	if resumeErr != nil {
 		terminal := isTerminalResumeError(resumeErr)
+		if !terminal {
+			// Older AgentHub versions reported provider launch failures from
+			// Resume as the generic runtime_operation_failed code. Re-read the
+			// exact Session before treating the error as transient: startup_error
+			// is a durable terminal boundary for this generation and must consume
+			// the Task work-chain recovery budget instead of retrying forever.
+			if afterFailure, observeErr := client.GetSession(context.WithoutCancel(ctx), observed.ID); observeErr == nil && agentHubSessionStartupFailed(afterFailure) {
+				terminal = true
+				resumeErr = providerStartupFailure(afterFailure, resumeErr)
+			}
+		}
 		receipt.State = GenerationReceiptUnknown
 		if terminal {
 			receipt.State = GenerationReceiptTerminal
@@ -161,6 +178,18 @@ func (m *agentManager) resumeStoppedGenerationLocked(ctx context.Context, worksp
 	return true, false, nil
 }
 
+func agentHubSessionStartupFailed(session agentHubSession) bool {
+	return session.State == "stopped" && strings.EqualFold(strings.TrimSpace(session.StopReason), "startup_error")
+}
+
+func providerStartupFailure(session agentHubSession, cause error) error {
+	message := fmt.Sprintf("AgentHub Session %s stopped because Agent %q failed to start", session.ID, session.AgentName)
+	if cause != nil {
+		message += ": " + strings.TrimSpace(cause.Error())
+	}
+	return &resourceAPIError{Code: "provider_start_failed", Message: message}
+}
+
 func lifecycleResumeReceipt(plan GenerationLifecyclePlan) GenerationLifecycleReceipt {
 	return GenerationLifecycleReceipt{
 		Operation:    GenerationOperationResumeSession,
@@ -188,7 +217,7 @@ func isTerminalResumeError(err error) bool {
 	code := strings.ToLower(strings.TrimSpace(apiErr.Code))
 	message := strings.ToLower(strings.TrimSpace(apiErr.Message))
 	switch code {
-	case "session_not_found", "session_archived", "session_source_mismatch", "resume_unavailable", "provider_resume_unavailable":
+	case "session_not_found", "session_archived", "session_source_mismatch", "resume_unavailable", "provider_resume_unavailable", "provider_start_failed":
 		return true
 	}
 	if apiErr.Retryable {

@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,34 +26,36 @@ import (
 	"github.com/disksing/pua/agenthub/internal/runtime"
 	"github.com/disksing/pua/agenthub/internal/semantic"
 	"github.com/disksing/pua/agenthub/internal/session"
+	"github.com/disksing/pua/agenthub/protocol"
 )
 
-const APIVersion = "1"
+const APIVersion = protocol.APIMajor
 
 const (
-	CapabilitySessionSource            = "session.source"
-	CapabilitySessionSourceMetadata    = "session.source-metadata"
-	CapabilitySessionIdempotentCreate  = "session.idempotent-create"
-	CapabilitySessionInputCapabilities = "session.input-capabilities"
-	CapabilityMessageIdempotency       = "messages.idempotent"
-	CapabilityMessageAtLeastOnce       = "messages.at-least-once"
-	CapabilityMessageOpaquePayloadV2   = "messages.opaque-payload-v2"
-	CapabilityTurnsStableIndex         = "turns.stable-index"
-	CapabilityTurnsMaterialized        = "turns.materialized"
-	CapabilityTurnsActivityItems       = "turns.activity-items"
-	CapabilitySessionLaunchEnvironment = "session.launch-environment"
+	CapabilityTurnScopedSteer          = protocol.CapabilityTurnScopedSteer
+	CapabilitySessionSource            = protocol.CapabilitySessionSource
+	CapabilitySessionSourceMetadata    = protocol.CapabilitySessionSourceMetadata
+	CapabilitySessionIdempotentCreate  = protocol.CapabilitySessionIdempotentCreate
+	CapabilitySessionInputCapabilities = protocol.CapabilitySessionInputCapabilities
+	CapabilityMessageIdempotency       = protocol.CapabilityMessageIdempotency
+	CapabilityMessageAtLeastOnce       = protocol.CapabilityMessageAtLeastOnce
+	CapabilityMessageOpaquePayloadV2   = protocol.CapabilityMessageOpaquePayloadV2
+	CapabilityTurnsStableIndex         = protocol.CapabilityTurnsStableIndex
+	CapabilityTurnsMaterialized        = protocol.CapabilityTurnsMaterialized
+	CapabilityTurnsActivityItems       = protocol.CapabilityTurnsActivityItems
+	CapabilitySessionLaunchEnvironment = protocol.CapabilitySessionLaunchEnvironment
 	// CapabilitySessionLaunchEnvironmentUpdate reports that resume accepts
 	// an optional launchEnvironment overlay persisted before provider start.
-	CapabilitySessionLaunchEnvironmentUpdate = "session.launch-environment-update"
-	CapabilitySessionStrictStopped           = "session.strict-stopped"
-	CapabilityEventsLosslessReplay           = "events.lossless-replay"
-	CapabilityEventsDeltaMerge               = "events.delta-merge"
-	CapabilityEventsBackwardPagination       = "events.backward-pagination"
-	CapabilityEventsCanonicalTerminal        = "events.canonical-turn-terminals"
-	CapabilityEventsSemanticV1               = "events.semantic-v1"
-	CapabilityEventRawV1                     = "event.raw-v1"
-	CapabilityActivityGlobalSSE              = "activity.global-sse"
-	CapabilityRecoveryClosedTurns            = "recovery.closed-turns"
+	CapabilitySessionLaunchEnvironmentUpdate = protocol.CapabilitySessionLaunchEnvironmentUpdate
+	CapabilitySessionStrictStopped           = protocol.CapabilitySessionStrictStopped
+	CapabilityEventsLosslessReplay           = protocol.CapabilityEventsLosslessReplay
+	CapabilityEventsDeltaMerge               = protocol.CapabilityEventsDeltaMerge
+	CapabilityEventsBackwardPagination       = protocol.CapabilityEventsBackwardPagination
+	CapabilityEventsCanonicalTerminal        = protocol.CapabilityEventsCanonicalTerminal
+	CapabilityEventsSemanticV1               = protocol.CapabilityEventsSemanticV1
+	CapabilityEventRawV1                     = protocol.CapabilityEventRawV1
+	CapabilityActivityGlobalSSE              = protocol.CapabilityActivityGlobalSSE
+	CapabilityRecoveryClosedTurns            = protocol.CapabilityRecoveryClosedTurns
 )
 
 // ModelLister enumerates the models of a built-in provider and can drop its
@@ -163,7 +166,7 @@ func (s *Server) routes() []apiRoute {
 		{"GET /v1/status", s.status, "GET /v1/status"},
 		{"GET /v1/config", s.getConfig, "GET /v1/config"},
 		{"PUT /v1/config", s.putConfig, "PUT /v1/config"},
-		{"PUT /v1/config/providers/{id}", s.putProviderEnabled, "PUT /v1/config/providers/{id}"},
+		{"PUT /v1/config/providers/{id}", s.putProviderCommand, "PUT /v1/config/providers/{id}"},
 		{"POST /v1/onwatch/test", s.testOnWatch, "POST /v1/onwatch/test"},
 		{"GET /v1/quota", s.quota, "GET /v1/quota"},
 		{"GET /v1/activity/events", s.activityEvents, "GET /v1/activity/events"},
@@ -248,7 +251,8 @@ func (s *Server) status(w http.ResponseWriter, _ *http.Request) {
 		"sessionStore": map[string]any{
 			"path":         s.store.Root(),
 			"archivePath":  s.store.ArchiveRoot(),
-			"sessionCount": len(s.store.List(true)),
+			"sessionCount": s.store.Count(),
+			"diagnostics":  s.store.Diagnostics(),
 		},
 		"runtime": s.runtimeStatus(),
 	})
@@ -279,6 +283,7 @@ func (s *Server) capabilities() []string {
 	}
 	if s.runtime != nil {
 		capabilities = append(capabilities,
+			CapabilityTurnScopedSteer,
 			CapabilityEventsCanonicalTerminal,
 			CapabilityRecoveryClosedTurns,
 			CapabilitySessionLaunchEnvironment,
@@ -293,7 +298,7 @@ func (s *Server) runtimeStatus() any {
 	if s.runtime == nil {
 		return map[string]any{"available": false}
 	}
-	return map[string]any{"available": true, "summary": s.runtime.String()}
+	return map[string]any{"available": true, "summary": s.runtime.String(), "startupRecoveryNanos": s.runtime.StartupRecoveryNanos()}
 }
 
 func (s *Server) getConfig(w http.ResponseWriter, _ *http.Request) {
@@ -414,9 +419,9 @@ const modelEnumerationTimeout = 45 * time.Second
 // providerModels enumerates the models of one built-in provider through its
 // official interface. It is read-only: it never creates a provider session
 // and never changes the configuration. Status codes distinguish the failure
-// modes a UI must render differently: 404 unknown provider, 409 disabled,
-// 503 CLI unavailable, 504 enumeration timeout, 502 upstream error; an empty
-// list is a 200 with an empty models array.
+// modes a UI must render differently: 404 unknown provider, 503 CLI
+// unavailable, 504 enumeration timeout, 502 upstream error; an empty list is
+// a 200 with an empty models array.
 func (s *Server) providerModels(w http.ResponseWriter, r *http.Request) {
 	if s.runtime == nil || s.models == nil {
 		writeAPIError(w, http.StatusServiceUnavailable, "runtime_unavailable", "runtime is unavailable", nil)
@@ -426,10 +431,6 @@ func (s *Server) providerModels(w http.ResponseWriter, r *http.Request) {
 	target, ok := s.providerByID(id)
 	if !ok {
 		writeAPIError(w, http.StatusNotFound, "unknown_provider", fmt.Sprintf("unknown built-in provider %q", id), nil)
-		return
-	}
-	if !target.Enabled {
-		writeAPIError(w, http.StatusConflict, "provider_disabled", fmt.Sprintf("provider %q is disabled", id), nil)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), modelEnumerationTimeout)
@@ -460,9 +461,9 @@ func (s *Server) providerModels(w http.ResponseWriter, r *http.Request) {
 }
 
 // providerByID resolves a built-in provider id against the live
-// configuration: a configured provider keeps its name, type, command and
-// enabled flag; a built-in provider missing from the configuration is
-// reported with its canonical definition and enabled=false.
+// configuration: a configured provider keeps its name, type and command; a
+// built-in provider missing from the configuration is reported with its
+// canonical definition.
 func (s *Server) providerByID(id string) (config.Provider, bool) {
 	canonical, ok := config.BuiltinProvider(id)
 	if !ok {
@@ -482,33 +483,41 @@ func (s *Server) invalidateModels() {
 	}
 }
 
-// putProviderEnabled flips the enabled flag of one built-in provider without
-// touching the rest of the configuration. It is the minimal contract behind
-// the four switches of the Web settings UI: clients never have to rebuild or
-// resubmit the whole provider structure, and the provider's command and other
-// fields survive a disable/enable cycle. A built-in provider missing from an
-// old config is created with its canonical defaults.
-func (s *Server) putProviderEnabled(w http.ResponseWriter, r *http.Request) {
+// putProviderCommand replaces the executable path of one built-in provider
+// without touching the rest of the configuration. It is the minimal contract
+// behind the provider rows of the Web settings UI: clients never have to
+// rebuild or resubmit the whole provider structure. A non-empty command must
+// resolve to an executable on this host and is rejected otherwise; an empty
+// command clears the override so the provider falls back to automatic
+// detection from PATH and common install directories. A built-in provider
+// missing from an old config is created with its canonical defaults.
+func (s *Server) putProviderCommand(w http.ResponseWriter, r *http.Request) {
 	if s.runtime == nil {
 		writeAPIError(w, http.StatusServiceUnavailable, "runtime_unavailable", "runtime is unavailable", nil)
 		return
 	}
 	var body struct {
-		Enabled *bool `json:"enabled"`
+		Command *string `json:"command"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeAPIError(w, http.StatusBadRequest, "invalid_request", err.Error(), nil)
 		return
 	}
-	if body.Enabled == nil {
-		writeAPIError(w, http.StatusBadRequest, "invalid_request", "enabled is required", nil)
+	if body.Command == nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid_request", "command is required", nil)
 		return
 	}
 	s.configMu.Lock()
 	defer s.configMu.Unlock()
-	next, provider, err := s.runtime.Config().SetProviderEnabled(r.PathValue("id"), *body.Enabled)
+	next, provider, err := s.runtime.Config().SetProviderCommand(r.PathValue("id"), *body.Command)
 	if err != nil {
-		writeAPIError(w, http.StatusNotFound, "unknown_provider", err.Error(), nil)
+		status := http.StatusUnprocessableEntity
+		code := "invalid_command"
+		if strings.Contains(err.Error(), "unknown built-in provider") {
+			status = http.StatusNotFound
+			code = "unknown_provider"
+		}
+		writeAPIError(w, status, code, err.Error(), nil)
 		return
 	}
 	if err := config.Save(s.config, next); err != nil {
@@ -521,9 +530,9 @@ func (s *Server) putProviderEnabled(w http.ResponseWriter, r *http.Request) {
 }
 
 // agentStatus extends an agent with its effective availability. An agent is
-// unavailable when its provider is disabled or missing; the Web UI hides such
-// agents from the new-session choices and the daemon rejects attempts to use
-// them anyway.
+// unavailable when its provider is missing or its executable cannot be
+// resolved; the Web UI hides such agents from the new-session choices and the
+// daemon rejects attempts to use them anyway.
 type agentStatus struct {
 	config.Agent
 	Available         bool   `json:"available"`
@@ -537,20 +546,22 @@ func (s *Server) agents(w http.ResponseWriter, _ *http.Request) {
 	}
 	cfg := s.runtime.Config()
 	providers := make(map[string]config.Provider, len(cfg.AgentProviders))
+	availability := make(map[string]error, len(cfg.AgentProviders))
 	for _, provider := range cfg.AgentProviders {
 		providers[provider.ID] = provider
+		_, availability[provider.ID] = config.ResolveProviderCommand(provider)
 	}
 	agents := make([]agentStatus, 0, len(cfg.Agents))
 	for _, agent := range cfg.Agents {
 		status := agentStatus{Agent: agent, Available: true}
-		provider, ok := providers[agent.ProviderID]
+		_, ok := providers[agent.ProviderID]
 		switch {
 		case !ok:
 			status.Available = false
 			status.UnavailableReason = fmt.Sprintf("provider %q is not configured", agent.ProviderID)
-		case !provider.Enabled:
+		case availability[agent.ProviderID] != nil:
 			status.Available = false
-			status.UnavailableReason = fmt.Sprintf("provider %q is disabled", agent.ProviderID)
+			status.UnavailableReason = availability[agent.ProviderID].Error()
 		}
 		agents = append(agents, status)
 	}
@@ -575,30 +586,108 @@ func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
 	if query.Has("sourceExternalId") {
 		filter.SourceExternalID = stringPointer(query.Get("sourceExternalId"))
 	}
-	values := s.store.Filter(filter)
-	if archivedOnly {
-		filtered := values[:0]
-		for _, value := range values {
-			if value.State == session.StateArchived {
-				filtered = append(filtered, value)
-			}
-		}
-		values = filtered
+	options, queryErr := parseSessionListOptions(query)
+	if queryErr != nil {
+		writeAPIError(w, http.StatusBadRequest, queryErr.code, queryErr.message, nil)
+		return
 	}
-	if stateFilter := strings.TrimSpace(r.URL.Query().Get("state")); stateFilter != "" {
-		allowed := make(map[string]bool)
+	options.ArchivedOnly = archivedOnly
+	if stateFilter := strings.TrimSpace(query.Get("state")); stateFilter != "" {
 		for _, state := range strings.Split(stateFilter, ",") {
-			allowed[strings.TrimSpace(state)] = true
+			options.States = append(options.States, strings.TrimSpace(state))
 		}
-		filtered := values[:0]
-		for _, value := range values {
-			if allowed[value.State] {
-				filtered = append(filtered, value)
+	}
+	page, err := s.store.Query(r.Context(), filter, options)
+	if err != nil || r.Context().Err() != nil {
+		return // A cancelled list must not continue copying or encoding rows.
+	}
+	metadata := sessionListPageMetadata{Limit: options.Limit, HasMore: page.HasMore}
+	if options.Limit <= 0 {
+		metadata.Limit = len(page.Sessions)
+	}
+	if page.HasMore && len(page.Sessions) > 0 {
+		metadata.NextCursor = encodeSessionListCursor(page.Sessions[len(page.Sessions)-1])
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sessions": page.Sessions, "page": metadata})
+}
+
+const (
+	defaultSessionListLimit = 50
+	maximumSessionListLimit = 500
+)
+
+type sessionListCursor struct {
+	UpdatedAt time.Time `json:"updatedAt"`
+	ID        string    `json:"id"`
+}
+
+type sessionListPageMetadata struct {
+	Limit      int    `json:"limit"`
+	NextCursor string `json:"nextCursor,omitempty"`
+	HasMore    bool   `json:"hasMore"`
+}
+
+type sessionListQueryError struct {
+	code    string
+	message string
+}
+
+func (e *sessionListQueryError) Error() string { return e.message }
+
+// Keep the historical unbounded response unless a client opts into pagination.
+// The cursor is the exclusive descending (updatedAt, id) boundary used by Query.
+func parseSessionListOptions(query url.Values) (session.ListOptions, *sessionListQueryError) {
+	options := session.ListOptions{}
+	limitText := strings.TrimSpace(query.Get("limit"))
+	cursorText := strings.TrimSpace(query.Get("cursor"))
+	paginated := limitText != "" || cursorText != ""
+	if !paginated {
+		return options, nil
+	}
+
+	limit := defaultSessionListLimit
+	if limitText != "" {
+		parsed, err := strconv.Atoi(limitText)
+		if err != nil || parsed <= 0 || parsed > maximumSessionListLimit {
+			return options, &sessionListQueryError{
+				code:    "invalid_session_limit",
+				message: fmt.Sprintf("limit must be between 1 and %d", maximumSessionListLimit),
 			}
 		}
-		values = filtered
+		limit = parsed
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"sessions": values})
+
+	options.Limit = limit
+	if cursorText != "" {
+		cursor, err := decodeSessionListCursor(cursorText)
+		if err != nil {
+			return options, &sessionListQueryError{
+				code: "invalid_session_cursor", message: "cursor is not a valid Session list cursor",
+			}
+		}
+		options.Cursor = &session.ListCursor{UpdatedAt: cursor.UpdatedAt, ID: cursor.ID}
+	}
+	return options, nil
+}
+
+func encodeSessionListCursor(value session.Session) string {
+	encoded, _ := json.Marshal(sessionListCursor{UpdatedAt: value.UpdatedAt, ID: value.ID})
+	return base64.RawURLEncoding.EncodeToString(encoded)
+}
+
+func decodeSessionListCursor(value string) (sessionListCursor, error) {
+	decoded, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil {
+		return sessionListCursor{}, err
+	}
+	var cursor sessionListCursor
+	if err := json.Unmarshal(decoded, &cursor); err != nil {
+		return sessionListCursor{}, err
+	}
+	if cursor.UpdatedAt.IsZero() || strings.TrimSpace(cursor.ID) == "" {
+		return sessionListCursor{}, errors.New("cursor fields are required")
+	}
+	return cursor, nil
 }
 
 func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
@@ -677,7 +766,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		if created || value.State == session.StateReady || value.State == session.StateStarting {
 			started, err := s.runtime.Start(value.ID)
 			if err != nil {
-				writeAPIError(w, http.StatusBadGateway, "provider_start_failed", err.Error(), map[string]any{"sessionId": value.ID})
+				s.writeProviderStartError(w, value.ID, err)
 				return
 			}
 			value = started
@@ -736,19 +825,21 @@ func (s *Server) sessionOps() []sessionOp {
 // initialMessage. Schema v2 carries opaque caller payload. The provenance
 // fields below are accepted only by the schema-v1 compatibility adapter.
 type inboundMessageRequest struct {
-	SchemaVersion int             `json:"schemaVersion"`
-	Text          string          `json:"text"`
-	Payload       json.RawMessage `json:"payload"`
-	Role          string          `json:"role"`
-	Sender        json.RawMessage `json:"sender"`
-	Steer         bool            `json:"steer"`
-	MessageID     string          `json:"messageId"`
-	ReplyTo       string          `json:"replyTo"`
-	CorrelationID string          `json:"correlationId"`
+	ExpectedTurnID string          `json:"expectedTurnId,omitempty"`
+	SchemaVersion  int             `json:"schemaVersion"`
+	Text           string          `json:"text"`
+	Payload        json.RawMessage `json:"payload"`
+	Role           string          `json:"role"`
+	Sender         json.RawMessage `json:"sender"`
+	Steer          bool            `json:"steer"`
+	MessageID      string          `json:"messageId"`
+	ReplyTo        string          `json:"replyTo"`
+	CorrelationID  string          `json:"correlationId"`
 }
 
 func (request inboundMessageRequest) hasMessageIntent() bool {
 	return strings.TrimSpace(request.Text) != "" ||
+		request.ExpectedTurnID != "" ||
 		request.SchemaVersion != 0 || len(bytes.TrimSpace(request.Payload)) > 0 ||
 		strings.TrimSpace(request.Role) != "" || request.Steer ||
 		len(bytes.TrimSpace(request.Sender)) > 0 || request.MessageID != "" ||
@@ -761,15 +852,16 @@ func (request inboundMessageRequest) messageInput() (session.MessageInput, error
 		return session.MessageInput{}, err
 	}
 	return session.NormalizeMessageInput(session.MessageInput{
-		SchemaVersion: request.SchemaVersion,
-		Text:          request.Text,
-		Payload:       request.Payload,
-		Role:          session.MessageRole(request.Role),
-		Sender:        sender,
-		Steer:         request.Steer,
-		MessageID:     request.MessageID,
-		ReplyTo:       request.ReplyTo,
-		CorrelationID: request.CorrelationID,
+		ExpectedTurnID: request.ExpectedTurnID,
+		SchemaVersion:  request.SchemaVersion,
+		Text:           request.Text,
+		Payload:        request.Payload,
+		Role:           session.MessageRole(request.Role),
+		Sender:         sender,
+		Steer:          request.Steer,
+		MessageID:      request.MessageID,
+		ReplyTo:        request.ReplyTo,
+		CorrelationID:  request.CorrelationID,
 	})
 }
 
@@ -944,6 +1036,10 @@ func (s *Server) resumeSession(w http.ResponseWriter, r *http.Request, id string
 	}
 	value, err := s.runtime.Start(id)
 	if err != nil {
+		if current, getErr := s.store.Get(id); getErr == nil && current.State == session.StateStopped && current.StopReason == session.StopReasonStartupError {
+			s.writeProviderStartError(w, id, err)
+			return
+		}
 		s.writeRuntimeError(w, err)
 		return
 	}
@@ -1070,6 +1166,10 @@ func (s *Server) writeRuntimeError(w http.ResponseWriter, err error) {
 		return
 	}
 	writeAPIError(w, http.StatusConflict, "runtime_operation_failed", err.Error(), nil)
+}
+
+func (s *Server) writeProviderStartError(w http.ResponseWriter, sessionID string, err error) {
+	writeAPIError(w, http.StatusBadGateway, "provider_start_failed", err.Error(), map[string]any{"sessionId": sessionID})
 }
 
 func (s *Server) getSession(w http.ResponseWriter, _ *http.Request, id string) {

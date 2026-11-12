@@ -141,14 +141,14 @@ func TestHotMailboxMarkerDropsSettledAgentMessages(t *testing.T) {
 	tests := []struct {
 		name            string
 		mode            string
-		subscribeResult bool
+		subscribeResult *bool
 		subscription    string
 		wantHot         bool
 	}{
-		{name: "disabled enqueue", mode: resourceMessageModeEnqueue, subscription: resourceResultSubscriptionDisabled},
-		{name: "disabled steer", mode: resourceMessageModeSteer, subscription: resourceResultSubscriptionDisabled},
-		{name: "settled steer", mode: resourceMessageModeSteer, subscribeResult: true, subscription: resourceResultSubscriptionNone},
-		{name: "unbound result subscription", mode: resourceMessageModeEnqueue, subscribeResult: true, wantHot: true},
+		{name: "disabled enqueue", mode: resourceMessageModeEnqueue, subscription: "disabled"},
+		{name: "disabled steer", mode: resourceMessageModeSteer, subscription: "disabled"},
+		{name: "settled steer", mode: resourceMessageModeSteer, subscribeResult: boolPtr(true), subscription: "none"},
+		{name: "unbound result subscription", mode: resourceMessageModeEnqueue, subscribeResult: boolPtr(true)},
 	}
 	for index, test := range tests {
 		resourceID := fmt.Sprintf("project1.task%d", index+1)
@@ -252,8 +252,8 @@ func TestHotMailboxLoadCompactsLegacySettledMarker(t *testing.T) {
 	}
 	stamp := time.Now().UTC().Format(time.RFC3339Nano)
 	document.Messages[0].Status = resourceMessageDelivered
-	document.Messages[0].SubscribeResult = false
-	document.Messages[0].ResultSubscriptionStatus = resourceResultSubscriptionDisabled
+	document.Messages[0].SubscribeResult = boolPtr(false)
+	document.Messages[0].ResultSubscriptionStatus = "disabled"
 	document.Messages[0].DeliveredAt = stamp
 	document.Messages[0].TerminalAt = stamp
 	document.Messages[0].UpdatedAt = stamp
@@ -280,3 +280,5 @@ func TestHotMailboxLoadCompactsLegacySettledMarker(t *testing.T) {
 		t.Fatalf("legacy settled message was not retained as a receipt: found=%v err=%v message=%#v", found, err, settled)
 	}
 }
+
+func boolPtr(value bool) *bool { return &value }

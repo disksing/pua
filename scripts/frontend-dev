@@ -12,7 +12,7 @@ fi
 pua_dev_runtime=$(mktemp -d "${TMPDIR:-/tmp}/pua-frontend-dev.XXXXXX")
 mkdir -p "$pua_dev_runtime/agenthub"
 if [ ! -f "$root/agenthub/web/static/index.html" ]; then
-	npm --prefix "$root/agenthub/frontend" run build
+	npm --prefix "$root/web" run build:agenthub
 fi
 go -C "$root" build -o "$pua_dev_runtime/pua" ./cli/cmd/pua
 PUA_SERVE_CONFIG="$pua_dev_runtime/serve.json" \

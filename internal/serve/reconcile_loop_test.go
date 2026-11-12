@@ -213,6 +213,7 @@ func TestIdleDeadlineWakesStableReconcileLoop(t *testing.T) {
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	manager.runBackground(func() { manager.runReconcileLoop(ctx) })
 	waitForRuntimeTest(t, func() bool { return runtimeFakeListCalls(fake) >= 2 })
 	baseline := runtimeFakeListCalls(fake)

@@ -1,1 +1,1 @@
-Run `npm --prefix agenthub/frontend run build` to generate the embedded AgentHub Web UI.
+Run `npm --prefix web run build:agenthub` to generate the embedded AgentHub Web UI.

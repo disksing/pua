@@ -26,8 +26,12 @@ export interface ResourceRecord {
   userState?: ResourceUserState;
   latestTurnNumber?: number;
   latestTurnAt?: string;
+  latestChatAt?: string;
+  latestUnreadChatAt?: string;
   latestAgentName?: string;
   unreadCount?: number;
+  chat?: { open: boolean; unreadCount: number };
+  dialogueEvents?: { latestTurnNumber: number; readTurnNumber: number; unreadCount: number };
 }
 
 export interface ResourceUserState {
@@ -61,12 +65,23 @@ export interface ScheduleRecord {
   target: string;
   createdAt: string;
   updatedAt: string;
+  exactTime?: {
+    at?: string;
+    timeOfDay?: string;
+    timeZone: string;
+    expiresAt?: string;
+    startedAt: string;
+    lastFiredAt?: string;
+    pending?: { occurrence: string; firedAt: string; description: string; target: string; language: string };
+  };
 }
 
 export interface SchedulerConfigRecord {
   schemaVersion: number;
   agentBinding: { kind: "profile" | "agent"; name: string };
   wakeIntervalMinutes: number;
+  conditionMaxChars: number;
+  descriptionMaxChars: number;
   schedules: ScheduleRecord[];
 }
 
@@ -76,9 +91,11 @@ export interface ResourceAgentDefaultsRecord {
 }
 
 export interface GenerationPolicyRecord {
-  enabled: boolean;
+  budgetEnabled: boolean;
   maxTurns: number;
   maxAccumulatedTurnMinutes: number;
+  inactivityEnabled: boolean;
+  maxInactivityMinutes: number;
 }
 
 export interface StallWatchdogPolicyRecord {

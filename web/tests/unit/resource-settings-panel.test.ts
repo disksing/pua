@@ -1,6 +1,8 @@
 import { mount, tick, unmount } from "svelte";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import ResourceSettingsHarness from "../fixtures/ResourceSettingsHarness.svelte";
+import { createModelChannel } from "../../src/components/model-channel";
 import ResourceSettingsPanel from "../../src/components/ResourceSettingsPanel.svelte";
 import type { DetailPanelModel } from "../../src/components/models";
 
@@ -31,6 +33,8 @@ function model(overrides: Partial<DetailPanelModel> = {}): DetailPanelModel {
         schemaVersion: 1,
         agentBinding: { kind: "profile", name: "default" },
         wakeIntervalMinutes: 30,
+        conditionMaxChars: 128,
+        descriptionMaxChars: 32,
         schedules: [],
       },
     },
@@ -39,7 +43,7 @@ function model(overrides: Partial<DetailPanelModel> = {}): DetailPanelModel {
     workspaceDefaults: { project: { kind: "profile", name: "default" }, task: { kind: "profile", name: "default" } },
     workspaceUsers: [],
     currentUserName: "User",
-    generationPolicy: { enabled: true, maxTurns: 20, maxAccumulatedTurnMinutes: 120 },
+    generationPolicy: { budgetEnabled: true, maxTurns: 20, maxAccumulatedTurnMinutes: 120, inactivityEnabled: true, maxInactivityMinutes: 1440 },
     stallWatchdogPolicy: { enabled: true, timeoutMinutes: 30 },
     agentBinding: { kind: "profile", name: "default" },
     agentProfiles: [{ key: "default", description: "Default", agentName: "fake-agent" }],
@@ -113,7 +117,7 @@ describe("ResourceSettingsPanel", () => {
     cleanups.push(() => unmount(component));
     await tick();
 
-    const save = target.querySelector<HTMLButtonElement>(".resource-settings-policy-controls .secondary-button")!;
+    const save = target.querySelector<HTMLButtonElement>(".resource-settings-generation-controls .secondary-button")!;
     expect(save.textContent).toContain("Save");
     expect(save.disabled).toBe(true);
     expect(save.hasAttribute("disabled")).toBe(true);
@@ -123,6 +127,37 @@ describe("ResourceSettingsPanel", () => {
     maxTurns.dispatchEvent(new Event("input", { bubbles: true }));
     await tick();
     expect(save.disabled).toBe(false);
+  });
+
+  it("saves independent Workspace Generation rotation policies", async () => {
+    const onSaveGenerationPolicy = vi.fn(async () => undefined);
+    const target = document.body.appendChild(document.createElement("div"));
+    const component = mount(ResourceSettingsPanel, {
+      target,
+      props: { model: model({ resourceType: "workspace", resourceId: "workspace", onSaveGenerationPolicy }) },
+    });
+    cleanups.push(() => unmount(component));
+    await tick();
+
+    const budgetEnabled = target.querySelector<HTMLInputElement>('[aria-label="Enable usage-based Generation rotation"]')!;
+    const inactivityEnabled = target.querySelector<HTMLInputElement>('[aria-label="Enable inactivity-based Generation rotation"]')!;
+    const inactivityMinutes = target.querySelector<HTMLInputElement>('[aria-label="Maximum inactivity minutes per Generation"]')!;
+    expect(budgetEnabled.checked).toBe(true);
+    expect(inactivityEnabled.checked).toBe(true);
+    expect(inactivityMinutes.value).toBe("1440");
+
+    budgetEnabled.click();
+    inactivityMinutes.value = "2880";
+    inactivityMinutes.dispatchEvent(new Event("input", { bubbles: true }));
+    await tick();
+    target.querySelector<HTMLButtonElement>(".resource-settings-generation-controls button")!.click();
+    await vi.waitFor(() => expect(onSaveGenerationPolicy).toHaveBeenCalledWith({
+      budgetEnabled: false,
+      maxTurns: 20,
+      maxAccumulatedTurnMinutes: 120,
+      inactivityEnabled: true,
+      maxInactivityMinutes: 2880,
+    }));
   });
 
   it("saves the Workspace Turn stall watchdog policy", async () => {
@@ -195,4 +230,132 @@ describe("ResourceSettingsPanel", () => {
     expect(target.querySelector("#schedulerIntervalError")).toBeNull();
     expect(save.disabled).toBe(false);
   });
+  it("saves the Scheduler condition limit beside the wake interval and validates the range", async () => {
+    const fetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetch);
+    const panelModel = model();
+    const target = document.body.appendChild(document.createElement("div"));
+    const component = mount(ResourceSettingsPanel, { target, props: { model: panelModel } });
+    cleanups.push(() => unmount(component));
+    await tick();
+    const input = target.querySelector<HTMLInputElement>('[aria-label="Scheduler condition character limit"]')!;
+    const save = target.querySelector<HTMLButtonElement>(".resource-settings-condition-limit button")!;
+    expect(input.value).toBe("128");
+    expect(save.disabled).toBe(true);
+    for (const value of ["0", "65537", "1.5", ""]) {
+      input.value = value;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      await tick();
+      expect(input.getAttribute("aria-invalid")).toBe("true");
+      expect(target.querySelector("#schedulerConditionLimitError")?.textContent).toContain("between 1 and 65536 characters");
+      expect(save.disabled).toBe(true);
+    }
+    // An unsaved interval draft must not be saved by the condition-limit button.
+    const interval = target.querySelector<HTMLInputElement>('[aria-label="Scheduler wake interval in minutes"]')!;
+    interval.value = "45";
+    interval.dispatchEvent(new Event("input", { bubbles: true }));
+    const descriptionLimit = target.querySelector<HTMLInputElement>('[aria-label="Scheduler description character limit"]')!;
+    descriptionLimit.value = "8";
+    descriptionLimit.dispatchEvent(new Event("input", { bubbles: true }));
+    input.value = "256";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await tick();
+    expect(save.disabled).toBe(false);
+    save.click();
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+    expect(JSON.parse(String(fetch.mock.calls[0][1]?.body))).toEqual({
+      agentBinding: { kind: "profile", name: "default" }, wakeIntervalMinutes: 30, conditionMaxChars: 256, descriptionMaxChars: 32,
+    });
+    await vi.waitFor(() => expect(panelModel.onRefreshScheduler).toHaveBeenCalledOnce());
+  });
+
+  it("preserves the saved condition limit when saving the wake interval", async () => {
+    const fetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetch);
+    const target = document.body.appendChild(document.createElement("div"));
+    const component = mount(ResourceSettingsPanel, { target, props: { model: model() } });
+    cleanups.push(() => unmount(component));
+    await tick();
+    const interval = target.querySelector<HTMLInputElement>('[aria-label="Scheduler wake interval in minutes"]')!;
+    interval.value = "45";
+    interval.dispatchEvent(new Event("input", { bubbles: true }));
+    const limit = target.querySelector<HTMLInputElement>('[aria-label="Scheduler condition character limit"]')!;
+    limit.value = "256";
+    limit.dispatchEvent(new Event("input", { bubbles: true }));
+    const descriptionLimit = target.querySelector<HTMLInputElement>('[aria-label="Scheduler description character limit"]')!;
+    descriptionLimit.value = "8";
+    descriptionLimit.dispatchEvent(new Event("input", { bubbles: true }));
+    await tick();
+    target.querySelector<HTMLButtonElement>(".resource-settings-interval button")!.click();
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+    expect(JSON.parse(String(fetch.mock.calls[0][1]?.body))).toEqual({
+      agentBinding: { kind: "profile", name: "default" }, wakeIntervalMinutes: 45, conditionMaxChars: 128, descriptionMaxChars: 32,
+    });
+  });
+
+  it("saves the Scheduler description limit without overwriting the other settings and validates the range", async () => {
+    let settle!: (response: Response) => void;
+    const fetch = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) => new Promise<Response>((resolve) => { settle = resolve; }));
+    vi.stubGlobal("fetch", fetch);
+    const panelModel = model();
+    const target = document.body.appendChild(document.createElement("div"));
+    const component = mount(ResourceSettingsPanel, { target, props: { model: panelModel } });
+    cleanups.push(() => unmount(component));
+    await tick();
+    const input = target.querySelector<HTMLInputElement>('[aria-label="Scheduler description character limit"]')!;
+    const save = target.querySelector<HTMLButtonElement>(".resource-settings-description-limit button")!;
+    const interval = target.querySelector<HTMLInputElement>('[aria-label="Scheduler wake interval in minutes"]')!;
+    const conditionLimit = target.querySelector<HTMLInputElement>('[aria-label="Scheduler condition character limit"]')!;
+    expect(input.value).toBe("32");
+    expect(save.disabled).toBe(true);
+    for (const value of ["0", "65537", "1.5", ""]) {
+      input.value = value;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      await tick();
+      expect(input.getAttribute("aria-invalid")).toBe("true");
+      expect(target.querySelector("#schedulerDescriptionLimitError")?.textContent).toContain("between 1 and 65536 characters");
+      expect(save.disabled).toBe(true);
+    }
+    interval.value = "45";
+    interval.dispatchEvent(new Event("input", { bubbles: true }));
+    conditionLimit.value = "256";
+    conditionLimit.dispatchEvent(new Event("input", { bubbles: true }));
+    input.value = "16";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await tick();
+    expect(save.disabled).toBe(false);
+    save.click();
+    await tick();
+    expect(interval.disabled).toBe(true);
+    expect(conditionLimit.disabled).toBe(true);
+    expect(input.disabled).toBe(true);
+    settle(new Response("{}", { status: 200 }));
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+    expect(JSON.parse(String(fetch.mock.calls[0][1]?.body))).toEqual({
+      agentBinding: { kind: "profile", name: "default" }, wakeIntervalMinutes: 30, conditionMaxChars: 128, descriptionMaxChars: 16,
+    });
+    await vi.waitFor(() => expect(panelModel.onRefreshScheduler).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(input.disabled).toBe(false));
+  });
+
+});
+
+
+it("preserves resource settings edits during polling and resets them on navigation", async () => {
+  const initial = model({ identity: "ws-test:workspace", resourceType: "workspace", resourceId: "workspace" });
+  const channel = createModelChannel(initial);
+  const target = document.body.appendChild(document.createElement("div"));
+  const component = mount(ResourceSettingsHarness, { target, props: { channel } });
+  cleanups.push(() => unmount(component)); await tick();
+  const turns = target.querySelector<HTMLInputElement>('[aria-label="Maximum Turns per Generation"]')!;
+  turns.value = "77"; turns.dispatchEvent(new Event("input", { bubbles: true }));
+  const toggle = target.querySelector<HTMLInputElement>('[aria-label="Enable usage-based Generation rotation"]')!;
+  toggle.checked = false; toggle.dispatchEvent(new Event("change", { bubbles: true })); await tick();
+  channel.publish({ ...initial, generationPolicy: { ...initial.generationPolicy }, stallWatchdogPolicy: { ...initial.stallWatchdogPolicy } }); await tick();
+  expect(turns.value).toBe("77"); expect(toggle.checked).toBe(false);
+  channel.publish({ ...initial, generationPolicy: { ...initial.generationPolicy, maxTurns: 50, maxAccumulatedTurnMinutes: 300 } }); await tick();
+  expect(turns.value).toBe("77");
+  expect(target.querySelector<HTMLInputElement>('[aria-label="Maximum accumulated Turn minutes per Generation"]')!.value).toBe("300");
+  channel.publish({ ...initial, identity: "other:workspace", workspaceId: "other" }); await tick();
+  expect(turns.value).toBe("20"); expect(toggle.checked).toBe(true);
 });

@@ -1,5 +1,13 @@
 @import "./SettingsPanel.css";
 
+:where([data-component-owner="profiles-settings-panel"]) button {
+  -webkit-appearance: none;
+  appearance: none;
+  margin: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
 /* Profile routes are collapsible cards with drag-to-reorder handles. System
  * profiles stay pinned to the top without a handle. */
 
@@ -31,7 +39,7 @@
 }
 
 :where([data-component-owner="profiles-settings-panel"]) .settings-profile-card-system {
-  background: var(--bg);
+  background: var(--panel);
 }
 
 :where([data-component-owner="profiles-settings-panel"]) .settings-profile-card-head {
@@ -95,7 +103,7 @@
   flex: 1;
   min-width: 0;
   border-radius: 4px;
-  background: var(--panel-sunken);
+  background: transparent;
   color: var(--muted);
   padding: 3px 8px;
   font-size: 11px;
@@ -103,6 +111,17 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+:where([data-component-owner="profiles-settings-panel"]) .settings-profile-card-head .icon-button.danger {
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+
+:where([data-component-owner="profiles-settings-panel"]) .settings-profile-card-head .icon-button.danger:hover:not(:disabled) {
+  background: var(--red-soft);
+  color: var(--red-deep, var(--accent));
 }
 
 :where([data-component-owner="profiles-settings-panel"]) .settings-profile-system-label {

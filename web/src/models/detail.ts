@@ -27,6 +27,7 @@ export interface FileTreeModel {
   size?: number;
   modified?: string;
   children?: FileTreeModel[];
+  truncated?: boolean;
 }
 
 export interface ResourceRepoModel {
@@ -81,6 +82,7 @@ export interface WorkspaceAgentsModel extends Partial<FilePreviewModel> {
 }
 
 export interface DetailPanelModel {
+  chatFocusRequest?: number;
   identity: string;
   workspaceId: string;
   workspaceName: string;
@@ -92,9 +94,14 @@ export interface DetailPanelModel {
   detail: ResourceDetailModel | null;
   wiki: { exists?: boolean; error?: string; entries?: FileTreeModel[] } | null;
   workspaceAgents: WorkspaceAgentsModel | null;
+  workspaceChat?: WorkspaceAgentsModel | null;
   workspaceDefaults: { project: ResourceAgentBindingModel; task: ResourceAgentBindingModel };
   workspaceUsers: WorkspaceUser[];
   currentUserName: string;
+  executionUnreadCount?: number;
+  dialogueUnreadCount?: number;
+  onChatState?: (chat: { open: boolean; unreadCount: number }) => void;
+  onSessionRead?: () => void;
   generationPolicy: GenerationPolicyRecord;
   stallWatchdogPolicy: StallWatchdogPolicyRecord;
   agentBinding: ResourceAgentBindingModel;

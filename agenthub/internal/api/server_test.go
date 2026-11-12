@@ -9,6 +9,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -467,6 +468,70 @@ func TestSessionSourceAPIAndCombinedFilters(t *testing.T) {
 	}
 }
 
+func TestSessionListCursorPagination(t *testing.T) {
+	store, err := session.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 4; index++ {
+		if _, err := store.Create(session.CreateInput{Source: &session.Source{App: "pua"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.Create(session.CreateInput{Source: &session.Source{App: "other"}}); err != nil {
+		t.Fatal(err)
+	}
+	app := "pua"
+	values := store.Filter(session.ListFilter{SourceApp: &app})
+	handler := New(store, "test", time.Now()).Handler()
+	type responsePage struct {
+		Sessions []session.Session       `json:"sessions"`
+		Page     sessionListPageMetadata `json:"page"`
+	}
+	readPage := func(query url.Values) responsePage {
+		t.Helper()
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/v1/sessions?"+query.Encode(), nil))
+		var result responsePage
+		if response.Code != http.StatusOK {
+			t.Fatalf("list status = %d: %s", response.Code, response.Body.String())
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	first := readPage(url.Values{"sourceApp": {"pua"}, "limit": {"2"}})
+	if len(first.Sessions) != 2 || first.Sessions[0].ID != values[0].ID || first.Sessions[1].ID != values[1].ID || !first.Page.HasMore || first.Page.NextCursor == "" || first.Page.Limit != 2 {
+		t.Fatalf("first page = %+v", first)
+	}
+	second := readPage(url.Values{"sourceApp": {"pua"}, "limit": {"2"}, "cursor": {first.Page.NextCursor}})
+	if len(second.Sessions) != 2 || second.Sessions[0].ID != values[2].ID || second.Sessions[1].ID != values[3].ID || second.Page.HasMore || second.Page.NextCursor != "" {
+		t.Fatalf("second page = %+v", second)
+	}
+	unbounded := readPage(url.Values{"sourceApp": {"pua"}})
+	if len(unbounded.Sessions) != 4 || unbounded.Page.Limit != 4 || unbounded.Page.HasMore {
+		t.Fatalf("unbounded page = %+v", unbounded)
+	}
+}
+
+func TestSessionListPaginationValidation(t *testing.T) {
+	for _, test := range []struct {
+		query url.Values
+		code  string
+	}{
+		{query: url.Values{"limit": {"0"}}, code: "invalid_session_limit"},
+		{query: url.Values{"limit": {"501"}}, code: "invalid_session_limit"},
+		{query: url.Values{"limit": {"many"}}, code: "invalid_session_limit"},
+		{query: url.Values{"cursor": {"not-a-cursor"}}, code: "invalid_session_cursor"},
+	} {
+		_, queryErr := parseSessionListOptions(test.query)
+		if queryErr == nil || queryErr.code != test.code {
+			t.Errorf("query %v error = %+v, want %s", test.query, queryErr, test.code)
+		}
+	}
+}
+
 func TestMutationRejectsCrossOriginBrowser(t *testing.T) {
 	store, err := session.Open(t.TempDir())
 	if err != nil {
@@ -493,7 +558,7 @@ func newConfigTestServer(t *testing.T) *httptest.Server {
 	}
 	cfg := config.Config{
 		Version:        1,
-		AgentProviders: []config.Provider{{ID: "provider", Type: "pi", Enabled: true, Command: "missing-test-command"}},
+		AgentProviders: []config.Provider{{ID: "provider", Type: "pi", Command: "missing-test-command"}},
 		Agents:         []config.Agent{{Name: "Pi Agent", ProviderID: "provider"}},
 	}
 	manager := runtime.New(store, cfg)
@@ -600,8 +665,8 @@ func TestPutConfigRoundTrip(t *testing.T) {
 	updated := `{"config":{
 		"version": 1,
 		"agentProviders": [
-			{"id": "provider", "name": "Pi", "type": "pi", "enabled": true, "command": "missing-test-command"},
-			{"id": "second", "name": "Kimi", "type": "kimi", "enabled": false}
+			{"id": "provider", "name": "Pi", "type": "pi", "command": "missing-test-command"},
+			{"id": "second", "name": "Kimi", "type": "kimi", "command": "missing-kimi-command"}
 		],
 		"agents": [
 			{"name": "Pi Agent", "providerId": "provider"},
@@ -647,9 +712,12 @@ func TestPutConfigRoundTrip(t *testing.T) {
 	if len(agentsBody.Agents) != 2 {
 		t.Fatalf("GET /v1/agents does not reflect saved config: %+v", agentsBody)
 	}
-	// Only enabled providers are probed; the disabled second one is absent.
-	if len(agentsBody.Probes) != 1 || agentsBody.Probes[0].ProviderID != "provider" {
+	// Every provider is probed, regardless of whether its executable resolves.
+	if len(agentsBody.Probes) != 2 || agentsBody.Probes[0].ProviderID != "provider" || agentsBody.Probes[1].ProviderID != "second" {
 		t.Fatalf("unexpected probes after save: %+v", agentsBody.Probes)
+	}
+	if agentsBody.Probes[0].Available || agentsBody.Probes[1].Available {
+		t.Fatalf("missing executables must probe unavailable: %+v", agentsBody.Probes)
 	}
 }
 
@@ -1650,7 +1718,7 @@ func TestResumeSessionAcceptsOptionalLaunchEnvironment(t *testing.T) {
 	}
 	cfg := config.Config{
 		Version:        1,
-		AgentProviders: []config.Provider{{ID: "provider", Type: "pi", Enabled: true, Command: "missing-test-command"}},
+		AgentProviders: []config.Provider{{ID: "provider", Type: "pi", Command: "missing-test-command"}},
 		Agents:         []config.Agent{{Name: "Pi Agent", ProviderID: "provider"}},
 	}
 	manager := runtime.New(store, cfg)
@@ -1667,8 +1735,9 @@ func TestResumeSessionAcceptsOptionalLaunchEnvironment(t *testing.T) {
 	}
 
 	// The test provider binary does not exist, so a resume that passes
-	// request validation reaches the runtime and fails there with a
-	// conflict; anything else means the request was rejected earlier.
+	// request validation reaches the runtime and fails there with the
+	// structured provider startup error; anything else means the request was
+	// rejected earlier.
 	postResume := func(body *string) (int, string) {
 		t.Helper()
 		var reader *strings.Reader
@@ -1702,8 +1771,8 @@ func TestResumeSessionAcceptsOptionalLaunchEnvironment(t *testing.T) {
 		"empty object": stringPointer(`{}`),
 	} {
 		status, code := postResume(body)
-		if status != http.StatusConflict || code != "runtime_operation_failed" {
-			t.Fatalf("%s: status/code = %d/%q, want 409/runtime_operation_failed", name, status, code)
+		if status != http.StatusBadGateway || code != "provider_start_failed" {
+			t.Fatalf("%s: status/code = %d/%q, want 502/provider_start_failed", name, status, code)
 		}
 		value, err := store.Get(created.ID)
 		if err != nil {
@@ -1717,8 +1786,8 @@ func TestResumeSessionAcceptsOptionalLaunchEnvironment(t *testing.T) {
 	// A valid overlay is persisted before the provider start fails, and
 	// keeps keys the overlay did not mention.
 	status, code := postResume(stringPointer(`{"launchEnvironment":{"SESSION_CONTEXT_ID":"context-new","EXTRA":"x"}}`))
-	if status != http.StatusConflict || code != "runtime_operation_failed" {
-		t.Fatalf("overlay resume: status/code = %d/%q, want 409/runtime_operation_failed", status, code)
+	if status != http.StatusBadGateway || code != "provider_start_failed" {
+		t.Fatalf("overlay resume: status/code = %d/%q, want 502/provider_start_failed", status, code)
 	}
 	value, err := store.Get(created.ID)
 	if err != nil {
@@ -1774,9 +1843,9 @@ func TestResumeSessionAcceptsOptionalLaunchEnvironment(t *testing.T) {
 	}
 }
 
-// newToggleTestServer starts a daemon whose config holds a single built-in
-// provider (pi) with a custom command and one agent bound to it.
-func newToggleTestServer(t *testing.T) (*httptest.Server, string) {
+// newProviderCommandTestServer starts a daemon whose config holds a single
+// built-in provider (pi) with a custom command and one agent bound to it.
+func newProviderCommandTestServer(t *testing.T) (*httptest.Server, string) {
 	t.Helper()
 	root := t.TempDir()
 	store, err := session.Open(filepath.Join(root, "sessions"))
@@ -1785,7 +1854,7 @@ func newToggleTestServer(t *testing.T) (*httptest.Server, string) {
 	}
 	cfg := config.Config{
 		Version:        1,
-		AgentProviders: []config.Provider{{ID: "pi", Name: "Pi Coding Agent", Type: "pi", Enabled: true, Command: "missing-test-command"}},
+		AgentProviders: []config.Provider{{ID: "pi", Name: "Pi Coding Agent", Type: "pi", Command: "missing-test-command"}},
 		Agents:         []config.Agent{{Name: "Pi Agent", ProviderID: "pi"}},
 	}
 	configPath := filepath.Join(root, "config.json")
@@ -1798,7 +1867,7 @@ func newToggleTestServer(t *testing.T) (*httptest.Server, string) {
 	return server, configPath
 }
 
-func toggleProvider(t *testing.T, server *httptest.Server, id, body string) (int, map[string]any) {
+func putProviderCommand(t *testing.T, server *httptest.Server, id, body string) (int, map[string]any) {
 	t.Helper()
 	request, err := http.NewRequest(http.MethodPut, server.URL+"/v1/config/providers/"+id, strings.NewReader(body))
 	if err != nil {
@@ -1833,81 +1902,77 @@ func getAgents(t *testing.T, server *httptest.Server) []map[string]any {
 	return body.Agents
 }
 
-func TestToggleProviderDisableEnableRoundTrip(t *testing.T) {
-	server, configPath := newToggleTestServer(t)
+func TestPutProviderCommandRoundTrip(t *testing.T) {
+	server, configPath := newProviderCommandTestServer(t)
 
-	// Disable: only the flag flips, the custom command is preserved, and the
-	// change is persisted to disk.
-	status, body := toggleProvider(t, server, "pi", `{"enabled": false}`)
+	// The configured command does not exist, so the agent starts out
+	// unavailable.
+	agents := getAgents(t, server)
+	if len(agents) != 1 || agents[0]["available"] != false || agents[0]["unavailableReason"] == nil {
+		t.Fatalf("agent of an unavailable provider should be unavailable: %v", agents)
+	}
+
+	// Point the provider at a real executable: only the command changes and
+	// the change is persisted to disk.
+	executable := filepath.Join(t.TempDir(), "pi-custom")
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	status, body := putProviderCommand(t, server, "pi", `{"command": "`+executable+`"}`)
 	if status != http.StatusOK {
-		t.Fatalf("disable: status = %d, body = %v", status, body)
+		t.Fatalf("set command: status = %d, body = %v", status, body)
 	}
 	provider := body["provider"].(map[string]any)
-	if provider["enabled"] != false || provider["command"] != "missing-test-command" {
-		t.Fatalf("disable lost the underlying configuration: %v", provider)
+	if provider["command"] != executable || provider["name"] != "Pi Coding Agent" {
+		t.Fatalf("command update lost the provider configuration: %v", provider)
 	}
 	onDisk, err := config.Load(configPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if onDisk.AgentProviders[0].Enabled || onDisk.AgentProviders[0].Command != "missing-test-command" {
-		t.Fatalf("toggle was not persisted: %+v", onDisk.AgentProviders[0])
+	if onDisk.AgentProviders[0].Command != executable {
+		t.Fatalf("command update was not persisted: %+v", onDisk.AgentProviders[0])
 	}
 
-	// The agent of a disabled provider is reported unavailable and new
-	// sessions naming it are rejected even when the client bypasses the UI.
-	agents := getAgents(t, server)
-	if len(agents) != 1 || agents[0]["available"] != false || agents[0]["unavailableReason"] == nil {
-		t.Fatalf("agent of disabled provider should be unavailable: %v", agents)
-	}
-	request, err := http.NewRequest(http.MethodPost, server.URL+"/v1/sessions", strings.NewReader(
-		`{"cwd":"`+t.TempDir()+`","agentName":"Pi Agent"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	request.Header.Set("Content-Type", "application/json")
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer response.Body.Close()
-	var created map[string]any
-	if err := json.NewDecoder(response.Body).Decode(&created); err != nil {
-		t.Fatal(err)
-	}
-	if response.StatusCode != http.StatusUnprocessableEntity || created["error"].(map[string]any)["code"] != "invalid_agent" {
-		t.Fatalf("session creation with a disabled provider: status = %d, body = %v", response.StatusCode, created)
-	}
-
-	// Re-enable restores availability without losing the command.
-	status, body = toggleProvider(t, server, "pi", `{"enabled": true}`)
-	if status != http.StatusOK {
-		t.Fatalf("enable: status = %d, body = %v", status, body)
-	}
-	provider = body["provider"].(map[string]any)
-	if provider["enabled"] != true || provider["command"] != "missing-test-command" {
-		t.Fatalf("enable lost the underlying configuration: %v", provider)
-	}
+	// The agent of a provider with a resolvable executable becomes available.
 	agents = getAgents(t, server)
 	if len(agents) != 1 || agents[0]["available"] != true {
-		t.Fatalf("agent of re-enabled provider should be available: %v", agents)
+		t.Fatalf("agent of an available provider should be available: %v", agents)
+	}
+
+	// Clearing the command restores automatic detection and keeps the rest of
+	// the provider configuration.
+	status, body = putProviderCommand(t, server, "pi", `{"command": ""}`)
+	if status != http.StatusOK {
+		t.Fatalf("clear command: status = %d, body = %v", status, body)
+	}
+	provider = body["provider"].(map[string]any)
+	if provider["command"] != nil && provider["command"] != "" {
+		t.Fatalf("clearing the command failed: %v", provider)
+	}
+	onDisk, err = config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if onDisk.AgentProviders[0].Command != "" || onDisk.AgentProviders[0].Name != "Pi Coding Agent" {
+		t.Fatalf("clearing the command was not persisted: %+v", onDisk.AgentProviders[0])
 	}
 }
 
-func TestToggleProviderCreatesBuiltinDefault(t *testing.T) {
-	server, _ := newToggleTestServer(t)
-	status, body := toggleProvider(t, server, "kimi", `{"enabled": true}`)
+func TestPutProviderCommandCreatesBuiltinDefault(t *testing.T) {
+	server, _ := newProviderCommandTestServer(t)
+	status, body := putProviderCommand(t, server, "kimi", `{"command": ""}`)
 	if status != http.StatusOK {
 		t.Fatalf("status = %d, body = %v", status, body)
 	}
 	provider := body["provider"].(map[string]any)
-	if provider["id"] != "kimi" || provider["type"] != "kimi" || provider["enabled"] != true {
+	if provider["id"] != "kimi" || provider["type"] != "kimi" {
 		t.Fatalf("missing built-in provider was not created with defaults: %v", provider)
 	}
 }
 
-func TestToggleProviderRejectsBadRequests(t *testing.T) {
-	server, _ := newToggleTestServer(t)
+func TestPutProviderCommandRejectsBadRequests(t *testing.T) {
+	server, _ := newProviderCommandTestServer(t)
 	cases := []struct {
 		name string
 		id   string
@@ -1915,14 +1980,15 @@ func TestToggleProviderRejectsBadRequests(t *testing.T) {
 		want int
 		code string
 	}{
-		{"unknown provider", "ghost", `{"enabled": true}`, http.StatusNotFound, "unknown_provider"},
-		{"non-builtin custom provider", "provider", `{"enabled": false}`, http.StatusNotFound, "unknown_provider"},
-		{"missing enabled flag", "pi", `{}`, http.StatusBadRequest, "invalid_request"},
-		{"wrong enabled type", "pi", `{"enabled": "yes"}`, http.StatusBadRequest, "invalid_request"},
-		{"unknown field", "pi", `{"enabled": true, "command": "x"}`, http.StatusBadRequest, "invalid_request"},
+		{"unknown provider", "ghost", `{"command": ""}`, http.StatusNotFound, "unknown_provider"},
+		{"non-builtin custom provider", "provider", `{"command": ""}`, http.StatusNotFound, "unknown_provider"},
+		{"missing command field", "pi", `{}`, http.StatusBadRequest, "invalid_request"},
+		{"wrong command type", "pi", `{"command": 5}`, http.StatusBadRequest, "invalid_request"},
+		{"unknown field", "pi", `{"command": "", "enabled": true}`, http.StatusBadRequest, "invalid_request"},
+		{"unresolvable command", "pi", `{"command": "/missing/pi-binary"}`, http.StatusUnprocessableEntity, "invalid_command"},
 	}
 	for _, item := range cases {
-		status, body := toggleProvider(t, server, item.id, item.body)
+		status, body := putProviderCommand(t, server, item.id, item.body)
 		code, _ := body["error"].(map[string]any)["code"].(string)
 		if status != item.want || code != item.code {
 			t.Errorf("%s: status = %d, code = %q, want %d %s", item.name, status, code, item.want, item.code)
@@ -1999,6 +2065,34 @@ func TestCreateSessionProviderFailureSurfacesError(t *testing.T) {
 	value := getSession(t, server, parsed.Error.Details.SessionID)
 	if value.State != session.StateStopped || value.StopReason != session.StopReasonStartupError {
 		t.Fatalf("unexpected session terminal state: %+v", value)
+	}
+
+	resume, err := http.NewRequest(http.MethodPost, server.URL+"/v1/sessions/"+value.ID+"/resume", bytes.NewReader([]byte("{}")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resume.Header.Set("Content-Type", "application/json")
+	resumeResponse, err := http.DefaultClient.Do(resume)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resumeResponse.Body.Close()
+	if resumeResponse.StatusCode != http.StatusBadGateway {
+		t.Fatalf("unexpected Resume status: %s", resumeResponse.Status)
+	}
+	var resumeError struct {
+		Error struct {
+			Code    string `json:"code"`
+			Details struct {
+				SessionID string `json:"sessionId"`
+			} `json:"details"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resumeResponse.Body).Decode(&resumeError); err != nil {
+		t.Fatal(err)
+	}
+	if resumeError.Error.Code != "provider_start_failed" || resumeError.Error.Details.SessionID != value.ID {
+		t.Fatalf("unexpected Resume error: %+v", resumeError.Error)
 	}
 }
 
@@ -2222,6 +2316,7 @@ func TestStatusCapabilitiesAreBackedByHTTPBehavior(t *testing.T) {
 		CapabilityTurnsStableIndex,
 		CapabilityTurnsMaterialized,
 		CapabilityTurnsActivityItems,
+		CapabilityTurnScopedSteer,
 		CapabilityEventsCanonicalTerminal,
 		CapabilityRecoveryClosedTurns,
 		CapabilitySessionLaunchEnvironment,

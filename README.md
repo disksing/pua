@@ -69,12 +69,15 @@ another output directory to `scripts/build` if needed.
 
 ### Local releases
 
-The macOS release workflow builds `pua` and `agenthub` for macOS and Linux on
-both arm64 and amd64. macOS binaries are signed with a Developer ID Application
-identity, submitted together to Apple's notary service, checked against the
-resulting online notarization tickets, and then packaged separately. Linux
-binaries are unsigned. All ZIP archives and notarization diagnostics are
-written to a new output directory, along with `SHA256SUMS`.
+PUA Server, AgentHub, and the macOS App share one release train and use a single
+`vX.Y.Z` tag and GitHub Release. Each train may publish any non-empty subset of
+the components. Set `versions/release` to `X.Y.Z`, set the version file for each
+participating component to the same value, and leave skipped components at their
+previous version. Validate the selection with:
+
+```bash
+scripts/release-plan v0.1.0
+```
 
 Before the first release, install a valid Developer ID Application identity and
 save notarization credentials in the login Keychain:
@@ -90,29 +93,21 @@ xcrun notarytool store-credentials pua-notary \
 saving. Never put the password, certificate private key, or exported `.p12`
 file in the repository.
 
-Run the release from a clean macOS checkout and provide an explicit version:
+Rehearse all components selected by the version files from a clean macOS
+checkout:
 
 ```bash
-scripts/release-local 0.1.0
+scripts/release-local
 ```
 
-By default the command creates `dist/0.1.0/` containing:
+By default the command writes component-specific assets under `dist/v0.1.0/`.
+Pass one output directory argument to use another location. It refuses to
+overwrite an existing path or release a dirty worktree.
 
-```text
-pua-0.1.0-darwin-arm64.zip
-pua-0.1.0-darwin-amd64.zip
-pua-0.1.0-linux-arm64.zip
-pua-0.1.0-linux-amd64.zip
-SHA256SUMS
-notarization-submit.json
-notarization-log.json
-```
-
-Pass a second argument to choose another output directory. The command refuses
-to overwrite an existing path or release a dirty worktree. If more than one
-Developer ID Application identity is installed, select one explicitly with
-`CODESIGN_IDENTITY`. Set `NOTARYTOOL_KEYCHAIN_PROFILE` when the credentials use
-a profile name other than `pua-notary`, or `NOTARYTOOL_KEYCHAIN` when they are
+If more than one Developer ID Application identity is installed, select one
+explicitly with `CODESIGN_IDENTITY`. Set `NOTARYTOOL_KEYCHAIN_PROFILE` when the
+credentials use a profile name other than `pua-notary`, or
+`NOTARYTOOL_KEYCHAIN` when they are
 stored in a keychain other than the user's default keychain.
 
 Apple creates online notarization tickets for the standalone Mach-O binaries,
@@ -187,7 +182,7 @@ The main UI is split into navigation, resource details, and agent chat:
 - **Navigation:** switch workspaces, open the fixed Scheduler entry, expand the project/task tree, and monitor each resource's current runtime state.
 - **Details:** render Scheduler context, schedules, `project.md`, `task.md`, and resource History; browse templates and artifacts; preview the workspace Wiki; inspect repository/worktree metadata; and render tracked plus untracked Git diffs.
 - **Chat:** select a Workspace, Scheduler, Project, or Task and send a message directly; PUA lazily creates or reuses that work subject's current generation. The resource timeline continues across generation boundaries, shows explicit history gaps, and pages older Turns without exposing Session lifecycle controls. At an idle Turn boundary, the composer can explicitly end the current generation; PUA safely stops and archives its AgentHub Session, retires the generation, and waits for the next message to create a successor. A new generation recovers from the brief, bounded recent resource history, task-worktree Git state, and artifacts rather than a second permanent progress file. Waiting mailbox messages appear above the composer and can be inserted into the active Turn without changing message ID when steer is supported.
-- **Settings:** add or remove workspaces, choose one of the bundled workspace icons, edit the user-owned portion of workspace `AGENTS.md`, manage Workspace-local users and preferences, inspect the read-only AgentHub catalog, map Profiles to catalog agents, and choose the one-time Profile defaults for newly created Workspaces, Projects, and Tasks. Each browser selects an existing user independently for each Workspace; creating a Workspace requires an initial user name, which is prefilled from the Server account when that name is valid.
+- **Settings:** add or remove workspaces, choose one of the bundled workspace icons, edit the user-owned portion of workspace `AGENTS.md`, manage Workspace-local users and preferences, configure independent usage-based and inactivity-based automatic Generation rotation, inspect the read-only AgentHub catalog, map Profiles to catalog agents, and choose the one-time Profile defaults for newly created Workspaces, Projects, and Tasks. Each browser selects an existing user independently for each Workspace; creating a Workspace requires an initial user name, which is prefilled from the Server account when that name is valid.
 
 The desktop panes are resizable. On smaller screens, navigation becomes a drawer and details/chat become switchable views.
 
@@ -197,11 +192,11 @@ PUA does not import provider adapters, spawn provider CLIs, probe provider healt
 
 PUA owns the complete Provider prompt and sends AgentHub a schema-v2 message containing that prompt as `text` plus a `pua.resource-message.v1` opaque payload. The payload retains the original text, role, sender, Workspace instance, type, and causation for PUA history and recovery; AgentHub forwards only the top-level text without interpreting PUA metadata. The timeline decodes the payload and shows the original message with its sender. Browser user selection is scoped to the stable Workspace instance, and requests for personal state require a selected registered user. Historical messages without sender provenance may still display the legacy `User` label.
 
-The Provider-facing envelope follows the target Workspace language (`en` or `zh-CN`) and states what the Turn opener receives: a user can observe progress and the final reply, a subscribed Agent receives only the final reply, and an unsubscribed Agent or system sender receives neither. An active-Turn insertion names the actual Turn opener and its response channel; when the insertion came from a different address, the envelope also includes the exact `pua message send --to=...` command for a separate reply. An insertion from the opener itself stays compact. PUA freezes this presentation context before the first delivery attempt, so a Workspace language change or Turn transition cannot rewrite the same stable message during recovery. The opaque payload remains `pua.resource-message.v1`, and PUA still recognizes the previous English envelope when recovering an input accepted before upgrade.
+Provider 消息封装使用目标 Workspace 的语言（`en` 或 `zh-CN`），标明消息发送方可接收的输出。Agent 和 system 消息不会自动接收最终回复；用户 Chat 的公开回复需要显式发布。插入活动 Turn 的消息会标明当前会话；来自不同发送方时，还会提供单独回复的 `pua message send --to=...` 命令。首次投递前会冻结语言、发送方和 Turn 上下文；重试旧 Agent 输入时修正过时的结果提示，恢复时仍识别旧版封装。历史 payload 继续使用 `pua.resource-message.v1`。
 
 PUA persists each resource generation under `<workspace>/.pua/runtime/resources/<resource-key>/`. The resource key is derived from the stable Workspace instance ID and normalized resource ID, so it is unambiguous and independent of the Workspace path. A versioned `generation-store.json` marker and staging directory make migration from the old runtime generation index repeatable; legacy files remain as rollback evidence, while records without a generation ID are isolated as cold history. The same resource directory contains the atomic mailbox `hot.json`, `receipts.json`, `outbox.json`, `scheduler.json`, and `commit.json`: hot state retains complete messages while delivery, recovery, notification, or Scheduler turn-boundary work is unresolved; terminal messages become minimal receipts without body text.
 
-A ready current generation is automatically slept after 30 minutes of continuous idle when there is no active Turn or approval, pending mailbox delivery, or lifecycle convergence. PUA persists the ready boundary and Stop-confirms the exact AgentHub Session, then retains that same generation and Session as an addressable idle-suspended resource. A later user, agent, system, or Scheduler message resumes that exact Session on demand and only delivers after the Session is ready; a stopped current Session observed after a PUA or AgentHub restart follows the same path. Temporary Resume failures use durable exponential backoff from five seconds to five minutes, so polling and Server restarts cannot create a restart storm. With no pending message, a stopped Session stays stopped and no provider work starts. Only a binding/profile change, explicit generation end, resource archive, archived/missing Session, explicit provider/native resume failure, or other replacement intent archives and retires the generation. Polling and Server restarts do not reset the deadline, and the resource history remains continuous across the retained generation.
+A ready current generation is automatically slept after 30 minutes of continuous idle when there is no active Turn or approval, pending mailbox delivery, or lifecycle convergence. PUA persists the ready boundary and Stop-confirms the exact AgentHub Session, then retains that same generation and Session as an addressable idle-suspended resource. A later user, agent, system, or Scheduler message normally resumes that exact Session on demand and only delivers after the Session is ready; a stopped current Session observed after a PUA or AgentHub restart follows the same path. Before a queued message starts a new Turn, the Workspace's independent Generation policies can instead replace the current Generation: usage rotation defaults to 20 completed Turns or 120 accumulated active Turn minutes, while inactivity rotation defaults to 24 hours since AgentHub's latest semantic Turn activity. Replacement happens before Resume or delivery, so the same durable mailbox message moves to the successor without waking a stale Session; active-Turn steer is never rotated. Temporary Resume failures use durable exponential backoff from five seconds to five minutes, so polling and Server restarts cannot create a restart storm. With no pending message, a stopped Session stays stopped and no provider work starts. Only a binding/profile change, explicit generation end, resource archive, archived/missing Session, explicit provider/native resume failure, an enabled automatic rotation policy, or another replacement intent archives and retires the generation. Polling and Server restarts do not reset the idle deadline or proactively rotate inactive generations, and resource history remains continuous across generations.
 
 Resource messages use `steer` (default), `enqueue`, or `interrupt`. A supported active Turn receives steer immediately; an unsupported steer is durably downgraded to enqueue. Enqueue waits for a ready boundary. Interrupt first persists its mailbox item, records the exact active Turn, interrupts only that Turn, waits for terminal state, and then opens a new Turn. Already-delivering messages resolve first; otherwise interrupt outranks steer, and steer outranks queued enqueue, with acceptance order preserved inside each class. A live steer or interrupt may therefore bypass older enqueue work. Generation replacement never moves mailbox ownership: delivered steer remains with the old Turn, enqueue waits for the new generation, and interrupt terminates the old Turn before replacement delivery. The periodic reconciler recovers all modes after Server or AgentHub failures. Archived resources reject new messages: items not yet sent become `undeliverable`, while an already-attempted item whose AgentHub outcome cannot be confirmed becomes `delivery_unknown`; both remain queryable by message ID.
 
@@ -211,7 +206,7 @@ The Web sidebar has a server-owned Activity panel below the resource tree with i
 
 ### Scheduler
 
-`pua init` and `pua migrate` non-destructively create the special `scheduler/` resource. Its formatted `scheduler.json` contains `schemaVersion`, an independent Agent/Profile binding, `wakeIntervalMinutes` (30 by default), and a `schedules` array. A schedule intentionally has only `id`, `description`, `condition`, `target`, `createdAt`, and `updatedAt`; conditions are natural language, not cron expressions. `scheduler.md` is optional durable judgment context maintained by the Scheduler Agent, while `AGENTS.md` explains the parent instructions, allowed files, duplicate-message behavior, and required target-message fields.
+`pua init` and `pua migrate` non-destructively create the special `scheduler/` resource. Its formatted `scheduler.json` contains `schemaVersion`, an independent Agent/Profile binding, `wakeIntervalMinutes` (30 by default), `conditionMaxChars` (128 by default, configurable from 1 to 65536 alongside the wake interval in Scheduler settings), `descriptionMaxChars` (32 by default, same range and settings group), and a `schedules` array. A schedule intentionally has only `id`, `description`, `condition`, `target`, `createdAt`, and `updatedAt`; conditions are natural language, not cron expressions. New and explicitly updated conditions and descriptions are limited by Unicode character count after trimming surrounding whitespace. Existing longer values remain readable and removable; updating other fields does not recheck them, and lowering a limit does not truncate stored text. Older configurations without `conditionMaxChars` use 128, and those without `descriptionMaxChars` use 32. A schedule description is only a short label; notes belong in the target Task's `task.md` or the Project's `project.md`, not in the schedule description. `scheduler.md` is optional durable judgment context maintained by the Scheduler Agent, while `AGENTS.md` explains the parent instructions, allowed files, duplicate-message behavior, and required target-message fields.
 
 The Server sends enqueue-only `scheduler_tick` system messages. It does not interpret conditions itself. An empty schedule list produces no Turn; adding or changing a schedule requests an immediate coalesced tick. Otherwise the interval is measured from the end of the previous completed Server-triggered Scheduler Turn, so user chat with the Scheduler does not postpone its next wake. Restart recovery checks durable mailbox and canonical AgentHub Turn state before deciding whether one recovery tick is needed. Messages to schedule targets may repeat, and receivers use the schedule ID to handle duplicates.
 
@@ -444,9 +439,9 @@ the web Settings workspace tab (mirroring the Project and Task titles kept in
 their resource metadata). Workspaces without a name fall back to the directory
 base name.
 
-Workspace, Project, and Task creation is local and uses the shared `internal/app` application boundary. Creation no longer persists resource creator metadata; Agent sender provenance remains on messages and is validated from the injected generation environment. Creation sends no initial message and creates no generation; call `pua message send` separately, which lazily creates the first generation. A message that actually opens a Turn subscribes to that Turn's result by default; a message delivered as steer into an existing Turn does not. A steer request downgraded to enqueue becomes an opener and does subscribe. Pass `--subscribe-result=false` to disable the result for an opening message. If a create command commits but its output is lost, query the resource before deciding whether to issue a new create operation.
+Workspace、Project 和 Task 通过 `internal/app` 在本地创建，不保存资源创建者元数据，也不会自动发送首条消息或创建 generation。使用 `pua message send` 单独发送首条输入，并通过注入的环境记录 Agent 发送方来源。所有投递模式下的 Agent 消息均为单向；需要回复时可显式发送新消息。创建已提交但输出丢失时，应先查询资源再决定是否重试。
 
-Subscribed terminal Turn results and terminal cross-resource delivery failures return through the source resource's recoverable outbox as structured system messages with stable `type`, `causation`, and receipt metadata. Only the Agent message that opened a Turn receives its final result; steer inputs delivered into that Turn require an explicit PUA reply when needed. The generated body is retained only until the target mailbox accepts it; after that, source and target retain bounded summaries while AgentHub canonical history remains the content source. Generated messages force `subscribeResult=false` and never recursively generate another notification. Use `pua message show` for delivery diagnostics and `pua history turn show` for Turn references.
+跨资源投递失败时仍可通过可恢复 outbox 发送带 `type`、`causation` 和 receipt 的系统通知，可用 `pua message show` 查询。旧结果订阅和遗留 outbox 操作不再发送结果；目标 mailbox 中尚未投递的旧结果会取消，已经开始投递的项标为 `delivery_unknown`，因为 AgentHub 可能已经接受。历史 receipt 按既有保留期保存。AgentHub 已接受的结果无法撤回；回退旧版 Server 可能重新启用其仍能读取的旧订阅。
 
 `pua migrate` upgrades supported resource metadata, generation/mailbox stores,
 legacy task history, Scheduler resources, and PUA-managed `AGENTS.md` blocks.
@@ -464,14 +459,14 @@ Run the full test suite and build all binaries:
 
 ```bash
 cd web && npm ci && npm run check && npm test && npm run test:e2e && cd ..
-cd agenthub/frontend && npm ci && npm test && npm run test:sites && cd ../..
 go test -race ./...
 go vet ./...
 scripts/build
 ```
 
-`scripts/build` validates and builds both frontends, embeds their generated
-assets, and produces `pua` plus `agenthub`. Node is required only for
+`scripts/build` validates the single Svelte/TypeScript project, builds its
+separate PUA and AgentHub entries, embeds their generated assets, and produces
+`pua` plus `agenthub`. Node is required only for
 development and builds; neither shipped binary has a Node runtime dependency.
 Focused and full Go tests compile directly from a clean checkout without a
 frontend build. The release script enables an internal `embed_frontend` build

@@ -6,7 +6,7 @@
   import { ApiClient } from "../api/client";
   import ActivityGroup from "./ActivityGroup.svelte";
   import ApprovalCard from "./ApprovalCard.svelte";
-  import { ChatSessionController, turnIsCollapsedByPolicy } from "./chat-state";
+  import { ChatSessionController, turnIsCollapsedByPolicy, type ChatSessionControllerOptions } from "./chat-state";
   import { effectiveGenerationStatus } from "./generation-status";
   import FilePreviewModal from "./FilePreviewModal.svelte";
   import LifecycleNotice from "./LifecycleNotice.svelte";
@@ -18,7 +18,7 @@
   import { formatClock, groupTimelineActivities, markTurnAgentRuns, markTurnFinalAssistant } from "./timeline-events";
   import UnknownEvent from "./UnknownEvent.svelte";
 
-  let { channel }: { channel: ModelChannel<EventTimelineModel> } = $props();
+  let { channel, readOnly = false, controllerOptions = {}, onViewed }: { channel: ModelChannel<EventTimelineModel>; readOnly?: boolean; controllerOptions?: ChatSessionControllerOptions; onViewed?: (snapshot: ChatContextSnapshot) => void } = $props();
   // svelte-ignore state_referenced_locally
   let model = $state(channel.current());
   // svelte-ignore state_referenced_locally
@@ -55,13 +55,19 @@
 
   onMount(() => {
     const scroll = scroller();
-    const trackFollow = () => { follow = isNearBottom(scroller()); };
+    const trackFollow = () => { follow = isNearBottom(scroller()); reportViewed(); };
+    document.addEventListener("visibilitychange", trackFollow);
     scroll?.addEventListener("scroll", trackFollow, { passive: true });
     const followResize = typeof ResizeObserver === "undefined" || !scroll ? null : new ResizeObserver(() => {
       if (follow && !hasActiveSelection()) scrollToBottom();
     });
     if (scroll && followResize) followResize.observe(scroll);
     controller = new ChatSessionController({
+      ...controllerOptions,
+      onStatus: (workspaceId, resourceId, status) => {
+        if (model.workspaceId === workspaceId && model.resourceId === resourceId) model = { ...model, status };
+        controllerOptions.onStatus?.(workspaceId, resourceId, status);
+      },
       onEvent: (workspaceId, resourceId, event) => model.onEvent(workspaceId, resourceId, event),
       onNotice: (workspaceId, resourceId, notice) => model.onNotice(workspaceId, resourceId, notice),
     });
@@ -113,6 +119,7 @@
       document.removeEventListener("selectionchange", selectionChanged);
       document.removeEventListener("keydown", keydown);
       scroll?.removeEventListener("scroll", trackFollow);
+      document.removeEventListener("visibilitychange", trackFollow);
       followResize?.disconnect();
       controller?.dispose();
       controller = undefined;
@@ -142,7 +149,13 @@
     void tick().then(() => {
       if (followAfterUpdate && !hasActiveSelection()) scrollToBottom();
       if (next.loaded) void fillViewport(next.identity);
+      reportViewed();
     });
+  }
+
+  function reportViewed(): void {
+    if (follow && snapshot.loaded && !snapshot.error && document.visibilityState !== "hidden"
+      && !hasActiveSelection() && !snapshot.blocks.some(block => block.kind === "gap")) onViewed?.(snapshot);
   }
 
   function observeTurn(node: HTMLElement, reference: string) {
@@ -173,12 +186,18 @@
     return block.generation.agentName || block.generation.resolvedProfile || block.generation.binding?.name || model.agentName || "Agent";
   }
 
+  // Keep viewport loading, digest rendering and controller projection on the
+  // same policy so a terminal update cannot hide an event pane's messages.
+  function isTurnCollapsed(turn: ResourceHistoryTurnSummary): boolean {
+    return turnIsCollapsedByPolicy(turn, controllerOptions.collapseNonUserTurns !== false);
+  }
+
   // autoExpandReference feeds the visibility observer: only Turns that may
   // expand on scroll return their reference; collapsed-by-policy Turns return
   // an empty reference so the observer never requests their details.
   function autoExpandReference(block: ConversationBlock): string {
     const turn = block.turn;
-    if (!turn || turnIsCollapsedByPolicy(turn)) return "";
+    if (!turn || isTurnCollapsed(turn)) return "";
     return turn.reference || "";
   }
 
@@ -261,7 +280,7 @@
       const block = snapshot.blocks[index];
       if (block.kind !== "turn" || !block.turn?.reference) continue;
       // Collapsed-by-policy (non-user) Turns expand only on explicit click.
-      if (turnIsCollapsedByPolicy(block.turn)) continue;
+      if (isTurnCollapsed(block.turn)) continue;
       if (block.items || block.events || block.loading || block.error) continue;
       return block.turn.reference;
     }
@@ -397,7 +416,7 @@
       {:else}
         <section class="conversation-turn" class:conversation-turn-loading={block.loading} data-timeline-key={block.key} use:observeTurn={autoExpandReference(block)}>
           {#if block.turn && !block.items && !block.events}
-            {#if turnIsCollapsedByPolicy(block.turn)}
+            {#if isTurnCollapsed(block.turn)}
               <!-- Non-user-triggered Turns (agent messages, scheduler and system
                    notifications) render as a two-message conversation digest:
                    the trigger message and the final reply keep the normal
@@ -456,7 +475,7 @@
               {:else if item.kind === "activity"}
                 <ActivityGroup {item} onExpand={() => expandCompact(item)} />
               {:else if item.kind === "approval"}
-                <ApprovalCard {item} generationId={block.generation.generationId} contextIdentity={snapshot.identity} onApproval={model.onApproval} onToast={model.onToast} />
+                <ApprovalCard {item} {readOnly} generationId={block.generation.generationId} contextIdentity={snapshot.identity} onApproval={model.onApproval} onToast={model.onToast} />
               {:else if item.kind === "lifecycle"}
                 <LifecycleNotice {item} />
               {:else if item.kind === "error"}
@@ -466,7 +485,7 @@
               {/if}
             </div>
           {/each}
-          {#if block.turn && turnIsCollapsedByPolicy(block.turn) && (block.items?.length || block.events?.length)}
+          {#if block.turn && isTurnCollapsed(block.turn) && (block.items?.length || block.events?.length)}
             <button type="button" class="turn-collapse-again" onclick={() => collapseExpandedTurn(block)}><Icon name="chevron-up" /><span>Collapse turn</span></button>
           {/if}
           {#if block.loading && !block.items && !block.events}<div class="turn-loading"><Icon name="loader-circle" /><span>Loading turn details</span></div>{/if}
@@ -484,7 +503,7 @@
       </div>
     {/if}
     {#if snapshot.loading && !snapshot.blocks.length}<div class="chat-timeline-empty"><Icon name="loader-circle" /><strong>Loading resource history</strong></div>{/if}
-    {#if snapshot.loaded && !snapshot.loading && !snapshot.blocks.length && !snapshot.notices.length && !turnIsWorking(model.status)}<div class="chat-timeline-empty"><Icon name="bot" /><strong>No conversation yet</strong><span>Send a message to start this resource's conversation.</span></div>{/if}
+    {#if snapshot.loaded && !snapshot.loading && !snapshot.blocks.length && !snapshot.notices.length && !turnIsWorking(model.status)}<div class="chat-timeline-empty"><Icon name="bot" /><strong>{readOnly ? "No session events yet" : "No conversation yet"}</strong>{#if !readOnly}<span>Send a message to start this resource's conversation.</span>{/if}</div>{/if}
   {:else}
     <div class="chat-timeline-empty"><Icon name="bot" /><strong>No resource selected</strong></div>
   {/if}

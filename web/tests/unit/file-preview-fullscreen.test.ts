@@ -1,4 +1,4 @@
-import { mount, unmount } from "svelte";
+import { mount, tick, unmount } from "svelte";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EditorView } from "@codemirror/view";
 
@@ -52,6 +52,21 @@ afterEach(async () => {
 });
 
 describe("FilePreviewFullscreen", () => {
+  it("saves workspace chat.md through the scoped documents endpoint", async () => {
+    setURL({ workspaceId: "ws", resourceId: "workspace", path: "chat.md", mode: "edit" });
+    const requests: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "PUT") requests.push(String(input));
+      return new Response(JSON.stringify({ path: "chat.md", name: "chat.md", content: "# Pending", contentHash: "chat-hash" }), { headers: { "content-type": "application/json" } });
+    }));
+    const target = mountFullscreen();
+    await vi.waitFor(() => expect(target.querySelector(".cm-editor")).not.toBeNull());
+    const view = EditorView.findFromDOM(target.querySelector<HTMLElement>(".cm-editor")!)!;
+    view.dispatch({ changes: { from: view.state.doc.length, insert: "\nResult" } });
+    await tick();
+    Array.from(target.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.trim() === "Save")!.click();
+    await vi.waitFor(() => expect(requests).toEqual(["/api/workspaces/ws/resources/workspace/documents?path=chat.md"]));
+  });
   it("renders the file full screen from URL parameters without a modal backdrop", async () => {
     setURL({ workspaceId: "ws", resourceId: "project1.task1", section: "Files", path: "project1/task1/task.md", mode: "edit" });
     const fetch = fileFetchMock();

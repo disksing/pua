@@ -3,6 +3,7 @@ package pua
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/disksing/pua/internal/app"
@@ -29,6 +30,9 @@ type taskListOptions struct {
 }
 
 func Run(args []string) error {
+	if os.Getenv("PUA_CHANNEL") == "dialogue" && !dialogueCommandAllowed(args) {
+		return errors.New("dialogue Sessions are retired and may only query historical resources")
+	}
 	if len(args) == 0 {
 		printUsage()
 		return nil
@@ -40,6 +44,16 @@ func Run(args []string) error {
 			return errors.New("usage: pua --version")
 		}
 		fmt.Print(buildinfo.Text("pua"))
+		return nil
+	case "--version-json":
+		if len(args) != 1 {
+			return errors.New("usage: pua --version-json")
+		}
+		data, err := buildinfo.JSON("pua")
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s\n", data)
 		return nil
 	case "init":
 		return runInit(args[1:])
@@ -57,6 +71,10 @@ func Run(args []string) error {
 		return runAgent(args[1:])
 	case "user":
 		return runUser(args[1:])
+	case "chat":
+		return runChat(args[1:])
+	case "turn":
+		return runTurn(args[1:])
 	case "message":
 		return runMessage(args[1:])
 	case "history":
@@ -284,6 +302,8 @@ Usage:
   pua agent <command>
   pua user <command>
   pua workspace <command>
+  pua chat show|notes|publish|dispatch|timer
+  pua turn status|yield|notify|finish|cancel-resume
   pua message <command>
   pua history <command>
   pua serve [--addr=<address>] [--workspace=<path>] [--version]
@@ -291,7 +311,7 @@ Usage:
 
 Commands:
   pua --version
-    Print the build-time branch and sha.
+    Print the product version and source build identity.
 
   pua init [--language=<language>]
     Initialize the current directory as a new AgentWorkspace. Fails when run
@@ -317,7 +337,7 @@ Commands:
     binding, repo.
 
   pua scheduler <command>
-    Manage natural-language schedules. Subcommands: list, show, add, update,
+    Manage time and condition schedules. Subcommands: list, show, add, update,
     remove.
 
   pua template <command>
@@ -381,6 +401,10 @@ func runHelp(args []string) error {
 		printUserHelp()
 	case "workspace":
 		printWorkspaceHelp()
+	case "chat":
+		fmt.Println(chatUsage)
+	case "turn":
+		fmt.Println(turnUsage)
 	case "message":
 		printMessageHelp()
 	case "history":
@@ -559,8 +583,8 @@ func printSchedulerHelp() {
 	fmt.Print(`Usage:
   pua scheduler list [--json]
   pua scheduler show --id=<schedule>
-  pua scheduler add --description=<text> --condition=<text> --target=<resource>
-  pua scheduler update --id=<schedule> [--description=<text>] [--condition=<text>] [--target=<resource>]
+  pua scheduler add --description=<text> --target=<resource> [--condition=<text>] [--at=<time>|--daily=<HH:MM>] [--timezone=<IANA>] [--expires=<time>]
+  pua scheduler update --id=<schedule> [--description=<text>] [--condition=<text>] [--target=<resource>] [--at=<time>|--daily=<HH:MM>] [--timezone=<IANA>] [--expires=<time>] [--no-exact-time]
   pua scheduler remove --id=<schedule>
 
 Commands:
@@ -570,12 +594,19 @@ Commands:
   pua scheduler show --id=<schedule>
     Print one schedule as JSON.
 
-  pua scheduler add --description=<text> --condition=<text> --target=<resource>
-    Create a natural-language schedule. <resource> is a stable resource id such
-    as workspace or project1.task1.
+  pua scheduler add --description=<text> --target=<resource> [--condition=<text>] [--at=<time>|--daily=<HH:MM>] [--timezone=<IANA>] [--expires=<time>]
+    Create a schedule. --at fires once; --daily fires each day at HH:MM.
+    Time values accept RFC3339 or YYYY-MM-DDTHH:MM[:SS]. --timezone is an
+    IANA zone (default: server local zone, persisted when created).
+    Without an exact time, --condition is required and evaluated by the
+    Scheduler Agent. With an exact time, condition is an optional note.
+    Missed daily occurrences are coalesced to the latest one after downtime.
+    <resource> is a stable resource id such as workspace or project1.task1.
 
-  pua scheduler update --id=<schedule> [--description=<text>] [--condition=<text>] [--target=<resource>]
-    Update one or more fields of an existing schedule.
+  pua scheduler update --id=<schedule> [--description=<text>] [--condition=<text>] [--target=<resource>] [--at=<time>|--daily=<HH:MM>] [--timezone=<IANA>] [--expires=<time>] [--no-exact-time]
+    Update one or more fields. --no-exact-time removes the exact trigger
+    (requires a condition). --condition= clears an optional note;
+    --expires= clears the expiry. Time or target changes rearm the schedule.
 
   pua scheduler remove --id=<schedule>
     Remove a schedule.
@@ -640,18 +671,16 @@ Commands:
 
 func printMessageHelp() {
 	fmt.Print(`Usage:
-  pua message send --to=<resource|user> [--mode=steer|enqueue|interrupt] [--subscribe-result=false] [--server=<url>] <message>
+  pua message send --to=<resource|user> [--mode=steer|enqueue|interrupt] [--server=<url>] <message>
   pua message show --id=<message-id> [--server=<url>]
 
 Commands:
-  pua message send --to=<resource|user> [--mode=steer|enqueue|interrupt] [--subscribe-result=false] [--server=<url>] <message>
+  pua message send --to=<resource|user> [--mode=steer|enqueue|interrupt] [--server=<url>] <message>
     When --to is a stable resource id (workspace, scheduler, projectN, or
     projectN.taskM), persist a message in the target resource mailbox through
     the owning pua serve process. steer is the default.
-    A message that actually opens a Turn subscribes to its result by default;
-    a message delivered as steer into an
-    existing Turn does not. Pass --subscribe-result=false to disable the
-    opener result. The current directory's stable work-subject id and
+    Agent messages are one-way; the recipient's Turn does not automatically
+    return its final response. The current directory's stable work-subject id and
     Workspace instance id are sent as role=agent provenance. A valid injected
     PUA resource environment takes precedence over cwd; provenance is not
     authentication or instruction priority.
@@ -661,11 +690,9 @@ Commands:
     standard input, for example:
       pua message send --to=project1.task2 - <<'EOF'
 
-    When --to is a registered user name, durably append the message to that
-    user's inbox for display in the Web GUI. The user reads it in the Inbox
-    panel and may reply; the reply arrives as an ordinary role=user resource
-    mailbox message addressed to the sending resource. --mode and
-    --subscribe-result apply only to resource targets.
+    User Inbox delivery has been removed. New Chat Turns publish ordinary
+    assistant text automatically. Internal Turns can request a visible
+    notification with pua turn notify. Only legacy inputs use chat publish.
 
   pua message show --id=<message-id> [--server=<url>]
     Query the current delivery record for a stable mailbox message id. Status

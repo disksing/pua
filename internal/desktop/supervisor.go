@@ -20,17 +20,21 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/disksing/pua/internal/buildinfo"
 )
 
 const (
-	defaultAddress    = "127.0.0.1:4936"
-	manifestVersion   = 1
-	stateVersion      = 1
-	backendFileName   = "pua"
-	defaultProbePath  = "/api/workspaces"
-	defaultStartDelay = 100 * time.Millisecond
-	pathBlockStart    = "# >>> PUA desktop managed PATH >>>"
-	pathBlockEnd      = "# <<< PUA desktop managed PATH <<<"
+	defaultAddress         = "127.0.0.1:4936"
+	defaultAgentHubAddress = "127.0.0.1:4646"
+	manifestVersion        = 1
+	stateVersion           = 2
+	backendFileName        = "pua"
+	agentHubFileName       = "agenthub"
+	defaultProbePath       = "/api/workspaces"
+	defaultStartDelay      = 100 * time.Millisecond
+	pathBlockStart         = "# >>> PUA desktop managed PATH >>>"
+	pathBlockEnd           = "# <<< PUA desktop managed PATH <<<"
 )
 
 // macOS applications launched from Finder or the Dock do not source the
@@ -46,23 +50,38 @@ var macOSProviderPathEntries = []string{
 
 // Options controls how the desktop shell finds and starts the PUA backend.
 type Options struct {
-	Address        string
-	ConfigPath     string
-	AppSupportDir  string
-	BackendPath    string
-	CLIPath        string
-	ShellProfile   string
-	StartupTimeout time.Duration
-	HTTPClient     *http.Client
+	Address           string
+	AgentHubAddress   string
+	ConfigPath        string
+	AppSupportDir     string
+	BackendPath       string
+	AgentHubPath      string
+	AgentHubHome      string
+	AgentHubStatePath string
+	AgentHubLockPath  string
+	CLIPath           string
+	AgentHubCLIPath   string
+	ShellProfile      string
+	UpdateManifestURL string
+	UpdatePublicKey   string
+	StartupTimeout    time.Duration
+	HTTPClient        *http.Client
 }
 
 // Result describes the backend selected by Ensure.
 type Result struct {
-	URL         string
-	Managed     bool
-	PID         int
-	BackendPath string
-	Digest      string
+	URL               string    `json:"url"`
+	Managed           bool      `json:"managed"`
+	PID               int       `json:"pid"`
+	BackendPath       string    `json:"backendPath"`
+	Digest            string    `json:"digest"`
+	StartedAt         time.Time `json:"startedAt,omitempty"`
+	AgentHubURL       string    `json:"agentHubUrl"`
+	AgentHubManaged   bool      `json:"agentHubManaged"`
+	AgentHubPID       int       `json:"agentHubPid"`
+	AgentHubPath      string    `json:"agentHubPath"`
+	AgentHubDigest    string    `json:"agentHubDigest"`
+	AgentHubStartedAt time.Time `json:"agentHubStartedAt,omitempty"`
 }
 
 type manifest struct {
@@ -73,13 +92,30 @@ type manifest struct {
 }
 
 type backendState struct {
+	SchemaVersion    int       `json:"schemaVersion"`
+	PID              int       `json:"pid"`
+	Endpoint         string    `json:"endpoint"`
+	BackendPath      string    `json:"backendPath"`
+	Digest           string    `json:"digest"`
+	Managed          bool      `json:"managed"`
+	StartedAt        time.Time `json:"startedAt"`
+	AgentHubEndpoint string    `json:"agentHubEndpoint"`
+}
+
+type agentHubState struct {
 	SchemaVersion int       `json:"schemaVersion"`
 	PID           int       `json:"pid"`
 	Endpoint      string    `json:"endpoint"`
-	BackendPath   string    `json:"backendPath"`
+	BinaryPath    string    `json:"binaryPath"`
 	Digest        string    `json:"digest"`
 	Managed       bool      `json:"managed"`
 	StartedAt     time.Time `json:"startedAt"`
+}
+
+type agentHubDaemonState struct {
+	PID       int       `json:"pid"`
+	Endpoint  string    `json:"endpoint"`
+	StartedAt time.Time `json:"startedAt"`
 }
 
 type serveLock struct {
@@ -93,23 +129,57 @@ func DefaultOptions() (Options, error) {
 	if err != nil {
 		return Options{}, fmt.Errorf("find home directory: %w", err)
 	}
+	development := buildinfo.IsDevelopment(buildinfo.Current("macapp"))
+	address, agentHubAddress := defaultAddress, defaultAgentHubAddress
+	applicationName, configDirectory := "PUA", ".pua"
+	if development {
+		address, agentHubAddress = "127.0.0.1:14936", "127.0.0.1:14646"
+		applicationName, configDirectory = "PUA Dev", ".pua-dev"
+	}
 	configPath := os.Getenv("PUA_SERVE_CONFIG")
 	if configPath == "" {
-		configPath = filepath.Join(home, ".pua", "serve.json")
+		configPath = filepath.Join(home, configDirectory, "serve.json")
 	}
 	appSupport := os.Getenv("PUA_DESKTOP_HOME")
 	if appSupport == "" {
-		appSupport = filepath.Join(home, "Library", "Application Support", "PUA")
+		appSupport = filepath.Join(home, "Library", "Application Support", applicationName)
+	}
+	agentHubHome := os.Getenv("PUA_DESKTOP_AGENTHUB_HOME")
+	if agentHubHome == "" && !development {
+		agentHubHome = os.Getenv("AGENTHUB_HOME")
+	}
+	if agentHubHome == "" && development {
+		agentHubHome = filepath.Join(appSupport, "agenthub-home")
+	}
+	agentHubStatePath := filepath.Join(home, ".agenthub", "server.json")
+	agentHubLockPath := filepath.Join(home, ".agenthub", "server.lock")
+	if agentHubHome != "" {
+		agentHubStatePath = filepath.Join(agentHubHome, "state", "server.json")
+		agentHubLockPath = filepath.Join(agentHubHome, "state", "server.lock")
+	}
+	cliPath := filepath.Join(home, ".pua", "bin", backendFileName)
+	shellProfile := defaultShellProfile(home)
+	if development {
+		cliPath = filepath.Join(appSupport, "bin", backendFileName)
+		shellProfile = ""
 	}
 	return Options{
-		Address:        envOrDefault("PUA_DESKTOP_ADDRESS", defaultAddress),
-		ConfigPath:     configPath,
-		AppSupportDir:  appSupport,
-		BackendPath:    os.Getenv("PUA_DESKTOP_BACKEND"),
-		CLIPath:        envOrDefault("PUA_DESKTOP_CLI_PATH", filepath.Join(home, ".pua", "bin", backendFileName)),
-		ShellProfile:   envOrDefault("PUA_DESKTOP_SHELL_PROFILE", defaultShellProfile(home)),
-		StartupTimeout: 30 * time.Second,
-		HTTPClient:     &http.Client{Timeout: 2 * time.Second},
+		Address:           envOrDefault("PUA_DESKTOP_ADDRESS", address),
+		AgentHubAddress:   envOrDefault("PUA_DESKTOP_AGENTHUB_ADDRESS", agentHubAddress),
+		ConfigPath:        configPath,
+		AppSupportDir:     appSupport,
+		BackendPath:       os.Getenv("PUA_DESKTOP_BACKEND"),
+		AgentHubPath:      os.Getenv("PUA_DESKTOP_AGENTHUB"),
+		AgentHubHome:      agentHubHome,
+		AgentHubStatePath: agentHubStatePath,
+		AgentHubLockPath:  agentHubLockPath,
+		CLIPath:           envOrDefault("PUA_DESKTOP_CLI_PATH", cliPath),
+		AgentHubCLIPath:   os.Getenv("PUA_DESKTOP_AGENTHUB_CLI_PATH"),
+		ShellProfile:      envOrDefault("PUA_DESKTOP_SHELL_PROFILE", shellProfile),
+		UpdateManifestURL: envOrDefault("PUA_COMPONENT_MANIFEST_URL", buildinfo.ComponentManifestURL),
+		UpdatePublicKey:   envOrDefault("PUA_COMPONENT_UPDATE_PUBLIC_KEY", buildinfo.ComponentUpdatePublicKey),
+		StartupTimeout:    30 * time.Second,
+		HTTPClient:        &http.Client{Timeout: 2 * time.Second},
 	}, nil
 }
 
@@ -127,6 +197,11 @@ func Ensure(ctx context.Context, options Options) (Result, error) {
 			}
 			return result, nil
 		}
+		backendAgentHubEndpoint := result.AgentHubURL
+		agentHub, err := ensureAgentHub(ctx, options)
+		if err != nil {
+			return Result{}, err
+		}
 		backendPath, digest, err := selectBackend(options)
 		if err != nil {
 			return Result{}, err
@@ -134,15 +209,21 @@ func Ensure(ctx context.Context, options Options) (Result, error) {
 		if err := installCLI(options, backendPath); err != nil {
 			return Result{}, err
 		}
-		if result.Digest == digest {
+		result = combineResults(result, agentHub)
+		if result.Digest == digest && backendAgentHubEndpoint == agentHub.URL {
 			return result, nil
 		}
 		if err := stopManagedBackend(ctx, options, result); err != nil {
 			return Result{}, err
 		}
-		return startBackend(ctx, options, backendPath, digest)
+		started, err := startBackend(ctx, options, backendPath, digest, agentHub.URL)
+		return combineResults(started, agentHub), err
 	}
 
+	agentHub, err := ensureAgentHub(ctx, options)
+	if err != nil {
+		return Result{}, err
+	}
 	backendPath, digest, err := selectBackend(options)
 	if err != nil {
 		return Result{}, err
@@ -150,18 +231,44 @@ func Ensure(ctx context.Context, options Options) (Result, error) {
 	if err := installCLI(options, backendPath); err != nil {
 		return Result{}, err
 	}
-	return startBackend(ctx, options, backendPath, digest)
+	started, err := startBackend(ctx, options, backendPath, digest, agentHub.URL)
+	return combineResults(started, agentHub), err
+}
+
+func combineResults(pua Result, agentHub Result) Result {
+	pua.AgentHubURL = agentHub.URL
+	pua.AgentHubManaged = agentHub.Managed
+	pua.AgentHubPID = agentHub.PID
+	pua.AgentHubPath = agentHub.BackendPath
+	pua.AgentHubDigest = agentHub.Digest
+	pua.AgentHubStartedAt = agentHub.StartedAt
+	return pua
 }
 
 func withDefaults(options Options) Options {
 	if options.Address == "" {
 		options.Address = defaultAddress
 	}
+	if options.AgentHubAddress == "" {
+		options.AgentHubAddress = defaultAgentHubAddress
+	}
 	if options.StartupTimeout <= 0 {
 		options.StartupTimeout = 30 * time.Second
 	}
 	if options.HTTPClient == nil {
 		options.HTTPClient = &http.Client{Timeout: 2 * time.Second}
+	}
+	if options.AgentHubHome == "" {
+		options.AgentHubHome = os.Getenv("AGENTHUB_HOME")
+	}
+	if options.AgentHubStatePath == "" || options.AgentHubLockPath == "" {
+		if options.AgentHubHome != "" {
+			options.AgentHubStatePath = filepath.Join(options.AgentHubHome, "state", "server.json")
+			options.AgentHubLockPath = filepath.Join(options.AgentHubHome, "state", "server.lock")
+		} else if home, err := os.UserHomeDir(); err == nil {
+			options.AgentHubStatePath = filepath.Join(home, ".agenthub", "server.json")
+			options.AgentHubLockPath = filepath.Join(home, ".agenthub", "server.lock")
+		}
 	}
 	return options
 }
@@ -175,6 +282,9 @@ func validateOptions(options Options) error {
 	}
 	if _, err := endpointForAddress(options.Address); err != nil {
 		return fmt.Errorf("invalid desktop backend address: %w", err)
+	}
+	if _, err := endpointForAddress(options.AgentHubAddress); err != nil {
+		return fmt.Errorf("invalid AgentHub address: %w", err)
 	}
 	return nil
 }
@@ -192,6 +302,8 @@ func discoverExisting(ctx context.Context, options Options) (Result, bool) {
 			PID:         state.PID,
 			BackendPath: state.BackendPath,
 			Digest:      state.Digest,
+			StartedAt:   state.StartedAt,
+			AgentHubURL: state.AgentHubEndpoint,
 		}, true
 	}
 
@@ -213,13 +325,13 @@ func selectBackend(options Options) (string, string, error) {
 	if options.BackendPath != "" {
 		return installBackend(options, options.BackendPath)
 	}
+	if current, ok := validCurrentBackend(options); ok {
+		return current.Path, current.Digest, nil
+	}
 
 	source, err := bundledBackendPath()
 	if err == nil {
-		return selectBundledBackend(options, source)
-	}
-	if current, ok := validCurrentBackend(options); ok {
-		return current.Path, current.Digest, nil
+		return installBackend(options, source)
 	}
 	return "", "", err
 }
@@ -245,23 +357,7 @@ func validCurrentBackend(options Options) (manifest, bool) {
 }
 
 func bundledBackendPath() (string, error) {
-	executable, err := os.Executable()
-	if err != nil {
-		return "", fmt.Errorf("find desktop executable: %w", err)
-	}
-	candidates := []string{
-		filepath.Join(filepath.Dir(executable), "..", "Resources", backendFileName),
-		filepath.Join(filepath.Dir(executable), backendFileName),
-	}
-	for _, candidate := range candidates {
-		if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
-			return filepath.Clean(candidate), nil
-		}
-	}
-	if path, lookErr := exec.LookPath(backendFileName); lookErr == nil {
-		return path, nil
-	}
-	return "", errors.New("PUA backend not found; reinstall PUA.app or set PUA_DESKTOP_BACKEND")
+	return bundledComponentPath(backendFileName)
 }
 
 func installBackend(options Options, source string) (string, string, error) {
@@ -298,7 +394,17 @@ func installBundledCLI(options Options) error {
 	if err != nil {
 		return err
 	}
-	return installCLI(options, backendPath)
+	if err := installCLI(options, backendPath); err != nil {
+		return err
+	}
+	if options.AgentHubCLIPath == "" {
+		return nil
+	}
+	agentHubPath, _, err := selectAgentHub(options)
+	if err != nil {
+		return err
+	}
+	return installNamedCLI(options.AgentHubCLIPath, agentHubPath)
 }
 
 func installCLI(options Options, source string) error {
@@ -325,7 +431,193 @@ func installCLI(options Options, source string) error {
 	return nil
 }
 
-func startBackend(ctx context.Context, options Options, backendPath, digest string) (Result, error) {
+func installNamedCLI(destination, source string) error {
+	if destination == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
+		return fmt.Errorf("create CLI directory: %w", err)
+	}
+	sourceDigest, err := fileDigest(source)
+	if err != nil {
+		return fmt.Errorf("hash CLI source: %w", err)
+	}
+	if installedDigest, digestErr := fileDigest(destination); digestErr != nil || installedDigest != sourceDigest {
+		if err := copyExecutable(source, destination); err != nil {
+			return fmt.Errorf("install CLI: %w", err)
+		}
+	}
+	return nil
+}
+
+func ensureAgentHub(ctx context.Context, options Options) (Result, error) {
+	if result, ok := discoverAgentHub(ctx, options); ok {
+		return result, nil
+	}
+	path, digest, err := selectAgentHub(options)
+	if err != nil {
+		return Result{}, err
+	}
+	if err := installNamedCLI(options.AgentHubCLIPath, path); err != nil {
+		return Result{}, err
+	}
+	return startAgentHub(ctx, options, path, digest)
+}
+
+func selectAgentHub(options Options) (string, string, error) {
+	if options.AgentHubPath != "" {
+		return installAgentHub(options, options.AgentHubPath)
+	}
+	if current, ok := validCurrentAgentHub(options); ok {
+		return current.Path, current.Digest, nil
+	}
+	source, err := bundledComponentPath(agentHubFileName)
+	if err != nil {
+		return "", "", err
+	}
+	return installAgentHub(options, source)
+}
+
+func installAgentHub(options Options, source string) (string, string, error) {
+	return installVersionedComponent(filepath.Join(options.AppSupportDir, "agenthub"), source, agentHubFileName)
+}
+
+func validCurrentAgentHub(options Options) (manifest, bool) {
+	current, ok := readJSON[manifest](agentHubManifestPath(options))
+	if !ok || current.SchemaVersion != manifestVersion {
+		return manifest{}, false
+	}
+	digest, err := fileDigest(current.Path)
+	return current, err == nil && digest == current.Digest
+}
+
+func installVersionedComponent(root, source, fileName string) (string, string, error) {
+	digest, err := fileDigest(source)
+	if err != nil {
+		return "", "", fmt.Errorf("hash %s: %w", fileName, err)
+	}
+	versionDir := filepath.Join(root, "versions", digest)
+	destination := filepath.Join(versionDir, fileName)
+	if err := os.MkdirAll(versionDir, 0o700); err != nil {
+		return "", "", fmt.Errorf("create %s version directory: %w", fileName, err)
+	}
+	if installedDigest, digestErr := fileDigest(destination); digestErr != nil || installedDigest != digest {
+		if err := copyExecutable(source, destination); err != nil {
+			return "", "", err
+		}
+	}
+	if err := writeJSONAtomic(filepath.Join(root, "current.json"), manifest{
+		SchemaVersion: manifestVersion,
+		Digest:        digest,
+		Path:          destination,
+		InstalledAt:   time.Now().UTC(),
+	}); err != nil {
+		return "", "", fmt.Errorf("write %s manifest: %w", fileName, err)
+	}
+	return destination, digest, nil
+}
+
+func bundledComponentPath(fileName string) (string, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("find desktop executable: %w", err)
+	}
+	candidates := []string{
+		filepath.Join(filepath.Dir(executable), "..", "Resources", fileName),
+		filepath.Join(filepath.Dir(executable), fileName),
+	}
+	for _, candidate := range candidates {
+		if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
+			return filepath.Clean(candidate), nil
+		}
+	}
+	if path, lookErr := exec.LookPath(fileName); lookErr == nil {
+		return path, nil
+	}
+	return "", fmt.Errorf("%s not found; reinstall PUA.app or configure its path", fileName)
+}
+
+func discoverAgentHub(ctx context.Context, options Options) (Result, bool) {
+	endpoint, err := agentHubEndpointForAddress(options.AgentHubAddress)
+	if err != nil || !agentHubHealthy(ctx, options.HTTPClient, endpoint) {
+		return Result{}, false
+	}
+	desktopState, desktopOK := readJSON[agentHubState](agentHubDesktopStatePath(options))
+	daemonState, daemonOK := readJSON[agentHubDaemonState](options.AgentHubStatePath)
+	lockPID, lockOK := readPID(options.AgentHubLockPath)
+	managed := desktopOK && desktopState.SchemaVersion == stateVersion && desktopState.Managed &&
+		daemonOK && lockOK && desktopState.PID > 0 && desktopState.PID == daemonState.PID && desktopState.PID == lockPID &&
+		desktopState.Endpoint == endpoint && daemonState.Endpoint == endpoint && processAlive(desktopState.PID)
+	if managed {
+		return Result{URL: endpoint, Managed: true, PID: desktopState.PID, BackendPath: desktopState.BinaryPath, Digest: desktopState.Digest, StartedAt: desktopState.StartedAt}, true
+	}
+	return Result{URL: endpoint, PID: daemonState.PID, StartedAt: daemonState.StartedAt}, true
+}
+
+func startAgentHub(ctx context.Context, options Options, binaryPath, digest string) (Result, error) {
+	logDir := filepath.Join(options.AppSupportDir, "logs")
+	if err := os.MkdirAll(logDir, 0o700); err != nil {
+		return Result{}, fmt.Errorf("create desktop log directory: %w", err)
+	}
+	logFile, err := os.OpenFile(filepath.Join(logDir, "agenthub.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return Result{}, fmt.Errorf("open AgentHub log: %w", err)
+	}
+	command := exec.Command(binaryPath, "serve", "--addr="+options.AgentHubAddress)
+	command.Env = backendEnvironment(os.Environ(), options.CLIPath)
+	if options.AgentHubHome != "" {
+		command.Env = replaceEnv(command.Env, "AGENTHUB_HOME", options.AgentHubHome)
+	}
+	command.Stdout = logFile
+	command.Stderr = logFile
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := command.Start(); err != nil {
+		_ = logFile.Close()
+		return Result{}, fmt.Errorf("start AgentHub: %w", err)
+	}
+	processDone := make(chan error, 1)
+	go func() {
+		processDone <- command.Wait()
+		_ = logFile.Close()
+	}()
+	endpoint, _ := agentHubEndpointForAddress(options.AgentHubAddress)
+	timer := time.NewTimer(options.StartupTimeout)
+	defer timer.Stop()
+	ticker := time.NewTicker(defaultStartDelay)
+	defer ticker.Stop()
+	for {
+		if agentHubHealthy(ctx, options.HTTPClient, endpoint) {
+			daemon, stateOK := readJSON[agentHubDaemonState](options.AgentHubStatePath)
+			lockPID, lockOK := readPID(options.AgentHubLockPath)
+			if stateOK && lockOK && daemon.PID != command.Process.Pid && daemon.PID == lockPID && daemon.Endpoint == endpoint && processAlive(daemon.PID) {
+				_ = command.Process.Signal(os.Interrupt)
+				return Result{URL: endpoint, PID: daemon.PID, StartedAt: daemon.StartedAt}, nil
+			}
+			if stateOK && lockOK && daemon.PID == command.Process.Pid && daemon.PID == lockPID && daemon.Endpoint == endpoint {
+				state := agentHubState{SchemaVersion: stateVersion, PID: daemon.PID, Endpoint: endpoint, BinaryPath: binaryPath,
+					Digest: digest, Managed: true, StartedAt: time.Now().UTC()}
+				if err := writeJSONAtomic(agentHubDesktopStatePath(options), state); err != nil {
+					_ = command.Process.Signal(os.Interrupt)
+					return Result{}, fmt.Errorf("write AgentHub desktop state: %w", err)
+				}
+				return Result{URL: endpoint, Managed: true, PID: daemon.PID, BackendPath: binaryPath, Digest: digest, StartedAt: state.StartedAt}, nil
+			}
+		}
+		select {
+		case err := <-processDone:
+			return Result{}, fmt.Errorf("AgentHub exited before becoming ready: %w", err)
+		case <-ctx.Done():
+			_ = command.Process.Signal(os.Interrupt)
+			return Result{}, ctx.Err()
+		case <-timer.C:
+			_ = command.Process.Signal(os.Interrupt)
+			return Result{}, fmt.Errorf("AgentHub did not become ready within %s", options.StartupTimeout)
+		case <-ticker.C:
+		}
+	}
+}
+
+func startBackend(ctx context.Context, options Options, backendPath, digest, agentHubEndpoint string) (Result, error) {
 	if err := os.MkdirAll(filepath.Dir(options.ConfigPath), 0o700); err != nil {
 		return Result{}, fmt.Errorf("create PUA config directory: %w", err)
 	}
@@ -338,7 +630,8 @@ func startBackend(ctx context.Context, options Options, backendPath, digest stri
 		return Result{}, fmt.Errorf("open backend log: %w", err)
 	}
 
-	command := exec.Command(backendPath, "serve", "--addr="+options.Address, "--no-default-workspace")
+	command := exec.Command(backendPath, "serve", "--addr="+options.Address, "--no-default-workspace",
+		"--agenthub-mode=external", "--agenthub-endpoint="+agentHubEndpoint)
 	command.Env = backendEnvironment(os.Environ(), options.CLIPath)
 	command.Env = replaceEnv(command.Env, "PUA_SERVE_CONFIG", options.ConfigPath)
 	command.Stdout = logFile
@@ -370,19 +663,20 @@ func startBackend(ctx context.Context, options Options, backendPath, digest stri
 			}
 			if ok && lockErr == nil && lock.PID == command.Process.Pid && lockEndpoint == endpoint {
 				state := backendState{
-					SchemaVersion: stateVersion,
-					PID:           command.Process.Pid,
-					Endpoint:      endpoint,
-					BackendPath:   backendPath,
-					Digest:        digest,
-					Managed:       true,
-					StartedAt:     time.Now().UTC(),
+					SchemaVersion:    stateVersion,
+					PID:              command.Process.Pid,
+					Endpoint:         endpoint,
+					BackendPath:      backendPath,
+					Digest:           digest,
+					Managed:          true,
+					StartedAt:        time.Now().UTC(),
+					AgentHubEndpoint: agentHubEndpoint,
 				}
 				if err := writeJSONAtomic(statePath(options), state); err != nil {
 					_ = command.Process.Signal(os.Interrupt)
 					return Result{}, fmt.Errorf("write backend state: %w", err)
 				}
-				return Result{URL: endpoint, Managed: true, PID: state.PID, BackendPath: backendPath, Digest: digest}, nil
+				return Result{URL: endpoint, Managed: true, PID: state.PID, BackendPath: backendPath, Digest: digest, StartedAt: state.StartedAt}, nil
 			}
 		}
 		select {
@@ -427,10 +721,39 @@ func stopManagedBackend(ctx context.Context, options Options, result Result) err
 // desktop installation. External PUA processes are never stopped.
 func StopManaged(ctx context.Context, options Options, result Result) error {
 	options = withDefaults(options)
-	if !result.Managed {
-		return nil
+	if result.Managed {
+		if err := stopManagedBackend(ctx, options, result); err != nil {
+			return err
+		}
 	}
-	return stopManagedBackend(ctx, options, result)
+	if result.AgentHubManaged {
+		return stopManagedAgentHub(ctx, options, result)
+	}
+	return nil
+}
+
+func stopManagedAgentHub(ctx context.Context, options Options, result Result) error {
+	state, stateOK := readJSON[agentHubState](agentHubDesktopStatePath(options))
+	daemon, daemonOK := readJSON[agentHubDaemonState](options.AgentHubStatePath)
+	lockPID, lockOK := readPID(options.AgentHubLockPath)
+	if !stateOK || state.SchemaVersion != stateVersion || !state.Managed || !daemonOK || !lockOK ||
+		state.PID <= 0 || state.PID != result.AgentHubPID || state.PID != daemon.PID || state.PID != lockPID ||
+		state.Endpoint != result.AgentHubURL || state.Endpoint != daemon.Endpoint {
+		return errors.New("refusing to stop AgentHub because managed process ownership changed")
+	}
+	if err := syscall.Kill(state.PID, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return fmt.Errorf("stop managed AgentHub: %w", err)
+	}
+	ticker := time.NewTicker(defaultStartDelay)
+	defer ticker.Stop()
+	for processAlive(state.PID) {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("wait for managed AgentHub to stop: %w", ctx.Err())
+		case <-ticker.C:
+		}
+	}
+	return nil
 }
 
 // ActiveTurnCount reports resources with an active turn across all configured
@@ -490,8 +813,53 @@ func ActiveTurnCount(ctx context.Context, options Options, result Result) (int, 
 	return count, nil
 }
 
+// AgentHubActiveTurnCount reports every active Turn in the shared AgentHub,
+// including Sessions created directly from the AgentHub window rather than
+// through a PUA Workspace.
+func AgentHubActiveTurnCount(ctx context.Context, options Options, result Result) (int, error) {
+	options = withDefaults(options)
+	if strings.TrimSpace(result.AgentHubURL) == "" {
+		return 0, errors.New("AgentHub endpoint is unavailable")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(result.AgentHubURL, "/")+"/v1/sessions", nil)
+	if err != nil {
+		return 0, err
+	}
+	response, err := options.HTTPClient.Do(request)
+	if err != nil {
+		return 0, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("read AgentHub Sessions: HTTP %d", response.StatusCode)
+	}
+	var payload struct {
+		Sessions []struct {
+			CurrentTurnID string `json:"currentTurnId"`
+		} `json:"sessions"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		return 0, fmt.Errorf("decode AgentHub Sessions: %w", err)
+	}
+	count := 0
+	for _, session := range payload.Sessions {
+		if strings.TrimSpace(session.CurrentTurnID) != "" {
+			count++
+		}
+	}
+	return count, nil
+}
+
 func healthy(ctx context.Context, client *http.Client, endpoint string) bool {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(endpoint, "/")+defaultProbePath, nil)
+	return healthyPath(ctx, client, endpoint, defaultProbePath)
+}
+
+func agentHubHealthy(ctx context.Context, client *http.Client, endpoint string) bool {
+	return healthyPath(ctx, client, endpoint, "/v1/status")
+}
+
+func healthyPath(ctx context.Context, client *http.Client, endpoint, path string) bool {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(endpoint, "/")+path, nil)
 	if err != nil {
 		return false
 	}
@@ -502,6 +870,14 @@ func healthy(ctx context.Context, client *http.Client, endpoint string) bool {
 	defer response.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 	return response.StatusCode == http.StatusOK
+}
+
+func agentHubEndpointForAddress(address string) (string, error) {
+	endpoint, err := endpointForAddress(address)
+	if err != nil {
+		return "", err
+	}
+	return endpoint + "/agenthub", nil
 }
 
 func endpointForAddress(address string) (string, error) {
@@ -606,6 +982,15 @@ func readJSON[T any](path string) (T, bool) {
 		return value, false
 	}
 	return value, true
+}
+
+func readPID(path string) (int, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	return pid, err == nil && pid > 0
 }
 
 func processAlive(pid int) bool {
@@ -744,6 +1129,14 @@ func manifestPath(options Options) string {
 
 func statePath(options Options) string {
 	return filepath.Join(options.AppSupportDir, "backend-state.json")
+}
+
+func agentHubManifestPath(options Options) string {
+	return filepath.Join(options.AppSupportDir, "agenthub", "current.json")
+}
+
+func agentHubDesktopStatePath(options Options) string {
+	return filepath.Join(options.AppSupportDir, "agenthub-state.json")
 }
 
 func envOrDefault(key, fallback string) string {

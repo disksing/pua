@@ -12,7 +12,7 @@ import (
 )
 
 func cacheTestProvider() config.Provider {
-	return config.Provider{ID: "kimi", Type: "kimi", Enabled: true}
+	return config.Provider{ID: "kimi", Type: "kimi"}
 }
 
 func TestModelCacheCachesSuccess(t *testing.T) {

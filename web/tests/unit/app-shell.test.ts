@@ -39,7 +39,7 @@ function model(overrides: Partial<AppShellModel> = {}): AppShellModel {
       { id: "workspace-a", name: "Workspace A", path: "/tmp/a", iconSrc: "/favicon.svg" },
       { id: "workspace-b", name: "Workspace B", path: "/tmp/b", iconSrc: "/favicon.svg" },
     ],
-    projects: [resource("project-a", "Project A"), resource("project-b", "Project B")], treeEditing: false, activity: { running: [], unread: [], problems: [] }, inbox: [],
+    projects: [resource("project-a", "Project A"), resource("project-b", "Project B")], treeEditing: false, activity: { running: [], unread: [], problems: [] },
     doctor: { checking: false, complete: true, summary: { errors: 0, warnings: 0 }, workspaces: [] },
     paneSizes: { sidebarWidth: 280, chatWidth: 420, chatHeight: 320, sidebarAttentionHeight: 210 },
     mobile: { sidebarOpen: false },
@@ -49,7 +49,7 @@ function model(overrides: Partial<AppShellModel> = {}): AppShellModel {
     onSwitchWorkspace: vi.fn(async () => undefined), onResolveWorkspaceUser: vi.fn(async () => undefined), onAddWorkspace: vi.fn(), onCreateProject: vi.fn(), onOpenSettings: vi.fn(), onRefreshDoctor: vi.fn(async () => undefined),
     onToggleProject: vi.fn(async () => undefined), onSelectResource: vi.fn(async () => undefined), onReorder: vi.fn(async () => undefined),
     onDragState: vi.fn(), onToggleTreeEditing: vi.fn(), onCreateFolder: vi.fn(async () => ""), onRenameFolder: vi.fn(async () => undefined),
-    onDeleteFolder: vi.fn(async () => undefined), onToggleFolder: vi.fn(async () => undefined), onOpenInboxMessage: vi.fn(async () => undefined), onReplyInboxMessage: vi.fn(async () => undefined), onDeleteInboxMessage: vi.fn(async () => undefined), onPanePreview: vi.fn(), onPaneCommit: vi.fn(), onPaneViewport: vi.fn(), onMobileSidebar: vi.fn(),
+    onDeleteFolder: vi.fn(async () => undefined), onToggleFolder: vi.fn(async () => undefined), onPanePreview: vi.fn(), onPaneCommit: vi.fn(), onPaneViewport: vi.fn(), onMobileSidebar: vi.fn(),
     onToast: vi.fn(),
     onHistoryNavigation: vi.fn(async () => undefined),
     ...overrides,
@@ -64,6 +64,18 @@ function dragEvent(type: string, clientY = 0): Event {
 }
 
 describe("AppShell", () => {
+  it("uses the transparent yellow umbrella for the PUA brand and default workspace icon", async () => {
+    const target = document.body.appendChild(document.createElement("div"));
+    const component = mount(AppShell, { target, props: { channel: createModelChannel(model({
+      workspaces: [{ id: "workspace-a", name: "Workspace A", path: "/tmp/a", iconSrc: "" }],
+    })) } });
+    cleanups.push(() => unmount(component));
+    await tick();
+
+    expect(target.querySelector<HTMLImageElement>(".brand-mark img")?.getAttribute("src")).toBe("/workspace-icons/pua-yellow.png");
+    expect(target.querySelector<HTMLImageElement>("#workspaceAvatar img")?.getAttribute("src")).toBe("/workspace-icons/pua-yellow.png");
+  });
+
   it("shows Doctor issues from the brand reminder and refreshes the report", async () => {
     const onRefreshDoctor = vi.fn(async () => undefined);
     const initial = model({
@@ -414,4 +426,23 @@ describe("AppShell", () => {
     target.querySelector<HTMLFormElement>(".workspace-user-add")!.dispatchEvent(new SubmitEvent("submit", { bubbles: true, cancelable: true }));
     await vi.waitFor(() => expect(onResolveWorkspaceUser).toHaveBeenCalledWith("Carol", true));
   });
+});
+
+it("shows live chat state in the trailing resource row slot without a separate chat list", async () => {
+ const project = {...resource("project-a", "Project A"),chatOpen:true,unreadCount:2};
+ const channel=createModelChannel(model({projects:[project]}));
+ const target=document.body.appendChild(document.createElement("div"));
+ const component=mount(AppShell,{target,props:{channel}});
+ cleanups.push(()=>unmount(component));
+ await tick();
+ const title=target.querySelector('.name-text')!;
+ expect(title.parentElement?.nextElementSibling?.classList.contains('resource-chat-status')).toBe(true);
+ expect(title.parentElement?.nextElementSibling?.textContent?.trim()).toBe('2');
+ expect(target.querySelector('.chat-open-icon')).not.toBeNull();
+ expect(target.querySelector('.chat-list,[aria-label="Chats"]')).toBeNull();
+ channel.publish(model({projects:[{...project,unreadCount:0}]}));await tick();
+ expect(target.querySelector('.chat-open-icon')).not.toBeNull();
+ expect(target.querySelector('.unread-badge')).toBeNull();
+ channel.publish(model({projects:[{...project,chatOpen:false,unreadCount:0}]}));await tick();
+ expect(target.querySelector('.chat-open-icon')).toBeNull();
 });

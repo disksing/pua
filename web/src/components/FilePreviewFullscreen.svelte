@@ -21,7 +21,7 @@
   const editable = urlEditable != null
     ? urlEditable === "1"
     : resourceId === "workspace"
-      ? path === "AGENTS.md" || path === ""
+      ? path === "AGENTS.md" || path === "chat.md" || path === ""
       : resourceId !== "scheduler";
 
   const handoff = readFilePreviewHandoff();

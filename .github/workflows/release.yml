@@ -1,0 +1,143 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.plan.outputs.release }}
+      pua: ${{ steps.plan.outputs.pua }}
+      agenthub: ${{ steps.plan.outputs.agenthub }}
+      macapp: ${{ steps.plan.outputs.macapp }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: plan
+        name: Validate tag and component selection
+        run: scripts/release-plan "$GITHUB_REF_NAME" >>"$GITHUB_OUTPUT"
+
+  components:
+    needs: prepare
+    if: ${{ needs.prepare.outputs.pua == 'true' || needs.prepare.outputs.agenthub == 'true' }}
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-go@v6
+        with: { go-version-file: go.mod, cache: true }
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Import Developer ID certificate
+        env:
+          CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: scripts/ci-import-certificate
+      - name: Build, sign and notarize selected components
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.release }}
+          RELEASE_PUA: ${{ needs.prepare.outputs.pua }}
+          RELEASE_AGENTHUB: ${{ needs.prepare.outputs.agenthub }}
+          NOTARYTOOL_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          NOTARYTOOL_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          NOTARYTOOL_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+        run: |
+          scripts/ci-configure-notary
+          mkdir -p dist/components dist/release-assets
+          if [ "$RELEASE_PUA" = true ]; then
+            scripts/release-component pua "$RELEASE_VERSION" dist/components/pua
+          fi
+          if [ "$RELEASE_AGENTHUB" = true ]; then
+            scripts/release-component agenthub "$RELEASE_VERSION" dist/components/agenthub
+          fi
+          cp dist/components/*/* dist/release-assets/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-components
+          path: dist/release-assets/*
+          if-no-files-found: error
+          retention-days: 7
+
+  macapp:
+    needs: prepare
+    if: ${{ needs.prepare.outputs.macapp == 'true' }}
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-go@v6
+        with: { go-version-file: go.mod, cache: true }
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Import Developer ID certificate
+        env:
+          CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: scripts/ci-import-certificate
+      - name: Build Universal DMG
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.release }}
+          NOTARYTOOL_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          NOTARYTOOL_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          NOTARYTOOL_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+          CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+          SPARKLE_PUBLIC_KEY: ${{ secrets.SPARKLE_PUBLIC_KEY }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          SPARKLE_KEY_ACCOUNT: ${{ secrets.SPARKLE_KEY_ACCOUNT }}
+          COMPONENT_UPDATE_PUBLIC_KEY: ${{ secrets.COMPONENT_UPDATE_PUBLIC_KEY }}
+          COMPONENT_MANIFEST_URL: https://pua.dev/updates/channel-v1.json
+          SPARKLE_FEED_URL: https://pua.dev/updates/appcast.xml
+        run: |
+          scripts/ci-configure-notary
+          scripts/release-macapp "$RELEASE_VERSION" dist/macapp
+          mkdir -p dist/release-assets
+          cp dist/macapp/* dist/release-assets/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macapp
+          path: dist/release-assets/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: [prepare, components, macapp]
+    if: >-
+      ${{ always() && needs.prepare.result == 'success' &&
+          (needs.components.result == 'success' || needs.components.result == 'skipped') &&
+          (needs.macapp.result == 'success' || needs.macapp.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+      - name: Publish one GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release create "$RELEASE_TAG" release-assets/* --verify-tag --generate-notes --repo "$GH_REPO"
+
+  pages:
+    needs: publish
+    uses: ./.github/workflows/pages.yml
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    secrets: inherit

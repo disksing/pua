@@ -10,7 +10,7 @@
   import FileBrowser from "./FileBrowser.svelte";
   import FilePreviewModal from "./FilePreviewModal.svelte";
   import Icon from "./Icon.svelte";
-  import HistoryTimeline from "./HistoryTimeline.svelte";
+  import ChannelEvents from "./ChannelEvents.svelte";
   import MarkdownDocument from "./MarkdownDocument.svelte";
   import SchedulerPanel from "./SchedulerPanel.svelte";
   import ResourceSettingsPanel from "./ResourceSettingsPanel.svelte";
@@ -27,6 +27,7 @@
   const tabMemory = new Map<string, string>();
   const client = new ApiClient();
   let refreshVersion = 0;
+  let chatFocusRequest = 0;
 
   type PreviewScrollState = { key: string; scrollTop: number; scrollLeft: number };
 
@@ -38,9 +39,12 @@
     content: model.workspaceAgents.content || "",
     contentHash: model.workspaceAgents.contentHash,
   } as ResourceFileModel : null);
+  const chatFile = $derived(model.workspaceChat && !model.workspaceChat.error ? {
+    name: "chat.md", path: "chat.md", content: model.workspaceChat.content || "", contentHash: model.workspaceChat.contentHash,
+  } as ResourceFileModel : null);
   const tabs = $derived(resourceTabs());
   const activePreviewPath = $derived(preview ? `${preview.section}:${preview.path}` : "");
-  const filePreviewEditable = $derived(model.resourceType === "workspace" ? Boolean(preview && (preview.path === "AGENTS.md" || preview.path === "")) : !model.detail?.archived && (model.resourceType === "project" || model.resourceType === "task"));
+  const filePreviewEditable = $derived(model.resourceType === "workspace" ? Boolean(preview && (preview.path === "AGENTS.md" || preview.path === "chat.md" || preview.path === "")) : !model.detail?.archived && (model.resourceType === "project" || model.resourceType === "task"));
 
   onMount(() => channel.subscribe((next) => {
     const previewScrollState = capturePreviewScrollState();
@@ -58,6 +62,12 @@
       if (content) content.scrollTop = 0;
     } else if (tabs.length && !tabs.some((tab) => tab.id === activeTab)) {
       activeTab = tabs[0].id;
+    }
+    if (next.chatFocusRequest && next.chatFocusRequest !== chatFocusRequest) {
+      chatFocusRequest = next.chatFocusRequest;
+      // Chat navigation must not mount a remembered event tab and mark it read.
+      activeTab = next.resourceType ? initialTab(next) : "task";
+      tabMemory.set(identity, activeTab);
     }
     void tick().then(() => {
       if (currentRefreshVersion === refreshVersion) restorePreviewScrollState(previewScrollState);
@@ -84,25 +94,29 @@
     if (detailFiles.some((file) => file.name === "task.md")) return "task";
     if (value.resourceType === "project") return "project";
     if (value.resourceType === "task") return "task";
-    return "history";
+    return "execution-events";
   }
 
   function resourceTabs(): Array<{ id: string; label: string; icon: string }> {
     if (model.resourceType === "workspace") return [
 	  { id: "agents", label: "AGENTS.md", icon: "file-text" },
+      { id: "chat-followups", label: "Chat follow-ups", icon: "message-square" },
 	  { id: "wiki", label: "Wiki", icon: "book-open" },
-	  { id: "settings", label: "Settings", icon: "settings" }
+	  { id: "execution-events", label: "Execution events", icon: "history" },
+      { id: "settings", label: "Settings", icon: "settings" }
 	];
     if (!model.detail) return [];
 	if (model.resourceType === "scheduler") return [
 	  { id: "schedules", label: "Schedules", icon: "calendar-clock" },
 	  { id: "context", label: "Context", icon: "file-text" },
-	  { id: "settings", label: "Settings", icon: "settings" }
+	  { id: "execution-events", label: "Execution events", icon: "history" },
+      { id: "settings", label: "Settings", icon: "settings" }
 	];
     const result: Array<{ id: string; label: string; icon: string }> = [];
     if (model.resourceType === "project") result.push({ id: "project", label: "Project", icon: "file-text" });
     if (model.resourceType === "task") result.push({ id: "task", label: "Task", icon: "file-text" });
-    result.push({ id: "history", label: "History", icon: "history" }, { id: "artifacts", label: "Artifacts", icon: "paperclip" });
+    result.push({ id: "chat-followups", label: "Chat follow-ups", icon: "message-square" });
+    result.push({ id: "execution-events", label: "Execution events", icon: "history" }, { id: "artifacts", label: "Artifacts", icon: "paperclip" });
     if (model.resourceType === "task") result.push({ id: "worktrees", label: "Worktrees", icon: "folder-git-2" });
     result.push({ id: "settings", label: "Settings", icon: "settings" });
     return result;
@@ -112,6 +126,7 @@
 	if (file.name === "scheduler.md") return "context";
     if (file.name === "project.md") return "project";
     if (file.name === "task.md") return "task";
+    if (file.name === "chat.md") return "chat-followups";
     return tabs.find((tab) => ["project", "task"].includes(tab.id))?.id || "";
   }
 
@@ -206,13 +221,18 @@
 {:else if model.resourceType === "workspace"}
   <div class="details-header"><h1 class="details-title">{model.workspaceName}</h1></div>
   <div class="details-tabs" role="tablist" aria-label="Workspace details">
-    {#each tabs as tab (tab.id)}<button type="button" class:active={activeTab === tab.id} class="details-tab" role="tab" aria-selected={activeTab === tab.id} onclick={() => selectTab(tab.id)}><Icon name={tab.icon} /><span>{tab.label}</span></button>{/each}
+    {#each tabs as tab (tab.id)}<button type="button" class:active={activeTab === tab.id} class="details-tab" role="tab" aria-selected={activeTab === tab.id} onclick={() => selectTab(tab.id)}><Icon name={tab.icon} /><span>{tab.label}</span>{#if tab.id === "execution-events" && model.executionUnreadCount}<span class="event-unread-count" aria-label={`${model.executionUnreadCount} unread execution Turns`}>{model.executionUnreadCount}</span>{/if}</button>{/each}
   </div>
-  <div id="detailsContent" class="details-content">
+  <div id="detailsContent" class="details-content" class:details-events={activeTab === "execution-events"}>
     <div hidden={activeTab !== "agents"}>
       {#if agentsFile}<MarkdownDocument file={agentsFile} workspaceId={model.workspaceId} editable={true} resolveResourceTitle={model.resolveResourceTitle} onNavigate={model.onNavigate} onOpenFile={openLinkedFile} onEdit={openEditor} onAnnotate={openAnnotator} />
       {:else if model.workspaceAgents?.error}<div class="content-section"><div class="file-modal-empty error-preview wiki-status"><Icon name="triangle-alert" /><strong>AGENTS.md unavailable</strong><span>{model.workspaceAgents.error}</span></div></div>
       {:else}<div class="content-section"><div class="file-modal-empty wiki-status"><Icon name="loader-circle" /><strong>Loading AGENTS.md...</strong></div></div>{/if}
+    </div>
+    <div hidden={activeTab !== "chat-followups"}>
+      {#if chatFile}<MarkdownDocument file={chatFile} workspaceId={model.workspaceId} editable={true} resolveResourceTitle={model.resolveResourceTitle} onNavigate={model.onNavigate} onOpenFile={openLinkedFile} onEdit={openEditor} onAnnotate={openAnnotator} />
+      {:else if model.workspaceChat?.error}<div class="content-section"><div class="file-modal-empty error-preview"><Icon name="triangle-alert" /><strong>Chat follow-ups unavailable</strong><span>{model.workspaceChat.error}</span></div></div>
+      {:else}<div class="content-section"><div class="file-modal-empty"><Icon name="loader-circle" /><strong>Loading chat follow-ups...</strong></div></div>{/if}
     </div>
     <div hidden={activeTab !== "wiki"}>
       {#if model.wiki?.error}<div class="content-section"><div class="file-modal-empty error-preview wiki-status"><Icon name="triangle-alert" /><strong>Wiki unavailable</strong><span>{model.wiki.error}</span></div></div>
@@ -220,6 +240,7 @@
       {:else}<FileBrowser title="Wiki" entries={model.wiki.entries || []} emptyMessage="No Wiki files yet." {expanded} activePath={activePreviewPath} onToggle={toggleFile} onPreview={openPreview} {rawURL} showHeading={false} />{/if}
     </div>
     <div hidden={activeTab !== "settings"}><ResourceSettingsPanel {model} /></div>
+    {#if activeTab === "execution-events"}{#key `${model.identity}:${model.currentUserName}:${activeTab}`}<ChannelEvents {model} onOpenFile={openLinkedFile} onOpenLegacy={(path) => openPreview("Artifacts", path)} />{/key}{/if}
   </div>
 {:else}
   <div class="details-header">
@@ -232,15 +253,16 @@
   {#if model.loading || !model.detail}<div id="detailsContent" class="details-content"><div class="empty-state"><Icon name="loader-circle" className="empty-state-icon" /><strong>Loading details...</strong></div></div>
   {:else}
     <div class="details-tabs" role="tablist" aria-label="Resource details">
-      {#each tabs as tab (tab.id)}<button type="button" class:active={activeTab === tab.id} class="details-tab" role="tab" aria-selected={activeTab === tab.id} onclick={() => selectTab(tab.id)}><Icon name={tab.icon} /><span>{tab.label}</span></button>{/each}
+      {#each tabs as tab (tab.id)}<button type="button" class:active={activeTab === tab.id} class="details-tab" role="tab" aria-selected={activeTab === tab.id} onclick={() => selectTab(tab.id)}><Icon name={tab.icon} /><span>{tab.label}</span>{#if tab.id === "execution-events" && model.executionUnreadCount}<span class="event-unread-count" aria-label={`${model.executionUnreadCount} unread execution Turns`}>{model.executionUnreadCount}</span>{/if}</button>{/each}
     </div>
-    <div id="detailsContent" class="details-content">
+    <div id="detailsContent" class="details-content" class:details-events={activeTab === "execution-events"}>
       {#each files as file (file.path || file.name)}<div hidden={activeTab !== documentTab(file)}><MarkdownDocument {file} workspaceId={model.workspaceId} editable={!model.detail.archived && (model.resourceType === "project" || model.resourceType === "task")} resolveResourceTitle={model.resolveResourceTitle} onNavigate={model.onNavigate} onOpenFile={openLinkedFile} onEdit={openEditor} onAnnotate={openAnnotator} /></div>{/each}
       {#if model.resourceType === "project" && !fileNames.has("project.md")}<div class="content-section" hidden={activeTab !== "project"}><div class="file-modal-empty detail-missing"><Icon name="file-text" /><strong>Project brief is missing</strong><span>project.md was not found in this project directory.</span></div></div>{/if}
       {#if model.resourceType === "task" && !fileNames.has("task.md")}<div class="content-section" hidden={activeTab !== "task"}><div class="file-modal-empty detail-missing"><Icon name="file-text" /><strong>Task brief is missing</strong><span>task.md was not found in this task directory.</span></div></div>{/if}
+      {#if (model.resourceType === "project" || model.resourceType === "task") && !fileNames.has("chat.md")}<div class="content-section" hidden={activeTab !== "chat-followups"}><div class="file-modal-empty detail-missing"><Icon name="file-text" /><strong>Chat follow-ups are missing</strong><span>chat.md was not found in this resource directory.</span></div></div>{/if}
       {#if model.resourceType === "scheduler" && model.detail.scheduler}<div hidden={activeTab !== "schedules"}><SchedulerPanel workspaceId={model.workspaceId} config={model.detail.scheduler} resolveResourceTitle={model.resolveResourceTitle} onChanged={model.onRefreshScheduler || (async () => undefined)} onToast={model.onToast} /></div>{/if}
       <div hidden={activeTab !== "settings"}><ResourceSettingsPanel {model} onOpenTemplate={(path) => openPreview("Templates", path)} /></div>
-      {#if activeTab === "history"}{#key model.identity}<HistoryTimeline workspaceId={model.workspaceId} resourceId={model.resourceId} artifacts={model.detail.artifacts || []} resolveResourceTitle={model.resolveResourceTitle} onNavigate={model.onNavigate} onOpenFile={openLinkedFile} onOpenLegacy={(path) => openPreview("Artifacts", path)} />{/key}{/if}
+      {#if activeTab === "execution-events"}{#key `${model.identity}:${model.currentUserName}:${activeTab}`}<ChannelEvents {model} onOpenFile={openLinkedFile} onOpenLegacy={(path) => openPreview("Artifacts", path)} />{/key}{/if}
       <div hidden={activeTab !== "artifacts"}><FileBrowser title="Artifacts" entries={model.detail.artifacts || []} emptyMessage="No artifacts." {expanded} activePath={activePreviewPath} onToggle={toggleFile} onPreview={openPreview} {rawURL} onDelete={model.detail.archived ? undefined : deleteArtifact} showHeading={false} /></div>
       <div hidden={activeTab !== "worktrees"}><div class="content-section"><div class="worktree-list">{#if model.detail.repos?.length}{#each model.detail.repos as repo (`${repo.name}:${repo.worktreePath}`)}<div class="worktree-row"><div class="worktree-main"><Icon name="git-branch" className="worktree-icon" /><div><strong>{repo.branch || "HEAD"}</strong><span>{repo.name || "repository"}{repo.targetBranch ? ` · base ${repo.targetBranch}` : ""}</span><small>{repo.worktreePath || ""}</small></div></div><button type="button" class="secondary-button" onclick={() => diffRepo = repo}><Icon name="git-compare-arrows" /><span>View Diff</span></button></div>{/each}{:else}<div class="empty-list-row"><Icon name="git-branch" /><span>No worktrees.</span></div>{/if}</div></div></div>
     </div>

@@ -28,7 +28,7 @@ func resourceSnapshotFromApp(resource app.ResourceTreeView) resourceSnapshot {
 func fileTreeEntriesFromApp(entries []app.FileTreeEntry) []fileTreeEntry {
 	result := make([]fileTreeEntry, 0, len(entries))
 	for _, entry := range entries {
-		converted := fileTreeEntry{Name: entry.Name, Path: entry.Path, Type: entry.Type, Size: entry.Size, Modified: entry.Modified}
+		converted := fileTreeEntry{Name: entry.Name, Path: entry.Path, Type: entry.Type, Size: entry.Size, Modified: entry.Modified, Truncated: entry.Truncated}
 		converted.Children = fileTreeEntriesFromApp(entry.Children)
 		result = append(result, converted)
 	}

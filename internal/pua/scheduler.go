@@ -10,9 +10,9 @@ import (
 )
 
 const (
-	schedulerAddUsage    = "usage: pua scheduler add --description=<text> --condition=<text> --target=<resource>"
+	schedulerAddUsage    = "usage: pua scheduler add --description=<text> --target=<resource> [--condition=<text>] [--at=<time>|--daily=<HH:MM>] [--timezone=<IANA>] [--expires=<time>]"
 	schedulerShowUsage   = "usage: pua scheduler show --id=<schedule>"
-	schedulerUpdateUsage = "usage: pua scheduler update --id=<schedule> [--description=<text>] [--condition=<text>] [--target=<resource>]"
+	schedulerUpdateUsage = "usage: pua scheduler update --id=<schedule> [--description=<text>] [--condition=<text>] [--target=<resource>] [--at=<time>|--daily=<HH:MM>] [--timezone=<IANA>] [--expires=<time>] [--no-exact-time]"
 	schedulerRemoveUsage = "usage: pua scheduler remove --id=<schedule>"
 )
 
@@ -45,7 +45,15 @@ func runScheduler(args []string) error {
 			return printJSON(config)
 		}
 		for _, schedule := range config.Schedules {
-			fmt.Fprintf(os.Stdout, "%s\t%s\t%s\t%s\n", schedule.ID, schedule.Description, schedule.Condition, schedule.Target)
+			trigger := schedule.Condition
+			if schedule.ExactTime != nil {
+				trigger = schedule.ExactTime.At
+				if trigger == "" {
+					trigger = "daily " + schedule.ExactTime.TimeOfDay
+				}
+				trigger += " (" + schedule.ExactTime.TimeZone + ")"
+			}
+			fmt.Fprintf(os.Stdout, "%s\t%s\t%s\t%s\n", schedule.ID, schedule.Description, trigger, schedule.Target)
 		}
 		return nil
 	case "show":
@@ -68,21 +76,25 @@ func runScheduler(args []string) error {
 		}
 		return fmt.Errorf("schedule not found: %s", values["id"])
 	case "add":
-		values, err := parseSchedulerOptions(args[1:], map[string]bool{"description": true, "condition": true, "target": true})
-		if err != nil || values["description"] == "" || values["condition"] == "" || values["target"] == "" {
+		values, err := parseSchedulerOptions(args[1:], map[string]bool{"description": true, "condition": true, "target": true, "at": true, "daily": true, "timezone": true, "expires": true})
+		if err != nil || values["description"] == "" || values["target"] == "" {
 			return errors.New(schedulerAddUsage)
+		}
+		exact, err := schedulerExactTimeOptions(values, nil)
+		if err != nil {
+			return err
 		}
 		workspace, err := openApplicationWorkspace()
 		if err != nil {
 			return err
 		}
-		created, err := workspace.AddSchedule(app.CreateScheduleInput{Description: values["description"], Condition: values["condition"], Target: values["target"]})
+		created, err := workspace.AddSchedule(app.CreateScheduleInput{Description: values["description"], Condition: values["condition"], Target: values["target"], ExactTime: exact})
 		if err != nil {
 			return err
 		}
 		return printJSON(created)
 	case "update":
-		values, err := parseSchedulerOptions(args[1:], map[string]bool{"id": true, "description": true, "condition": true, "target": true})
+		values, err := parseSchedulerOptions(args[1:], map[string]bool{"id": true, "description": true, "condition": true, "target": true, "at": true, "daily": true, "timezone": true, "expires": true, "no-exact-time": true})
 		if err != nil || values["id"] == "" {
 			return errors.New(schedulerUpdateUsage)
 		}
@@ -96,10 +108,24 @@ func runScheduler(args []string) error {
 		if value, exists := values["target"]; exists {
 			input.Target = &value
 		}
-		if input.Description == nil && input.Condition == nil && input.Target == nil {
+		if len(values) == 1 {
 			return errors.New(schedulerUpdateUsage)
 		}
 		workspace, err := openApplicationWorkspace()
+		if err != nil {
+			return err
+		}
+		config, err := workspace.Scheduler()
+		if err != nil {
+			return err
+		}
+		var previous *app.ScheduleExactTimeSpec
+		for _, schedule := range config.Schedules {
+			if schedule.ID == input.ID && schedule.ExactTime != nil {
+				previous = &schedule.ExactTime.ScheduleExactTimeSpec
+			}
+		}
+		input.ExactTime, err = schedulerExactTimeOptions(values, previous)
 		if err != nil {
 			return err
 		}
@@ -136,10 +162,15 @@ func parseSchedulerOptions(args []string, allowed map[string]bool) (map[string]s
 		}
 		nameValue := strings.SplitN(strings.TrimPrefix(arg, "--"), "=", 2)
 		name := nameValue[0]
-		if !allowed[name] || values[name] != "" {
+		_, duplicate := values[name]
+		if !allowed[name] || duplicate {
 			return nil, fmt.Errorf("unknown or duplicate option --%s", name)
 		}
 		value := ""
+		if name == "no-exact-time" && len(nameValue) == 1 {
+			values[name] = "true"
+			continue
+		}
 		if len(nameValue) == 2 {
 			value = nameValue[1]
 		} else if index+1 < len(args) && !strings.HasPrefix(args[index+1], "--") {
@@ -147,10 +178,48 @@ func parseSchedulerOptions(args []string, allowed map[string]bool) (map[string]s
 			value = args[index]
 		}
 		value = strings.TrimSpace(value)
-		if value == "" {
+		if value == "" && !(len(nameValue) == 2 && (name == "condition" || name == "expires")) {
 			return nil, fmt.Errorf("option --%s requires a value", name)
 		}
 		values[name] = value
 	}
 	return values, nil
+}
+
+func schedulerExactTimeOptions(values map[string]string, previous *app.ScheduleExactTimeSpec) (*app.ScheduleExactTimeSpec, error) {
+	hasExact := false
+	for _, name := range []string{"at", "daily", "timezone", "expires"} {
+		if _, exists := values[name]; exists {
+			hasExact = true
+		}
+	}
+	if values["no-exact-time"] != "" {
+		if values["no-exact-time"] != "true" || hasExact {
+			return nil, errors.New("--no-exact-time conflicts with exact-time options")
+		}
+		return &app.ScheduleExactTimeSpec{}, nil
+	}
+	if !hasExact {
+		return nil, nil
+	}
+	if values["at"] != "" && values["daily"] != "" {
+		return nil, errors.New("--at and --daily are mutually exclusive")
+	}
+	var exact app.ScheduleExactTimeSpec
+	if previous != nil {
+		exact = *previous
+	}
+	if at, exists := values["at"]; exists {
+		exact.At, exact.TimeOfDay = at, ""
+	}
+	if daily, exists := values["daily"]; exists {
+		exact.TimeOfDay, exact.At = daily, ""
+	}
+	if zone, exists := values["timezone"]; exists {
+		exact.TimeZone = zone
+	}
+	if expires, exists := values["expires"]; exists {
+		exact.ExpiresAt = expires
+	}
+	return &exact, nil
 }

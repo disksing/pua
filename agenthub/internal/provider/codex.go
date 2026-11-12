@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/disksing/pua/agenthub/internal/config"
 	"github.com/disksing/pua/agenthub/internal/semantic"
@@ -15,6 +16,7 @@ type codexSession struct {
 	rpc     *jsonRPC
 	thread  string
 	turn    string
+	turnMu  sync.Mutex
 }
 
 func newCodex(command string, options Options) *codexSession {
@@ -112,8 +114,8 @@ func (c *codexSession) prompt(text string, steer bool) error {
 		return errors.New("Codex thread is not ready")
 	}
 	input := []map[string]string{{"type": "text", "text": text}}
-	if steer && c.turn != "" {
-		_, err := c.rpc.request("turn/steer", map[string]any{"threadId": c.thread, "expectedTurnId": c.turn, "input": input})
+	if turn := c.activeTurn(); steer && turn != "" {
+		_, err := c.rpc.request("turn/steer", map[string]any{"threadId": c.thread, "expectedTurnId": turn, "input": input})
 		return err
 	}
 	params := map[string]any{"threadId": c.thread, "cwd": c.options.Cwd, "approvalPolicy": option(c.options.Agent, "approval", "never"), "input": input}
@@ -124,11 +126,37 @@ func (c *codexSession) prompt(text string, steer bool) error {
 	return err
 }
 
+func (c *codexSession) activeTurn() string {
+	c.turnMu.Lock()
+	defer c.turnMu.Unlock()
+	return c.turn
+}
+
+func (c *codexSession) setActiveTurn(turn string) {
+	c.turnMu.Lock()
+	defer c.turnMu.Unlock()
+	c.turn = turn
+}
+
+func (c *codexSession) SteerActive(text string) error {
+	turn := c.activeTurn()
+	if turn == "" {
+		return errors.New("preview turn has ended")
+	}
+	// The provider checks expectedTurnId atomically; never fall back to turn/start.
+	_, err := c.rpc.request("turn/steer", map[string]any{
+		"threadId": c.thread, "expectedTurnId": turn,
+		"input": []map[string]string{{"type": "text", "text": text}},
+	})
+	return err
+}
+
 func (c *codexSession) Interrupt() error {
-	if c.thread == "" || c.turn == "" {
+	turn := c.activeTurn()
+	if c.thread == "" || turn == "" {
 		return nil
 	}
-	_, err := c.rpc.request("turn/interrupt", map[string]any{"threadId": c.thread, "turnId": c.turn})
+	_, err := c.rpc.request("turn/interrupt", map[string]any{"threadId": c.thread, "turnId": turn})
 	return err
 }
 
@@ -259,13 +287,13 @@ func (c *codexSession) notification(method string, params json.RawMessage) {
 	event := Event{Type: "provider.event", Data: map[string]any{"method": method, "raw": json.RawMessage(params)}}
 	switch method {
 	case "turn/started":
-		c.turn = lookup(params, "turn", "id")
+		c.setActiveTurn(lookup(params, "turn", "id"))
 		event.Type = "provider.turn.started"
 	case "turn/completed":
-		c.turn = ""
+		c.setActiveTurn("")
 		event.Type, event.TurnDone = "provider.turn.completed", true
 	case "turn/failed":
-		c.turn = ""
+		c.setActiveTurn("")
 		event.Data, _ = codexErrorData(method, params)
 		event.Type, event.TurnDone, event.TurnFailed = "provider.error", true, true
 	case "error":
@@ -273,7 +301,7 @@ func (c *codexSession) notification(method string, params json.RawMessage) {
 		event.Data, willRetry = codexErrorData(method, params)
 		event.Type = "provider.error"
 		if !willRetry {
-			c.turn = ""
+			c.setActiveTurn("")
 			event.TurnDone, event.TurnFailed = true, true
 		}
 	case "item/agentMessage/delta":
@@ -291,7 +319,12 @@ func (c *codexSession) notification(method string, params json.RawMessage) {
 		// reasoning as well as tools. Keep the former as raw provider events;
 		// only actual tool items belong to AgentHub's tool.call contract.
 		switch lookup(params, "item", "type") {
-		case "userMessage", "agentMessage", "reasoning":
+		case "agentMessage":
+			if method == "item/completed" {
+				event.Type = "message.assistant.completed"
+				event.Data = map[string]any{"method": method}
+			}
+		case "userMessage", "reasoning":
 		default:
 			event.Type = "tool.call"
 			event.Data = semantic.ToolCallData(method, params)

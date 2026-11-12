@@ -91,6 +91,11 @@ type Session interface {
 	Close() error
 }
 
+// TurnScopedSteerer must never start a new provider turn or queue across turns.
+type TurnScopedSteerer interface {
+	SteerActive(text string) error
+}
+
 // PromptText resolves the provider-facing text of a canonical input. Schema
 // v2 is returned byte-for-byte unchanged. Header construction exists only for
 // durable schema-v1 inputs and old clients.
@@ -142,7 +147,9 @@ type Options struct {
 // prompt; Codex app-server and Pi RPC can.
 func InputCapabilities(providerType string) session.InputCapabilities {
 	switch strings.ToLower(strings.TrimSpace(providerType)) {
-	case "codex", "pi":
+	case "codex":
+		return session.InputCapabilities{Steer: true, TurnScopedSteer: true}
+	case "pi":
 		return session.InputCapabilities{Steer: true}
 	default:
 		return session.InputCapabilities{}

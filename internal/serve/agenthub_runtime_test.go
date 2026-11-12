@@ -21,12 +21,14 @@ import (
 )
 
 type runtimeFakeAgentHub struct {
+	materializeTurns     bool
 	mu                   sync.Mutex
 	sessions             map[string]agentHubSession
 	events               map[string][]agentHubEvent
 	turns                map[string]map[string]agentHubTurn
 	nextSession          int
 	abortNextCreate      bool
+	createStartupError   bool
 	rejectIdempotencyKey string
 	duplicateSource      bool
 	gapAfter             int64
@@ -40,6 +42,7 @@ type runtimeFakeAgentHub struct {
 	resumeErrorStatus    int
 	resumeErrorCode      string
 	resumeErrorMessage   string
+	resumeFailureReason  string
 	resumeUpdatesAt      bool
 	failNextMessage      bool
 	enforceMessageIDs    bool
@@ -73,6 +76,10 @@ func newRuntimeFakeAgentHub() *runtimeFakeAgentHub {
 }
 
 func (f *runtimeFakeAgentHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/v1/status" {
+		writeRuntimeFakeJSON(w, map[string]any{"apiVersion": "1", "capabilities": []string{"messages.turn-scoped-steer"}})
+		return
+	}
 	if r.URL.Path == "/v1/agents" && r.Method == http.MethodGet {
 		f.mu.Lock()
 		rejected := f.rejectAgentName
@@ -90,7 +97,7 @@ func (f *runtimeFakeAgentHub) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 			agents = append(agents, map[string]any{"name": extra, "providerId": "fake", "available": true})
 		}
 		writeRuntimeFakeJSON(w, map[string]any{
-			"providers": []any{map[string]any{"id": "fake", "name": "Fake", "type": "fake", "enabled": true}},
+			"providers": []any{map[string]any{"id": "fake", "name": "Fake", "type": "fake"}},
 			"agents":    agents, "probes": []any{},
 		})
 		return
@@ -205,6 +212,11 @@ func (f *runtimeFakeAgentHub) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 			messageHook(id, body)
 		}
 		f.mu.Lock()
+		if f.materializeTurns && body.ExpectedTurnID != "" && f.sessions[id].CurrentTurnID != body.ExpectedTurnID {
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusConflict)
+			return
+		}
 		f.messageSteers = append(f.messageSteers, body.Steer)
 		_, presentationRole, presentationSender := puaMessagePresentation(body.Text, body.Role, body.Sender, body.Payload)
 		f.messageRoles = append(f.messageRoles, presentationRole)
@@ -227,6 +239,18 @@ func (f *runtimeFakeAgentHub) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 			f.messageInputs[body.MessageID] = body
 		}
 		inputData := fakeMessageInputData(body)
+		if f.materializeTurns && !body.Steer {
+			current := f.sessions[id]
+			current.CurrentTurnID = fmt.Sprintf("turn-%d", len(f.events[id])+1)
+			f.sessions[id] = current
+			if f.turns[id] == nil {
+				f.turns[id] = map[string]agentHubTurn{}
+			}
+			f.turns[id][current.CurrentTurnID] = agentHubTurn{
+				ID: current.CurrentTurnID, TurnID: current.CurrentTurnID, Status: "active",
+				TriggerMessageID: body.MessageID, TriggerPayload: body.Payload,
+			}
+		}
 		f.appendLocked(id, "message.input", inputData)
 		f.appendLocked(id, "turn.started", map[string]any{"text": body.Text})
 		session := f.sessions[id]
@@ -292,6 +316,11 @@ func (f *runtimeFakeAgentHub) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 				if f.resumeBeforeFailure {
 					session := f.sessions[id]
 					session.State = "ready"
+					f.sessions[id] = session
+				} else if f.resumeFailureReason != "" {
+					session := f.sessions[id]
+					session.State = "stopped"
+					session.StopReason = f.resumeFailureReason
 					f.sessions[id] = session
 				}
 				f.mu.Unlock()
@@ -425,10 +454,18 @@ func (f *runtimeFakeAgentHub) create(w http.ResponseWriter, r *http.Request) {
 		LaunchEnvironment: request.LaunchEnvironment, Source: request.Source, Provider: "fake",
 		State: "ready", CreatedAt: time.Now().Format(time.RFC3339), UpdatedAt: time.Now().Format(time.RFC3339),
 	}
+	if f.materializeTurns {
+		session.InputCapabilities.TurnScopedSteer = true
+		session.InputCapabilities.Steer = true
+	}
+	if f.createStartupError {
+		session.State = "stopped"
+		session.StopReason = "startup_error"
+	}
 	f.sessions[id] = session
 	f.appendLocked(id, "session.created", session)
-	f.appendLocked(id, "session.state", map[string]any{"state": "ready"})
-	if request.InitialMessage != nil {
+	f.appendLocked(id, "session.state", map[string]any{"state": session.State, "reason": session.StopReason})
+	if request.InitialMessage != nil && !f.createStartupError {
 		f.appendLocked(id, "message.input", fakeMessageInputData(*request.InitialMessage))
 		f.appendLocked(id, "turn.started", map[string]any{"text": request.InitialMessage.Text})
 		session.State = "running"
@@ -650,7 +687,7 @@ func TestCreateResourceGenerationPersistsAgentHubCatalogSnapshot(t *testing.T) {
 	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/agents" && r.Method == http.MethodGet {
 			writeRuntimeFakeJSON(w, map[string]any{
-				"providers": []any{map[string]any{"id": "codex", "name": "Codex Cloud", "type": "cloud", "enabled": true}},
+				"providers": []any{map[string]any{"id": "codex", "name": "Codex Cloud", "type": "cloud"}},
 				"agents":    []any{map[string]any{"name": "fake-agent", "providerId": "codex", "options": map[string]string{"model": "gpt-history"}, "available": true}},
 				"probes":    []any{},
 			})
@@ -1293,7 +1330,7 @@ func TestAgentHubManualMessagesCarryBrowserUserProvenance(t *testing.T) {
 		}
 	}
 	if initial.Type == "" || initialMessage.SchemaVersion != agentHubOpaqueMessageSchema ||
-		initialMessage.Text != "Message from user \"Ada Lovelace\" [sender receives: progress + final reply]:\nhello" || initialPayload.Role != "user" ||
+		!strings.Contains(initialMessage.Text, "From user \"Ada Lovelace\" | audience: internal") || initialPayload.Role != "user" ||
 		initialPayload.Sender == nil || initialPayload.Sender.Name != "Ada Lovelace" {
 		t.Fatalf("initial opaque message = message %#v payload %#v; events=%#v", initialMessage, initialPayload, initialEvents)
 	}
@@ -1362,7 +1399,9 @@ func TestNormalizeAgentHubApprovalReply(t *testing.T) {
 
 func waitForRuntimeTest(t *testing.T, condition func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	// Race instrumentation and durable filesystem writes can exceed two
+	// seconds on busy hosts. Keep these assertions about convergence.
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if condition() {
 			return

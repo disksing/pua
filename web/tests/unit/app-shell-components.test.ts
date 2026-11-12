@@ -8,7 +8,7 @@ import ProjectTree from "../../src/components/ProjectTree.svelte";
 import PaneResizeHandle from "../../src/components/PaneResizeHandle.svelte";
 import SchedulerNav from "../../src/components/SchedulerNav.svelte";
 import WorkspaceSwitcher from "../../src/components/WorkspaceSwitcher.svelte";
-import type { ShellActivityItem, ShellInboxMessage, ShellResourceItem, ShellStatusPresentation } from "../../src/components/models";
+import type { ShellActivityItem, ShellResourceItem, ShellStatusPresentation } from "../../src/components/models";
 
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -65,18 +65,7 @@ function loadVendor<T>(relativePath: string, globalName: string): T {
   return new Function("window", "globalThis", `const module=undefined,exports=undefined,define=undefined;${source}\nreturn globalThis[${JSON.stringify(globalName)}];`)(window, window) as T;
 }
 
-function inboxPanelProps(overrides: Record<string, unknown> = {}) {
-  return {
-    activity: { running: [], unread: [], problems: [] },
-    inbox: [],
-    onSelect: vi.fn(async () => undefined),
-    onOpenInboxMessage: vi.fn(async () => undefined),
-    onReplyInboxMessage: vi.fn(async () => undefined),
-    onDeleteInboxMessage: vi.fn(async () => undefined),
-    onToast: vi.fn(),
-    ...overrides,
-  };
-}
+
 
 describe("AppShell responsibility components", () => {
   it("MobileToolbar owns navigation and backdrop actions", async () => {
@@ -249,7 +238,7 @@ describe("AppShell responsibility components", () => {
     expect(folderRow.querySelector(".drag-handle")).toBeNull();
   });
 
-  it("ProjectTree shows an aggregated unread badge only on collapsed folders", async () => {
+  it("ProjectTree never assigns resource chat badges to virtual folders", async () => {
     const collapsed: ShellResourceItem = { ...resource("vf-1"), type: "folder", expanded: false, unreadCount: 5, children: [resource("task-a", "task")] };
     const expandedFolder: ShellResourceItem = { ...resource("vf-2"), type: "folder", expanded: true, unreadCount: 0, children: [{ ...resource("task-b", "task"), unreadCount: 2 }] };
     const project = { ...resource("project-a"), expanded: true, children: [collapsed, expandedFolder] };
@@ -265,12 +254,7 @@ describe("AppShell responsibility components", () => {
 
     const rows = target.querySelectorAll<HTMLElement>(".folder-item");
     expect(rows).toHaveLength(2);
-    // The aggregated badge follows the folder's task count.
-    const collapsedBadge = rows[0].querySelector<HTMLElement>(".folder-count + .unread-badge");
-    expect(collapsedBadge?.textContent).toBe("5");
-    expect(collapsedBadge?.getAttribute("aria-label")).toBe("5 unread Turns");
-    // An expanded folder carries no aggregate badge; its visible Tasks render
-    // their own badges inside the task group instead of the folder row.
+    expect(rows[0].querySelector(".unread-badge")).toBeNull();
     expect(rows[1].querySelector(".unread-badge")).toBeNull();
     expect(target.querySelector(".folder-task-group .task-item .unread-badge")?.textContent).toBe("2");
   });
@@ -442,11 +426,11 @@ describe("AppShell responsibility components", () => {
     const badges = target.querySelectorAll<HTMLElement>(".unread-badge");
     expect(badges).toHaveLength(2);
     expect(badges[0].textContent).toBe("2");
-    expect(badges[0].getAttribute("aria-label")).toBe("2 unread Turns");
+    expect(badges[0].getAttribute("aria-label")).toBe("2 unread chat messages");
     expect(badges[1].textContent).toBe("99+");
-    expect(badges[1].getAttribute("aria-label")).toBe("120 unread Turns");
-    expect(target.querySelector(".project-tree > .tree-item .resource-ref + .unread-badge")).toBe(badges[0]);
-    expect(target.querySelector(".task-item .resource-ref + .unread-badge")).toBe(badges[1]);
+    expect(badges[1].getAttribute("aria-label")).toBe("120 unread chat messages");
+    expect(target.querySelector(".project-tree > .tree-item .name + .resource-chat-status .unread-badge")).toBe(badges[0]);
+    expect(target.querySelector(".task-item .name + .resource-chat-status .unread-badge")).toBe(badges[1]);
   });
 
   it("ProjectTree replaces the Task file icon with exactly one workflow state icon", async () => {
@@ -606,129 +590,25 @@ describe("AppShell responsibility components", () => {
     expect(document.activeElement).toBe(row);
   });
 
-  it("ActivityPanel inbox lists messages, opens them, and sends inline replies", async () => {
-    const onOpenInboxMessage = vi.fn(async () => undefined);
-    const onReplyInboxMessage = vi.fn(async () => undefined);
-    const onDeleteInboxMessage = vi.fn(async () => undefined);
-    const inbox: ShellInboxMessage[] = [
-      { id: "umsg-1", resourceId: "project1.task1", resourceTitle: "Task One", senderName: "project1.task1", text: "Build finished.", timeLabel: "2m ago", unread: true, replied: false },
-      { id: "umsg-2", resourceId: "project1.task2", resourceTitle: "Task Two", senderName: "project1.task2", text: "Need input.", timeLabel: "5m ago", unread: false, replied: true },
-    ];
-    const target = document.body.appendChild(document.createElement("div"));
-    const component = mount(ActivityPanel, {
-      target,
-      props: {
-        activity: { running: [], unread: [], problems: [] },
-        inbox,
-        onSelect: vi.fn(async () => undefined),
-        onOpenInboxMessage,
-        onReplyInboxMessage,
-        onDeleteInboxMessage,
-        onToast: vi.fn(),
-      },
-    });
-    cleanups.push(() => unmount(component));
-    await tick();
-
-    // The inbox tab counts only unread messages.
-    expect(target.querySelector('[role="tab"]:last-child')?.textContent?.trim()).toBe("Inbox 1");
-    target.querySelector<HTMLElement>('[role="tab"]:last-child')!.click();
-    await tick();
-
-    const rows = target.querySelectorAll(".inbox-row");
-    expect(rows.length).toBe(2);
-    expect(rows[0].classList.contains("unread")).toBe(true);
-    expect(rows[1].classList.contains("unread")).toBe(false);
-    expect(rows[1].querySelector(".inbox-replied-badge")?.textContent).toBe("Replied");
-    // The sender resource id leads; the resource title is secondary context.
-    expect(rows[0].querySelector(".inbox-source strong")?.textContent).toBe("project1.task1");
-    expect(rows[0].querySelector(".inbox-context")?.textContent).toContain("Task One");
-
-    // Clicking a row opens the message (marks read and navigates).
-    (rows[0] as HTMLElement).click();
-    await vi.waitFor(() => expect(onOpenInboxMessage).toHaveBeenCalledWith("umsg-1"));
-
-    // The reply affordance expands an inline form and posts the draft.
-    const replyButton = rows[1].querySelector<HTMLElement>(".inbox-actions .inbox-action:nth-child(2)")!;
-    replyButton.click();
-    await tick();
-    const input = target.querySelector<HTMLTextAreaElement>(".inbox-reply-input")!;
-    input.value = "on it";
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    await tick();
-    target.querySelector<HTMLElement>(".inbox-send")!.click();
-    await vi.waitFor(() => expect(onReplyInboxMessage).toHaveBeenCalledWith("umsg-2", "on it"));
-    expect(onOpenInboxMessage).toHaveBeenCalledTimes(1);
-
-    // The delete affordance asks the controller to remove the message.
-    const deleteButton = rows[1].querySelector<HTMLElement>(".inbox-delete")!;
-    deleteButton.click();
-    await vi.waitFor(() => expect(onDeleteInboxMessage).toHaveBeenCalledWith("umsg-2"));
-    expect(onOpenInboxMessage).toHaveBeenCalledTimes(1);
-  });
-
-  it("ActivityPanel inbox renders message text as markdown and follows resource links", async () => {
-    window.marked = loadVendor<NonNullable<Window["marked"]>>("../../static/vendor/marked/marked.min.js", "marked");
-    window.DOMPurify = loadVendor<NonNullable<Window["DOMPurify"]>>("../../static/vendor/dompurify/purify.min.js", "DOMPurify");
-    cleanups.push(async () => { delete window.marked; delete window.DOMPurify; });
-
-    const onOpenInboxMessage = vi.fn(async () => undefined);
-    const onNavigate = vi.fn();
-    const inbox: ShellInboxMessage[] = [
-      { id: "umsg-md", resourceId: "project1.task1", resourceTitle: "Task One", senderName: "project1.task1", text: "**Done** with [[project1.task2]].\n\n- one\n- two", timeLabel: "1m ago", unread: false, replied: false },
-    ];
-    const target = document.body.appendChild(document.createElement("div"));
-    const component = mount(ActivityPanel, {
-      target,
-      props: inboxPanelProps({
-        inbox,
-        workspaceId: "workspace-a",
-        resolveResourceTitle: (resourceId: string) => (resourceId === "project1.task2" ? "Second task" : null),
-        onNavigate,
-        onOpenInboxMessage,
-      }),
-    });
-    cleanups.push(() => unmount(component));
-    await tick();
-
-    target.querySelector<HTMLElement>('[role="tab"]:last-child')!.click();
-    await tick();
-
-    const text = target.querySelector<HTMLElement>(".inbox-text.markdown-rendered")!;
-    expect(text.querySelector("strong")?.textContent).toBe("Done");
-    expect(text.querySelectorAll("li").length).toBe(2);
-    const link = text.querySelector<HTMLAnchorElement>("a[data-pua-resource-id]")!;
-    expect(link.textContent).toBe("Second task");
-
-    // A resource link navigates to the linked resource without triggering the
-    // row's open action.
-    link.click();
-    await tick();
-    expect(onNavigate).toHaveBeenCalledWith("project1.task2");
-    expect(onOpenInboxMessage).not.toHaveBeenCalled();
-
-    // A plain click on the message body still opens the message.
-    text.click();
-    await vi.waitFor(() => expect(onOpenInboxMessage).toHaveBeenCalledWith("umsg-md"));
-  });
-
-  it("ActivityPanel shows tab counts without a dismiss control", async () => {
+  it("ActivityPanel counts unread chats and keeps read chats without badges", async () => {
     const onSelect = vi.fn(async () => undefined);
     const item: ShellActivityItem = {
       id: "project-a", type: "project", title: "Project A", ref: "#1", selected: true, activeTurn: false, unreadCount: 2,
-      turnNumber: 2, agentName: "Codex", statusLabel: "2 unread", status: emptyStatus,
+      turnNumber: 2, agentName: "Codex", statusLabel: "Idle", status: emptyStatus,
     };
     const activeItem: ShellActivityItem = {
       id: "task-b", type: "task", title: "Task B", ref: "#2", selected: false, activeTurn: true, unreadCount: 1,
       turnNumber: 3, agentName: "Codex", statusLabel: "Resource working", status: emptyStatus,
     };
     const target = document.body.appendChild(document.createElement("div"));
-    const activity = { running: [activeItem], unread: [activeItem, item], problems: [] };
-    const component = mount(ActivityPanel, { target, props: { activity, inbox: [], onSelect, onOpenInboxMessage: vi.fn(async () => undefined), onReplyInboxMessage: vi.fn(async () => undefined), onDeleteInboxMessage: vi.fn(async () => undefined), onToast: vi.fn() } });
+    const readItem = { ...item, id: "task-read", title: "Read chat", unreadCount: 0 };
+    const activity = { running: [activeItem], unread: [activeItem, item, readItem], problems: [] };
+    const onSelectChat = vi.fn(async () => undefined);
+    const component = mount(ActivityPanel, { target, props: { activity, onSelect, onSelectChat, onToast: vi.fn() } });
     cleanups.push(() => unmount(component));
     await tick();
 
-    expect([...target.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent?.trim())).toEqual(["Running 1", "Unread 2", "Issues 0", "Inbox 0"]);
+    expect([...target.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent?.trim())).toEqual(["Running 1", "Chat 2", "Issues 0"]);
     const activeRow = target.querySelector<HTMLElement>('[aria-label^="Task B."]')!;
     expect(activeRow.classList.contains("selected")).toBe(false);
     expect(activeRow.getAttribute("data-active-turn")).toBe("true");
@@ -736,7 +616,21 @@ describe("AppShell responsibility components", () => {
 
     target.querySelector<HTMLElement>('[role="tab"]:nth-child(2)')!.click();
     await tick();
+    expect(target.querySelectorAll("button.activity-row")).toHaveLength(3);
+    expect([...target.querySelectorAll(".activity-chat-unread-count")].map((badge) => badge.textContent)).toEqual(["1", "2"]);
+    expect(target.querySelector('[aria-label^="Read chat."] .activity-chat-unread-count')).toBeNull();
+    expect(target.querySelector('[aria-label^="Task B."]')?.getAttribute("aria-label")).toContain("1 unread chat message");
+    expect(target.querySelector('[aria-label^="Task B."] .activity-meta')?.textContent).toBe("#2 · Agent Codex · Turn 3 · Resource working");
+    expect(target.querySelector('[aria-label^="Task B."]')?.getAttribute("title")).toBe("#2 · Agent Codex · Turn 3 · Resource working");
+    expect(target.querySelector('[aria-label^="Read chat."] .activity-meta')?.textContent).toBe("#1 · Agent Codex · Turn 2 · Idle");
+    target.querySelector<HTMLElement>('[aria-label^="Project A."]')!.click();
+    await vi.waitFor(() => expect(onSelectChat).toHaveBeenCalledWith("project-a"));
+    expect(onSelect).not.toHaveBeenCalled();
+    target.querySelector<HTMLElement>('[role="tab"]:nth-child(1)')!.click();
+    await tick();
     expect(target.querySelector(".activity-title")?.textContent).toContain("#2 · Agent Codex · Turn 3 · Resource working");
+    target.querySelector<HTMLElement>('[aria-label^="Task B."]')!.click();
+    await vi.waitFor(() => expect(onSelect).toHaveBeenCalledWith("task-b"));
   });
 
   it("PaneResizeHandle resizes and commits the Activity panel height", async () => {

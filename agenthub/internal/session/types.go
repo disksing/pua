@@ -61,33 +61,42 @@ type MessageSender struct {
 // controls. The remaining provenance and correlation fields are accepted and
 // replayed only for schema-v1 compatibility.
 type MessageInput struct {
-	SchemaVersion int             `json:"schemaVersion,omitempty"`
-	Text          string          `json:"text"`
-	Payload       json.RawMessage `json:"payload,omitempty"`
-	Steer         bool            `json:"steer"`
-	MessageID     string          `json:"messageId,omitempty"`
-	Role          MessageRole     `json:"role,omitempty"`
-	Sender        *MessageSender  `json:"sender,omitempty"`
-	ReplyTo       string          `json:"replyTo,omitempty"`
-	CorrelationID string          `json:"correlationId,omitempty"`
+	ExpectedTurnID string          `json:"expectedTurnId,omitempty"`
+	SchemaVersion  int             `json:"schemaVersion,omitempty"`
+	Text           string          `json:"text"`
+	Payload        json.RawMessage `json:"payload,omitempty"`
+	Steer          bool            `json:"steer"`
+	MessageID      string          `json:"messageId,omitempty"`
+	Role           MessageRole     `json:"role,omitempty"`
+	Sender         *MessageSender  `json:"sender,omitempty"`
+	ReplyTo        string          `json:"replyTo,omitempty"`
+	CorrelationID  string          `json:"correlationId,omitempty"`
 }
 
 // MessageDeliveryEventData records attempts to hand one durable canonical
 // input to its provider. Accepted means the provider call returned success;
 // a crash between the provider accepting the input and this event being
-// fsynced is intentionally recovered by another attempt (at-least-once).
+// fsynced is intentionally recovered by another attempt (at-least-once),
+// unless a terminal delivery outcome or closed Turn already forbids replay.
 type MessageDeliveryEventData struct {
-	MessageEventID int64  `json:"messageEventId"`
-	MessageID      string `json:"messageId,omitempty"`
-	State          string `json:"state"`
-	Attempt        int    `json:"attempt"`
-	Error          string `json:"error,omitempty"`
+	MessageEventID  int64  `json:"messageEventId"`
+	MessageID       string `json:"messageId,omitempty"`
+	State           string `json:"state"`
+	Attempt         int    `json:"attempt"`
+	Error           string `json:"error,omitempty"`
+	StartupAttempts int    `json:"startupAttempts,omitempty"`
+	RetryAt         string `json:"retryAt,omitempty"`
 }
 
 const (
 	MessageDeliveryAttempting = "attempting"
 	MessageDeliveryPending    = "pending"
 	MessageDeliveryAccepted   = "accepted"
+	MessageDeliveryFailed     = "failed"
+	MessageDeliveryCancelled  = "cancelled"
+	// MessageDeliveryClosed marks an unconfirmed input whose Turn closed.
+	// It prevents replay without claiming that the provider accepted it.
+	MessageDeliveryClosed = "closed"
 )
 
 // DurableMessage is reconstructed exclusively from canonical Events.
@@ -97,6 +106,13 @@ type DurableMessage struct {
 	Input     MessageInput
 	Attempt   int
 	Delivered bool
+	// Terminal includes accepted, failed, cancelled, and closed unconfirmed
+	// inputs. Delivered is true only with a provider acceptance receipt.
+	Terminal        bool
+	State           string
+	Error           string
+	StartupAttempts int
+	RetryAt         string
 }
 
 // MessageInputError is returned when an inbound message cannot be accepted.
@@ -115,6 +131,9 @@ func (e *MessageInputError) Error() string {
 // legacy provenance contract. Schema v2 never inspects Payload contents beyond
 // requiring one valid JSON value.
 func NormalizeMessageInput(value MessageInput) (MessageInput, error) {
+	if value.ExpectedTurnID != "" && (!value.Steer || value.SchemaVersion != MessageSchemaOpaquePayload) {
+		return MessageInput{}, &MessageInputError{Code: "invalid_expected_turn", Field: "expectedTurnId", Message: "expectedTurnId requires a schema-v2 steer input"}
+	}
 	if strings.TrimSpace(value.Text) == "" {
 		return MessageInput{}, &MessageInputError{
 			Code: "invalid_message_text", Field: "text", Message: "message text is required",
@@ -267,10 +286,14 @@ type Session struct {
 	CurrentTurnID      string            `json:"currentTurnId,omitempty"`
 	PendingApprovalIDs []string          `json:"pendingApprovalIds,omitempty"`
 	LastEventID        int64             `json:"lastEventId"`
-	// LastActivityAt is updated only by semantic work events within a Turn.
+	// LastActivityAt includes semantic events and incoming messages within a Turn.
 	// Session lifecycle changes, provider metadata, and stderr do not refresh it.
 	LastActivityAt     *time.Time `json:"lastActivityAt,omitempty"`
 	LastActivityTurnID string     `json:"lastActivityTurnId,omitempty"`
+	// LastProgressAt excludes incoming messages and transport/queue events.
+	// turn.started establishes the baseline before the first agent output.
+	LastProgressAt     *time.Time `json:"lastProgressAt,omitempty"`
+	LastProgressTurnID string     `json:"lastProgressTurnId,omitempty"`
 	CreatedAt          time.Time  `json:"createdAt"`
 	UpdatedAt          time.Time  `json:"updatedAt"`
 }
@@ -289,7 +312,8 @@ type Source struct {
 // Session. It is captured with the Session so archived Sessions remain
 // self-describing even when the daemon configuration later changes.
 type InputCapabilities struct {
-	Steer bool `json:"steer"`
+	Steer           bool `json:"steer"`
+	TurnScopedSteer bool `json:"turnScopedSteer,omitempty"`
 }
 
 // Event is a durable canonical session event. StartTime is populated for a
@@ -370,6 +394,7 @@ type TurnSummary struct {
 // count/timing metadata; callers use the bounded Event range endpoint to
 // expand their raw details.
 type TurnItem struct {
+	Complete             bool            `json:"complete,omitempty"`
 	Type                 string          `json:"type"`
 	Role                 MessageRole     `json:"role,omitempty"`
 	Sender               *MessageSender  `json:"sender,omitempty"`

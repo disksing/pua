@@ -49,9 +49,16 @@ export function projectConversationEvents(events: AgentEvent[]): TimelineItem[] 
 export function applyPUAMessagePayload(item: TimelineItem, rawPayload: unknown): TimelineItem {
   if (item.kind !== "message" || !rawPayload || typeof rawPayload !== "object" || Array.isArray(rawPayload)) return item;
   const payload = rawPayload as Record<string, unknown>;
+  if (payload.schema === "pua.queue-preview.v1") {
+    item.role = "system";
+    item.sender = undefined;
+    return item;
+  }
   if (payload.schema !== "pua.resource-message.v1") return item;
   if (typeof payload.text === "string") item.text = payload.text;
   if (typeof payload.role === "string" && payload.role.trim()) item.role = payload.role.trim().toLowerCase();
+  if (payload.type === "user_chat_input") item.role = "user";
+  if (payload.type === "queue_preview") item.role = "system";
   if (payload.sender && typeof payload.sender === "object" && !Array.isArray(payload.sender)) {
     const source = payload.sender as Record<string, unknown>;
     const sender: { name?: string; id?: string; sessionId?: string } = {};

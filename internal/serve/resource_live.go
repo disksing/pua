@@ -148,6 +148,9 @@ func (m *agentManager) handleResourceEndTurn(w http.ResponseWriter, r *http.Requ
 }
 
 func pauseTaskAfterManualTurnStop(workspace serveWorkspace, resourceID string) (app.TaskState, error) {
+	if err := cancelSuspendedTurnWork(workspace.Path, resourceID, "manual stop"); err != nil {
+		return "", err
+	}
 	if !strings.Contains(normalizedResourceID(resourceID), ".task") {
 		return "", nil
 	}

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -202,7 +203,7 @@ func schedulerTickTerminal(ctx context.Context, workspacePath string, message re
 }
 
 func findSchedulerTickTurn(ctx context.Context, client *agentHubClient, sessionID string, message resourceMailboxMessage) (agentHubTurn, bool, error) {
-	canonical, canonicalFound, canonicalErr := findCanonicalAgentHubMessage(ctx, client, sessionID, message)
+	canonical, canonicalFound, canonicalErr := findCanonicalAgentHubMessage(ctx, client, sessionID, message, 0)
 	if canonicalErr != nil {
 		return agentHubTurn{}, false, canonicalErr
 	}
@@ -265,6 +266,10 @@ func (m *agentManager) reconcileScheduler(ctx context.Context, workspace serveWo
 	if err != nil {
 		return err
 	}
+	if err := m.reconcileScheduleExactDue(ctx, workspace); err != nil {
+		log.Printf("reconcile exact-time schedules: %v", err)
+	}
+	config = naturalLanguageSchedules(config)
 	digest, err := schedulerConfigDigest(config)
 	if err != nil {
 		return err

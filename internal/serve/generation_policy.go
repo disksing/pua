@@ -11,8 +11,9 @@ import (
 )
 
 const (
-	generationPolicyRetireReason = "turn_limit"
-	generationUsagePageSize      = 500
+	generationBudgetRetireReason     = "turn_limit"
+	generationInactivityRetireReason = "inactivity_limit"
+	generationUsagePageSize          = 500
 )
 
 type generationUsage struct {
@@ -21,8 +22,8 @@ type generationUsage struct {
 	LatestEventID  int64
 }
 
-func generationPolicyReached(policy app.GenerationPolicy, usage generationUsage) bool {
-	if !policy.Enabled {
+func generationBudgetReached(policy app.GenerationPolicy, usage generationUsage) bool {
+	if !policy.BudgetEnabled {
 		return false
 	}
 	if policy.MaxTurns > 0 && usage.CompletedTurns >= policy.MaxTurns {
@@ -30,6 +31,17 @@ func generationPolicyReached(policy app.GenerationPolicy, usage generationUsage)
 	}
 	return policy.MaxAccumulatedTurnMinutes > 0 &&
 		usage.TurnDurationMS >= int64(policy.MaxAccumulatedTurnMinutes)*int64(time.Minute/time.Millisecond)
+}
+
+func generationInactivityReached(policy app.GenerationPolicy, session agentHubSession, now time.Time) bool {
+	if !policy.InactivityEnabled || policy.MaxInactivityMinutes < 1 || now.IsZero() {
+		return false
+	}
+	lastActivityAt := generationTime(session.LastActivityAt)
+	if lastActivityAt.IsZero() || now.Before(lastActivityAt) {
+		return false
+	}
+	return now.Sub(lastActivityAt) >= time.Duration(policy.MaxInactivityMinutes)*time.Minute
 }
 
 func generationUsageFromTurns(turns []agentHubTurn) generationUsage {
@@ -106,12 +118,12 @@ func fetchGenerationUsage(ctx context.Context, client *agentHubClient, sessionID
 	return usage, nil
 }
 
-// prepareGenerationPolicyForNewTurnLocked evaluates the generation budget only
-// when a queued mailbox input is about to start a new Turn. A terminal Turn can
-// therefore finish all of its completion bookkeeping before its generation is
-// replaced, and an over-budget idle generation does no work until new input
-// arrives. The caller owns the resource controller and has already verified the
-// exact inactive AgentHub Session.
+// prepareGenerationPolicyForNewTurnLocked evaluates the independent usage and
+// inactivity rotation policies only when queued input is about to start a new
+// Turn. A terminal Turn can therefore finish all completion bookkeeping before
+// replacement, and an idle generation does no work until new input arrives. The
+// caller owns the resource controller and has verified the exact inactive
+// AgentHub Session.
 func (m *agentManager) prepareGenerationPolicyForNewTurnLocked(ctx context.Context, workspace serveWorkspace, record generationRecord, observedSession agentHubSession, rt *agentRuntime, client *agentHubClient) (bool, error) {
 	if m == nil || rt == nil || client == nil ||
 		(observedSession.State != "ready" && observedSession.State != "stopped") {
@@ -122,7 +134,7 @@ func (m *agentManager) prepareGenerationPolicyForNewTurnLocked(ctx context.Conte
 		return false, err
 	}
 	runtimeConfig, err := puaWorkspace.RuntimeConfig()
-	if err != nil || !runtimeConfig.GenerationPolicy.Enabled {
+	if err != nil || (!runtimeConfig.GenerationPolicy.BudgetEnabled && !runtimeConfig.GenerationPolicy.InactivityEnabled) {
 		return false, err
 	}
 	current, found, err := currentResourceGeneration(workspace.Path, record.ResourceID)
@@ -135,7 +147,10 @@ func (m *agentManager) prepareGenerationPolicyForNewTurnLocked(ctx context.Conte
 		TurnDurationMS: current.GenerationTurnDurationMS,
 		LatestEventID:  current.GenerationUsageEventID,
 	}
-	if !current.GenerationUsageReady || current.GenerationUsageEventID < observedSession.LastEventID {
+	refreshUsage := func() (bool, error) {
+		if current.GenerationUsageReady && current.GenerationUsageEventID >= observedSession.LastEventID {
+			return true, nil
+		}
 		usage, err = fetchGenerationUsage(ctx, client, current.AgentHubSessionID)
 		if err != nil {
 			return false, fmt.Errorf("inspect generation Turn usage: %w", err)
@@ -159,6 +174,13 @@ func (m *agentManager) prepareGenerationPolicyForNewTurnLocked(ctx context.Conte
 			return false, nil
 		}
 		current = updated
+		return true, nil
+	}
+	if runtimeConfig.GenerationPolicy.BudgetEnabled {
+		currentStillMatches, refreshErr := refreshUsage()
+		if refreshErr != nil || !currentStillMatches {
+			return false, refreshErr
+		}
 	}
 
 	// Re-read the policy after the AgentHub projection request so a concurrent
@@ -167,7 +189,19 @@ func (m *agentManager) prepareGenerationPolicyForNewTurnLocked(ctx context.Conte
 	if err != nil {
 		return false, err
 	}
-	if !generationPolicyReached(runtimeConfig.GenerationPolicy, usage) {
+	if runtimeConfig.GenerationPolicy.BudgetEnabled {
+		currentStillMatches, refreshErr := refreshUsage()
+		if refreshErr != nil || !currentStillMatches {
+			return false, refreshErr
+		}
+	}
+	retireReason := ""
+	if generationBudgetReached(runtimeConfig.GenerationPolicy, usage) {
+		retireReason = generationBudgetRetireReason
+	} else if generationInactivityReached(runtimeConfig.GenerationPolicy, observedSession, m.resourceNow()) {
+		retireReason = generationInactivityRetireReason
+	}
+	if retireReason == "" {
 		return false, nil
 	}
 	updated, err := rt.mutateGeneration(func(current *generationRecord) {
@@ -177,7 +211,7 @@ func (m *agentManager) prepareGenerationPolicyForNewTurnLocked(ctx context.Conte
 		}
 		current.ReplacementPending = true
 		current.ManualStopRequested = false
-		current.RetireReason = generationPolicyRetireReason
+		current.RetireReason = retireReason
 		current.IdleSleepStopRequested = false
 		current.ResumeFailureCount = 0
 		current.ResumeRetryAt = ""

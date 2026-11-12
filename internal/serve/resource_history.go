@@ -128,9 +128,10 @@ type resourceHistorySegment struct {
 }
 
 type resourceHistoryPage struct {
-	ResourceID string                   `json:"resourceId"`
-	Segments   []resourceHistorySegment `json:"segments"`
-	Page       struct {
+	CompletedTurnNumber int                      `json:"completedTurnNumber"`
+	ResourceID          string                   `json:"resourceId"`
+	Segments            []resourceHistorySegment `json:"segments"`
+	Page                struct {
 		Limit      int    `json:"limit"`
 		NextCursor string `json:"nextCursor,omitempty"`
 		HasMore    bool   `json:"hasMore"`
@@ -234,7 +235,7 @@ func historyDeliveries(mailbox resourceMailbox, generationID, turnID string) []r
 	for _, message := range matches {
 		result = append(result, resourceHistoryDelivery{
 			MessageID: message.ID, RequestedMode: message.RequestedMode, ActualMode: message.ActualMode,
-			DowngradeReason: message.DowngradeReason, Role: message.Role, Sender: message.Sender,
+			DowngradeReason: message.DowngradeReason, Role: puaMessageRole(message.Role, message.Type), Sender: message.Sender,
 			SenderWorkspaceInstanceID: message.SenderWorkspaceInstanceID, Type: message.Type, Causation: message.Causation,
 			AcceptedAt: message.AcceptedAt, DeliveredAt: message.DeliveredAt,
 		})
@@ -260,9 +261,9 @@ func historyTurnSummary(instanceID, resourceID string, record generationRecord, 
 		trigger = &value
 	}
 	triggerPreview, triggerRole, triggerSender := turn.TriggerPreview, turn.TriggerRole, turn.TriggerSender
-	if payload, ok := decodePUAMessagePayload(turn.TriggerPayload); ok {
-		triggerPreview = resourceMessagePreview(payload.Text)
-		triggerRole, triggerSender = payload.Role, payload.Sender
+	if len(turn.TriggerPayload) > 0 {
+		triggerPreview, triggerRole, triggerSender = puaMessagePresentation(triggerPreview, triggerRole, triggerSender, turn.TriggerPayload)
+		triggerPreview = resourceMessagePreview(triggerPreview)
 	}
 	return resourceHistoryTurnSummary{
 		Reference: reference, TurnID: turnID, Status: turn.Status, Closed: turn.Closed,
@@ -345,6 +346,7 @@ func (m *agentManager) resourceHistoryPage(ctx context.Context, workspace serveW
 		return resourceHistoryPage{}, &resourceAPIError{Code: "history_index_corrupt", Message: err.Error()}
 	}
 	page := resourceHistoryPage{ResourceID: resourceID, Segments: []resourceHistorySegment{}}
+	page.CompletedTurnNumber = latestCompletedTurnByResource(records)[resourceID].TurnNumber
 	page.Page.Limit = limit
 	if len(records) == 0 {
 		return page, nil

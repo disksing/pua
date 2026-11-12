@@ -50,10 +50,17 @@
   display: grid;
   place-items: center;
   border-radius: 4px;
-  background: var(--accent);
+  background: transparent;
   color: var(--panel);
   font-size: calc(12px * var(--sidebar-font-scale, 1));
   font-weight: 700;
+}
+
+:where([data-component-owner="app-shell"]) .brand-mark img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
 }
 
 :where([data-component-owner="app-shell"]) .brand-copy {

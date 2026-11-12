@@ -35,6 +35,7 @@ export interface ShellResourceItem {
   children: ShellResourceItem[];
   projectId?: string;
   unreadCount: number;
+  chatOpen?: boolean;
 }
 
 export interface ShellActivityItem {
@@ -57,16 +58,7 @@ export interface ShellActivityLists {
   problems: ShellActivityItem[];
 }
 
-export interface ShellInboxMessage {
-  id: string;
-  resourceId: string;
-  resourceTitle: string;
-  senderName: string;
-  text: string;
-  timeLabel: string;
-  unread: boolean;
-  replied: boolean;
-}
+
 
 export interface ShellWorkspaceItem extends WorkspaceOption {
   iconSrc: string;
@@ -130,7 +122,6 @@ export interface AppShellModel {
   projects: ShellResourceItem[];
   treeEditing: boolean;
   activity: ShellActivityLists;
-  inbox: ShellInboxMessage[];
   doctor: DoctorSnapshotModel;
   paneSizes: { sidebarWidth: number; chatWidth: number; chatHeight: number; sidebarAttentionHeight: number };
   mobile: { sidebarOpen: boolean };
@@ -145,6 +136,7 @@ export interface AppShellModel {
   onRefreshDoctor: () => Promise<void>;
   onToggleProject: (id: string) => Promise<void>;
   onSelectResource: (id: string) => Promise<void>;
+  onSelectChat?: (id: string) => Promise<void>;
   onReorder: (drag: ShellDragTarget, target: ShellDragTarget, after: boolean) => Promise<void>;
   onDragState: (drag: ShellDragTarget | null) => void;
   onToggleTreeEditing: () => void;
@@ -152,9 +144,6 @@ export interface AppShellModel {
   onRenameFolder: (id: string, name: string) => Promise<void>;
   onDeleteFolder: (id: string) => Promise<void>;
   onToggleFolder: (id: string) => Promise<void>;
-  onOpenInboxMessage: (id: string) => Promise<void>;
-  onReplyInboxMessage: (id: string, text: string) => Promise<void>;
-  onDeleteInboxMessage: (id: string) => Promise<void>;
   onPanePreview: (name: keyof AppShellModel["paneSizes"], value: number) => void;
   onPaneCommit: (name: keyof AppShellModel["paneSizes"]) => void;
   onPaneViewport: () => void;

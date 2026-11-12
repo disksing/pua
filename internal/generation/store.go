@@ -440,18 +440,17 @@ func (s *Store) readResourceRecords(key string, currentOnly bool) ([]Record, err
 	currentPath := filepath.Join(resourceDir, currentFileName)
 	if current, found, err := readFileRecord(currentPath); err != nil {
 		return nil, err
-	} else if found && !currentOnly {
+	} else if found {
 		if _, retired, err := s.readRetiredForKey(key, current.GenerationID); err != nil {
 			return nil, err
 		} else if !retired {
 			result = append(result, current)
 		}
-	} else if found && currentOnly {
-		if _, retired, err := s.readRetiredForKey(key, current.GenerationID); err != nil {
-			return nil, err
-		} else if !retired {
-			result = append(result, current)
-		}
+	}
+	// Only the current generation's retirement manifest can invalidate it.
+	// Unrelated history must not add I/O or errors to a current-only query.
+	if currentOnly {
+		return result, nil
 	}
 	retiredDir := filepath.Join(resourceDir, retiredDirName)
 	if entries, err := os.ReadDir(retiredDir); err == nil {
@@ -465,9 +464,7 @@ func (s *Store) readResourceRecords(key string, currentOnly bool) ([]Record, err
 			}
 			if found {
 				record.Retired = true
-				if !currentOnly {
-					result = append(result, record)
-				}
+				result = append(result, record)
 			}
 		}
 	} else if !os.IsNotExist(err) {

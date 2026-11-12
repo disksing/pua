@@ -159,3 +159,10 @@ func TestFrameProjectionIsDeterministicAndAppendModeIsExplicit(t *testing.T) {
 		t.Fatalf("append frame = %#v", appendFrame)
 	}
 }
+
+func TestAssistantMessageCompletionIsSemanticBoundary(t *testing.T) {
+	frame := FrameFor(sourceEvent(t, 14, "message.assistant.completed", map[string]any{"method": "provider-specific", "raw": "private"}), false)
+	if len(frame.Events) != 1 || frame.Events[0].Type != "message.assistant.completed" || len(eventData(t, frame)) != 0 {
+		t.Fatalf("completion is not a clean semantic boundary: %+v", frame)
+	}
+}

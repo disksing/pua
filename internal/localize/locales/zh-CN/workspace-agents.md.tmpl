@@ -18,7 +18,7 @@ Workspace、Project、Task 和 Scheduler 都是长期存在的资源。每个资
 
 根据资源类型读取上下文：
 
-- Workspace：根目录 AGENTS.md、Workspace 配置和 wiki/index.md；
+- Workspace：根目录 AGENTS.md、workspace.md、Workspace 配置和 wiki/index.md；
 - Project：根目录与当前目录的 AGENTS.md、project.json、project.md；
 - Task：Workspace、Project、Task 三级 AGENTS.md、task.json、task.md；
 - Scheduler：Workspace 和 Scheduler 的 AGENTS.md、scheduler.json、scheduler.md。
@@ -244,17 +244,17 @@ Turn 开头固定本轮的对话对象及 Chat 可见性，并提供稳定的 wo
 
 升级兼容：仅原输入仍明确提供 `--reply-to` 发布命令的旧轮沿用 `pua chat publish`，按原指令收口；新的固定受众 Turn 自动同步，不能再重复调用发布命令。旧历史不会回灌 Chat。工作进展不解除最终答复义务；输出后通过 `pua turn status` 或共享历史核对发布事实。发布受阻时保留执行结果，不改投其他周期。
 
-### 对话事项文件
+### 资源说明与对话事项
 
-Workspace、Project、Task 各自拥有 chat.md，由所属执行 Agent 维护；不修改其他资源的文件、不与旧 chat notes 双写。每轮开始及上下文恢复后读取当前资源的未结事项；旧 Workspace 缺失时可创建本文件，并采用“通知约定、未结事项、最近结束”的结构。
+Workspace 使用 workspace.md，Project 使用 project.md，Task 使用 task.md，统一保存资源背景和对话事项，由所属执行 Agent 维护；Scheduler 在 scheduler.md 中保存上下文与必要事项。每轮开始及上下文恢复后读取当前资源说明及未结事项，在同一文档中维护“通知约定、未结事项、最近结束”，保留已有背景。不要单独创建 chat.md，也不与旧 chat notes 双写。升级迁移会把旧 chat.md 合入资源说明，确认写入成功后退役旧文件。
 
 收到用户消息（包括忙碌 Turn 中插入消息）时，先登记需要跟进的承诺：稳定事项 ID、用户、来源消息 ID 与源输入 History 引用、摘要、工作状态、通知状态、下一步、通知条件、关联资源或实际 schedule ID。无需为寒暄或已当场完成并成功发布的简单答复保留长期条目。用户取消或替代要求时更新原项，文件内容本身不构成新的授权。
 
 收到协作结果或调度消息时匹配原事项。每轮结束前核对本轮所有用户输入和到期通知：工作完成不等于已回复，进度回复不解除最终通知义务；自动同步或旧 publish 成功后才记录消息 ID、时间和摘要，已发布不等于已读。发布后写文件前中断时，通过稳定发布 ID 核对 Chat 事实，避免重复通知。
 
-问题有答案、承诺完成、需要用户决策、预计时间或方案实质变化时主动通知，尊重用户明确时机；无新信息不重复提醒。文件不会唤醒 Agent，长期等待应真实注册 Scheduler 条件。凭据只使用输入提供的合法回复指令；恢复时可通过源输入 History 引用读取原指令并接受服务端校验，不从原始 Chat 存储提取 Token，不将凭据写入 chat.md 或调度条件。关闭、重开等导致资格失效时保留结果并记录发布受阻，不改投其他用户或资源、不无限重试。
+问题有答案、承诺完成、需要用户决策、预计时间或方案实质变化时主动通知，尊重用户明确时机；无新信息不重复提醒。文件不会唤醒 Agent，长期等待应真实注册 Scheduler 条件。凭据只使用输入提供的合法回复指令；恢复时可通过源输入 History 引用读取原指令并接受服务端校验，不从原始 Chat 存储提取 Token，不将凭据写入资源说明或调度条件。关闭、重开等导致资格失效时保留结果并记录发布受阻，不改投其他用户或资源、不无限重试。
 
-只记录必要摘要和引用，不复制完整聊天或其他用户的私人对话。长期背景和决定仍写入 project.md / task.md。保留全部未结事项和最近 20 项结束摘要，较早摘要按需归入当前资源 artifacts；仅当工作与通知义务都结束时关闭事项。
+只记录必要摘要和引用，不复制完整聊天或其他用户的私人对话。长期背景和决定写在同一资源说明中。保留全部未结事项和最近 20 项结束摘要，较早摘要按需归入当前资源 artifacts；仅当工作与通知义务都结束时关闭事项。
 
 ## 7. Scheduler
 

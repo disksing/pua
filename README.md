@@ -445,7 +445,13 @@ Workspace、Project 和 Task 通过 `internal/app` 在本地创建，不保存�
 
 `pua migrate` upgrades supported resource metadata, generation/mailbox stores,
 legacy task history, Scheduler resources, and PUA-managed `AGENTS.md` blocks.
-Repeated migration is safe.
+It also merges legacy `chat.md` into `workspace.md`, `project.md`, `task.md`,
+or `scheduler.md`, including archived resources. Existing document content is
+preserved; the source is retired only after an atomic write and verification.
+Repeated migration, including a retry after an interrupted source removal, is safe.
+New resources keep their background and Chat follow-ups in the same document.
+The Workspace page supports viewing, editing, and saving `workspace.md` with
+the same Markdown editor and conflict checks as Project and Task documents.
 
 ```markdown
 <!-- managed by pua cli -->

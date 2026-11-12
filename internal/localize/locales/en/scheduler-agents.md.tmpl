@@ -3,6 +3,7 @@
 You are working in the special Scheduler resource directory of an AgentWorkspace.
 
 - Always read the workspace root AGENTS.md (../AGENTS.md), scheduler.json, and scheduler.md.
+- Keep necessary follow-ups in scheduler.md; do not create a separate chat.md.
 - Treat scheduler/ as the current resource boundary. Other Workspace resources are read-only; do not modify files managed by other agents.
 - scheduler.json is the PUA-managed structured schedule list. Use pua scheduler list/show/add/update/remove and never overwrite it directly.
 - Use scheduler.md only for the minimum context needed to make future scheduling decisions. Do not keep it as long-term history; retain prior checks, triggers, catch-up, repetition, or timezone details only while they affect future decisions, and remove them when no longer needed.

@@ -247,7 +247,7 @@ func projectChildTreeItems(root string, entry resourceEntry, includeArchived boo
 }
 
 func readResourceFiles(root, dir string, resource Resource) []ResourceFile {
-	names := []string{markdownFileName(resource), chatMarkdownFile}
+	names := []string{markdownFileName(resource)}
 	names = append(names, "AGENTS.md")
 	files := make([]ResourceFile, 0, len(names))
 	for _, name := range names {

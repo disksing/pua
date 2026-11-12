@@ -105,9 +105,7 @@ func TestResourceMarkdownSaveAllowsOnlyOwnedOpenMarkdown(t *testing.T) {
 		path       string
 		abs        string
 	}{
-		{name: "workspace chat", resourceID: "workspace", path: "chat.md", abs: filepath.Join(fixture.root, "chat.md")},
-		{name: "project chat", resourceID: "project1", path: project.Path + "/chat.md", abs: filepath.Join(fixture.projectPath, "chat.md")},
-		{name: "task chat", resourceID: "project1.task1", path: task.Path + "/chat.md", abs: filepath.Join(fixture.taskPath, "chat.md")},
+		{name: "workspace brief", resourceID: "workspace", path: "workspace.md", abs: filepath.Join(fixture.root, "workspace.md")},
 		{name: "project brief", resourceID: "project1", path: project.Path + "/project.md", abs: filepath.Join(fixture.projectPath, "project.md")},
 		{name: "task brief", resourceID: "project1.task1", path: task.Path + "/task.md", abs: filepath.Join(fixture.taskPath, "task.md")},
 		{name: "project template", resourceID: "project1", path: project.Path + "/templates/review.md", abs: filepath.Join(fixture.projectPath, "templates", "review.md")},
@@ -129,6 +127,16 @@ func TestResourceMarkdownSaveAllowsOnlyOwnedOpenMarkdown(t *testing.T) {
 			if err != nil || string(data) != updated {
 				t.Fatalf("saved content = %q, err=%v", data, err)
 			}
+			reloaded := httptest.NewRecorder()
+			fixture.server.handleWorkspace(reloaded, httptest.NewRequest(http.MethodGet, "/api/workspaces/workspace-one/files?path="+url.QueryEscape(test.path), nil))
+			var preview struct {
+				Content     string `json:"content"`
+				ContentHash string `json:"contentHash"`
+			}
+			if err := json.Unmarshal(reloaded.Body.Bytes(), &preview); err != nil || reloaded.Code != http.StatusOK ||
+				preview.Content != updated || preview.ContentHash != previewContentHash(data) {
+				t.Fatalf("reloaded document = %s, err=%v", reloaded.Body.String(), err)
+			}
 			afterInfo, err := os.Stat(test.abs)
 			if err != nil {
 				t.Fatal(err)
@@ -145,6 +153,17 @@ func TestResourceMarkdownSaveRejectsConflictsAndUnownedPaths(t *testing.T) {
 	project, _ := fixture.workspace.Resource("project1")
 	task, _ := fixture.workspace.Resource("project1.task1")
 	taskBrief := filepath.Join(fixture.taskPath, "task.md")
+	for _, path := range []string{"chat.md", project.Path + "/chat.md", task.Path + "/chat.md"} {
+		absolute := filepath.Join(fixture.root, path)
+		if err := os.WriteFile(absolute, []byte("Late legacy write"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		for _, id := range []string{"workspace", "project1", "project1.task1"} {
+			if result := markdownSaveRequest(t, fixture, id, path, "changed", fileHash(t, absolute)); result.Code != http.StatusBadRequest {
+				t.Fatalf("legacy document was editable: %s %s: %d", id, path, result.Code)
+			}
+		}
+	}
 	originalHash := fileHash(t, taskBrief)
 	if err := os.WriteFile(taskBrief, []byte("# External change\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -160,9 +179,9 @@ func TestResourceMarkdownSaveRejectsConflictsAndUnownedPaths(t *testing.T) {
 		path       string
 		abs        string
 	}{
-		{name: "workspace child chat", resourceID: "workspace", path: task.Path + "/chat.md", abs: filepath.Join(fixture.taskPath, "chat.md")},
-		{name: "project child chat", resourceID: "project1", path: task.Path + "/chat.md", abs: filepath.Join(fixture.taskPath, "chat.md")},
-		{name: "task parent chat", resourceID: "project1.task1", path: "chat.md", abs: filepath.Join(fixture.root, "chat.md")},
+		{name: "workspace child brief", resourceID: "workspace", path: task.Path + "/task.md", abs: filepath.Join(fixture.taskPath, "task.md")},
+		{name: "project child brief", resourceID: "project1", path: task.Path + "/task.md", abs: filepath.Join(fixture.taskPath, "task.md")},
+		{name: "task parent brief", resourceID: "project1.task1", path: "workspace.md", abs: filepath.Join(fixture.root, "workspace.md")},
 		{name: "workspace artifact", resourceID: "workspace", path: project.Path + "/artifacts/notes.md", abs: filepath.Join(fixture.projectPath, "artifacts", "notes.md")},
 		{name: "other resource brief", resourceID: "project1", path: task.Path + "/task.md", abs: taskBrief},
 		{name: "text artifact", resourceID: "project1.task1", path: task.Path + "/artifacts/nested/not-markdown.txt", abs: filepath.Join(fixture.taskPath, "artifacts", "nested", "not-markdown.txt")},

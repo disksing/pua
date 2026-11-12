@@ -80,42 +80,40 @@ afterEach(async () => {
 beforeEach(() => vi.stubGlobal("localStorage", new MemoryStorage()));
 
 describe("DetailPanel", () => {
-  it.each(["workspace", "project", "task"] as const)("edits chat follow-ups for %s without changing the brief", async (kind) => {
+  it.each(["workspace", "project", "task"] as const)("edits the unified %s document", async (kind) => {
     const resourceId = kind === "workspace" ? "workspace" : kind === "project" ? "project1" : "project1.task1";
-    const path = kind === "workspace" ? "chat.md" : kind === "project" ? "project1/chat.md" : "project1/task1/chat.md";
-    const file = { name: "chat.md", path, content: "# Pending reply", contentHash: "chat-hash" };
+    const name = `${kind}.md`;
+    const path = kind === "workspace" ? name : kind === "project" ? `project1/${name}` : `project1/task1/${name}`;
+    const file = { name, path, content: "# Background\n\n## Chat follow-ups\nPending reply", contentHash: "document-hash" };
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(file), { headers: { "content-type": "application/json" } })));
     const base = resourceModel();
-    const model = resourceModel({ resourceId, resourceType: kind, workspaceChat: kind === "workspace" ? file : null,
-      detail: kind === "workspace" ? null : { ...base.detail!, files: [...base.detail!.files!, file] } });
+    const model = resourceModel({ resourceId, resourceType: kind, workspaceDocument: kind === "workspace" ? file : null,
+      detail: kind === "workspace" ? null : { ...base.detail!, files: [file] } });
     const { target } = mountModel(model);
     await tick();
-    const tab = Array.from(target.querySelectorAll<HTMLButtonElement>('[role="tab"]')).find((button) => button.textContent === "Chat follow-ups")!;
-    tab.click();
-    await tick();
-    const doc = target.querySelector<HTMLElement>('[data-doc-file="chat.md"]')!;
+    expect(Array.from(target.querySelectorAll('[role="tab"]')).some((tab) => tab.textContent === "Chat follow-ups")).toBe(false);
+    const doc = target.querySelector<HTMLElement>(`[data-doc-file="${name}"]`)!;
     expect(doc.closest("[hidden]")).toBeNull();
     Array.from(doc.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.trim() === "Edit")!.click();
-    await vi.waitFor(() => expect(target.querySelector('[role="dialog"] .cm-editor')).not.toBeNull());
+    await vi.waitFor(() => expect(target.querySelector('[role="dialog"] .cm-editor')).not.toBeNull(), { timeout: 5000 });
     const dialog = target.querySelector<HTMLElement>('[role="dialog"]')!;
     const view = EditorView.findFromDOM(dialog.querySelector<HTMLElement>(".cm-editor")!)!;
     view.dispatch({ changes: { from: view.state.doc.length, insert: "\nResult pending" } });
     await tick();
     Array.from(dialog.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.trim() === "Save")!.click();
-    await vi.waitFor(() => expect(model.onSaveMarkdownFile).toHaveBeenCalledWith(path, "# Pending reply\nResult pending", "chat-hash"));
+    await vi.waitFor(() => expect(model.onSaveMarkdownFile).toHaveBeenCalledWith(path, `${file.content}\nResult pending`, "document-hash"));
     expect(model.onSaveWorkspaceAgents).not.toHaveBeenCalled();
   });
 
-  it("shows a missing follow-up document and keeps archived documents read-only", async () => {
-    const model = resourceModel();
+  it("shows missing briefs and keeps archived documents read-only", async () => {
+    const base = resourceModel();
+    const model = resourceModel({ detail: { ...base.detail!, files: [] } });
     const { target, channel } = mountModel(model);
     await tick();
-    Array.from(target.querySelectorAll<HTMLButtonElement>('[role="tab"]')).find((button) => button.textContent === "Chat follow-ups")!.click();
+    expect(target.textContent).toContain("Task brief is missing");
+    channel.publish({ ...model, detail: { ...model.detail!, archived: true, files: [{ name: "task.md", path: "project1/task1/task.md", content: "# Completed" }] } });
     await tick();
-    expect(target.textContent).toContain("Chat follow-ups are missing");
-    channel.publish({ ...model, detail: { ...model.detail!, archived: true, files: [{ name: "chat.md", path: "project1/task1/chat.md", content: "# Completed" }] } });
-    await tick();
-    expect(target.querySelector('[data-doc-file="chat.md"]')?.textContent).not.toContain("Edit");
+    expect(target.querySelector('[data-doc-file="task.md"]')?.textContent).not.toContain("Edit");
   });
   it("opens the Markdown editor dialog and saves through the resource callback", async () => {
     const save = vi.fn(async (path: string, content: string) => ({ path, name: "task.md", content, contentHash: "saved-hash" }));
@@ -427,7 +425,10 @@ describe("DetailPanel", () => {
     await tick();
 
     const tabs = Array.from(target.querySelectorAll<HTMLButtonElement>("[role=tab]"));
-    expect(tabs.map((tab) => tab.textContent?.trim())).toEqual(["AGENTS.md", "Chat follow-ups", "Wiki", "Execution events", "Settings"]);
+    expect(tabs.map((tab) => tab.textContent?.trim())).toEqual(["Workspace", "AGENTS.md", "Wiki", "Execution events", "Settings"]);
+    expect(target.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain("Workspace");
+    tabs.find((tab) => tab.textContent?.trim() === "AGENTS.md")!.click();
+    await tick();
     expect(target.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain("AGENTS.md");
     // The managed block is no longer hidden from the rendered document.
     expect(target.querySelector('[data-doc-file="AGENTS.md"]')).not.toBeNull();
@@ -446,6 +447,8 @@ describe("DetailPanel", () => {
       onSaveWorkspaceAgents: save,
     });
     const { target } = mountModel(initial);
+    await tick();
+    Array.from(target.querySelectorAll<HTMLButtonElement>('[role="tab"]')).find((tab) => tab.textContent?.trim() === "AGENTS.md")!.click();
     await tick();
     const edit = Array.from(target.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.trim() === "Edit")!;
     edit.click();

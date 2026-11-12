@@ -210,7 +210,7 @@ func initializeWorkspaceLocked(root, language string) error {
 	if _, err := ensureSchedulerLocked(root, language); err != nil {
 		return err
 	}
-	return updateOpenTaskAgentsMD(root, language)
+	return migrateResourceDocuments(root, language)
 }
 
 func syncDirectory(path string) error {
@@ -259,7 +259,7 @@ func (w *Workspace) migrate(language string) error {
 	if err := updateAgentsMD(filepath.Join(w.root, "AGENTS.md"), language); err != nil {
 		return &APIError{Operation: "migrate Workspace", Kind: "workspace", Workspace: w.root, Err: err}
 	}
-	if err := updateOpenTaskAgentsMD(w.root, language); err != nil {
+	if err := migrateResourceDocuments(w.root, language); err != nil {
 		return &APIError{Operation: "migrate Workspace", Kind: "workspace", Workspace: w.root, Err: err}
 	}
 	if _, err := ensureSchedulerLocked(w.root, language); err != nil {
@@ -622,6 +622,10 @@ func (w *Workspace) PreviewTask(input CreateTaskInput) (TaskPreview, error) {
 }
 
 func (w *Workspace) resolveTaskContent(input CreateTaskInput) (string, string, *TaskTemplateSource, []TemplateIssue, error) {
+	language, err := workspaceLanguage(w.root)
+	if err != nil {
+		return "", "", nil, nil, err
+	}
 	templateName := strings.TrimSpace(input.TemplateName)
 	if templateName != "" {
 		if strings.TrimSpace(input.Detail) != "" || input.CompleteMarkdownSet {
@@ -636,7 +640,7 @@ func (w *Workspace) resolveTaskContent(input CreateTaskInput) (string, string, *
 			return "", "", nil, nil, &APIError{Operation: "render task template", Kind: "template_conflict", Workspace: w.root, ResourceID: input.ProjectID, Err: &TemplateValidationError{Template: templateName, Issues: []TemplateIssue{issue}}}
 		}
 		source := &TaskTemplateSource{Name: result.TemplateName, SchemaVersion: result.SchemaVersion, Digest: result.Digest}
-		return result.Title, result.Markdown, source, result.Warnings, nil
+		return result.Title, withFollowupMarkdown(result.Markdown, language), source, result.Warnings, nil
 	}
 	if len(input.TemplateFields) > 0 || strings.TrimSpace(input.ExpectedTemplateDigest) != "" {
 		return "", "", nil, nil, &APIError{Operation: "create task", Kind: "template", Workspace: w.root, ResourceID: input.ProjectID, Err: errors.New("templateFields and expectedTemplateDigest require templateName")}
@@ -645,15 +649,11 @@ func (w *Workspace) resolveTaskContent(input CreateTaskInput) (string, string, *
 	if title == "" {
 		return "", "", nil, nil, &APIError{Operation: "create task", Kind: "task", Workspace: w.root, ResourceID: input.ProjectID, Err: errors.New("title cannot be empty")}
 	}
-	language, err := workspaceLanguage(w.root)
-	if err != nil {
-		return "", "", nil, nil, err
-	}
 	markdown := taskMarkdown(title, strings.TrimSpace(input.Detail), language)
 	if input.CompleteMarkdownSet {
 		markdown = input.CompleteMarkdown
 	}
-	return title, markdown, nil, nil, nil
+	return title, withFollowupMarkdown(markdown, language), nil, nil, nil
 }
 
 func (w *Workspace) resolveTaskAgentBinding(parent Project, explicit AgentBinding) (AgentBinding, error) {

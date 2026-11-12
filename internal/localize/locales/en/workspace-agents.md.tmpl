@@ -18,7 +18,7 @@ If the location is unclear, inspect the working directory and PUA_RESOURCE_ID. P
 
 Read context according to the resource type:
 
-- Workspace: the root AGENTS.md, Workspace configuration, and wiki/index.md.
+- Workspace: the root AGENTS.md, workspace.md, Workspace configuration, and wiki/index.md.
 - Project: the root and local AGENTS.md, project.json, and project.md.
 - Task: the Workspace, Project, and Task AGENTS.md files, task.json, and task.md.
 - Scheduler: the Workspace and Scheduler AGENTS.md files, scheduler.json, and scheduler.md.
@@ -244,17 +244,17 @@ Use `pua turn status` to inspect work, continuation and output status. Use `pua 
 
 Upgrade compatibility: only old inputs that explicitly include a `--reply-to` command use `pua chat publish`; follow their original instructions. New fixed-audience Turns publish automatically and must not also call that command. Legacy histories are not replayed into Chat. Keep work progress separate from final reply obligations; after output, confirm its publication through `pua turn status` or shared history. If publication is blocked, retain the result in execution history without redirecting it.
 
-### Chat follow-up document
+### Resource documents and Chat follow-ups
 
-Each Workspace, Project and Task owns chat.md, maintained by its execution Agent. Do not modify another resource's document or mirror it into legacy chat notes. Read the current resource's open items at every Turn start and after context recovery. If an older Workspace lacks this file, create it with Notification rules, Open items and Recently closed sections.
+Workspace uses workspace.md, Project uses project.md, and Task uses task.md for both resource background and Chat follow-ups, maintained by its execution Agent. Scheduler keeps its context and necessary follow-ups in scheduler.md. Read the current resource document and its open items at every Turn start and after context recovery. Maintain Notification rules, Open items and Recently closed sections in that document, preserving existing background. Do not create a separate chat.md or mirror items into legacy chat notes. Upgrade migration merges legacy chat.md into the resource document and retires it after verifying the write.
 
 On user input, including steering during a busy Turn, first record actionable commitments: stable item ID, user, source message ID and source-input History reference, summary, work status, notification status, next action, notification condition, related resource or actual schedule ID. Greetings and simple answers already completed and successfully published need no lasting entry. Update the original item when the user cancels or supersedes a request; this document grants no new authorization.
 
 Match collaboration results and scheduled messages to existing items. Before ending each Turn, check all user inputs received during the Turn and all due notifications. Work completion is not a reply; progress does not discharge the final notification. Record publication ID, time and summary only after automatic synchronization or legacy publish succeeds; published does not mean read. If interrupted after publishing but before updating the file, reconcile the stable publication ID against Chat facts to avoid duplicates.
 
-Notify when a question has an answer, a commitment is completed, a user decision is needed, or the expected time or plan changes materially; honor explicit timing. Do not repeat reminders without new information. The file cannot wake an Agent: register actual Scheduler conditions for long waits. Use legitimate reply instructions supplied with the input; after recovery, retrieve them through the source-input History reference and accept server validation. Never extract Tokens from raw Chat storage or put capabilities in chat.md or schedule conditions. If closure or reopening invalidates eligibility, retain the result and mark publication blocked; do not redirect to another user/resource or retry indefinitely.
+Notify when a question has an answer, a commitment is completed, a user decision is needed, or the expected time or plan changes materially; honor explicit timing. Do not repeat reminders without new information. The file cannot wake an Agent: register actual Scheduler conditions for long waits. Use legitimate reply instructions supplied with the input; after recovery, retrieve them through the source-input History reference and accept server validation. Never extract Tokens from raw Chat storage or put capabilities in resource documents or schedule conditions. If closure or reopening invalidates eligibility, retain the result and mark publication blocked; do not redirect to another user/resource or retry indefinitely.
 
-Keep necessary summaries and references, not full conversations or another user's private messages. Durable background and decisions still belong in project.md / task.md. Retain all open items and the latest 20 closed summaries; move older summaries into this resource's artifacts when needed. Close items only when both work and notification obligations end.
+Keep necessary summaries and references, not full conversations or another user's private messages. Durable background and decisions belong in the same resource document. Retain all open items and the latest 20 closed summaries; move older summaries into this resource's artifacts when needed. Close items only when both work and notification obligations end.
 
 ## 7. Scheduler
 

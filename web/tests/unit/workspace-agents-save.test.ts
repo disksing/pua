@@ -35,7 +35,7 @@ describe("Workspace AGENTS save flow", () => {
     vi.unstubAllGlobals();
   });
 
-  it("renders and saves the full workspace AGENTS.md content including the managed block", async () => {
+  it.each(["AGENTS.md", "workspace.md"])("renders and saves the full %s through the controller", async (documentName) => {
     vi.stubGlobal("matchMedia", (query: string) => ({
       matches: false,
       media: query,
@@ -69,16 +69,18 @@ describe("Workspace AGENTS save flow", () => {
       if (url.pathname === "/api/workspaces/ws-test/tree" && method === "GET") {
 		return json({ agentBinding: { kind: "profile", name: "default" }, projects: [], activity: { running: [], unread: [], problems: [] }, wiki: { exists: false } });
       }
-      if (url.pathname === "/api/workspaces/ws-test/files" && url.searchParams.get("path") === "AGENTS.md") {
+      if ((url.pathname === "/api/workspaces/ws-test/files" || url.pathname === "/api/workspaces/ws-test/resources/workspace/documents") && url.searchParams.get("path") === documentName) {
         if (method === "PUT") {
+          expect(url.pathname).toBe(documentName === "AGENTS.md" ? "/api/workspaces/ws-test/files" : "/api/workspaces/ws-test/resources/workspace/documents");
           const body = JSON.parse(String(init?.body || "{}")) as { content?: string; expectedContentHash?: string };
           saveBodies.push({ content: String(body.content || ""), expectedContentHash: String(body.expectedContentHash || "") });
           if (body.expectedContentHash !== contentHash()) return json({ error: "stale AGENTS.md" }, 409);
           fullContent = String(body.content || "");
           hashVersion++;
         }
-        return json({ path: "AGENTS.md", name: "AGENTS.md", content: fullContent, contentHash: contentHash() });
+        return json({ path: documentName, name: documentName, content: fullContent, contentHash: contentHash() });
       }
+      if (url.pathname === "/api/workspaces/ws-test/files") return json({ path: url.searchParams.get("path"), content: "# Other document", contentHash: "other" });
       if (url.pathname === "/api/workspaces/ws-test/resources/workspace/status" && method === "GET") {
         return json({ acceptsMessages: true, waitingMessages: [], canSteerWaiting: false, session: { state: "idle" } });
       }
@@ -101,20 +103,23 @@ describe("Workspace AGENTS save flow", () => {
     stopPUAApp = controller.stopPUAApp;
     controller.startPUAApp(publisher);
 
-    await vi.waitFor(() => expect(channels.detail.current().workspaceAgents?.content).toContain("managed by pua cli"));
+    await vi.waitFor(() => expect((documentName === "AGENTS.md" ? channels.detail.current().workspaceAgents : channels.detail.current().workspaceDocument)?.content).toContain("managed by pua cli"));
     const target = document.createElement("section");
     target.id = "detailsPanel";
     document.body.append(target);
     mounted.push(mount(DetailPanel, { target, props: { channel: channels.detail } }));
     await tick();
 
-    // The full document, including the managed block, is rendered in the AGENTS.md tab.
-    expect(target.querySelector('[data-doc-file="AGENTS.md"]')).not.toBeNull();
+    if (documentName === "AGENTS.md") {
+      Array.from(target.querySelectorAll<HTMLButtonElement>('[role="tab"]')).find((tab) => tab.textContent?.trim() === "AGENTS.md")!.click();
+      await tick();
+    }
+    expect(target.querySelector(`[data-doc-file="${documentName}"]`)).not.toBeNull();
     expect(target.textContent).toContain("Generated guidance.");
 
-    const edit = Array.from(target.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.trim() === "Edit")!;
+    const edit = Array.from(target.querySelectorAll<HTMLButtonElement>(`[data-doc-file="${documentName}"] button`)).find((button) => button.textContent?.trim() === "Edit")!;
     edit.click();
-    await vi.waitFor(() => expect(target.querySelector<HTMLElement>('[role="dialog"] .cm-editor')).not.toBeNull());
+    await vi.waitFor(() => expect(target.querySelector<HTMLElement>('[role="dialog"] .cm-editor')).not.toBeNull(), { timeout: 5000 });
     const dialog = target.querySelector<HTMLElement>('[role="dialog"]')!;
     const view = EditorView.findFromDOM(dialog.querySelector<HTMLElement>(".cm-editor")!)!;
     view.dispatch({ changes: { from: view.state.doc.length, insert: "\nEdited.\n" } });

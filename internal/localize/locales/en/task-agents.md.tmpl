@@ -3,7 +3,7 @@
 You are working in a Task resource directory managed by PUA.
 
 - Resource ID: {{.ResourceID}}
-- Read this directory's chat.md at every Turn start and after context recovery. Maintain pending commitments and replies; check notifications before ending and record publication only after automatic synchronization or legacy publish succeeds.
+- Read this directory's task.md, including its Chat follow-ups section, at every Turn start and after context recovery. Maintain pending commitments and replies there; check notifications before ending and record publication only after automatic synchronization or legacy publish succeeds.
 - Always read the parent Project instructions in ../AGENTS.md and the Workspace instructions in ../../AGENTS.md.
 - When sending Agent messages, follow the conciseness convention in the "Agent collaboration" section of the root AGENTS.md.
 - The Server sets the Task state to in_progress at the start of every Turn. Before ending a Turn, continue the work or choose waiting, blocked, paused, or completed and run pua task state set <state> --note "...".

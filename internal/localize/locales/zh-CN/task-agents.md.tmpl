@@ -3,7 +3,7 @@
 你正在由 PUA 管理的 Task 资源目录中工作。
 
 - 当前资源 ID：{{.ResourceID}}
-- 每轮开始及上下文恢复后读取当前目录 chat.md，维护待跟进和待回复事项；结束前核对通知，自动同步或旧 publish 成功后才记录已发布。
+- 每轮开始及上下文恢复后读取当前目录 task.md（含对话事项），在其中维护待跟进和待回复事项；结束前核对通知，自动同步或旧 publish 成功后才记录已发布。
 - 总是读取父 Project 的 AGENTS.md（../AGENTS.md）和 Workspace 根目录的 AGENTS.md（../../AGENTS.md）。
 - 发送 Agent 消息时遵守根 AGENTS.md"Agent 协作"一节的简洁约定。
 - Server 会在每个 Turn 开始时把任务状态设为 in_progress。结束 Turn 前，必须继续推进任务，或从 waiting、blocked、paused、completed 中选择一个状态，运行 pua task state set <状态> --note "..." 更新。

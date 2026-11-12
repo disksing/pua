@@ -319,8 +319,8 @@ Commands:
 
   pua migrate [--language=<language>]
     Refresh pua-managed AGENTS.md blocks and migrate legacy task/resource
-    history before removing obsolete files. Pass --language to switch between
-    en and zh-CN.
+    history and chat.md into resource documents before removing obsolete files.
+    Pass --language to switch between en and zh-CN.
 
   pua doctor [--json] [--server=<url>]
     Inspect open Workspace data and Agent bindings without changing them.
@@ -439,8 +439,8 @@ func printMigrateHelp() {
 Commands:
   pua migrate [--language=<language>]
     Refresh pua-managed AGENTS.md blocks and migrate legacy task/resource
-    history before removing obsolete files. Pass --language to switch between
-    en and zh-CN.
+    history and chat.md into resource documents before removing obsolete files.
+    Pass --language to switch between en and zh-CN.
 `)
 }
 

@@ -17,6 +17,7 @@ import (
 
 	"github.com/disksing/pua/internal/app"
 	"github.com/disksing/pua/internal/buildinfo"
+	"github.com/disksing/pua/internal/localize"
 )
 
 const (
@@ -709,7 +710,7 @@ func TestTaskLifecycle(t *testing.T) {
 		assertDir(t, filepath.Join(root, "project1", "templates"))
 		assertMissing(t, filepath.Join(root, "project1", "worktree"))
 		projectAgents := readFile(t, filepath.Join(root, "project1", "AGENTS.md"))
-		for _, want := range []string{"# Project Agent Instructions", "AgentWorkspace Project directory", "Resource ID: project1", "../AGENTS.md"} {
+		for _, want := range []string{"# Project Agent Instructions", "AgentWorkspace Project directory", "Resource ID: project1", "../AGENTS.md", "project.md"} {
 			if !strings.Contains(projectAgents, want) {
 				t.Fatalf("Project AGENTS.md is missing %q:\n%s", want, projectAgents)
 			}
@@ -717,7 +718,7 @@ func TestTaskLifecycle(t *testing.T) {
 		if strings.Count(projectAgents, puaPromptStart) != 1 || strings.Count(projectAgents, puaPromptEnd) != 1 {
 			t.Fatalf("expected Project AGENTS.md to contain one managed block, got:\n%s", projectAgents)
 		}
-		for _, copied := range []string{"## 1. Environment", "pua message send", "templates/", "project.md"} {
+		for _, copied := range []string{"## 1. Environment", "pua message send", "templates/"} {
 			if strings.Contains(projectAgents, copied) {
 				t.Fatalf("Project AGENTS.md copied Workspace guidance %q:\n%s", copied, projectAgents)
 			}
@@ -775,7 +776,7 @@ func TestTaskLifecycle(t *testing.T) {
 		}
 		assertDir(t, filepath.Join(root, "project1", "task1", "worktree"))
 		subtaskAgents := readFile(t, filepath.Join(root, "project1", "task1", "AGENTS.md"))
-		for _, want := range []string{"# Task Agent Instructions", "Resource ID: project1.task1", "../AGENTS.md", "../../AGENTS.md"} {
+		for _, want := range []string{"# Task Agent Instructions", "Resource ID: project1.task1", "../AGENTS.md", "../../AGENTS.md", "task.md"} {
 			if !strings.Contains(subtaskAgents, want) {
 				t.Fatalf("Task AGENTS.md is missing %q:\n%s", want, subtaskAgents)
 			}
@@ -783,7 +784,7 @@ func TestTaskLifecycle(t *testing.T) {
 		if strings.Count(subtaskAgents, puaPromptStart) != 1 || strings.Count(subtaskAgents, puaPromptEnd) != 1 {
 			t.Fatalf("expected Task AGENTS.md to contain one managed block, got:\n%s", subtaskAgents)
 		}
-		for _, copied := range []string{"## 1. Environment", "pua message send", "templates/", "task.md", "git worktree add"} {
+		for _, copied := range []string{"## 1. Environment", "pua message send", "templates/", "git worktree add"} {
 			if strings.Contains(subtaskAgents, copied) {
 				t.Fatalf("Task AGENTS.md copied Workspace guidance %q:\n%s", copied, subtaskAgents)
 			}
@@ -1035,7 +1036,7 @@ Line two
 <!-- List observable results that mean this is done. -->
 - TBD
 `
-		if taskMD != expectedTaskMD {
+		if taskMD != expectedTaskMD+"\n"+localize.MustRender("en", "followups.md", nil) {
 			t.Fatalf("expected detail to initialize task.md, got:\n%s", taskMD)
 		}
 
@@ -1068,8 +1069,8 @@ Template background.
 		run(t, "task", "create", "Template task", "--project=project1", "--slug=template-task", "--task-markdown", templateMarkdown)
 
 		taskMD := readFile(t, filepath.Join(root, "project1", "task1-template-task", "task.md"))
-		if taskMD != templateMarkdown {
-			t.Fatalf("expected template markdown to be written exactly once, got:\n%s", taskMD)
+		if taskMD != templateMarkdown+"\n"+localize.MustRender("en", "followups.md", nil) {
+			t.Fatalf("expected template markdown followed by unified follow-ups, got:\n%s", taskMD)
 		}
 		for _, heading := range []string{"# Template task", "## Background", "## Scope", "## Acceptance Criteria"} {
 			if count := strings.Count(taskMD, heading); count != 1 {

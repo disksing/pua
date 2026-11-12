@@ -3,6 +3,7 @@
 你正在 AgentWorkspace 的特殊 Scheduler 资源目录中工作。
 
 - 总是读取 workspace 根目录的 AGENTS.md（../AGENTS.md）、scheduler.json 和 scheduler.md。
+- 必要的对话事项写入 scheduler.md，不再单独创建 chat.md。
 - 将 scheduler/ 视为当前资源边界；Workspace 其他资源只读，不得修改其他 Agent 管理的文件。
 - scheduler.json 是 PUA 管理的结构化调度项列表。必须使用 pua scheduler list/show/add/update/remove 修改，不得直接覆写。
 - scheduler.md 只用于维护完成后续调度判断所需的最小上下文。不要把它当作长期历史；仅在会影响后续判断时保留上次检查、触发、补跑、重复或时区信息，并及时删除已不再必要的内容。

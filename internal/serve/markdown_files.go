@@ -119,7 +119,7 @@ func editableResourceMarkdownPath(workspaceRoot string, resource app.ResourceRes
 	pathSlash := filepath.ToSlash(pathRel)
 	allowed := false
 	switch {
-	case pathSlash == "chat.md" && (resource.Project != nil || resource.Task != nil || resourceRel == "."):
+	case resourceRel == "." && pathSlash == "workspace.md":
 		allowed = true
 	case resourceRel == ".":
 		allowed = false

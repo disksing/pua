@@ -187,8 +187,7 @@ func ensureSchedulerLocked(root, language string) (SchedulerConfig, error) {
 		}
 	}
 
-	markdownPath := filepath.Join(dir, schedulerMarkdownFile)
-	if err := createTextFileIfMissing(markdownPath, defaultSchedulerMarkdown(language)); err != nil {
+	if err := ensureResourceDocument(dir, schedulerMarkdownFile, defaultSchedulerMarkdown(language)); err != nil {
 		return SchedulerConfig{}, err
 	}
 	agentsPath := filepath.Join(dir, "AGENTS.md")
@@ -216,28 +215,6 @@ func requireRegularOrMissing(path string) error {
 		return fmt.Errorf("Scheduler file must be a regular file: %s", path)
 	}
 	return nil
-}
-
-func createTextFileIfMissing(path, content string) error {
-	if err := requireRegularOrMissing(path); err != nil {
-		return err
-	}
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-	if os.IsExist(err) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if _, err := io.WriteString(file, content); err != nil {
-		file.Close()
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		file.Close()
-		return err
-	}
-	return file.Close()
 }
 
 func readSchedulerJSON(path string) (SchedulerConfig, error) {

@@ -68,7 +68,7 @@ func createResourceFiles(dir string, resource Resource, languages ...string) err
 	if len(languages) > 0 {
 		language = languages[0]
 	}
-	return createResourceFilesWithMarkdown(dir, resource, defaultTaskMD(resource, language), language)
+	return createResourceFilesWithMarkdown(dir, resource, resourceInitialMarkdown(resource, language), language)
 }
 
 func createResourceFilesWithMarkdown(dir string, resource Resource, markdown, language string) error {
@@ -90,9 +90,6 @@ func createResourceFilesWithMarkdown(dir string, resource Resource, markdown, la
 		return err
 	}
 	if err := os.WriteFile(filepath.Join(dir, markdownFileName(resource)), []byte(markdown), 0o644); err != nil {
-		return err
-	}
-	if err := ensureChatDocument(dir, language); err != nil {
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte(taskAgentsBlock(resource, language)+"\n"), 0o644)
@@ -373,34 +370,8 @@ func isArchivedPath(root, path string) bool {
 	return false
 }
 
-func updateOpenTaskAgentsMD(root, language string) error {
-	return filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if !entry.IsDir() {
-			return nil
-		}
-		if path != root {
-			switch entry.Name() {
-			case ".git", reposDir, archiveDir, "worktree", "artifacts":
-				return filepath.SkipDir
-			}
-		}
-
-		if !pathExists(filepath.Join(path, projectJSONFile)) && !pathExists(filepath.Join(path, taskJSONFile)) {
-			return nil
-		}
-		resource, err := readResourceAtDir(path)
-		if err != nil {
-			return nil
-		}
-		return updateTaskAgentsMD(root, path, resource, language)
-	})
-}
-
 func updateTaskAgentsMD(root, dir string, resource Resource, language string) error {
-	if err := ensureChatDocument(dir, language); err != nil {
+	if err := ensureResourceDocument(dir, markdownFileName(resource), resourceInitialMarkdown(resource, language)); err != nil {
 		return err
 	}
 	path := filepath.Join(dir, "AGENTS.md")

@@ -187,6 +187,19 @@ pua message show --id=<message-id>
 
 Include the goal, necessary context, scope, and expected result in the message. Message text is sent verbatim and may use Markdown; for multi-line text use real newlines (for example $'...' quoting or a heredoc), or pass - to read the message from standard input. Do not write \n escapes inside single quotes:
 
+### Keep messages concise
+
+Agent-to-agent messages carry only what the current collaboration needs. By default, structure the message as:
+
+- Goal: one sentence stating what you want the recipient to do;
+- Key facts: the state, decisions, or evidence directly relevant to the goal, usually no more than three items;
+- Expected action: what the recipient should do and what to send back;
+- New constraints: only boundaries added or changed by this message relative to existing agreements.
+
+The recipient already follows Workspace, Project, and its own resource rules; do not restate them one by one in the message. When emphasis is needed, write "follow the existing agreements in [[resource]]'s task.md / project.md" with a reference. When forwarding a user or third-party request, do not quote the full text; give a History or Chat reference instead. Constraints that stay unchanged across a collaboration chain are stated once in the first message and are not repeated in later ones.
+
+Keep messages within roughly 400 characters by default; when more detail is genuinely needed, write it into your own resource's task.md or artifacts and include a summary plus a link in the message. Do not enumerate "what this turn did not do" for liability; only mention unfinished items that directly affect the recipient's action.
+
 ~~~sh
 pua message send --to=<resource> - <<'EOF'
 First line

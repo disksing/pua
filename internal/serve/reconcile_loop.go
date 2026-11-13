@@ -265,6 +265,8 @@ func generationNeedsFastReconcile(m *agentManager, rt *agentRuntime, record gene
 // audit remains responsible for discovering new/out-of-process records and
 // checking archive state.
 func (m *agentManager) pollFastAgentHubSessions(ctx context.Context) error {
+	started := time.Now()
+	defer logReconcileDuration("active_sessions", started)
 	cfg, client, err := m.agentHubRuntimeConfig()
 	if err != nil {
 		return err
@@ -361,6 +363,8 @@ func (m *agentManager) nextIdleReconcileDeadline() time.Time {
 }
 
 func (m *agentManager) reconcileOwnedWorkspaceMailboxes(ctx context.Context) error {
+	started := time.Now()
+	defer logReconcileDuration("mailboxes", started)
 	cfg, _, err := m.agentHubRuntimeConfig()
 	if err != nil {
 		return err

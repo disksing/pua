@@ -219,6 +219,9 @@ type agentManager struct {
 	schedulerDigests      map[string]string
 	reconcileWake         chan struct{}
 	reconcilePending      reconcileRequest
+	turnOutputMu          sync.Mutex
+	turnOutputTargets     map[turnOutputKey]*turnOutputTarget
+	turnOutputWake        chan struct{}
 	now                   func() time.Time
 	idleSleepAfter        time.Duration
 	activePollInterval    time.Duration
@@ -272,6 +275,8 @@ func newAgentManager(s *server) *agentManager {
 		subscribers:          make(map[string]map[chan agentStreamMessage]bool),
 		schedulerDigests:     make(map[string]string),
 		reconcileWake:        make(chan struct{}, 1),
+		turnOutputTargets:    make(map[turnOutputKey]*turnOutputTarget),
+		turnOutputWake:       make(chan struct{}, 1),
 		now:                  time.Now,
 		idleSleepAfter:       defaultResourceIdleSleepAfter,
 		activePollInterval:   2 * time.Second,
@@ -737,6 +742,7 @@ func (rt *agentRuntime) recordTurnCompletionHistory(session agentHubSession, his
 	})
 	if updated.CompletionMarker != "" && updated.CompletionMarker != previous && rt.manager != nil {
 		rt.manager.scheduleTaskTurnCompletion(rt, updated)
+		rt.manager.requestTurnOutput(rt.workspace, updated.ResourceID)
 		rt.manager.requestReconcile(reconcileNotifications | reconcileScheduler | reconcileAgentHub)
 	}
 }

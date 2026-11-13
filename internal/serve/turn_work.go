@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -34,6 +35,9 @@ type turnWork struct {
 	Outcome              string                            `json:"outcome,omitempty"`
 	LastError            string                            `json:"lastError,omitempty"`
 	OutputDone           bool                              `json:"outputDone,omitempty"`
+	CreatedAt            string                            `json:"createdAt,omitempty"`
+	TerminalObservedAt   string                            `json:"terminalObservedAt,omitempty"`
+	LastPublishedAt      string                            `json:"lastPublishedAt,omitempty"`
 	PublishedIDs         []string                          `json:"publishedIds,omitempty"`
 	NotificationAccepted bool                              `json:"notificationAccepted,omitempty"`
 	Command              *turnWorkCommand                  `json:"command,omitempty"`
@@ -143,7 +147,7 @@ func prepareTurnWork(root, resource, generation, session string, message resourc
 		return err
 	}
 	work := turnWork{ID: message.ID, GenerationID: generation, SessionID: session,
-		Context: *message.ProviderContext, State: "running"}
+		Context: *message.ProviderContext, State: "running", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	for _, parent := range file.Works {
 		if parent.TargetID == message.ID && parent.State == "suspended" {
 			work.ParentID = parent.ID
@@ -204,6 +208,7 @@ func syncTurnChat(root, resource string, work *turnWork, turn agentHubTurn) erro
 		if err := saveChatLocked(root, chat); err != nil {
 			return err
 		}
+		work.LastPublishedAt = chat.Messages[len(chat.Messages)-1].CreatedAt
 	}
 	work.PublishedIDs = published
 	work.LastError = ""
@@ -223,8 +228,12 @@ func turnWorkReference(root, resource string, work turnWork) (string, error) {
 
 func (m *agentManager) reconcileTurnWorkLocked(ctx context.Context, workspace serveWorkspace, resource string, client *agentHubClient) error {
 	file, err := loadTurnWork(workspace.Path, resource)
-	if err != nil || len(file.Works) == 0 {
+	if err != nil {
 		return err
+	}
+	defer m.refreshTurnOutputTarget(workspace, resource, false)
+	if len(file.Works) == 0 {
+		return nil
 	}
 	before, _ := json.Marshal(file)
 	_, archived, _, err := resourceExistsAndArchived(workspace.Path, resource)
@@ -271,19 +280,40 @@ func (m *agentManager) reconcileTurnWorkLocked(ctx context.Context, workspace se
 				continue
 			}
 		}
+		queryStarted := time.Now()
 		turn, _, e := client.SessionTurn(ctx, work.SessionID, work.TurnID)
+		queryElapsed := time.Since(queryStarted)
 		if e != nil {
 			work.LastError = e.Error()
+			log.Printf("Turn output query workspace=%s resource=%s work=%s query_ms=%d error=%v",
+				workspace.ID, resource, work.ID, queryElapsed.Milliseconds(), e)
 			continue
+		}
+		if queryElapsed >= time.Second {
+			log.Printf("Turn output query workspace=%s resource=%s work=%s query_ms=%d",
+				workspace.ID, resource, work.ID, queryElapsed.Milliseconds())
+		}
+		if turn.Closed && work.TerminalObservedAt == "" {
+			work.TerminalObservedAt = time.Now().UTC().Format(time.RFC3339Nano)
 		}
 		work.History, e = turnWorkReference(workspace.Path, resource, *work)
 		if e != nil {
 			return e
 		}
 		if !archived {
+			previousPublishedAt := work.LastPublishedAt
 			if e = syncTurnChat(workspace.Path, resource, work, turn); e != nil {
 				work.LastError = e.Error()
 				continue
+			}
+			if work.LastPublishedAt != previousPublishedAt {
+				lag := time.Duration(0)
+				if terminalAt := generationTime(turn.CompletedAt); turn.Closed && !terminalAt.IsZero() {
+					lag = generationTime(work.LastPublishedAt).Sub(terminalAt)
+				}
+				log.Printf("Turn output published workspace=%s resource=%s work=%s turn=%s query_ms=%d terminal_at=%s observed_at=%s published_at=%s terminal_lag_ms=%d",
+					workspace.ID, resource, work.ID, work.TurnID, queryElapsed.Milliseconds(),
+					turn.CompletedAt, work.TerminalObservedAt, work.LastPublishedAt, lag.Milliseconds())
 			}
 		}
 		if !turn.Closed {
@@ -311,6 +341,7 @@ func (m *agentManager) reconcileTurnWorkLocked(ctx context.Context, workspace se
 		if err = saveTurnWork(workspace.Path, resource, file); err != nil {
 			return err
 		}
+		m.requestReconcile(reconcileMailboxes | reconcileNotifications | reconcileScheduler)
 	}
 	for i := range file.Works {
 		parent := &file.Works[i]

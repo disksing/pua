@@ -1517,6 +1517,7 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 		if err := prepareTurnWork(workspace.Path, resourceID, record.GenerationID, session.ID, message); err != nil {
 			return err
 		}
+		m.requestTurnOutput(workspace, resourceID)
 		deliveryPlan := lifecyclePlan
 		if err := m.prepareTaskWorkChain(workspace, message, rt); err != nil {
 			return err
@@ -1624,6 +1625,7 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 		if err := bindTurnWork(workspace.Path, resourceID, message.ID, turnID); err != nil {
 			return err
 		}
+		m.requestTurnOutput(workspace, resourceID)
 		if delivered.State == "running" || delivered.State == "waiting_approval" {
 			// More eligible steer inputs may enter this Turn; enqueue inputs wait.
 			continue

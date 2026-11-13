@@ -43,6 +43,12 @@ func (m *agentManager) startAgentRecovery(ctx context.Context) {
 // startAgentHubPoller polls AgentHub session state in the background until
 // ctx is cancelled.
 func (m *agentManager) startAgentHubPoller(ctx context.Context) {
+	m.runBackground(func() { m.runTurnOutputLoop(ctx) })
+	m.runBackground(func() {
+		if err := m.recoverTurnOutputTargets(ctx); err != nil {
+			log.Printf("recover Turn output: %v", err)
+		}
+	})
 	m.runBackground(func() { m.runReconcileLoop(ctx) })
 }
 
@@ -51,6 +57,8 @@ func (m *agentManager) startAgentHubPoller(ctx context.Context) {
 // the recovery-only Workspace coordinators. The background fast path does not
 // call this function on every active-session interval.
 func (m *agentManager) pollAgentHubSessions(ctx context.Context) error {
+	started := time.Now()
+	defer logReconcileDuration("cold_audit", started)
 	cfg, client, err := m.agentHubRuntimeConfig()
 	if err != nil {
 		return err

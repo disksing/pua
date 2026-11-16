@@ -240,7 +240,7 @@ func TestMailboxBatchFreezesOpenerAndPreviewCounts(t *testing.T) {
 	}
 	for _, preview := range previews {
 		if !strings.Contains(preview.Text, "waiting=2") || !strings.Contains(preview.Text, "same_source_waiting=2") ||
-			!strings.Contains(preview.Text, "includes_preview_message=true") {
+			!strings.Contains(preview.Text, "including the previewed message") {
 			t.Fatalf("preview did not freeze queue snapshot: %#v", preview)
 		}
 	}

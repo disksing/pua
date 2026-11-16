@@ -1,0 +1,4 @@
+Queue preview: {{.MessageID}}, from {{.Party}}; still queued, audience unchanged.
+{{.Queue}}{{if not .Compact}}Inspect `pua message list`; read complete bodies with `pua message read --from=<resource>` or `--ids=<id,id...>`. Ack only selected ordinary Agent inputs whose work is complete; never ack user, system, Scheduler, interrupt, continuation, in-delivery or unread messages. A preview does not consume the original message or authorize replying in this Turn.
+{{end}}{{.Hint}}
+{{.Body -}}

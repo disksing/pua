@@ -234,7 +234,9 @@ Agent 消息是单向的，无论其开启 Turn 还是作为 steer 插入，PUA 
 
 Turn 开头固定本轮的对话对象及 Chat 可见性，并提供稳定的 work ID。新 Turn 开始时读取当前 AGENTS.md。用户 Chat Turn 的普通阶段回复及最终回复自动进入共享 Chat；推理和工具事件留在执行历史。耗时工作先简短、真实地回应。内部 Agent、Scheduler 和系统 Turn 的输出保持内部可见，不在内部轮直接对用户发言；Agent 消息仍是单向消息。
 
-使用 work 控制前，先查 `pua turn status`，确认 `currentControl.workId` 真实匹配当前 Session 的活动正式 Turn。Pi 预告可能在结束边界另开内部提示轮；没有匹配正式 work 时收录提示并结束本轮，等待正式输入，不沿用已结束 workId、不把业务任务标为完成、不创建续接。服务端等待提示轮终态后才提交正式输入。提示的投递、终态及 `historyRef` 可在 status 和 PUA History 查询。
+使用 work 控制前，先查 `pua turn status`，确认 `currentControl.workId` 真实匹配当前 generation、Session、活动正式 Turn 的 work。队列预告与 Chat 开关提醒是提示而非正式输入，来源 work ID 仅供审计。Pi 可将提示插入活动轮，也可能在结束边界另开内部提示轮；没有匹配正式 work 时收录提示并结束本轮，等待正式输入，不沿用已结束或来源 work ID、不把业务任务标为完成、不创建续接。服务端等待提示轮终态后才提交正式输入。提示的投递、终态及 `historyRef` 可在 status 和 PUA History 查询。
+
+队列提示保留六个计数及采样时间：waiting、same_source_waiting、batch_eligible_from_source、delivering、interrupting、delivery_unknown。六项全零时省略队列行，省略不代表投递成功；含/不含标签分别说明本轮输入与预告原消息。仅 batch_eligible_from_source 大于零时显示批处理入口，沿上述 list/read/ack 流程，不凭同来源计数推断可确认。中断或未知投递先核对 status 与 History 再重试。短提示依赖本托管指引，行动前须读取 AGENTS.md。
 
 排队中的新消息可以作为预告提前出现。预告不消费原消息、不改变受众，也不代表可以在错误的 Turn 中回复；但可以影响是否继续当前工作。明确选择：
 - 无须切换时继续当前工作。

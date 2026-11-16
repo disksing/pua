@@ -1,6 +1,31 @@
 package app
 
-import "path/filepath"
+import (
+	"os"
+	"path/filepath"
+)
+
+func (w *Workspace) HasCurrentTurnGuidance() (bool, error) {
+	current := false
+	err := withWorkspaceMutationLock(w.root, func() error {
+		language, err := workspaceLanguage(w.root)
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(filepath.Join(w.root, "AGENTS.md"))
+		if err != nil {
+			return err
+		}
+		content := string(data)
+		start, end, found, err := managedBlockBounds(content)
+		if err != nil {
+			return err
+		}
+		current = found && content[start:end] == puaPromptBlock(language)
+		return nil
+	})
+	return current, err
+}
 
 // RefreshTurnGuidance updates only managed instructions, preserving custom text.
 // It is called at new-protocol input boundaries, never to change an active Turn.

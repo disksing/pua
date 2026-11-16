@@ -55,8 +55,6 @@ type turnCurrentControl struct {
 	Reason       string   `json:"reason,omitempty"`
 }
 
-const advisoryControlText = "\nThis is an advisory, not a formal input. Read `pua turn status` first. Use yield/notify/finish/cancel-resume only when currentControl identifies a matching active formal work in this Session and Turn. If no work matches, retain this snapshot and end this advisory Turn; await the separately queued formal input. Never reuse an ended or origin work ID. Do not mark the business task completed or create a continuation from this advisory."
-
 func stableParentResource(resource string) string {
 	if resource == "workspace" {
 		return ""
@@ -177,7 +175,7 @@ func (manager *agentManager) advisoryMode(ctx context.Context, client *agentHubC
 }
 
 func (manager *agentManager) reserveAdvisory(ctx context.Context, workspace serveWorkspace, resource string, file *turnWorkFile,
-	session agentHubSession, client *agentHubClient, work turnWork, id, kind, messageID, text string) error {
+	session agentHubSession, client *agentHubClient, work turnWork, id, kind, messageID string, render advisoryRenderer) error {
 	if file.advisory(id) != nil {
 		return nil
 	}
@@ -185,7 +183,10 @@ func (manager *agentManager) reserveAdvisory(ctx context.Context, workspace serv
 	if err != nil || !available {
 		return err
 	}
-	text += advisoryControlText
+	text, err := renderWorkspaceAdvisory(workspace, render)
+	if err != nil {
+		return err
+	}
 	payload, err := marshalPUAMessagePayload(puaMessagePayload{
 		Schema: puaMessagePayloadSchema, Role: "system", Type: kind, Text: text,
 		Causation: &resourceMessageCausation{Type: kind, SourceResourceID: resource, MessageID: messageID},
@@ -379,10 +380,11 @@ func (manager *agentManager) reconcileAdvisories(ctx context.Context, workspace 
 			}
 			if matches || (notice.AllowBoundary && session.CurrentTurnID == "") {
 				snapshot := chatSnapshotLocked(chat)
-				text := fmt.Sprintf("System Chat state notification: open=%t, epoch=%d, revision=%d, observedAt=%s. Origin formal work %s (audit only) retains audience visible=%t and epoch=%d. Chat state does not change that audience or restore publication rights. For internal work, request a separate visible notification using turn notify when Chat is open; when closed, report necessary business progress to parent %s. Delegation reports remain required.",
-					snapshot.Open, snapshot.Epoch, snapshot.Revision, snapshot.ObservedAt, work.ID, work.Context.ChatVisible, work.Context.ChatEpoch, snapshot.ParentID)
 				if err := manager.reserveAdvisory(ctx, workspace, resource, file, session, client, *work,
-					"chat-state-"+chatID(work.ID, fmt.Sprint(notice.Revision)), "chat_state", "", text); err != nil {
+					"chat-state-"+chatID(work.ID, fmt.Sprint(notice.Revision)), "chat_state", "",
+					func(language string, compact bool) (string, error) {
+						return localizedChatState(language, compact, snapshot, *work)
+					}); err != nil {
 					return err
 				}
 			}

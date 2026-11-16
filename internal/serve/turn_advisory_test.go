@@ -192,7 +192,8 @@ func TestChatStateAdvisoryCoversFormalAudiencesAndProviders(t *testing.T) {
 				for _, advisory := range file.Advisories {
 					if advisory.Type != "chat_state" || advisory.TurnID != work.TurnID ||
 						(advisory.Input.ExpectedTurnID != "") != (provider == "codex") ||
-						!strings.Contains(advisory.Input.Text, "currentControl") {
+						!strings.Contains(advisory.Input.Text, "pua turn status") ||
+						!strings.Contains(advisory.Input.Text, "audit only") {
 						t.Fatalf("invalid Chat notice: %+v", advisory)
 					}
 				}

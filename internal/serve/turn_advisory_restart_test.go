@@ -1,8 +1,13 @@
 package serve
 
 import (
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/disksing/pua/internal/app"
 )
 
 func restartWorkflowManager(t *testing.T, manager *agentManager) (*agentManager, *agentHubClient) {
@@ -33,6 +38,9 @@ func TestPiAdvisoryUnknownRecoversAfterManagerRestartWithoutResend(t *testing.T)
 	message := acceptTestResourceMessage(t, manager, workspace, "project1.task1", "background", resourceMessageModeEnqueue, nil)
 	original := *workFile(t, workspace).find(message.ID)
 	setAdvisoryProvider(fake, original.SessionID, "pi")
+	if err := os.WriteFile(filepath.Join(workspace.Path, "AGENTS.md"), []byte("Legacy guidance.\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 	fake.mu.Lock()
 	fake.messageHook = func(_ string, input agentHubInboundMessage) {
 		if strings.HasPrefix(input.MessageID, "preview-") {
@@ -49,6 +57,18 @@ func TestPiAdvisoryUnknownRecoversAfterManagerRestartWithoutResend(t *testing.T)
 		t.Fatalf("unknown outcome was not retained: %+v", file.Advisories)
 	}
 	advisoryID := file.Advisories[0].ID
+	frozen := *file.Advisories[0].Input
+	if !strings.Contains(frozen.Text, "currentControl") {
+		t.Fatal("stale guidance did not retain self-contained control rules")
+	}
+	setAdvisoryTestLanguage(t, workspace.Path, "zh-CN")
+	root, err := app.OpenWorkspace(workspace.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := root.RefreshTurnGuidance("workspace"); err != nil {
+		t.Fatal(err)
+	}
 	fake.mu.Lock()
 	fake.failEvents, fake.messageHook = false, nil
 	fake.mu.Unlock()
@@ -58,6 +78,9 @@ func TestPiAdvisoryUnknownRecoversAfterManagerRestartWithoutResend(t *testing.T)
 	}
 	file = workFile(t, workspace)
 	advisory := file.Advisories[0]
+	if !reflect.DeepEqual(*advisory.Input, frozen) {
+		t.Fatal("language/guidance change rewrote frozen advisory after restart")
+	}
 	if advisory.State != "accepted" || advisory.TurnID != original.TurnID || advisory.HistoryRef == "" {
 		t.Fatalf("restart lost canonical advisory identity: %+v", advisory)
 	}

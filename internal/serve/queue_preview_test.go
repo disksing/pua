@@ -8,6 +8,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/disksing/pua/internal/app"
 )
 
 func previewInputs(fake *runtimeFakeAgentHub) map[string]agentHubInboundMessage {
@@ -124,6 +126,14 @@ func TestQueuePreviewUnknownOutcomeStaysBoundToOriginalTurn(t *testing.T) {
 	// The stored wire request is stable even if presentation changes on retry.
 	changed := c
 	changed.Text = "changed presentation"
+	setAdvisoryTestLanguage(t, w.Path, "zh-CN")
+	root, err := app.OpenWorkspace(w.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := root.RefreshTurnGuidance("workspace"); err != nil {
+		t.Fatal(err)
+	}
 	if err := m.previewQueuedInput(context.Background(), w, session, goodClient, changed); err != nil {
 		t.Fatal(err)
 	}

@@ -1,0 +1,4 @@
+Chat：open={{.Chat.Open}} epoch={{.Chat.Epoch}} revision={{.Chat.Revision}} @{{.Chat.ObservedAt}}；上层={{.Chat.ParentID}}。
+来源 work {{.OriginWorkID}}（仅审计）：visible={{.Visible}} epoch={{.Epoch}}；受众不变，不恢复发布资格。
+{{if not .Compact}}内部正式工作需用户获知时，Chat 开启则用 `pua turn notify` 请求独立可见通知，关闭则向稳定上层发送必要业务摘要；委派回报义务保留。快照不授予 work 控制或发布资格，通知前重查状态；重开不转投旧输出。
+{{end}}{{.Hint -}}

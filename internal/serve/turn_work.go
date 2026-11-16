@@ -461,20 +461,17 @@ func (m *agentManager) previewQueuedInput(ctx context.Context, workspace serveWo
 		if current.CurrentTurnID != session.CurrentTurnID {
 			return nil
 		}
-		role := message.Role
-		if message.Type == "user_chat_input" {
-			role = "user"
-		}
 		mailbox, err := loadHotResourceMailbox(workspace.Path, message.ResourceID)
 		if err != nil {
 			return err
 		}
 		snapshot := queueSnapshot(mailboxInstanceID(workspace.Path), message.ResourceID, mailbox, &message, "", file)
 		snapshot.IncludesPreviewMessage = true
-		text := fmt.Sprintf("System queue notification: message %s from %s (preview only; still queued). Current audience and visibility are unchanged.%s\n%s",
-			message.ID, providerMessageParty(role, message.Sender, "en"), queueSnapshotText(snapshot), message.Text)
 		if err := m.reserveAdvisory(ctx, workspace, message.ResourceID, &file, current, client, *work,
-			"preview-"+chatID(work.ID, message.ID), "queue_preview", message.ID, text); err != nil {
+			"preview-"+chatID(work.ID, message.ID), "queue_preview", message.ID,
+			func(language string, compact bool) (string, error) {
+				return localizedQueuePreview(language, compact, message, snapshot)
+			}); err != nil {
 			return err
 		}
 		return saveTurnWork(workspace.Path, message.ResourceID, file)
@@ -495,18 +492,18 @@ func (m *agentManager) previewQueuedInput(ctx context.Context, workspace serveWo
 	}
 	input, attempted := work.PreviewAttempts[message.ID]
 	if !attempted {
-		role := message.Role
-		if message.Type == "user_chat_input" {
-			role = "user"
-		}
 		mailbox, err := loadHotResourceMailbox(workspace.Path, message.ResourceID)
 		if err != nil {
 			return err
 		}
 		snapshot := queueSnapshot(mailboxInstanceID(workspace.Path), message.ResourceID, mailbox, &message, "", file)
 		snapshot.IncludesPreviewMessage = true
-		text := fmt.Sprintf("System queue notification: message %s from %s (preview only; still queued). Current audience and visibility are unchanged.%s\n%s",
-			message.ID, providerMessageParty(role, message.Sender, "en"), queueSnapshotText(snapshot), message.Text)
+		text, err := renderWorkspaceAdvisory(workspace, func(language string, compact bool) (string, error) {
+			return localizedQueuePreview(language, compact, message, snapshot)
+		})
+		if err != nil {
+			return err
+		}
 		payload, err := marshalPUAMessagePayload(puaMessagePayload{
 			Schema: puaMessagePayloadSchema, Text: text, Role: "system", Type: "queue_preview",
 			Causation: &resourceMessageCausation{Type: "queue_preview", SourceResourceID: message.ResourceID, MessageID: message.ID},

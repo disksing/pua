@@ -222,6 +222,9 @@ type agentManager struct {
 	turnOutputMu          sync.Mutex
 	turnOutputTargets     map[turnOutputKey]*turnOutputTarget
 	turnOutputWake        chan struct{}
+	chatInputMu           sync.Mutex
+	chatInputTargets      map[chatInputKey]*chatInputTarget
+	chatInputWake         chan struct{}
 	now                   func() time.Time
 	idleSleepAfter        time.Duration
 	activePollInterval    time.Duration
@@ -277,6 +280,8 @@ func newAgentManager(s *server) *agentManager {
 		reconcileWake:        make(chan struct{}, 1),
 		turnOutputTargets:    make(map[turnOutputKey]*turnOutputTarget),
 		turnOutputWake:       make(chan struct{}, 1),
+		chatInputTargets:     make(map[chatInputKey]*chatInputTarget),
+		chatInputWake:        make(chan struct{}, 1),
 		now:                  time.Now,
 		idleSleepAfter:       defaultResourceIdleSleepAfter,
 		activePollInterval:   2 * time.Second,

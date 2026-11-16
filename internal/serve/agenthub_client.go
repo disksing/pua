@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -635,7 +636,25 @@ func (c *agentHubClient) sessionAction(ctx context.Context, sessionID, action st
 	return response.Session, err
 }
 
-func (c *agentHubClient) doJSON(ctx context.Context, method, path string, body, output any) error {
+func (c *agentHubClient) doJSON(ctx context.Context, method, path string, body, output any) (resultErr error) {
+	started := time.Now()
+	status := 0
+	messageID := ""
+	switch request := body.(type) {
+	case agentHubInboundMessage:
+		messageID = request.MessageID
+	case agentHubCreateSessionRequest:
+		if request.InitialMessage != nil {
+			messageID = request.InitialMessage.MessageID
+		}
+	}
+	defer func() {
+		if elapsed := time.Since(started); elapsed >= time.Second || resultErr != nil || messageID != "" {
+			log.Printf("AgentHub request method=%s path=%s message=%s started_at=%s duration_ms=%d status=%d error_code=%s",
+				method, strings.SplitN(path, "?", 2)[0], messageID, started.UTC().Format(time.RFC3339Nano),
+				elapsed.Milliseconds(), status, reconcileErrorCode(resultErr))
+		}
+	}()
 	requestContext := ctx
 	cancel := func() {}
 	if _, ok := ctx.Deadline(); !ok {
@@ -662,6 +681,7 @@ func (c *agentHubClient) doJSON(ctx context.Context, method, path string, body, 
 	if err != nil {
 		return err
 	}
+	status = response.StatusCode
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return decodeAgentHubError(response)

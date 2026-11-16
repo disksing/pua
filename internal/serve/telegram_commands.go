@@ -217,6 +217,7 @@ func (rt *telegramRuntime) process(ctx context.Context, st *telegramState, u tel
 		if e != nil {
 			return e
 		}
+		rt.server.agents.requestChatInput(rt.workspace, route.Resource, chatInputTransfer)
 		rt.server.agents.requestReconcile(reconcileMailboxes | reconcileAgentHub)
 		return nil
 	}

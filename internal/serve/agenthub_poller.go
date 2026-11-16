@@ -43,6 +43,12 @@ func (m *agentManager) startAgentRecovery(ctx context.Context) {
 // startAgentHubPoller polls AgentHub session state in the background until
 // ctx is cancelled.
 func (m *agentManager) startAgentHubPoller(ctx context.Context) {
+	m.runBackground(func() { m.runChatInputLoop(ctx) })
+	m.runBackground(func() {
+		if err := m.recoverChatInputs(ctx); err != nil {
+			log.Printf("recover Chat inputs: %v", err)
+		}
+	})
 	m.runBackground(func() { m.runTurnOutputLoop(ctx) })
 	m.runBackground(func() {
 		if err := m.recoverTurnOutputTargets(ctx); err != nil {

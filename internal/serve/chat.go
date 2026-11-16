@@ -6,12 +6,14 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/disksing/pua/internal/app"
 	"github.com/disksing/pua/internal/workspacepath"
@@ -316,6 +318,9 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 		writeError(w, err, 409)
 		return
 	}
+	if operation == "messages" || operation == "close" || operation == "open" {
+		m.requestChatInput(workspace, resourceID, chatInputTransfer)
+	}
 	// All effects are replayed from durable state by the reconciler. Closing
 	// revokes publication without interrupting execution.
 	m.requestReconcile(reconcileMailboxes | reconcileAgentHub)
@@ -368,99 +373,111 @@ func (m *agentManager) reconcileWorkspaceChats(ctx context.Context, workspace se
 			return err
 		}
 		id := strings.TrimSuffix(filepath.Base(path), ".json")
-		chatMu.Lock()
-		c, loadErr := loadChatLocked(workspace.Path, id)
+		_, loadErr := m.reconcileChatOutbox(ctx, workspace, id, registered)
 		if loadErr != nil {
-			chatMu.Unlock()
 			return loadErr
-		}
-		if c.Version < 4 {
-			chatMu.Unlock()
-			pending, pendingErr := mailboxPendingForResource(workspace.Path, c.address())
-			if pendingErr != nil {
-				return pendingErr
-			}
-			if pending {
-				if err = markResourceMailboxArchived(workspace.Path, c.address()); err != nil {
-					return err
-				}
-			}
-			continue
-		}
-		before, _ := json.Marshal(c)
-		c.IntervalSeconds, c.NextCheckAt = 0, ""
-		for id, source := range c.LegacySources {
-			if !registered[source.User] && (source.Open || source.Token != "") {
-				source.Open, source.Token = false, ""
-				c.LegacySources[id] = source
-			}
-		}
-		_, archived, _, loadErr := resourceExistsAndArchived(workspace.Path, c.ResourceID)
-		if loadErr != nil {
-			chatMu.Unlock()
-			return loadErr
-		}
-		for i := range c.Outbox {
-			d := &c.Outbox[i]
-			if d.Accepted {
-				continue
-			}
-			// Work durably dispatched before closure still belongs to execution.
-			legacySourceValid := true
-			if d.userInput() && d.SourceChatID != "" {
-				source, found := c.LegacySources[d.SourceChatID]
-				legacySourceValid = found && source.Open && registered[source.User]
-			}
-			if d.Target == c.address() || (d.userInput() && (!c.Open || archived || d.Epoch != c.Epoch || !legacySourceValid)) {
-				d.Accepted = true
-				continue
-			}
-			messageType := "chat_input"
-			if d.userInput() {
-				messageType = "user_chat_input"
-			}
-			sourceID := c.ID
-			if d.SourceChatID != "" {
-				sourceID = d.SourceChatID
-			}
-			sum := chatID(sourceID, d.ID)
-			var sender *agentHubMessageSender
-			if d.Sender != "" {
-				sender = &agentHubMessageSender{Name: d.Sender}
-			}
-			cause := &resourceMessageCausation{Type: "chat", SourceResourceID: c.ResourceID, MessageID: d.ID}
-			if d.Automatic {
-				cause.ChatEpoch, cause.AutomaticChat = d.Epoch, true
-			}
-			_, err = acceptGeneratedMailboxMessage(workspace.Path, resourceMailboxMessage{ID: "chat-" + sum, ResourceID: d.Target, Text: d.Text, Sender: sender, Type: messageType, RequestedMode: resourceMessageModeSteer, Causation: cause})
-			if err != nil {
-				chatMu.Unlock()
-				return err
-			}
-			d.Accepted = true
-		}
-		after, _ := json.Marshal(c)
-		if !bytes.Equal(before, after) {
-			err = saveChatLocked(workspace.Path, c)
-		}
-		chatMu.Unlock()
-		if err != nil {
-			return err
-		}
-		// The normal AgentHub poller sees every legacy dialogue address as
-		// archived and stops only its bound session. Chat migration never
-		// waits on that network operation or touches the execution session.
-		pending, pendingErr := mailboxPendingForResource(workspace.Path, c.address())
-		if pendingErr != nil {
-			return pendingErr
-		}
-		if pending {
-			if err = markResourceMailboxArchived(workspace.Path, c.address()); err != nil {
-				return err
-			}
 		}
 	}
 	return nil
+}
+
+func (m *agentManager) reconcileChatOutbox(ctx context.Context, workspace serveWorkspace, id string, registered map[string]bool) (transferred int, resultErr error) {
+	destinations := make(map[string]bool)
+	defer func() {
+		for resource := range destinations {
+			m.requestChatInput(workspace, resource, chatInputMailbox)
+		}
+	}()
+	chatMu.Lock()
+	defer chatMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	chat, err := loadChatLocked(workspace.Path, id)
+	if err != nil {
+		return 0, err
+	}
+	if chat.Version >= 4 {
+		before, _ := json.Marshal(chat)
+		chat.IntervalSeconds, chat.NextCheckAt = 0, ""
+		for sourceID, source := range chat.LegacySources {
+			if !registered[source.User] && (source.Open || source.Token != "") {
+				source.Open, source.Token = false, ""
+				chat.LegacySources[sourceID] = source
+			}
+		}
+		_, archived, _, resourceErr := resourceExistsAndArchived(workspace.Path, chat.ResourceID)
+		if resourceErr != nil {
+			return 0, resourceErr
+		}
+		savedAt := make(map[string]string)
+		for _, message := range chat.Messages {
+			if message.Role == "user" {
+				savedAt["input-"+message.ID] = message.CreatedAt
+			}
+		}
+		for index := range chat.Outbox {
+			delivery := &chat.Outbox[index]
+			if delivery.Accepted {
+				continue
+			}
+			if err := ctx.Err(); err != nil {
+				return transferred, err
+			}
+			legacySourceValid := true
+			if delivery.userInput() && delivery.SourceChatID != "" {
+				source, found := chat.LegacySources[delivery.SourceChatID]
+				legacySourceValid = found && source.Open && registered[source.User]
+			}
+			if delivery.Target == chat.address() || (delivery.userInput() && (!chat.Open || archived || delivery.Epoch != chat.Epoch || !legacySourceValid)) {
+				delivery.Accepted = true
+				continue
+			}
+			messageType := "chat_input"
+			if delivery.userInput() {
+				messageType = "user_chat_input"
+			}
+			sourceID := chat.ID
+			if delivery.SourceChatID != "" {
+				sourceID = delivery.SourceChatID
+			}
+			var sender *agentHubMessageSender
+			if delivery.Sender != "" {
+				sender = &agentHubMessageSender{Name: delivery.Sender}
+			}
+			cause := &resourceMessageCausation{Type: "chat", SourceResourceID: chat.ResourceID, MessageID: delivery.ID}
+			if delivery.Automatic {
+				cause.ChatEpoch, cause.AutomaticChat = delivery.Epoch, true
+			}
+			started := time.Now()
+			message, acceptErr := acceptGeneratedMailboxMessage(workspace.Path, resourceMailboxMessage{
+				ID: "chat-" + chatID(sourceID, delivery.ID), ResourceID: delivery.Target, Text: delivery.Text,
+				Sender: sender, Type: messageType, RequestedMode: resourceMessageModeSteer, Causation: cause,
+			})
+			if acceptErr != nil {
+				return transferred, acceptErr
+			}
+			delivery.Accepted = true
+			destinations[delivery.Target] = true
+			transferred++
+			log.Printf("Chat input accepted workspace=%s resource=%s input=%s message=%s saved_at=%s accepted_at=%s accept_ms=%d",
+				workspace.ID, delivery.Target, delivery.ID, message.ID, savedAt[delivery.ID], message.AcceptedAt, time.Since(started).Milliseconds())
+		}
+		after, _ := json.Marshal(chat)
+		if !bytes.Equal(before, after) {
+			if err := saveChatLocked(workspace.Path, chat); err != nil {
+				return transferred, err
+			}
+		}
+	}
+	pending, err := mailboxPendingForResource(workspace.Path, chat.address())
+	if err != nil {
+		return transferred, err
+	}
+	if pending {
+		return transferred, markResourceMailboxArchived(workspace.Path, chat.address())
+	}
+	return transferred, nil
 }
 
 func (m *agentManager) handleChats(w http.ResponseWriter, r *http.Request, workspaceID string) {

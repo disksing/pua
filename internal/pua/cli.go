@@ -356,7 +356,7 @@ Commands:
     resource, binding.
 
   pua message <command>
-    Send and inspect mailbox messages. Subcommands: send, show.
+    Send and inspect mailbox messages. Subcommands: send, show, list, read, ack, operation.
 
   pua history <command>
     Read resource conversation history. Subcommands: turn show, event show.
@@ -674,6 +674,11 @@ func printMessageHelp() {
   pua message send --to=<resource|user> [--mode=steer|enqueue|interrupt] [--server=<url>] <message>
   pua message show --id=<message-id> [--server=<url>]
 
+  pua message list [--from=<resource>] [--from-workspace=<instance-id>] [--limit=<1-100>] [--cursor=<cursor>] [--server=<url>]
+  pua message read [--ids=<id,id...>|--from=<resource> [--from-workspace=<instance-id>] [--limit=<1-100>]|--cursor=<cursor>] [--max-bytes=<n>] [--server=<url>]
+  pua message ack --ids=<id,id...> --summary=<text> [--operation=<operation-id>] [--receipts=<receipt,receipt...>] [--server=<url>]
+  pua message operation show --id=<operation-id> [--server=<url>]
+
 Commands:
   pua message send --to=<resource|user> [--mode=steer|enqueue|interrupt] [--server=<url>] <message>
     When --to is a stable resource id (workspace, scheduler, projectN, or
@@ -699,6 +704,28 @@ Commands:
     and message commands discover the owner from the Workspace control
     directory (.pua/serve.lock);
     --server explicitly overrides its diagnostic address.
+
+  pua message list [--from=<resource>] [--from-workspace=<instance-id>] [--limit=<1-100>] [--cursor=<cursor>] [--server=<url>]
+    List waiting Agent messages in this resource mailbox. Source filtering uses
+    the stable sender resource ID plus its Workspace instance ID; without
+    --from-workspace it means the current Workspace. A cursor freezes the new
+    sequence upper bound but does not consume or lock messages.
+
+  pua message read [--ids=<id,id...>|--from=<resource> [--from-workspace=<instance-id>] [--limit=<1-100>]|--cursor=<cursor>] [--max-bytes=<n>] [--server=<url>]
+    Read complete bodies without changing queue state. Run inside a resource
+    Turn to save server-issued complete-body credentials under .pua for later
+    ack. The default body budget is 65536 bytes and the maximum is 1048576.
+
+  pua message ack --ids=<id,id...> --summary=<text> [--operation=<operation-id>] [--receipts=<receipt,receipt...>] [--server=<url>]
+    Atomically mark explicitly selected messages handled in the active internal
+    work. A message is eligible only after its complete body was read by this
+    work; the server revalidates eligibility and normally resolves read
+    credentials automatically. --receipts is an explicit ordered override for
+    recovery. The summary must state that the necessary work is complete or
+    that remaining obligations were recorded.
+
+  pua message operation show --id=<operation-id> [--server=<url>]
+    Inspect a committed batch confirmation after an uncertain response.
 `)
 }
 

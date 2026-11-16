@@ -194,6 +194,7 @@ func providerMessageTextWithContext(message resourceMailboxMessage, steer bool) 
 					c.Chat.Open, c.Chat.Epoch, c.Chat.Revision, c.Chat.ObservedAt, c.Chat.ParentID)
 			}
 		}
+		context += queueSnapshotText(c.Queue)
 		return strings.TrimSpace(localize.MustRender(c.Language, "turn-opener.md", map[string]any{
 			"Party":   providerMessageParty(c.OpenerRole, c.OpenerSender, c.Language),
 			"Visible": c.ChatVisible, "WorkID": c.WorkID, "Context": context, "Text": message.Text,
@@ -310,14 +311,23 @@ func providerContextMailboxOpener(workspacePath, resourceID, generationID, sessi
 
 func (m *agentManager) ensureProviderMessageContext(ctx context.Context, workspace serveWorkspace, client *agentHubClient, session agentHubSession, generationID string, message resourceMailboxMessage) (resourceMailboxMessage, error) {
 	if message.ProviderContext != nil {
-		if message.ProviderContext.Protocol == 1 && message.ProviderContext.OpenerRole != "user" &&
+		if message.ProviderContext.Protocol == 1 && (message.ProviderContext.Queue == nil || (message.ProviderContext.OpenerRole != "user" && message.ProviderContext.Chat == nil)) &&
 			message.AttemptCount == 0 && message.Status == resourceMessageQueued {
-			snapshot, err := readTurnChatSnapshot(workspace.Path, message.ResourceID)
+			queue, err := sampleMailboxQueue(workspace, message)
+			if err != nil {
+				return resourceMailboxMessage{}, err
+			}
+			chat, err := readTurnChatSnapshot(workspace.Path, message.ResourceID)
 			if err != nil {
 				return resourceMailboxMessage{}, err
 			}
 			return updateMailboxMessage(workspace.Path, message.ID, func(current *resourceMailboxMessage) {
-				current.ProviderContext.Chat = &snapshot
+				if current.ProviderContext.Queue == nil {
+					current.ProviderContext.Queue = queue
+				}
+				if current.ProviderContext.OpenerRole != "user" && current.ProviderContext.Chat == nil {
+					current.ProviderContext.Chat = &chat
+				}
 			})
 		}
 		return message, nil
@@ -392,6 +402,12 @@ func (m *agentManager) ensureProviderMessageContext(ctx context.Context, workspa
 			if !contextValue.OpenerUnknown {
 				contextValue.OpenerResponse = providerOpenerResponse(contextValue.OpenerRole, openerMessage)
 			}
+		}
+	}
+	if contextValue.Protocol == 1 {
+		contextValue.Queue, err = sampleMailboxQueue(workspace, message)
+		if err != nil {
+			return resourceMailboxMessage{}, err
 		}
 	}
 	return updateMailboxMessage(workspace.Path, message.ID, func(current *resourceMailboxMessage) {

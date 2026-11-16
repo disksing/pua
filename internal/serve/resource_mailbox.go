@@ -82,6 +82,7 @@ type providerMessageContext struct {
 	OpenerResponse string                 `json:"openerResponse"`
 	OpenerUnknown  bool                   `json:"openerUnknown,omitempty"`
 	Chat           *turnChatSnapshot      `json:"chat,omitempty"`
+	Queue          *mailboxQueueSnapshot  `json:"queue,omitempty"`
 }
 
 // resourceMailboxMessage is the durable PUA-side ownership record for one
@@ -124,6 +125,8 @@ type resourceMailboxMessage struct {
 	LastAttemptAt             string                       `json:"lastAttemptAt,omitempty"`
 	LastError                 string                       `json:"lastError,omitempty"`
 	LastErrorCode             string                       `json:"lastErrorCode,omitempty"`
+	Handling                  *mailboxHandling             `json:"handling,omitempty"`
+	acceptedQueue             *mailboxQueueSnapshot
 	receipt                   bool
 }
 
@@ -169,6 +172,7 @@ type resourceMailboxCounts struct {
 	Cancelled       int `json:"cancelled"`
 	Undeliverable   int `json:"undeliverable"`
 	DeliveryUnknown int `json:"deliveryUnknown"`
+	Handled         int `json:"handled"`
 }
 
 type resourceGenerationStatus struct {
@@ -229,28 +233,34 @@ type resourceMessageRequest struct {
 }
 
 type resourceMessageResponse struct {
-	MessageID                string                       `json:"messageId"`
-	ResourceID               string                       `json:"resourceId"`
-	Text                     string                       `json:"text,omitempty"`
-	Receipt                  bool                         `json:"receipt,omitempty"`
-	RequestedMode            string                       `json:"requestedMode"`
-	ActualMode               string                       `json:"actualMode"`
-	DowngradeReason          string                       `json:"downgradeReason,omitempty"`
-	Status                   string                       `json:"status"`
-	AcceptedAt               string                       `json:"acceptedAt"`
-	PromotedAt               string                       `json:"promotedAt,omitempty"`
-	Reference                string                       `json:"reference"`
-	GenerationID             string                       `json:"generationId,omitempty"`
-	AgentHubSessionID        string                       `json:"agentHubSessionId,omitempty"`
-	TurnID                   string                       `json:"turnId,omitempty"`
-	SubscribeResult          *bool                        `json:"subscribeResult,omitempty"`
-	ResultSubscriptionStatus string                       `json:"resultSubscriptionStatus,omitempty"`
-	ResultOperationID        string                       `json:"resultOperationId,omitempty"`
-	LastError                string                       `json:"lastError,omitempty"`
-	LastErrorCode            string                       `json:"lastErrorCode,omitempty"`
-	Type                     string                       `json:"type,omitempty"`
-	Causation                *resourceMessageCausation    `json:"causation,omitempty"`
-	Notification             *resourceNotificationReceipt `json:"notification,omitempty"`
+	Role                      string                       `json:"role,omitempty"`
+	Sender                    *agentHubMessageSender       `json:"sender,omitempty"`
+	SenderWorkspaceInstanceID string                       `json:"senderWorkspaceInstanceId,omitempty"`
+	Sequence                  uint64                       `json:"sequence,omitempty"`
+	Handling                  *mailboxHandling             `json:"handling,omitempty"`
+	Queue                     *mailboxQueueSnapshot        `json:"queue,omitempty"`
+	MessageID                 string                       `json:"messageId"`
+	ResourceID                string                       `json:"resourceId"`
+	Text                      string                       `json:"text,omitempty"`
+	Receipt                   bool                         `json:"receipt,omitempty"`
+	RequestedMode             string                       `json:"requestedMode"`
+	ActualMode                string                       `json:"actualMode"`
+	DowngradeReason           string                       `json:"downgradeReason,omitempty"`
+	Status                    string                       `json:"status"`
+	AcceptedAt                string                       `json:"acceptedAt"`
+	PromotedAt                string                       `json:"promotedAt,omitempty"`
+	Reference                 string                       `json:"reference"`
+	GenerationID              string                       `json:"generationId,omitempty"`
+	AgentHubSessionID         string                       `json:"agentHubSessionId,omitempty"`
+	TurnID                    string                       `json:"turnId,omitempty"`
+	SubscribeResult           *bool                        `json:"subscribeResult,omitempty"`
+	ResultSubscriptionStatus  string                       `json:"resultSubscriptionStatus,omitempty"`
+	ResultOperationID         string                       `json:"resultOperationId,omitempty"`
+	LastError                 string                       `json:"lastError,omitempty"`
+	LastErrorCode             string                       `json:"lastErrorCode,omitempty"`
+	Type                      string                       `json:"type,omitempty"`
+	Causation                 *resourceMessageCausation    `json:"causation,omitempty"`
+	Notification              *resourceNotificationReceipt `json:"notification,omitempty"`
 }
 
 type resourceAPIError struct {
@@ -316,6 +326,10 @@ func normalizeResourceMessageRole(role string) (string, error) {
 
 func cloneMailboxMessage(message resourceMailboxMessage) resourceMailboxMessage {
 	cloned := message
+	if message.Handling != nil {
+		handling := *message.Handling
+		cloned.Handling = &handling
+	}
 	if message.Sender != nil {
 		sender := *message.Sender
 		cloned.Sender = &sender
@@ -344,6 +358,8 @@ func normalizedResourceID(resourceID string) string {
 
 func mailboxMessageResponse(message resourceMailboxMessage) resourceMessageResponse {
 	return resourceMessageResponse{
+		Role: message.Role, Sender: message.Sender, SenderWorkspaceInstanceID: message.SenderWorkspaceInstanceID, Sequence: message.Sequence,
+		Handling: message.Handling, Queue: message.acceptedQueue,
 		MessageID: message.ID, ResourceID: message.ResourceID,
 		Text: message.Text, Receipt: message.receipt,
 		RequestedMode: message.RequestedMode, ActualMode: message.ActualMode,
@@ -387,6 +403,8 @@ func mailboxCounts(mailbox resourceMailbox, resourceID string) (resourceMailboxC
 			counts.Undeliverable++
 		case resourceMessageDeliveryUnknown:
 			counts.DeliveryUnknown++
+		case resourceMessageHandled:
+			counts.Handled++
 		}
 		if strings.TrimSpace(message.LastError) != "" {
 			lastError = message.LastError
@@ -464,6 +482,11 @@ func acceptMailboxMessage(workspacePath, resourceID string, request resourceMess
 		mailbox.NextSequence++
 		message.Sequence = mailbox.NextSequence
 		mailbox.Messages = append(mailbox.Messages, cloneMailboxMessage(message))
+		works, err := loadTurnWork(workspacePath, resourceID)
+		if err != nil {
+			return err
+		}
+		message.acceptedQueue = queueSnapshot(mailboxInstanceID(workspacePath), resourceID, *mailbox, &message, "", works)
 		return nil
 	})
 	return message, err
@@ -1681,7 +1704,7 @@ func resourceErrorStatus(err error) int {
 		return http.StatusNotFound
 	case "message_receipt_expired":
 		return http.StatusGone
-	case "resource_archived", "message_not_waiting", "steer_unavailable", "generation_unavailable", "generation_changed", "active_turn":
+	case "resource_archived", "message_not_waiting", "steer_unavailable", "generation_unavailable", "generation_changed", "active_turn", "batch_work_unavailable":
 		return http.StatusConflict
 	case "workspace_not_owned":
 		return http.StatusConflict
@@ -1791,6 +1814,10 @@ func (m *agentManager) handleTaskState(w http.ResponseWriter, r *http.Request, w
 }
 
 func (m *agentManager) handleResourceMessages(w http.ResponseWriter, r *http.Request, workspaceID, resourceID string) {
+	if r.Method == http.MethodGet {
+		m.handleMailboxBatch(w, r, workspaceID, resourceID, "list")
+		return
+	}
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return

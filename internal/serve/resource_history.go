@@ -62,6 +62,8 @@ type resourceHistoryDelivery struct {
 	Causation                 *resourceMessageCausation `json:"causation,omitempty"`
 	AcceptedAt                string                    `json:"acceptedAt"`
 	DeliveredAt               string                    `json:"deliveredAt,omitempty"`
+	HandledAt                 string                    `json:"handledAt,omitempty"`
+	Handling                  *mailboxHandling          `json:"handling,omitempty"`
 }
 
 type resourceHistoryTurnSummary struct {
@@ -239,6 +241,7 @@ func historyDeliveries(mailbox resourceMailbox, generationID, turnID string) []r
 			DowngradeReason: message.DowngradeReason, Role: puaMessageRole(message.Role, message.Type), Sender: message.Sender,
 			SenderWorkspaceInstanceID: message.SenderWorkspaceInstanceID, Type: message.Type, Causation: message.Causation,
 			AcceptedAt: message.AcceptedAt, DeliveredAt: message.DeliveredAt,
+			Handling: message.Handling,
 		})
 	}
 	return result
@@ -262,6 +265,12 @@ func historyTurnSummary(instanceID, resourceID string, record generationRecord, 
 		trigger = &value
 	}
 	triggerPreview, triggerRole, triggerSender := turn.TriggerPreview, turn.TriggerRole, turn.TriggerSender
+	for _, delivery := range deliveries {
+		if delivery.MessageID == turn.TriggerMessageID {
+			trigger = &delivery
+			break
+		}
+	}
 	if len(turn.TriggerPayload) > 0 {
 		triggerPreview, triggerRole, triggerSender = puaMessagePresentation(triggerPreview, triggerRole, triggerSender, turn.TriggerPayload)
 		triggerPreview = resourceMessagePreview(triggerPreview)

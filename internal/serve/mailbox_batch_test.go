@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -373,6 +374,33 @@ func TestMailboxBatchTransactionVersionProtectsExtraFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(txnPath); err != nil {
 		t.Fatalf("unsupported transaction journal was deleted: %v", err)
+	}
+
+	legacyFinal := filepath.Join(store.Directory, "claims-legacy.json")
+	legacyTemp := legacyFinal + ".tmp"
+	if err := os.WriteFile(legacyFinal, []byte("original"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyTemp, []byte("replacement"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacyJournal := fmt.Sprintf(`{"version":1,"files":[{"temp":%q,"final":%q}]}`, legacyTemp, legacyFinal)
+	if err := os.WriteFile(txnPath, []byte(legacyJournal), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := recoverResourceMailboxTransaction(store.Directory); err == nil ||
+		!strings.Contains(err.Error(), "mailbox transaction Files require mailbox-batch-v2") {
+		t.Fatalf("legacy version=1 journal did not reject Files: %v", err)
+	}
+	if _, err := os.Stat(txnPath); err != nil {
+		t.Fatalf("rejected legacy journal was deleted: %v", err)
+	}
+	content, err := os.ReadFile(legacyFinal)
+	if err != nil || string(content) != "original" {
+		t.Fatalf("rejected legacy recovery replaced the final file: content=%q err=%v", content, err)
+	}
+	if _, err := os.Stat(legacyTemp); err != nil {
+		t.Fatalf("rejected legacy recovery moved the temp file: %v", err)
 	}
 }
 

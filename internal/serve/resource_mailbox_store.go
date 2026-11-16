@@ -404,6 +404,10 @@ func cloneProviderMessageContext(context *providerMessageContext) *providerMessa
 		return nil
 	}
 	cloned := *context
+	if context.Chat != nil {
+		snapshot := *context.Chat
+		cloned.Chat = &snapshot
+	}
 	if context.OpenerSender != nil {
 		sender := *context.OpenerSender
 		cloned.OpenerSender = &sender

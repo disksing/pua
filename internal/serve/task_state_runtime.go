@@ -199,6 +199,14 @@ func (m *agentManager) handleTaskTurnCompletionLocked(ctx context.Context, rt *a
 	if workErr != nil {
 		return workErr
 	}
+	for _, advisory := range file.Advisories {
+		if advisory.SessionID == record.CompletionSessionID && advisory.TurnID == record.CompletionTurnID {
+			return markTaskTurnCompletionHandled(rt, marker)
+		}
+	}
+	if file.advisoryUnowned() {
+		return nil
+	}
 	for _, work := range file.Works {
 		if work.SessionID == record.CompletionSessionID && work.TurnID == record.CompletionTurnID {
 			return markTaskTurnCompletionHandled(rt, marker)

@@ -44,6 +44,20 @@ func (m *agentManager) wakeTurnOutputs() {
 func (m *agentManager) updateTurnOutputTarget(workspace serveWorkspace, resource string, file turnWorkFile, requested bool) {
 	pending := false
 	var since time.Time
+	chatMu.Lock()
+	chat, err := loadChatLocked(workspace.Path, sharedChatID(resource))
+	chatMu.Unlock()
+	if err == nil && chat.StateNotice != nil {
+		pending = true
+	}
+	for _, advisory := range file.Advisories {
+		if advisoryPending(advisory) {
+			pending = true
+			if created := generationTime(advisory.CreatedAt); !created.IsZero() && (since.IsZero() || created.Before(since)) {
+				since = created
+			}
+		}
+	}
 	for _, work := range file.Works {
 		if work.OutputDone {
 			continue
@@ -127,12 +141,7 @@ func (m *agentManager) recoverTurnOutputTargets(ctx context.Context) error {
 				failures = append(failures, fmt.Errorf("%s: %w", path, err))
 				continue
 			}
-			for _, work := range file.Works {
-				if !work.OutputDone {
-					m.updateTurnOutputTarget(workspace, file.ResourceID, file, true)
-					break
-				}
-			}
+			m.updateTurnOutputTarget(workspace, file.ResourceID, file, true)
 		}
 	}
 	return errors.Join(failures...)

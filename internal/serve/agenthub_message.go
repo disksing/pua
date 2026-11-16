@@ -185,6 +185,15 @@ func providerMessageTextWithContext(message resourceMailboxMessage, steer bool) 
 		if c.PreviousResult != "" {
 			context += "\n" + c.PreviousResult
 		}
+		if c.Chat != nil && c.OpenerRole != "user" {
+			if c.Language == localize.SimplifiedChinese {
+				context += fmt.Sprintf("\nChat 状态快照：open=%t，epoch=%d，revision=%d，observedAt=%s；上层=%s。本轮固定可见性不随开关变化；内部工作需用户获知时，开启则用 turn notify 请求独立可见通知，关闭则向上层发必要业务摘要。委派回报义务保留；快照不授予发布资格。",
+					c.Chat.Open, c.Chat.Epoch, c.Chat.Revision, c.Chat.ObservedAt, c.Chat.ParentID)
+			} else {
+				context += fmt.Sprintf("\nChat snapshot: open=%t, epoch=%d, revision=%d, observedAt=%s; parent=%s. This does not change the fixed audience. Internal work uses turn notify for a separate visible notification when Chat is open; when closed, report necessary business progress to the parent. Delegation reports remain required. A snapshot grants no publication rights.",
+					c.Chat.Open, c.Chat.Epoch, c.Chat.Revision, c.Chat.ObservedAt, c.Chat.ParentID)
+			}
+		}
 		return strings.TrimSpace(localize.MustRender(c.Language, "turn-opener.md", map[string]any{
 			"Party":   providerMessageParty(c.OpenerRole, c.OpenerSender, c.Language),
 			"Visible": c.ChatVisible, "WorkID": c.WorkID, "Context": context, "Text": message.Text,
@@ -301,6 +310,16 @@ func providerContextMailboxOpener(workspacePath, resourceID, generationID, sessi
 
 func (m *agentManager) ensureProviderMessageContext(ctx context.Context, workspace serveWorkspace, client *agentHubClient, session agentHubSession, generationID string, message resourceMailboxMessage) (resourceMailboxMessage, error) {
 	if message.ProviderContext != nil {
+		if message.ProviderContext.Protocol == 1 && message.ProviderContext.OpenerRole != "user" &&
+			message.AttemptCount == 0 && message.Status == resourceMessageQueued {
+			snapshot, err := readTurnChatSnapshot(workspace.Path, message.ResourceID)
+			if err != nil {
+				return resourceMailboxMessage{}, err
+			}
+			return updateMailboxMessage(workspace.Path, message.ID, func(current *resourceMailboxMessage) {
+				current.ProviderContext.Chat = &snapshot
+			})
+		}
 		return message, nil
 	}
 	language, err := workspaceContentLanguage(workspace.Path)
@@ -321,6 +340,13 @@ func (m *agentManager) ensureProviderMessageContext(ctx context.Context, workspa
 		}
 		if message.Type == "user_chat_input" {
 			contextValue.OpenerRole = "user"
+		}
+		if contextValue.OpenerRole != "user" {
+			snapshot, err := readTurnChatSnapshot(workspace.Path, message.ResourceID)
+			if err != nil {
+				return resourceMailboxMessage{}, err
+			}
+			contextValue.Chat = &snapshot
 		}
 		file, e := loadTurnWork(workspace.Path, message.ResourceID)
 		if e != nil {

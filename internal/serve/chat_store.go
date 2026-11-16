@@ -69,6 +69,8 @@ type resourceChat struct {
 	User            string                      `json:"user"`
 	Open            bool                        `json:"open"`
 	Epoch           uint64                      `json:"epoch"`
+	Revision        uint64                      `json:"revision,omitempty"`
+	StateNotice     *chatStateNotice            `json:"stateNotice,omitempty"`
 	EpochStart      *int                        `json:"epochStart,omitempty"`
 	Token           string                      `json:"token"`
 	Binding         app.AgentBinding            `json:"binding"`

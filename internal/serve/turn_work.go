@@ -48,9 +48,10 @@ type turnWork struct {
 }
 
 type turnWorkFile struct {
-	Version    int        `json:"version"`
-	ResourceID string     `json:"resourceId"`
-	Works      []turnWork `json:"works"`
+	Version    int            `json:"version"`
+	ResourceID string         `json:"resourceId"`
+	Works      []turnWork     `json:"works"`
+	Advisories []turnAdvisory `json:"advisories,omitempty"`
 }
 
 type turnWorkCommand struct {
@@ -112,6 +113,11 @@ func (f turnWorkFile) canPreview(work *turnWork, messageID string) bool {
 	if work == nil {
 		return false
 	}
+	for _, advisory := range f.Advisories {
+		if advisory.Type == "queue_preview" && advisory.MessageID == messageID {
+			return false
+		}
+	}
 	for _, previous := range f.Works {
 		if previous.Previews[messageID] {
 			return false
@@ -133,8 +139,9 @@ func prepareTurnWork(root, resource, generation, session string, message resourc
 	}
 	if existing := file.find(message.ID); existing != nil {
 		if existing.TurnID == "" && message.Status == resourceMessageQueued &&
-			existing.SessionID != session {
+			(existing.SessionID != session || !reflect.DeepEqual(existing.Context, *message.ProviderContext)) {
 			existing.GenerationID, existing.SessionID = generation, session
+			existing.Context = *message.ProviderContext
 			return saveTurnWork(root, resource, file)
 		}
 		return nil
@@ -232,7 +239,7 @@ func (m *agentManager) reconcileTurnWorkLocked(ctx context.Context, workspace se
 		return err
 	}
 	defer m.refreshTurnOutputTarget(workspace, resource, false)
-	if len(file.Works) == 0 {
+	if len(file.Works) == 0 && len(file.Advisories) == 0 {
 		return nil
 	}
 	before, _ := json.Marshal(file)
@@ -252,6 +259,9 @@ func (m *agentManager) reconcileTurnWorkLocked(ctx context.Context, workspace se
 		if err != nil {
 			return err
 		}
+	}
+	if err := m.reconcileAdvisories(ctx, workspace, resource, &file, client, !archived && !paused); err != nil {
+		return err
 	}
 	for i := range file.Works {
 		work := &file.Works[i]
@@ -432,6 +442,29 @@ func (m *agentManager) previewQueuedInput(ctx context.Context, workspace serveWo
 		return err
 	}
 	work := file.active(session.ID, session.CurrentTurnID)
+	if session.Provider == "pi" && session.InputCapabilities.Steer && !session.InputCapabilities.TurnScopedSteer {
+		if !file.canPreview(work, message.ID) || file.advisoryUnowned() {
+			return nil
+		}
+		current, err := client.GetSession(ctx, session.ID)
+		if err != nil {
+			return err
+		}
+		if current.CurrentTurnID != session.CurrentTurnID {
+			return nil
+		}
+		role := message.Role
+		if message.Type == "user_chat_input" {
+			role = "user"
+		}
+		text := fmt.Sprintf("System queue notification: message %s from %s (preview only; still queued). Current audience and visibility are unchanged.\n%s",
+			message.ID, providerMessageParty(role, message.Sender, "en"), message.Text)
+		if err := m.reserveAdvisory(ctx, workspace, message.ResourceID, &file, current, client, *work,
+			"preview-"+chatID(work.ID, message.ID), "queue_preview", message.ID, text); err != nil {
+			return err
+		}
+		return saveTurnWork(workspace.Path, message.ResourceID, file)
+	}
 	if !session.InputCapabilities.TurnScopedSteer || !file.canPreview(work, message.ID) {
 		return nil
 	}
@@ -542,7 +575,20 @@ func (m *agentManager) handleTurnWork(w http.ResponseWriter, r *http.Request, wo
 				result, err = chat.publicPage(40, "", "", "")
 				return err
 			}
-			result = file
+			chat, err := readTurnChatSnapshot(workspace.Path, resource)
+			if err != nil {
+				return err
+			}
+			publicFile := file
+			publicFile.Advisories = append([]turnAdvisory(nil), file.Advisories...)
+			for index := range publicFile.Advisories {
+				publicFile.Advisories[index].Input = nil
+			}
+			result = struct {
+				turnWorkFile
+				Chat           turnChatSnapshot   `json:"chat"`
+				CurrentControl turnCurrentControl `json:"currentControl"`
+			}{publicFile, chat, m.currentTurnControl(r.Context(), workspace, resource, file)}
 			return nil
 		}
 		result, e = m.controlTurnWork(r.Context(), workspace, resource, &file, command)
@@ -561,17 +607,11 @@ func (m *agentManager) controlTurnWork(ctx context.Context, workspace serveWorks
 	if work == nil {
 		return nil, errors.New("unknown work; use the work id from this Turn's opener")
 	}
-	if work.Command != nil {
-		if reflect.DeepEqual(*work.Command, command) {
-			return map[string]string{"status": "accepted", "next": "End this Turn now; the server will schedule the next input."}, nil
-		}
-		return nil, errors.New("this Turn already has a different control request")
-	}
 	record, found, err := currentResourceGeneration(workspace.Path, resource)
 	if err != nil {
 		return nil, err
 	}
-	if !found || record.AgentHubSessionID != work.SessionID {
+	if !found || record.AgentHubSessionID != work.SessionID || record.GenerationID != work.GenerationID {
 		return nil, errors.New("work is no longer in the current generation")
 	}
 	_, client, err := m.agentHubRuntimeConfig()
@@ -582,8 +622,19 @@ func (m *agentManager) controlTurnWork(ctx context.Context, workspace serveWorks
 	if err != nil {
 		return nil, err
 	}
-	if work.TurnID == "" || session.CurrentTurnID != work.TurnID || work.OutputDone {
+	if work.TurnID == "" || session.CurrentTurnID != work.TurnID || work.OutputDone ||
+		(session.State != "running" && session.State != "waiting_approval") {
 		return nil, errors.New("work is not the active Turn")
+	}
+	turn, _, err := client.SessionTurn(ctx, work.SessionID, work.TurnID)
+	if err != nil || turn.Closed {
+		return nil, errors.New("work is not a verified active Turn")
+	}
+	if work.Command != nil {
+		if reflect.DeepEqual(*work.Command, command) {
+			return map[string]string{"status": "accepted", "next": "End this Turn now; the server will schedule the next input."}, nil
+		}
+		return nil, errors.New("this Turn already has a different control request")
 	}
 	if len(session.PendingApprovalIDs) != 0 {
 		return nil, errors.New("resolve outstanding approvals before ending this work")
@@ -678,7 +729,7 @@ func (m *agentManager) reconcileWorkspaceTurnWork(ctx context.Context, workspace
 			failures = append(failures, fmt.Errorf("decode Turn work %s: %w", path, e))
 			continue
 		}
-		if len(file.Works) == 0 {
+		if len(file.Works) == 0 && len(file.Advisories) == 0 {
 			continue
 		}
 		if file.ResourceID == "" {
@@ -726,6 +777,17 @@ func cancelSuspendedTurnWork(root, resource, reason string) error {
 }
 
 func settleTurnTaskState(root, resource string, file turnWorkFile) error {
+	if file.advisoryBarrier() {
+		return nil
+	}
+	if len(file.Works) > 0 {
+		lastWork := file.Works[len(file.Works)-1]
+		for _, advisory := range file.Advisories {
+			if advisory.Standalone && advisory.CreatedAt >= lastWork.CreatedAt {
+				return nil
+			}
+		}
+	}
 	if !strings.Contains(resource, ".task") {
 		return nil
 	}

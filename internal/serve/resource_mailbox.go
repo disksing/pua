@@ -81,6 +81,7 @@ type providerMessageContext struct {
 	OpenerSender   *agentHubMessageSender `json:"openerSender,omitempty"`
 	OpenerResponse string                 `json:"openerResponse"`
 	OpenerUnknown  bool                   `json:"openerUnknown,omitempty"`
+	Chat           *turnChatSnapshot      `json:"chat,omitempty"`
 }
 
 // resourceMailboxMessage is the durable PUA-side ownership record for one
@@ -328,12 +329,7 @@ func cloneMailboxMessage(message resourceMailboxMessage) resourceMailboxMessage 
 		cloned.Notification = &notification
 	}
 	if message.ProviderContext != nil {
-		context := *message.ProviderContext
-		if context.OpenerSender != nil {
-			sender := *context.OpenerSender
-			context.OpenerSender = &sender
-		}
-		cloned.ProviderContext = &context
+		cloned.ProviderContext = cloneProviderMessageContext(message.ProviderContext)
 	}
 	return cloned
 }
@@ -1270,6 +1266,9 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 		if workErr != nil {
 			return workErr
 		}
+		if workFile.advisoryUnowned() && message.RequestedMode != resourceMessageModeInterrupt {
+			return nil
+		}
 		if active && (workFile.active(session.ID, session.CurrentTurnID) != nil ||
 			(message.Causation != nil && message.Causation.AutomaticChat)) &&
 			message.Status == resourceMessageQueued && message.RequestedMode != resourceMessageModeInterrupt {
@@ -1306,6 +1305,9 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 		// resolve Profile routing here rather than from the periodic poller or
 		// settings write path. A true active-Turn steer deliberately keeps using
 		// the current generation.
+		if workFile.advisoryBarrier() && message.RequestedMode != resourceMessageModeInterrupt {
+			return nil
+		}
 		startsNewTurn := message.Status == resourceMessageQueued && !active &&
 			(!message.ModeFrozen || message.ActualMode != resourceMessageModeSteer)
 		if startsNewTurn {

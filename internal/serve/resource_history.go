@@ -65,6 +65,7 @@ type resourceHistoryDelivery struct {
 }
 
 type resourceHistoryTurnSummary struct {
+	Advisories        []turnAdvisory            `json:"advisories,omitempty"`
 	Reference         string                    `json:"reference"`
 	TurnID            string                    `json:"turnId"`
 	Status            string                    `json:"status"`
@@ -437,6 +438,9 @@ func (m *agentManager) resourceHistoryPage(ctx context.Context, workspace serveW
 			if summaryErr != nil {
 				return resourceHistoryPage{}, summaryErr
 			}
+			if err := annotateHistoryAdvisories(workspace.Path, resourceID, &summary); err != nil {
+				return resourceHistoryPage{}, err
+			}
 			segment.Turns = append(segment.Turns, summary)
 			remaining--
 		}
@@ -562,6 +566,9 @@ func (m *agentManager) resourceHistoryTurnForRecord(ctx context.Context, workspa
 	}
 	summary, err := historyTurnSummary(instanceID, resourceID, record, turn, mailbox)
 	if err != nil {
+		return resourceHistoryTurnDetail{}, err
+	}
+	if err := annotateHistoryAdvisories(workspace.Path, resourceID, &summary); err != nil {
 		return resourceHistoryTurnDetail{}, err
 	}
 	if summary.TurnID != turnID {

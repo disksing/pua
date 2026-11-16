@@ -239,7 +239,7 @@ func (f *runtimeFakeAgentHub) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 			f.messageInputs[body.MessageID] = body
 		}
 		inputData := fakeMessageInputData(body)
-		if f.materializeTurns && !body.Steer {
+		if f.materializeTurns && (!body.Steer || f.sessions[id].CurrentTurnID == "") {
 			current := f.sessions[id]
 			current.CurrentTurnID = fmt.Sprintf("turn-%d", len(f.events[id])+1)
 			f.sessions[id] = current
@@ -610,6 +610,9 @@ func (f *runtimeFakeAgentHub) appendLocked(sessionID, eventType string, data any
 	event := agentHubEvent{
 		ID: int64(len(f.events[sessionID]) + 1), Time: time.Now().Format(time.RFC3339),
 		Type: eventType, SessionID: sessionID, Data: raw,
+	}
+	if f.materializeTurns {
+		event.TurnID = f.sessions[sessionID].CurrentTurnID
 	}
 	f.events[sessionID] = append(f.events[sessionID], event)
 	session := f.sessions[sessionID]

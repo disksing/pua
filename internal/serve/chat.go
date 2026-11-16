@@ -102,7 +102,12 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 			return
 		}
 	}
+	noticeWorkID := ""
+	noticeBoundary := false
 	if r.Method == http.MethodPost && (operation == "open" || operation == "close") {
+		noticeContext, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		noticeWorkID, noticeBoundary = m.chatNoticeWork(noticeContext, workspace, resourceID)
+		cancel()
 		lifecycle := chatLifecycleLock(workspace.Path, sharedChatID(resourceID))
 		lifecycle.Lock()
 		defer lifecycle.Unlock()
@@ -231,6 +236,7 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 		writeError(w, errors.New("operation not available to this caller"), 403)
 		return
 	}
+	previousOpen := c.Open
 	switch operation {
 	case "open":
 		if !c.Open {
@@ -310,6 +316,13 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 	default:
 		err = errors.New("unknown chat operation")
 	}
+	if err == nil && previousOpen != c.Open {
+		c.Revision++
+		c.StateNotice = nil
+		if noticeWorkID != "" {
+			c.StateNotice = &chatStateNotice{Revision: c.Revision, OriginWorkID: noticeWorkID, AllowBoundary: noticeBoundary}
+		}
+	}
 	if err == nil {
 		err = saveChatLocked(workspace.Path, c)
 	}
@@ -320,6 +333,9 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 	}
 	if operation == "messages" || operation == "close" || operation == "open" {
 		m.requestChatInput(workspace, resourceID, chatInputTransfer)
+	}
+	if previousOpen != c.Open {
+		m.requestTurnOutput(workspace, resourceID)
 	}
 	// All effects are replayed from durable state by the reconciler. Closing
 	// revokes publication without interrupting execution.

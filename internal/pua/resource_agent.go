@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -794,15 +796,18 @@ func inferCurrentWorkID(client *resourceServerClient, resourceID string) (string
 
 func runMessageList(args []string) error {
 	options, err := parseMailboxBatchArgs(args, messageListUsage)
-	if err != nil || len(options.IDs) != 0 || options.Summary != "" || options.Operation != "" {
+	if err != nil || len(options.IDs) != 0 || options.Summary != "" || options.Operation != "" || options.Resume != "" {
 		return errors.New(messageListUsage)
 	}
 	client, resourceID, err := batchClient(options.ServerURL)
 	if err != nil {
 		return err
 	}
-	path := fmt.Sprintf("/api/workspaces/%s/resources/%s/messages?status=waiting&role=agent&limit=%d",
-		url.PathEscape(client.workspaceID), url.PathEscape(resourceID), options.Limit)
+	path := fmt.Sprintf("/api/workspaces/%s/resources/%s/messages?status=waiting&role=agent",
+		url.PathEscape(client.workspaceID), url.PathEscape(resourceID))
+	if options.Cursor == "" {
+		path += "&limit=" + strconv.Itoa(options.Limit)
+	}
 	if options.From != "" {
 		path += "&fromResource=" + url.QueryEscape(options.From)
 		if options.FromWorkspace != "" {
@@ -832,6 +837,7 @@ type mailboxPendingAck struct {
 	Version       int               `json:"version"`
 	ResourceID    string            `json:"resourceId"`
 	WorkspaceID   string            `json:"workspaceId"`
+	InstanceID    string            `json:"instanceId"`
 	ServerURL     string            `json:"serverUrl"`
 	OperationID   string            `json:"operationId"`
 	WorkID        string            `json:"workId"`
@@ -848,7 +854,8 @@ func mailboxPendingAckDirectory(root string) string {
 }
 
 func mailboxPendingAckPath(root, operationID string) string {
-	return filepath.Join(mailboxPendingAckDirectory(root), url.PathEscape(operationID)+".json")
+	digest := sha256.Sum256([]byte(operationID))
+	return filepath.Join(mailboxPendingAckDirectory(root), hex.EncodeToString(digest[:])+".json")
 }
 
 func writeMailboxPendingAck(root string, pending mailboxPendingAck) error {
@@ -887,7 +894,23 @@ func writeMailboxPendingAck(root string, pending mailboxPendingAck) error {
 		return err
 	}
 	remove = false
-	return nil
+	return syncMailboxPendingAckDirectory(root)
+}
+
+func syncMailboxPendingAckDirectory(root string) error {
+	directory, err := os.Open(mailboxPendingAckDirectory(root))
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	return directory.Sync()
+}
+
+func removeMailboxPendingAck(root, operationID string) error {
+	if err := os.Remove(mailboxPendingAckPath(root, operationID)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return syncMailboxPendingAckDirectory(root)
 }
 
 func readMailboxPendingAck(root, operationID string) (mailboxPendingAck, bool, error) {
@@ -908,9 +931,52 @@ func readMailboxPendingAck(root, operationID string) (mailboxPendingAck, bool, e
 	return pending, true, nil
 }
 
+func matchingMailboxPendingAck(root, resourceID, workspaceID, instanceID string, options mailboxBatchOptions) (mailboxPendingAck, bool, error) {
+	entries, err := os.ReadDir(mailboxPendingAckDirectory(root))
+	if os.IsNotExist(err) {
+		return mailboxPendingAck{}, false, nil
+	}
+	if err != nil {
+		return mailboxPendingAck{}, false, err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(mailboxPendingAckDirectory(root), entry.Name()))
+		if err != nil {
+			return mailboxPendingAck{}, false, err
+		}
+		var pending mailboxPendingAck
+		if err := json.Unmarshal(data, &pending); err != nil {
+			return mailboxPendingAck{}, false, err
+		}
+		if pending.Version == 1 && pending.ResourceID == resourceID && pending.WorkspaceID == workspaceID && pending.InstanceID == instanceID &&
+			pending.Summary == options.Summary && reflect.DeepEqual(pending.IDs, options.IDs) && (options.Operation == "" || options.Operation == pending.OperationID) {
+			if len(options.Receipts) != 0 {
+				if len(options.Receipts) != len(pending.Receipts) {
+					continue
+				}
+				matches := true
+				for index, id := range options.IDs {
+					if index >= len(options.Receipts) || options.Receipts[index] != pending.Receipts[id] {
+						matches = false
+						break
+					}
+				}
+				if !matches {
+					continue
+				}
+			}
+			return pending, true, nil
+		}
+	}
+	return mailboxPendingAck{}, false, nil
+}
+
 func runMessageRead(args []string) error {
 	options, err := parseMailboxBatchArgs(args, messageReadUsage)
-	if err != nil || options.Summary != "" || options.Operation != "" || options.WorkID != "" || len(options.Receipts) != 0 {
+	if err != nil || options.Summary != "" || options.Operation != "" || options.Resume != "" || options.WorkID != "" || len(options.Receipts) != 0 {
 		return errors.New(messageReadUsage)
 	}
 	client, resourceID, err := batchClient(options.ServerURL)
@@ -929,8 +995,11 @@ func runMessageRead(args []string) error {
 		ids = options.IDs
 	} else {
 		var list map[string]any
-		path := fmt.Sprintf("/api/workspaces/%s/resources/%s/messages?status=waiting&role=agent&limit=%d",
-			url.PathEscape(client.workspaceID), url.PathEscape(resourceID), options.Limit)
+		path := fmt.Sprintf("/api/workspaces/%s/resources/%s/messages?status=waiting&role=agent",
+			url.PathEscape(client.workspaceID), url.PathEscape(resourceID))
+		if options.Cursor == "" {
+			path += "&limit=" + strconv.Itoa(options.Limit)
+		}
 		if options.From != "" {
 			path += "&fromResource=" + url.QueryEscape(options.From)
 			if options.FromWorkspace != "" {
@@ -959,10 +1028,19 @@ func runMessageRead(args []string) error {
 		} else {
 			options.Cursor = ""
 		}
+		if len(ids) == 0 {
+			if options.Cursor != "" {
+				fmt.Fprintf(os.Stderr, "pua: next source page: pua message read --cursor=%s\n", options.Cursor)
+			}
+			return printJSON(map[string]any{"items": []any{}, "nextCursor": options.Cursor, "queue": list["queue"]})
+		}
 	}
 	body := map[string]any{"ids": ids, "workId": workID, "maxBytes": options.MaxBytes}
 	var response struct {
-		Items []struct {
+		Capability string          `json:"capability,omitempty"`
+		Queue      json.RawMessage `json:"queue,omitempty"`
+		NextCursor string          `json:"nextCursor,omitempty"`
+		Items      []struct {
 			MessageID   string `json:"messageId"`
 			Text        string `json:"text,omitempty"`
 			Complete    bool   `json:"complete"`
@@ -977,18 +1055,16 @@ func runMessageRead(args []string) error {
 	if err := client.request(context.Background(), http.MethodPost, path, body, &response); err != nil {
 		return err
 	}
-	complete := make([]string, 0)
-	receipts := make([]string, 0)
-	for _, item := range response.Items {
-		if item.Complete {
-			complete = append(complete, item.MessageID)
-		}
+	eligible := make([]string, 0)
+	for index, item := range response.Items {
 		if item.CanAck && item.ReadReceipt != "" {
-			receipts = append(receipts, item.MessageID)
+			eligible = append(eligible, item.MessageID)
 		}
+		response.Items[index].ReadReceipt = ""
 	}
-	if len(complete) > 0 {
-		fmt.Fprintf(os.Stderr, "pua: after completing required work, explicitly confirm: pua message ack --ids=%s --summary='<what was completed>'\n", strings.Join(complete, ","))
+	response.NextCursor = options.Cursor
+	if len(eligible) > 0 {
+		fmt.Fprintf(os.Stderr, "pua: after completing required work, explicitly confirm: pua message ack --ids=%s --summary='<what was completed>'\n", strings.Join(eligible, ","))
 	}
 	if options.Cursor != "" {
 		fmt.Fprintf(os.Stderr, "pua: next source page: pua message read --cursor=%s\n", options.Cursor)
@@ -1016,9 +1092,17 @@ func runMessageAck(args []string) error {
 	if resourceID == "" {
 		return errors.New("batch message commands require a resource execution context")
 	}
+	workspace, err := app.OpenWorkspace(root)
+	if err != nil {
+		return err
+	}
+	runtime, err := workspace.RuntimeConfig()
+	if err != nil {
+		return err
+	}
 	var pending mailboxPendingAck
+	var found bool
 	if options.Resume != "" {
-		var found bool
 		pending, found, err = readMailboxPendingAck(root, options.Resume)
 		if err != nil {
 			return err
@@ -1026,13 +1110,24 @@ func runMessageAck(args []string) error {
 		if !found {
 			return fmt.Errorf("pending ack operation %s was not found; use pua message operation show --id=%s to check whether it committed", options.Resume, options.Resume)
 		}
-		if pending.ResourceID != resourceID {
-			return fmt.Errorf("pending ack operation %s belongs to %s, not %s", pending.OperationID, pending.ResourceID, resourceID)
+	} else {
+		pending, found, err = matchingMailboxPendingAck(root, resourceID, client.workspaceID, runtime.InstanceID, options)
+		if err != nil {
+			return err
 		}
-		if pending.ServerURL != client.baseURL {
-			return fmt.Errorf("pending ack operation %s was recorded for %s, not %s", pending.OperationID, pending.ServerURL, client.baseURL)
+	}
+	if found {
+		if pending.ResourceID != resourceID || pending.WorkspaceID != client.workspaceID || pending.InstanceID != runtime.InstanceID {
+			return fmt.Errorf("pending ack operation %s belongs to a different resource or Workspace instance", pending.OperationID)
 		}
 	} else {
+		if options.Operation != "" {
+			if _, exists, err := readMailboxPendingAck(root, options.Operation); err != nil {
+				return err
+			} else if exists {
+				return fmt.Errorf("operation %s has a different frozen request; inspect or resume the original operation", options.Operation)
+			}
+		}
 		workID, inferErr := inferCurrentWorkID(client, resourceID)
 		if inferErr != nil {
 			return inferErr
@@ -1051,7 +1146,7 @@ func runMessageAck(args []string) error {
 			}
 		}
 		pending = mailboxPendingAck{
-			Version: 1, ResourceID: resourceID, WorkspaceID: client.workspaceID, ServerURL: client.baseURL,
+			Version: 1, ResourceID: resourceID, WorkspaceID: client.workspaceID, InstanceID: runtime.InstanceID, ServerURL: client.baseURL,
 			OperationID: operationID, WorkID: workID, IDs: append([]string(nil), options.IDs...),
 			Receipts: receipts, Summary: options.Summary, CreatedAt: time.Now().Format(time.RFC3339Nano),
 		}
@@ -1073,16 +1168,17 @@ func runMessageAck(args []string) error {
 		queryPath := fmt.Sprintf("/api/workspaces/%s/resources/%s/message-operations/%s", url.PathEscape(client.workspaceID), url.PathEscape(resourceID), url.PathEscape(operationID))
 		var committed map[string]any
 		if queryErr := client.request(context.Background(), http.MethodGet, queryPath, nil, &committed); queryErr == nil {
-			_ = os.Remove(mailboxPendingAckPath(root, operationID))
+			_ = removeMailboxPendingAck(root, operationID)
 			return printJSON(committed)
+		} else {
+			pending.LastError = errors.Join(err, queryErr).Error()
 		}
 		pending.LastAttemptAt = time.Now().Format(time.RFC3339Nano)
-		pending.LastError = err.Error()
-		_ = writeMailboxPendingAck(root, pending)
-		return fmt.Errorf("ack request outcome unknown; committed operation was not found; frozen operation %s can be retried with `pua message ack --resume=%s` or checked with `pua message operation show --id=%s`: %w",
-			operationID, operationID, operationID, err)
+		saveErr := writeMailboxPendingAck(root, pending)
+		return fmt.Errorf("ack outcome unconfirmed; frozen operation %s can be retried with `pua message ack --resume=%s` or checked with `pua message operation show --id=%s`: %w",
+			operationID, operationID, operationID, errors.Join(err, saveErr))
 	}
-	_ = os.Remove(mailboxPendingAckPath(root, operationID))
+	_ = removeMailboxPendingAck(root, operationID)
 	return printJSON(response)
 }
 
@@ -1091,16 +1187,34 @@ func runMessageOperation(args []string) error {
 		return errors.New(messageOperationUsage)
 	}
 	options, err := parseMailboxBatchArgs(args[1:], messageOperationUsage)
-	if err != nil || options.Operation == "" {
+	if err != nil || options.Operation == "" || options.Resume != "" {
 		return errors.New(messageOperationUsage)
 	}
-	client, resourceID, err := batchClient(options.ServerURL)
+	client, root, err := newResourceServerClient(options.ServerURL)
 	if err != nil {
 		return err
 	}
+	resourceID := strings.TrimSpace(os.Getenv(puaResourceIDEnvironment))
+	if resourceID == "" {
+		return errors.New("batch message commands require a resource execution context")
+	}
 	var response map[string]any
 	path := fmt.Sprintf("/api/workspaces/%s/resources/%s/message-operations/%s", url.PathEscape(client.workspaceID), url.PathEscape(resourceID), url.PathEscape(options.Operation))
-	return errors.Join(client.request(context.Background(), http.MethodGet, path, nil, &response), printJSON(response))
+	if err := client.request(context.Background(), http.MethodGet, path, nil, &response); err != nil {
+		pending, found, readErr := readMailboxPendingAck(root, options.Operation)
+		if readErr != nil {
+			return errors.Join(err, readErr)
+		}
+		if found && pending.ResourceID == resourceID && pending.WorkspaceID == client.workspaceID {
+			return errors.Join(err, printJSON(map[string]any{
+				"status": "unconfirmed", "operationId": pending.OperationID, "workId": pending.WorkID,
+				"ids": pending.IDs, "summary": pending.Summary, "lastError": pending.LastError,
+				"resumeCommand": "pua message ack --resume=" + pending.OperationID,
+			}))
+		}
+		return fmt.Errorf("query operation %s: %w", options.Operation, err)
+	}
+	return printJSON(response)
 }
 
 func parseResourceHistoryArgs(args []string, usage string) ([]string, resourceHistoryOptions, error) {

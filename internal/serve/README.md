@@ -121,6 +121,10 @@ Inbox 路由统一返回 410，旧 `users/*/inbox.json` 在取得 Workspace 所�
 
 批量队列接口以 `mailbox_batch_v1` capability 暴露：`GET .../resources/{resourceId}/messages` 只列出 waiting Agent 消息元数据；`POST .../messages/read` 读取显式 ID 的完整正文但不消费；`POST .../messages/ack` 在活动内部 Turn 中把显式 ID 原子确认为 `handled` 终态并保存完整正文、摘要、work/generation 与 History 审计。首批仅允许没有 causation、没有投递尝试、非 interrupt、非续接依赖、且带来源 Workspace instance ID 的稳定资源 Agent 输入。读取会按当前 work 持久化 receipt claim；ack 可以自动复用 claim，也可显式提供同 ID 顺序的 receipts 作恢复。相同 `operationId` 与相同请求幂等返回已提交 operation，冲突请求被拒绝；`GET .../message-operations/{operationId}` 用于未知结果恢复。opener 与独立预览附带冻结的 queue snapshot：waiting 总数、同稳定来源 waiting、批量可确认数、投递中/中断中/结果未知数，并标明是否排除当前 opener 或包含 preview 原消息。
 
+跨页读取会按 work 累计有效 claim，而不是让后一页覆盖前一页；重启后 claim 会按当前 generation、正文和 eligibility 重新校验。read/ack 除 Session 当前状态外还查询 canonical Turn，Session 投影仍显示 running 但 Turn 已 closed 时拒绝写入。CLI 在发送 ack 前把 operationId、work、IDs、receipts 和 summary 冻结到受控目录；响应或 operation 查询都失败时保留原 operation，并提示用 `pua message ack --resume=<operation>` 或以 `pua message operation show` 核对，重试不会生成新的随机 operation。
+
+带 `Files` 附加文档的事务使用字符串版本 `mailbox-batch-v2`，并将资源文档版本提升到 2。旧版 Server 按整数解析事务版本会直接拒绝该 journal，不会忽略 `Files` 后删除提交标记；新版仍可读取无附加文档的 v1 存储。回退到旧版前应停止写入并确认没有未恢复的 v2 journal；旧版会拒绝 v2 metadata，而不是静默降级。事务恢复会校验每个 `Files` 项的临时或最终文件，缺失时不删除 journal。
+
 curl 示例：
 
 ```bash

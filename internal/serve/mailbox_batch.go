@@ -367,7 +367,11 @@ func (m *agentManager) activeBatchWork(ctx context.Context, workspace serveWorks
 		}
 		return turnWork{}, works, err
 	}
-	if turn.Closed || (turn.TurnID != "" && turn.TurnID != work.TurnID) {
+	turnID := turn.TurnID
+	if turnID == "" {
+		turnID = turn.ID
+	}
+	if turn.Closed || turnID != work.TurnID {
 		return turnWork{}, works, &resourceAPIError{Code: "batch_work_unavailable", Message: "work Turn is already closed"}
 	}
 	return *work, works, nil
@@ -424,6 +428,28 @@ func (m *agentManager) readBatch(ctx context.Context, workspace serveWorkspace, 
 	for _, message := range store.Mailbox.Messages {
 		byID[message.ID] = message
 	}
+	claimIndexes := map[string]int{}
+	if request.WorkID != "" {
+		previous := claims
+		claims.Messages = []resourceMailboxMessage{}
+		claims.Receipts = map[string]string{}
+		for _, claimed := range previous.Messages {
+			message, found := byID[claimed.ID]
+			if !found || batchIneligibleReason(message, works) != "" {
+				continue
+			}
+			if _, duplicate := claimIndexes[message.ID]; duplicate {
+				continue
+			}
+			expected := batchReceipt(secret, store.InstanceID, resource, work.ID, work.GenerationID, message)
+			if !hmac.Equal([]byte(previous.Receipts[message.ID]), []byte(expected)) {
+				continue
+			}
+			claimIndexes[message.ID] = len(claims.Messages)
+			claims.Messages = append(claims.Messages, cloneMailboxMessage(message))
+			claims.Receipts[message.ID] = expected
+		}
+	}
 	var source *resourceMailboxMessage
 	remaining := request.MaxBytes
 	for _, id := range request.IDs {
@@ -457,7 +483,12 @@ func (m *agentManager) readBatch(ctx context.Context, workspace serveWorkspace, 
 					item.CanAck = true
 					item.ReadReceipt = batchReceipt(secret, store.InstanceID, resource, work.ID, work.GenerationID, message)
 					claims.Receipts[message.ID] = item.ReadReceipt
-					claims.Messages = append(claims.Messages, cloneMailboxMessage(message))
+					if index, found := claimIndexes[message.ID]; found {
+						claims.Messages[index] = cloneMailboxMessage(message)
+					} else {
+						claimIndexes[message.ID] = len(claims.Messages)
+						claims.Messages = append(claims.Messages, cloneMailboxMessage(message))
+					}
 				}
 			}
 			if source == nil && message.Sender != nil {

@@ -2,6 +2,9 @@ package serve
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -250,13 +253,24 @@ func TestMailboxBatchAccumulatesReadClaimsAcrossPagesAndRestart(t *testing.T) {
 	one := acceptBatchQueued(t, workspace, "project1.task1", "page one", "project1.task42", "ws-a")
 	two := acceptBatchQueued(t, workspace, "project1.task1", "page two", "project1.task42", "ws-a")
 
-	for _, id := range []string{one.ID, two.ID} {
+	for _, id := range []string{one.ID, two.ID, one.ID} {
 		read, err := manager.readBatch(context.Background(), workspace, "project1.task1", mailboxReadRequest{
 			IDs: []string{id}, WorkID: work.ID, MaxBytes: 1024,
 		})
 		if err != nil || len(read.Items) != 1 || !read.Items[0].CanAck {
 			t.Fatalf("read claim was not issued: %#v err=%v", read, err)
 		}
+	}
+	manager.waitBackground()
+	manager = newAgentManager(manager.server)
+	manager.server.agents = manager
+	store, err := loadResourceMailboxStoreForRead(workspace.Path, "project1.task1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := readMailboxClaims(store.Directory, work.ID)
+	if err != nil || len(claims.Messages) != 2 || len(claims.Receipts) != 2 {
+		t.Fatalf("restarted claims lost earlier page or duplicated a read: %#v err=%v", claims, err)
 	}
 	result, err := manager.ackBatch(context.Background(), workspace, "project1.task1", mailboxAckRequest{
 		OperationID: "op-cross-page", WorkID: work.ID, IDs: []string{one.ID, two.ID}, Summary: "handled across read pages",
@@ -274,7 +288,7 @@ func TestMailboxBatchAccumulatesReadClaimsAcrossPagesAndRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	claims, err := readMailboxClaims(reloaded.Directory, work.ID)
+	claims, err = readMailboxClaims(reloaded.Directory, work.ID)
 	if err != nil || len(claims.Messages) != 2 || len(claims.Receipts) != 2 {
 		t.Fatalf("restarted claims lost earlier page: %#v err=%v", claims, err)
 	}
@@ -351,7 +365,7 @@ func TestMailboxBatchTransactionVersionProtectsExtraFiles(t *testing.T) {
 	if _, err := os.Stat(claimsPath); err != nil {
 		t.Fatalf("crash recovery did not restore extra file: %v", err)
 	}
-	if err := writeResourceMailboxJSON(txnPath, resourceMailboxTxn{Version: resourceMailboxTxnBatchFilesVersion + 1}); err != nil {
+	if err := writeResourceMailboxJSON(txnPath, resourceMailboxTxn{Version: "mailbox-future-v3"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := recoverResourceMailboxTransaction(store.Directory); err == nil {
@@ -360,4 +374,189 @@ func TestMailboxBatchTransactionVersionProtectsExtraFiles(t *testing.T) {
 	if _, err := os.Stat(txnPath); err != nil {
 		t.Fatalf("unsupported transaction journal was deleted: %v", err)
 	}
+}
+
+func TestMailboxBatchAckTransactionCrashWindows(t *testing.T) {
+	for window := 0; window <= 7; window++ {
+		t.Run(fmt.Sprintf("renamed-%d", window), func(t *testing.T) {
+			_, workspace, _, _ := outputTestFixture(t, nil)
+			message := acceptBatchQueued(t, workspace, "project1.task1", "complete audited body", "project1.task42", "ws-a")
+			store, err := loadResourceMailboxStoreForRead(workspace.Path, "project1.task1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			handled := cloneMailboxMessage(message)
+			handled.Status = resourceMessageHandled
+			handled.Handling = &mailboxHandling{OperationID: "crash-ack", WorkID: "work-a", Summary: "done", BodyDigest: batchHash(message.Text), History: "history-a"}
+			for index := range store.Mailbox.Messages {
+				if store.Mailbox.Messages[index].ID == message.ID {
+					store.Mailbox.Messages[index] = handled
+				}
+			}
+			store.BatchCommit = &mailboxHandledOperation{
+				Version: 1, RequestDigest: "frozen-request",
+				Result:   mailboxAckResult{OperationID: "crash-ack", WorkID: "work-a", IDs: []string{message.ID}, Handled: 1},
+				Messages: []resourceMailboxMessage{handled},
+			}
+			store.BatchExtra = []resourceMailboxDocument{{
+				path:  mailboxReadClaimsPath(store.Directory, "work-a"),
+				value: mailboxReadClaims{Version: 1, WorkID: "work-a", Receipts: map[string]string{message.ID: "receipt"}, Messages: []resourceMailboxMessage{message}},
+			}}
+			hot, receipts, outbox, scheduler := prepareResourceMailboxDocuments(store)
+			extra, err := mailboxHandledDocuments(store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			documents := 4 + len(extra)
+			if documents != 7 {
+				t.Fatalf("update crash windows for %d transaction documents", documents)
+			}
+			renamed := 0
+			crash := errors.New("simulated process loss")
+			err = commitResourceMailboxDocuments(store.Directory, mailboxStoreMeta(store), hot, receipts, outbox, scheduler, func(temp, final string) error {
+				if renamed == window {
+					return crash
+				}
+				if err := os.Rename(temp, final); err != nil {
+					return err
+				}
+				renamed++
+				if window == documents && renamed == documents {
+					return crash
+				}
+				return nil
+			}, extra...)
+			if !errors.Is(err, crash) || renamed != window {
+				t.Fatalf("fault did not stop at requested window: renamed=%d err=%v", renamed, err)
+			}
+			journal, err := os.ReadFile(resourceMailboxTxnPath(store.Directory))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var legacy struct {
+				Version int `json:"version"`
+			}
+			if err := json.Unmarshal(journal, &legacy); err == nil {
+				t.Fatal("legacy int-version recovery could consume a Files transaction")
+			}
+			reloaded, err := loadResourceMailboxStoreForRead(workspace.Path, "project1.task1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			operation, found, err := readMailboxOperation(reloaded.Directory, "crash-ack")
+			if err != nil || !found || operation.Result.Handled != 1 || len(operation.Messages) != 1 || operation.Messages[0].Text != message.Text {
+				t.Fatalf("operation/body lost after recovery: %#v found=%v err=%v", operation, found, err)
+			}
+			audit, found, err := mailboxHandledByID(reloaded.Directory, message.ID)
+			if err != nil || !found || audit.Status != resourceMessageHandled || audit.Handling.History != "history-a" {
+				t.Fatalf("handled index lost after recovery: %#v found=%v err=%v", audit, found, err)
+			}
+			claims, err := readMailboxClaims(reloaded.Directory, "work-a")
+			if err != nil || claims.Receipts[message.ID] != "receipt" {
+				t.Fatalf("claims lost after recovery: %#v err=%v", claims, err)
+			}
+			if err := recoverResourceMailboxTransaction(reloaded.Directory); err != nil {
+				t.Fatalf("second recovery failed: %v", err)
+			}
+			if _, err := os.Stat(resourceMailboxTxnPath(reloaded.Directory)); !os.IsNotExist(err) {
+				t.Fatalf("recovered journal remains: %v", err)
+			}
+			if _, err := mutateResourceMailboxStoreForResource(workspace.Path, "project1.task1", func(*resourceMailboxStore) error { return nil }); err != nil {
+				t.Fatal(err)
+			}
+			var meta resourceMailboxMeta
+			if found, err := readResourceMailboxJSON(resourceMailboxMetaPath(reloaded.Directory), &meta); err != nil || !found || meta.Version != resourceMailboxBatchStoreVersion {
+				t.Fatalf("ordinary write downgraded batch metadata: %#v found=%v err=%v", meta, found, err)
+			}
+		})
+	}
+}
+
+func TestMailboxBatchFailureBeforeJournalKeepsWaitingState(t *testing.T) {
+	_, workspace, _, _ := outputTestFixture(t, nil)
+	message := acceptBatchQueued(t, workspace, "project1.task1", "still waiting", "project1.task42", "ws-a")
+	store, err := loadResourceMailboxStoreForRead(workspace.Path, "project1.task1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hot, receipts, outbox, scheduler := prepareResourceMailboxDocuments(store)
+	err = writeResourceMailboxStoreDocuments(store.Directory, mailboxStoreMeta(store), hot, receipts, outbox, scheduler, resourceMailboxDocument{
+		path: mailboxOperationPath(store.Directory, "not-committed"), value: make(chan string),
+	})
+	if err == nil {
+		t.Fatal("unsupported document did not stop before journal")
+	}
+	if _, err := os.Stat(resourceMailboxTxnPath(store.Directory)); !os.IsNotExist(err) {
+		t.Fatalf("precommit failure wrote a journal: %v", err)
+	}
+	queued, found, err := mailboxMessageByID(workspace.Path, message.ID)
+	if err != nil || !found || queued.Status != resourceMessageQueued || queued.Text != message.Text {
+		t.Fatalf("precommit failure changed queue: %#v found=%v err=%v", queued, found, err)
+	}
+	if _, found, err := readMailboxOperation(store.Directory, "not-committed"); err != nil || found {
+		t.Fatalf("precommit operation exists: found=%v err=%v", found, err)
+	}
+}
+
+func TestMailboxBatchHundredReportsTenSourceTurnsModel(t *testing.T) {
+	manager, workspace, fake, client := workflowFixture(t)
+	for source := 0; source < 10; source++ {
+		for report := 0; report < 10; report++ {
+			acceptBatchQueued(t, workspace, "project1.task1", fmt.Sprintf("report-%d-%d", source, report), fmt.Sprintf("project1.task%d", source+10), "ws-source")
+		}
+	}
+	turns, handled := 0, 0
+	for iteration := 0; iteration < 11; iteration++ {
+		reconcileWorkflow(t, manager, workspace, client)
+		file := workFile(t, workspace)
+		var active *turnWork
+		for index := range file.Works {
+			if file.Works[index].State == "running" && !file.Works[index].OutputDone {
+				active = &file.Works[index]
+				break
+			}
+		}
+		if active == nil {
+			break
+		}
+		turns++
+		opener, found, err := mailboxMessageByID(workspace.Path, active.ID)
+		if err != nil || !found || opener.Sender == nil {
+			t.Fatalf("opener missing: %#v err=%v", opener, err)
+		}
+		page := batchList(t, workspace, "project1.task1", "fromResource="+opener.Sender.ID+"&fromWorkspaceInstanceId=ws-source&limit=100")
+		ids := []string{}
+		for _, item := range page.Items {
+			if item.CanAck {
+				ids = append(ids, item.MessageID)
+			}
+		}
+		if len(ids) != 9 {
+			t.Fatalf("expected nine sibling reports: %#v", page)
+		}
+		if _, err := manager.readBatch(context.Background(), workspace, "project1.task1", mailboxReadRequest{WorkID: active.ID, IDs: ids}); err != nil {
+			t.Fatal(err)
+		}
+		result, err := manager.ackBatch(context.Background(), workspace, "project1.task1", mailboxAckRequest{
+			OperationID: fmt.Sprintf("model-%d", turns), WorkID: active.ID, IDs: ids, Summary: "all ten source reports checked",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		handled += result.Handled
+		closeWorkflowTurn(fake, *active, "completed", "done")
+	}
+	actual := 0
+	fake.mu.Lock()
+	for _, id := range fake.messageIDs {
+		if !strings.HasPrefix(id, "preview-") && !strings.HasPrefix(id, "advisory-") {
+			actual++
+		}
+	}
+	fake.mu.Unlock()
+	if turns != 10 || handled != 90 || actual != 10 {
+		t.Fatalf("batch model mismatch: turns=%d providerInputs=%d handled=%d", turns, actual, handled)
+	}
+	t.Logf("reports=100 sourceGroups=10 batchedTurns=%d handledByBatch=%d providerBusinessInputs=%d independentTurnStartsWithoutBatch=%d",
+		turns, handled, actual, turns+handled)
 }

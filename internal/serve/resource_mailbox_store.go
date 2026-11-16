@@ -15,9 +15,10 @@ import (
 )
 
 const (
-	resourceMailboxStoreVersion    = 1
-	resourceMailboxExpiredState    = "expired"
-	resourceMailboxHotIndexVersion = 1
+	resourceMailboxStoreVersion      = 1
+	resourceMailboxBatchStoreVersion = 2
+	resourceMailboxExpiredState      = "expired"
+	resourceMailboxHotIndexVersion   = 1
 )
 
 // These are variables so focused tests can shrink the retention window without
@@ -169,7 +170,7 @@ type resourceMailboxLocator struct {
 }
 
 type resourceMailboxTxn struct {
-	Version       int                      `json:"version"`
+	Version       any                      `json:"version"`
 	HotTemp       string                   `json:"hotTemp"`
 	ReceiptTemp   string                   `json:"receiptTemp"`
 	OutboxTemp    string                   `json:"outboxTemp"`
@@ -183,10 +184,14 @@ type resourceMailboxTxnFile struct {
 }
 
 type resourceMailboxTxnEnvelope struct {
-	Version int `json:"version"`
+	Version json.RawMessage `json:"version"`
 }
 
-const resourceMailboxTxnBatchFilesVersion = 2
+const resourceMailboxTxnBatchFilesVersion = "mailbox-batch-v2"
+
+func supportedResourceMailboxStoreVersion(version int) bool {
+	return version == resourceMailboxStoreVersion || version == resourceMailboxBatchStoreVersion
+}
 
 type resourceMailboxDocument struct {
 	value any
@@ -386,12 +391,15 @@ func recoverResourceMailboxTransaction(directory string) error {
 	if err := json.Unmarshal(data, &envelope); err != nil {
 		return fmt.Errorf("read %s: %w", resourceMailboxTxnPath(directory), err)
 	}
-	if envelope.Version > resourceMailboxTxnBatchFilesVersion {
-		return fmt.Errorf("unsupported mailbox transaction version %d", envelope.Version)
+	if string(envelope.Version) != "1" && string(envelope.Version) != `"`+resourceMailboxTxnBatchFilesVersion+`"` {
+		return fmt.Errorf("unsupported mailbox transaction version %s", envelope.Version)
 	}
 	var transaction resourceMailboxTxn
 	if err := json.Unmarshal(data, &transaction); err != nil {
 		return err
+	}
+	if len(transaction.Files) != 0 && string(envelope.Version) == "1" {
+		return errors.New("mailbox transaction Files require mailbox-batch-v2")
 	}
 	for _, item := range []struct{ temp, final string }{
 		{transaction.HotTemp, resourceMailboxHotPath(directory)},
@@ -408,6 +416,8 @@ func recoverResourceMailboxTransaction(directory string) error {
 			}
 		} else if !os.IsNotExist(statErr) {
 			return statErr
+		} else if _, finalErr := os.Stat(item.final); finalErr != nil {
+			return fmt.Errorf("missing mailbox transaction file %s: %w", item.final, finalErr)
 		}
 	}
 	for _, item := range transaction.Files {
@@ -417,6 +427,8 @@ func recoverResourceMailboxTransaction(directory string) error {
 			}
 		} else if !os.IsNotExist(statErr) {
 			return statErr
+		} else if _, finalErr := os.Stat(item.Final); finalErr != nil {
+			return fmt.Errorf("missing mailbox transaction file %s: %w", item.Final, finalErr)
 		}
 		if err := syncResourceMailboxDirectory(filepath.Dir(item.Final)); err != nil {
 			return err
@@ -602,7 +614,7 @@ func loadResourceMailboxStoreInternal(workspacePath, resourceID string) (resourc
 	if found, err := readResourceMailboxJSON(resourceMailboxMetaPath(store.Directory), &meta); err != nil {
 		return store, err
 	} else if found {
-		if meta.Version != resourceMailboxStoreVersion || meta.ResourceID != store.ResourceID || meta.InstanceID != store.InstanceID {
+		if !supportedResourceMailboxStoreVersion(meta.Version) || meta.ResourceID != store.ResourceID || meta.InstanceID != store.InstanceID {
 			return store, fmt.Errorf("resource mailbox metadata mismatch for %s", store.ResourceID)
 		}
 	}
@@ -610,7 +622,7 @@ func loadResourceMailboxStoreInternal(workspacePath, resourceID string) (resourc
 	if found, err := readResourceMailboxJSON(resourceMailboxHotPath(store.Directory), &hot); err != nil {
 		return store, err
 	} else if found {
-		if hot.Version != resourceMailboxStoreVersion {
+		if !supportedResourceMailboxStoreVersion(hot.Version) {
 			return store, fmt.Errorf("unsupported hot mailbox version %d", hot.Version)
 		}
 		store.Mailbox.NextSequence = hot.NextSequence
@@ -626,7 +638,7 @@ func loadResourceMailboxStoreInternal(workspacePath, resourceID string) (resourc
 	if found, err := readResourceMailboxJSON(resourceMailboxReceiptPath(store.Directory), &store.Receipts); err != nil {
 		return store, err
 	} else if found {
-		if store.Receipts.Version != resourceMailboxStoreVersion {
+		if !supportedResourceMailboxStoreVersion(store.Receipts.Version) {
 			return store, fmt.Errorf("unsupported receipt store version %d", store.Receipts.Version)
 		}
 		if store.Receipts.Receipts == nil {
@@ -639,7 +651,7 @@ func loadResourceMailboxStoreInternal(workspacePath, resourceID string) (resourc
 	if found, err := readResourceMailboxJSON(resourceMailboxOutboxPath(store.Directory), &store.Outbox); err != nil {
 		return store, err
 	} else if found {
-		if store.Outbox.Version != resourceMailboxStoreVersion {
+		if !supportedResourceMailboxStoreVersion(store.Outbox.Version) {
 			return store, fmt.Errorf("unsupported outbox store version %d", store.Outbox.Version)
 		}
 		if store.Outbox.Operations == nil {
@@ -651,7 +663,7 @@ func loadResourceMailboxStoreInternal(workspacePath, resourceID string) (resourc
 	}
 	if found, err := readResourceMailboxJSON(resourceMailboxSchedulerPath(store.Directory), &store.Scheduler); err != nil {
 		return store, err
-	} else if found && store.Scheduler.Version != resourceMailboxStoreVersion {
+	} else if found && !supportedResourceMailboxStoreVersion(store.Scheduler.Version) {
 		return store, fmt.Errorf("unsupported scheduler checkpoint version %d", store.Scheduler.Version)
 	}
 
@@ -1065,15 +1077,29 @@ func prepareResourceMailboxDocuments(store resourceMailboxStore) (resourceMailbo
 }
 
 func writeResourceMailboxStoreDocuments(directory string, meta resourceMailboxMeta, hot resourceMailboxHotDocument, receipts resourceMailboxReceiptDocument, outbox resourceMailboxOutboxDocument, scheduler resourceSchedulerCheckpoint, extra ...resourceMailboxDocument) error {
+	return commitResourceMailboxDocuments(directory, meta, hot, receipts, outbox, scheduler, os.Rename, extra...)
+}
+
+func commitResourceMailboxDocuments(directory string, meta resourceMailboxMeta, hot resourceMailboxHotDocument, receipts resourceMailboxReceiptDocument, outbox resourceMailboxOutboxDocument, scheduler resourceSchedulerCheckpoint, rename func(string, string) error, extra ...resourceMailboxDocument) error {
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return err
 	}
-	if _, err := os.Stat(resourceMailboxMetaPath(directory)); os.IsNotExist(err) {
+	var previous resourceMailboxMeta
+	found, err := readResourceMailboxJSON(resourceMailboxMetaPath(directory), &previous)
+	if err != nil {
+		return err
+	}
+	if found && !supportedResourceMailboxStoreVersion(previous.Version) {
+		return fmt.Errorf("unsupported mailbox metadata version %d", previous.Version)
+	}
+	if len(extra) != 0 || (found && previous.Version == resourceMailboxBatchStoreVersion) {
+		meta.Version = resourceMailboxBatchStoreVersion
+		hot.Version, receipts.Version, outbox.Version, scheduler.Version = meta.Version, meta.Version, meta.Version, meta.Version
+	}
+	if !found || meta.Version != previous.Version {
 		if err := writeResourceMailboxMeta(directory, meta); err != nil {
 			return err
 		}
-	} else if err != nil {
-		return err
 	}
 	encode := func(value any) ([]byte, error) {
 		data, err := json.MarshalIndent(value, "", "  ")
@@ -1131,7 +1157,7 @@ func writeResourceMailboxStoreDocuments(directory string, meta resourceMailboxMe
 	for index := 4; index < len(values); index++ {
 		txn.Files = append(txn.Files, resourceMailboxTxnFile{Temp: temporary[index], Final: values[index].path})
 	}
-	if len(txn.Files) != 0 {
+	if meta.Version == resourceMailboxBatchStoreVersion {
 		txn.Version = resourceMailboxTxnBatchFilesVersion
 	}
 	if err := writeResourceMailboxJSON(resourceMailboxTxnPath(directory), txn); err != nil {
@@ -1139,7 +1165,7 @@ func writeResourceMailboxStoreDocuments(directory string, meta resourceMailboxMe
 	}
 	removeTemporary = false
 	for index, item := range values {
-		if err := os.Rename(temporary[index], item.path); err != nil {
+		if err := rename(temporary[index], item.path); err != nil {
 			return err
 		}
 		if err := syncResourceMailboxDirectory(filepath.Dir(item.path)); err != nil {
@@ -1313,7 +1339,7 @@ func listResourceMailboxResourceIDs(workspacePath string) ([]string, error) {
 		if readErr != nil {
 			return nil, readErr
 		}
-		if found && meta.Version == resourceMailboxStoreVersion && strings.TrimSpace(meta.ResourceID) != "" {
+		if found && supportedResourceMailboxStoreVersion(meta.Version) && strings.TrimSpace(meta.ResourceID) != "" {
 			resourceIDs = append(resourceIDs, meta.ResourceID)
 		}
 	}

@@ -182,6 +182,12 @@ type resourceMailboxTxnFile struct {
 	Final string `json:"final"`
 }
 
+type resourceMailboxTxnEnvelope struct {
+	Version int `json:"version"`
+}
+
+const resourceMailboxTxnBatchFilesVersion = 2
+
 type resourceMailboxDocument struct {
 	value any
 	path  string
@@ -369,9 +375,22 @@ func writeResourceMailboxIndexJSON(path string, value any) error {
 }
 
 func recoverResourceMailboxTransaction(directory string) error {
+	var envelope resourceMailboxTxnEnvelope
+	data, readErr := os.ReadFile(resourceMailboxTxnPath(directory))
+	if os.IsNotExist(readErr) {
+		return nil
+	}
+	if readErr != nil {
+		return readErr
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return fmt.Errorf("read %s: %w", resourceMailboxTxnPath(directory), err)
+	}
+	if envelope.Version > resourceMailboxTxnBatchFilesVersion {
+		return fmt.Errorf("unsupported mailbox transaction version %d", envelope.Version)
+	}
 	var transaction resourceMailboxTxn
-	found, err := readResourceMailboxJSON(resourceMailboxTxnPath(directory), &transaction)
-	if err != nil || !found {
+	if err := json.Unmarshal(data, &transaction); err != nil {
 		return err
 	}
 	for _, item := range []struct{ temp, final string }{
@@ -1111,6 +1130,9 @@ func writeResourceMailboxStoreDocuments(directory string, meta resourceMailboxMe
 	txn := resourceMailboxTxn{Version: resourceMailboxStoreVersion, HotTemp: temporary[0], ReceiptTemp: temporary[1], OutboxTemp: temporary[2], SchedulerTemp: temporary[3]}
 	for index := 4; index < len(values); index++ {
 		txn.Files = append(txn.Files, resourceMailboxTxnFile{Temp: temporary[index], Final: values[index].path})
+	}
+	if len(txn.Files) != 0 {
+		txn.Version = resourceMailboxTxnBatchFilesVersion
 	}
 	if err := writeResourceMailboxJSON(resourceMailboxTxnPath(directory), txn); err != nil {
 		return err

@@ -359,6 +359,17 @@ func (m *agentManager) activeBatchWork(ctx context.Context, workspace serveWorks
 		(session.State != "running" && session.State != "waiting_approval") || (internal && len(session.PendingApprovalIDs) != 0) {
 		return turnWork{}, works, &resourceAPIError{Code: "batch_work_unavailable", Message: "work is no longer active or approvals are outstanding"}
 	}
+	turn, _, err := client.SessionTurn(ctx, work.SessionID, work.TurnID)
+	if err != nil {
+		var upstream *agentHubAPIError
+		if errors.As(err, &upstream) && upstream.StatusCode == http.StatusNotFound {
+			return turnWork{}, works, &resourceAPIError{Code: "batch_work_unavailable", Message: "work Turn is already closed"}
+		}
+		return turnWork{}, works, err
+	}
+	if turn.Closed || (turn.TurnID != "" && turn.TurnID != work.TurnID) {
+		return turnWork{}, works, &resourceAPIError{Code: "batch_work_unavailable", Message: "work Turn is already closed"}
+	}
 	return *work, works, nil
 }
 
@@ -404,8 +415,6 @@ func (m *agentManager) readBatch(ctx context.Context, workspace serveWorkspace, 
 			lock.Unlock()
 			return response, err
 		}
-		claims.Messages = []resourceMailboxMessage{}
-		claims.Receipts = map[string]string{}
 	}
 	claimsPath := ""
 	if request.WorkID != "" {

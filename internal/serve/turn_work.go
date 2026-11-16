@@ -193,6 +193,7 @@ func syncTurnChat(root, resource string, work *turnWork, turn agentHubTurn) erro
 		return nil
 	}
 	changed := false
+	sender, senderResolved := "", false
 	var published []string
 	for i, item := range turn.Items {
 		if item.Type != "message" || item.Role != "assistant" || strings.TrimSpace(item.Text) == "" {
@@ -207,6 +208,13 @@ func syncTurnChat(root, resource string, work *turnWork, turn agentHubTurn) erro
 		oldLen := len(chat.Messages)
 		if err := chat.appendMessage(id, "agent", item.Text); err != nil {
 			return err
+		}
+		if len(chat.Messages) != oldLen {
+			if !senderResolved {
+				sender = turnChatSender(root, resource, *work)
+				senderResolved = true
+			}
+			chat.Messages[len(chat.Messages)-1].Sender = sender
 		}
 		changed = changed || len(chat.Messages) != oldLen
 		published = append(published, id)

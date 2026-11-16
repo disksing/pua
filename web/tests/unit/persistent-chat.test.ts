@@ -27,6 +27,25 @@ function setup() {
  return { channel, target };
 }
 function button(target: HTMLElement, text: string) { const result = [...target.querySelectorAll("button")].find(b => b.textContent?.trim() === text); expect(result).toBeTruthy(); return result!; }
+it("shows saved agent names and keeps unknown historical senders generic across binding changes", async () => {
+ vi.stubGlobal("fetch", vi.fn(async (input) => {
+  if (pathname(input).endsWith("/status")) return response({ sessionState: "idle", resolvedAgent: "Current Agent" });
+  return response({ id: "shared", open: true, epoch: 1, unreadCount: 0, messages: [
+   { id: "a", role: "agent", sender: "Original Agent", text: "Original reply", createdAt: "2026-11-17T00:00:00Z" },
+   { id: "b", role: "agent", sender: "reasoning", text: "Profile reply", createdAt: "2026-11-17T00:00:01Z" },
+   { id: "c", role: "agent", text: "Legacy reply", createdAt: "2026-11-17T00:00:02Z" },
+   { id: "d", role: "agent", sender: "  ", text: "Unnamed reply", createdAt: "2026-11-17T00:00:03Z" },
+   { id: "e", role: "user", sender: "Other User", text: "User input", createdAt: "2026-11-17T00:00:04Z" },
+   { id: "f", role: "user", text: "Old input", createdAt: "2026-11-17T00:00:05Z" },
+  ] });
+ }));
+ const { channel, target } = setup();
+ const headings = () => [...target.querySelectorAll("article > small")].map(element => element.textContent?.split(" · ")[0]);
+ await vi.waitFor(() => expect(headings()).toEqual(["Original Agent", "reasoning", "Agent", "Agent", "Other User", "User"]));
+ channel.publish({ ...channel.current(), currentUserName: "other", agentBinding: { kind: "agent", name: "Next Agent" } });
+ await tick();
+ await vi.waitFor(() => expect(headings()).toEqual(["Original Agent", "reasoning", "Agent", "Agent", "Other User", "User"]));
+});
 it("shows queued input counts without copying internal message content into Chat", async () => {
  vi.stubGlobal("fetch", vi.fn(async (input) => {
   if (pathname(input).endsWith("/status")) return response({ sessionState: "working", messages: { waiting: 2 }, waitingMessages: [{ text: "private background request" }] });

@@ -233,7 +233,7 @@
     {/if}
     {#each chat?.messages || [] as message (message.id)}
       <article class:user-message={message.role === "user"}>
-        <small>{message.role === "user" ? (message.sender || "User") : "Agent"} · {new Date(message.createdAt).toLocaleString()}</small>
+        <small>{message.role === "user" ? (message.sender || "User") : (message.sender?.trim() || "Agent")} · {new Date(message.createdAt).toLocaleString()}</small>
         <div class="markdown-rendered" use:markdownResourceNavigation={{ resolveResourceTitle: model.resolveResourceTitle, onNavigate: model.onNavigate, onOpenFile: openLinkedFile }}>{@html markdownHTML(message.text, { resolveResourceTitle: model.resolveResourceTitle, workspaceId: model.workspaceId })}</div>
       </article>
     {/each}

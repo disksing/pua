@@ -119,6 +119,8 @@ Inbox 路由统一返回 410，旧 `users/*/inbox.json` 在取得 Workspace 所�
 
 发送响应包含 `messageId`、`resourceId`、正文（仍在 hot 中时）、`receipt` 标记、`requestedMode`、`actualMode`、`downgradeReason`、对外消息状态、接受/提升时间、可再次 GET 的 `reference`、当前 generation/Turn 关联以及可选的 `lastErrorCode`/`lastError`。历史结果与投递失败通知可能包含 `type`、`causation` 和源消息上的 `notification` receipt。内部 `queued` 对外映射为 `waiting`。`GET .../messages/{messageId}` 对保留的冷 receipt 返回无正文但带 `receipt: true` 的诊断结果；超过 retention 返回稳定 `message_receipt_expired`（HTTP 410），不把已存在的消息伪装成从未存在。状态响应的公共状态只会是 `idle`、`working`、`attention_required`、`unavailable` 或 `archived`；消息等待数与 `waitingMessages` 单列，不会把 Task 标成 queued。状态不再展示 creator；显式绑定、当前 generation/replacement、Turn/steer capability 和最近错误仍可诊断。`POST .../steer` 保留同一个 waiting mailbox 项；旧 Turn 支持 steer 时立即插入，新版固定受众 Turn 则保持排队并发送独立预告，不消费原输入。稳定错误 code 还包括 `message_not_waiting`、`steer_unavailable` 和 `message_receipt_expired`。provenance 只是来源元数据，不构成认证、授权或指令优先级。
 
+批量队列接口以 `mailbox_batch_v1` capability 暴露：`GET .../resources/{resourceId}/messages` 只列出 waiting Agent 消息元数据；`POST .../messages/read` 读取显式 ID 的完整正文但不消费；`POST .../messages/ack` 在活动内部 Turn 中把显式 ID 原子确认为 `handled` 终态并保存完整正文、摘要、work/generation 与 History 审计。首批仅允许没有 causation、没有投递尝试、非 interrupt、非续接依赖、且带来源 Workspace instance ID 的稳定资源 Agent 输入。读取会按当前 work 持久化 receipt claim；ack 可以自动复用 claim，也可显式提供同 ID 顺序的 receipts 作恢复。相同 `operationId` 与相同请求幂等返回已提交 operation，冲突请求被拒绝；`GET .../message-operations/{operationId}` 用于未知结果恢复。opener 与独立预览附带冻结的 queue snapshot：waiting 总数、同稳定来源 waiting、批量可确认数、投递中/中断中/结果未知数，并标明是否排除当前 opener 或包含 preview 原消息。
+
 curl 示例：
 
 ```bash

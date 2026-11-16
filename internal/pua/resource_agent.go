@@ -3,6 +3,7 @@ package pua
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/hex"
@@ -33,6 +34,10 @@ const (
 	taskStateUsage                  = "usage: pua task state [--project=<project>] [--task=<task>] [--server=<url>] | pua task state set <waiting|blocked|paused|completed> [--note=<text>] [--project=<project>] [--task=<task>] [--server=<url>]"
 	messageSendUsage                = "usage: pua message send --to=<resource|user> [--mode=steer|enqueue|interrupt] [--server=<url>] <message>"
 	messageShowUsage                = "usage: pua message show --id=<message-id> [--server=<url>]"
+	messageListUsage                = "usage: pua message list [--from=<resource>] [--from-workspace=<instance-id>] [--limit=<1-100>] [--cursor=<cursor>] [--server=<url>]"
+	messageReadUsage                = "usage: pua message read [--ids=<id,id...>|--from=<resource> [--from-workspace=<instance-id>] [--limit=<1-100>]|--cursor=<cursor>] [--max-bytes=<n>] [--server=<url>]"
+	messageAckUsage                 = "usage: pua message ack --ids=<id,id...> --summary=<text> [--operation=<operation-id>] [--receipts=<receipt,receipt...>] [--server=<url>]"
+	messageOperationUsage           = "usage: pua message operation show --id=<operation-id> [--server=<url>]"
 	workspaceHistoryUsage           = "usage: pua workspace history [--cursor=<cursor>] [--limit=<n>] [--server=<url>] [--json]"
 	projectHistoryUsage             = "usage: pua project history [--project=<project>] [--cursor=<cursor>] [--limit=<n>] [--server=<url>] [--json]"
 	taskHistoryUsage                = "usage: pua task history [--project=<project>] [--task=<task>] [--cursor=<cursor>] [--limit=<n>] [--server=<url>] [--json]"
@@ -459,6 +464,14 @@ func runMessage(args []string) error {
 		return runMessageSend(args[1:])
 	case "show":
 		return runMessageShow(args[1:])
+	case "list":
+		return runMessageList(args[1:])
+	case "read":
+		return runMessageRead(args[1:])
+	case "ack":
+		return runMessageAck(args[1:])
+	case "operation":
+		return runMessageOperation(args[1:])
 	default:
 		return fmt.Errorf("unknown message subcommand %q", args[0])
 	}
@@ -663,6 +676,301 @@ func runMessageShow(args []string) error {
 		return err
 	}
 	return printJSON(response)
+}
+
+type mailboxBatchOptions struct {
+	From, FromWorkspace, Cursor string
+	IDs                         []string
+	Receipts                    []string
+	WorkID                      string
+	Limit, MaxBytes             int
+	Summary, Operation          string
+	ServerURL                   string
+}
+
+func newMessageOperationID() string {
+	random := make([]byte, 12)
+	_, _ = rand.Read(random)
+	return hex.EncodeToString(random)
+}
+
+func parseMailboxBatchArgs(args []string, usage string) (mailboxBatchOptions, error) {
+	var options mailboxBatchOptions
+	options.Limit = 20
+	options.MaxBytes = 64 * 1024
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		value := func(name string) (string, bool) {
+			prefix := "--" + name + "="
+			if strings.HasPrefix(arg, prefix) {
+				return strings.TrimSpace(strings.TrimPrefix(arg, prefix)), true
+			}
+			if arg == "--"+name && index+1 < len(args) && !strings.HasPrefix(args[index+1], "--") {
+				index++
+				return strings.TrimSpace(args[index]), true
+			}
+			return "", false
+		}
+		var matched bool
+		for _, name := range []string{"from", "from-workspace", "cursor", "ids", "receipts", "work", "summary", "operation", "server", "id"} {
+			if raw, ok := value(name); ok {
+				if matched {
+					return options, errors.New(usage)
+				}
+				matched = true
+				switch name {
+				case "from":
+					options.From = raw
+				case "from-workspace":
+					options.FromWorkspace = raw
+				case "cursor":
+					options.Cursor = raw
+				case "ids":
+					options.IDs = append(options.IDs, splitMessageIDs(raw)...)
+				case "receipts":
+					options.Receipts = append(options.Receipts, splitMessageIDs(raw)...)
+				case "work":
+					options.WorkID = raw
+				case "summary":
+					options.Summary = raw
+				case "operation", "id":
+					options.Operation = raw
+				case "server":
+					options.ServerURL = raw
+				}
+			}
+		}
+		if matched {
+			continue
+		}
+		if raw, ok := value("limit"); ok {
+			options.Limit, _ = strconv.Atoi(raw)
+			continue
+		}
+		if raw, ok := value("max-bytes"); ok {
+			options.MaxBytes, _ = strconv.Atoi(raw)
+			continue
+		}
+		return options, errors.New(usage)
+	}
+	return options, nil
+}
+
+func splitMessageIDs(value string) []string {
+	parts := strings.FieldsFunc(value, func(character rune) bool {
+		return character == ',' || character == ' ' || character == '\n' || character == '\t'
+	})
+	ids := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			ids = append(ids, part)
+		}
+	}
+	return ids
+}
+
+func inferCurrentWorkID(client *resourceServerClient, resourceID string) (string, error) {
+	var response struct {
+		Works []struct {
+			ID    string `json:"id"`
+			State string `json:"state"`
+		} `json:"works"`
+	}
+	path := fmt.Sprintf("/api/workspaces/%s/resources/%s/turn-work", url.PathEscape(client.workspaceID), url.PathEscape(resourceID))
+	if err := client.request(context.Background(), http.MethodGet, path, nil, &response); err != nil {
+		return "", err
+	}
+	for index := len(response.Works) - 1; index >= 0; index-- {
+		if response.Works[index].State == "running" {
+			return response.Works[index].ID, nil
+		}
+	}
+	return "", errors.New("no running PUA work was found")
+}
+
+func runMessageList(args []string) error {
+	options, err := parseMailboxBatchArgs(args, messageListUsage)
+	if err != nil || len(options.IDs) != 0 || options.Summary != "" || options.Operation != "" {
+		return errors.New(messageListUsage)
+	}
+	client, resourceID, err := batchClient(options.ServerURL)
+	if err != nil {
+		return err
+	}
+	path := fmt.Sprintf("/api/workspaces/%s/resources/%s/messages?status=waiting&role=agent&limit=%d",
+		url.PathEscape(client.workspaceID), url.PathEscape(resourceID), options.Limit)
+	if options.From != "" {
+		path += "&fromResource=" + url.QueryEscape(options.From)
+		if options.FromWorkspace != "" {
+			path += "&fromWorkspaceInstanceId=" + url.QueryEscape(options.FromWorkspace)
+		}
+	}
+	if options.Cursor != "" {
+		path += "&cursor=" + url.QueryEscape(options.Cursor)
+	}
+	var response map[string]any
+	return errors.Join(client.request(context.Background(), http.MethodGet, path, nil, &response), printJSON(response))
+}
+
+func batchClient(serverURL string) (*resourceServerClient, string, error) {
+	client, _, err := newResourceServerClient(serverURL)
+	if err != nil {
+		return nil, "", err
+	}
+	resourceID := strings.TrimSpace(os.Getenv(puaResourceIDEnvironment))
+	if resourceID == "" {
+		return nil, "", errors.New("batch message commands require a resource execution context")
+	}
+	return client, resourceID, nil
+}
+
+func runMessageRead(args []string) error {
+	options, err := parseMailboxBatchArgs(args, messageReadUsage)
+	if err != nil || options.Summary != "" || options.Operation != "" || options.WorkID != "" || len(options.Receipts) != 0 {
+		return errors.New(messageReadUsage)
+	}
+	client, resourceID, err := batchClient(options.ServerURL)
+	if err != nil {
+		return err
+	}
+	workID, err := inferCurrentWorkID(client, resourceID)
+	if err != nil {
+		return err
+	}
+	var ids []string
+	if len(options.IDs) != 0 {
+		if options.From != "" || options.Cursor != "" {
+			return errors.New(messageReadUsage)
+		}
+		ids = options.IDs
+	} else {
+		var list map[string]any
+		path := fmt.Sprintf("/api/workspaces/%s/resources/%s/messages?status=waiting&role=agent&limit=%d",
+			url.PathEscape(client.workspaceID), url.PathEscape(resourceID), options.Limit)
+		if options.From != "" {
+			path += "&fromResource=" + url.QueryEscape(options.From)
+			if options.FromWorkspace != "" {
+				path += "&fromWorkspaceInstanceId=" + url.QueryEscape(options.FromWorkspace)
+			}
+		}
+		if options.Cursor != "" {
+			path += "&cursor=" + url.QueryEscape(options.Cursor)
+		}
+		if err := client.request(context.Background(), http.MethodGet, path, nil, &list); err != nil {
+			return err
+		}
+		items, ok := list["items"].([]any)
+		if !ok {
+			return errors.New("queue list response did not include items")
+		}
+		for _, item := range items {
+			entry, _ := item.(map[string]any)
+			messageID, _ := entry["messageId"].(string)
+			if eligible, _ := entry["canAck"].(bool); eligible && messageID != "" {
+				ids = append(ids, messageID)
+			}
+		}
+		if next, _ := list["nextCursor"].(string); next != "" {
+			options.Cursor = next
+		} else {
+			options.Cursor = ""
+		}
+	}
+	body := map[string]any{"ids": ids, "workId": workID, "maxBytes": options.MaxBytes}
+	var response struct {
+		Items []struct {
+			MessageID   string `json:"messageId"`
+			Text        string `json:"text,omitempty"`
+			Complete    bool   `json:"complete"`
+			CanAck      bool   `json:"canAck"`
+			Reason      string `json:"reason,omitempty"`
+			BodyDigest  string `json:"bodyDigest,omitempty"`
+			ReadReceipt string `json:"readReceipt,omitempty"`
+		} `json:"items"`
+		RemainingIDs []string `json:"remainingIds"`
+	}
+	path := fmt.Sprintf("/api/workspaces/%s/resources/%s/messages/read", url.PathEscape(client.workspaceID), url.PathEscape(resourceID))
+	if err := client.request(context.Background(), http.MethodPost, path, body, &response); err != nil {
+		return err
+	}
+	complete := make([]string, 0)
+	receipts := make([]string, 0)
+	for _, item := range response.Items {
+		if item.Complete {
+			complete = append(complete, item.MessageID)
+		}
+		if item.CanAck && item.ReadReceipt != "" {
+			receipts = append(receipts, item.MessageID)
+		}
+	}
+	if len(complete) > 0 {
+		fmt.Fprintf(os.Stderr, "pua: after completing required work, explicitly confirm: pua message ack --ids=%s --summary='<what was completed>'\n", strings.Join(complete, ","))
+	}
+	if options.Cursor != "" {
+		fmt.Fprintf(os.Stderr, "pua: next source page: pua message read --cursor=%s\n", options.Cursor)
+	}
+	return printJSON(response)
+}
+
+func runMessageAck(args []string) error {
+	options, err := parseMailboxBatchArgs(args, messageAckUsage)
+	if err != nil || len(options.IDs) == 0 || strings.TrimSpace(options.Summary) == "" || options.From != "" || options.Cursor != "" {
+		return errors.New(messageAckUsage)
+	}
+	client, resourceID, err := batchClient(options.ServerURL)
+	if err != nil {
+		return err
+	}
+	workID, err := inferCurrentWorkID(client, resourceID)
+	if err != nil {
+		return err
+	}
+	operationID := options.Operation
+	if operationID == "" {
+		operationID = "ack-" + newMessageOperationID()
+	}
+	receipts := map[string]string{}
+	if len(options.Receipts) != 0 {
+		if len(options.Receipts) != len(options.IDs) {
+			return errors.New(messageAckUsage)
+		}
+		for index, id := range options.IDs {
+			receipts[id] = options.Receipts[index]
+		}
+	}
+	body := map[string]any{"operationId": operationID, "workId": workID, "ids": options.IDs, "summary": options.Summary}
+	if len(receipts) != 0 {
+		body["receipts"] = receipts
+	}
+	var response map[string]any
+	path := fmt.Sprintf("/api/workspaces/%s/resources/%s/messages/ack", url.PathEscape(client.workspaceID), url.PathEscape(resourceID))
+	if err := client.request(context.Background(), http.MethodPost, path, body, &response); err != nil {
+		queryPath := fmt.Sprintf("/api/workspaces/%s/resources/%s/message-operations/%s", url.PathEscape(client.workspaceID), url.PathEscape(resourceID), url.PathEscape(operationID))
+		var committed map[string]any
+		if queryErr := client.request(context.Background(), http.MethodGet, queryPath, nil, &committed); queryErr == nil {
+			return printJSON(committed)
+		}
+		return fmt.Errorf("ack request outcome unknown; committed operation was not found and request may be retried: %w", err)
+	}
+	return printJSON(response)
+}
+
+func runMessageOperation(args []string) error {
+	if len(args) < 1 || args[0] != "show" {
+		return errors.New(messageOperationUsage)
+	}
+	options, err := parseMailboxBatchArgs(args[1:], messageOperationUsage)
+	if err != nil || options.Operation == "" {
+		return errors.New(messageOperationUsage)
+	}
+	client, resourceID, err := batchClient(options.ServerURL)
+	if err != nil {
+		return err
+	}
+	var response map[string]any
+	path := fmt.Sprintf("/api/workspaces/%s/resources/%s/message-operations/%s", url.PathEscape(client.workspaceID), url.PathEscape(resourceID), url.PathEscape(options.Operation))
+	return errors.Join(client.request(context.Background(), http.MethodGet, path, nil, &response), printJSON(response))
 }
 
 func parseResourceHistoryArgs(args []string, usage string) ([]string, resourceHistoryOptions, error) {

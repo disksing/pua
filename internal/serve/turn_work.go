@@ -452,8 +452,14 @@ func (m *agentManager) previewQueuedInput(ctx context.Context, workspace serveWo
 		if message.Type == "user_chat_input" {
 			role = "user"
 		}
-		text := fmt.Sprintf("System queue notification: message %s from %s (preview only; still queued). Current audience and visibility are unchanged.\n%s",
-			message.ID, providerMessageParty(role, message.Sender, "en"), message.Text)
+		mailbox, err := loadHotResourceMailbox(workspace.Path, message.ResourceID)
+		if err != nil {
+			return err
+		}
+		snapshot := queueSnapshot(mailboxInstanceID(workspace.Path), message.ResourceID, mailbox, &message, "", file)
+		snapshot.IncludesPreviewMessage = true
+		text := fmt.Sprintf("System queue notification: message %s from %s (preview only; still queued). Current audience and visibility are unchanged.%s\n%s",
+			message.ID, providerMessageParty(role, message.Sender, "en"), queueSnapshotText(snapshot), message.Text)
 		payload, err := marshalPUAMessagePayload(puaMessagePayload{
 			Schema: puaMessagePayloadSchema, Text: text, Role: "system", Type: "queue_preview",
 			Causation: &resourceMessageCausation{Type: "queue_preview", SourceResourceID: message.ResourceID, MessageID: message.ID},

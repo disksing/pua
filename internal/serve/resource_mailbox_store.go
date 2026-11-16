@@ -38,6 +38,8 @@ type resourceMailboxStore struct {
 	Receipts    resourceMailboxReceiptDocument
 	Outbox      resourceMailboxOutboxDocument
 	Scheduler   resourceSchedulerCheckpoint
+	BatchCommit *mailboxHandledOperation
+	BatchExtra  []resourceMailboxDocument
 }
 
 type resourceMailboxHotDocument struct {
@@ -86,6 +88,7 @@ type resourceMailboxReceipt struct {
 	PromotedAt                string                       `json:"promotedAt,omitempty"`
 	LastError                 string                       `json:"lastError,omitempty"`
 	LastErrorCode             string                       `json:"lastErrorCode,omitempty"`
+	Handling                  *mailboxHandling             `json:"handling,omitempty"`
 }
 
 type resourceMailboxExpiredEntry struct {
@@ -166,11 +169,22 @@ type resourceMailboxLocator struct {
 }
 
 type resourceMailboxTxn struct {
-	Version       int    `json:"version"`
-	HotTemp       string `json:"hotTemp"`
-	ReceiptTemp   string `json:"receiptTemp"`
-	OutboxTemp    string `json:"outboxTemp"`
-	SchedulerTemp string `json:"schedulerTemp"`
+	Version       int                      `json:"version"`
+	HotTemp       string                   `json:"hotTemp"`
+	ReceiptTemp   string                   `json:"receiptTemp"`
+	OutboxTemp    string                   `json:"outboxTemp"`
+	SchedulerTemp string                   `json:"schedulerTemp"`
+	Files         []resourceMailboxTxnFile `json:"files,omitempty"`
+}
+
+type resourceMailboxTxnFile struct {
+	Temp  string `json:"temp"`
+	Final string `json:"final"`
+}
+
+type resourceMailboxDocument struct {
+	value any
+	path  string
 }
 
 // resourceMailboxHotMarker is the durable membership record for a resource
@@ -377,6 +391,18 @@ func recoverResourceMailboxTransaction(directory string) error {
 			return statErr
 		}
 	}
+	for _, item := range transaction.Files {
+		if _, statErr := os.Stat(item.Temp); statErr == nil {
+			if renameErr := os.Rename(item.Temp, item.Final); renameErr != nil {
+				return renameErr
+			}
+		} else if !os.IsNotExist(statErr) {
+			return statErr
+		}
+		if err := syncResourceMailboxDirectory(filepath.Dir(item.Final)); err != nil {
+			return err
+		}
+	}
 	if err := os.Remove(resourceMailboxTxnPath(directory)); err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -429,6 +455,7 @@ func receiptFromMailboxMessage(message resourceMailboxMessage) resourceMailboxRe
 		AgentHubSessionID: message.AgentHubSessionID, TurnID: message.TurnID, ProviderContext: cloneProviderMessageContext(message.ProviderContext), InterruptTurnID: message.InterruptTurnID,
 		InterruptAt: message.InterruptAt, PromotedAt: message.PromotedAt, LastError: message.LastError,
 		LastErrorCode: message.LastErrorCode,
+		Handling:      message.Handling,
 	}
 }
 
@@ -450,6 +477,7 @@ func mailboxMessageFromReceipt(receipt resourceMailboxReceipt) resourceMailboxMe
 		AgentHubSessionID: receipt.AgentHubSessionID, TurnID: receipt.TurnID, ProviderContext: cloneProviderMessageContext(receipt.ProviderContext), InterruptTurnID: receipt.InterruptTurnID,
 		InterruptAt: receipt.InterruptAt, PromotedAt: receipt.PromotedAt, LastError: receipt.LastError,
 		LastErrorCode: receipt.LastErrorCode, receipt: true,
+		Handling: receipt.Handling,
 	}
 }
 
@@ -1013,7 +1041,7 @@ func prepareResourceMailboxDocuments(store resourceMailboxStore) (resourceMailbo
 	return hot, receiptDoc, outbox, scheduler
 }
 
-func writeResourceMailboxStoreDocuments(directory string, meta resourceMailboxMeta, hot resourceMailboxHotDocument, receipts resourceMailboxReceiptDocument, outbox resourceMailboxOutboxDocument, scheduler resourceSchedulerCheckpoint) error {
+func writeResourceMailboxStoreDocuments(directory string, meta resourceMailboxMeta, hot resourceMailboxHotDocument, receipts resourceMailboxReceiptDocument, outbox resourceMailboxOutboxDocument, scheduler resourceSchedulerCheckpoint, extra ...resourceMailboxDocument) error {
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return err
 	}
@@ -1031,15 +1059,13 @@ func writeResourceMailboxStoreDocuments(directory string, meta resourceMailboxMe
 		}
 		return append(data, '\n'), nil
 	}
-	values := []struct {
-		value any
-		path  string
-	}{
+	values := []resourceMailboxDocument{
 		{hot, resourceMailboxHotPath(directory)},
 		{receipts, resourceMailboxReceiptPath(directory)},
 		{outbox, resourceMailboxOutboxPath(directory)},
 		{scheduler, resourceMailboxSchedulerPath(directory)},
 	}
+	values = append(values, extra...)
 	temporary := make([]string, 0, len(values))
 	removeTemporary := true
 	defer func() {
@@ -1050,6 +1076,9 @@ func writeResourceMailboxStoreDocuments(directory string, meta resourceMailboxMe
 		}
 	}()
 	for _, item := range values {
+		if err := os.MkdirAll(filepath.Dir(item.path), 0o700); err != nil {
+			return err
+		}
 		data, err := encode(item.value)
 		if err != nil {
 			return err
@@ -1071,13 +1100,23 @@ func writeResourceMailboxStoreDocuments(directory string, meta resourceMailboxMe
 			return err
 		}
 		temporary = append(temporary, tmp)
+		if err := syncResourceMailboxDirectory(filepath.Dir(item.path)); err != nil {
+			return err
+		}
 	}
 	txn := resourceMailboxTxn{Version: resourceMailboxStoreVersion, HotTemp: temporary[0], ReceiptTemp: temporary[1], OutboxTemp: temporary[2], SchedulerTemp: temporary[3]}
+	for index := 4; index < len(values); index++ {
+		txn.Files = append(txn.Files, resourceMailboxTxnFile{Temp: temporary[index], Final: values[index].path})
+	}
 	if err := writeResourceMailboxJSON(resourceMailboxTxnPath(directory), txn); err != nil {
 		return err
 	}
+	removeTemporary = false
 	for index, item := range values {
 		if err := os.Rename(temporary[index], item.path); err != nil {
+			return err
+		}
+		if err := syncResourceMailboxDirectory(filepath.Dir(item.path)); err != nil {
 			return err
 		}
 	}
@@ -1169,6 +1208,10 @@ func updateResourceMailboxLocators(workspacePath string, store resourceMailboxSt
 
 func persistResourceMailboxStore(workspacePath string, store resourceMailboxStore, before resourceMailboxStore) error {
 	hot, receipts, outbox, scheduler := prepareResourceMailboxDocuments(store)
+	extra, err := mailboxHandledDocuments(store)
+	if err != nil {
+		return err
+	}
 	active := resourceMailboxStoreNeedsHotWork(store)
 	if active {
 		// Keep the marker and mailbox commit in one ordering boundary. If the
@@ -1178,14 +1221,14 @@ func persistResourceMailboxStore(workspacePath string, store resourceMailboxStor
 		resourceMailboxHotIndexMu.Lock()
 		markerErr := writeResourceMailboxHotMarkerLocked(workspacePath, store.ResourceID)
 		if markerErr == nil {
-			markerErr = writeResourceMailboxStoreDocuments(store.Directory, mailboxStoreMeta(store), hot, receipts, outbox, scheduler)
+			markerErr = writeResourceMailboxStoreDocuments(store.Directory, mailboxStoreMeta(store), hot, receipts, outbox, scheduler, extra...)
 		}
 		resourceMailboxHotIndexMu.Unlock()
 		if markerErr != nil {
 			return markerErr
 		}
 	} else {
-		if err := writeResourceMailboxStoreDocuments(store.Directory, mailboxStoreMeta(store), hot, receipts, outbox, scheduler); err != nil {
+		if err := writeResourceMailboxStoreDocuments(store.Directory, mailboxStoreMeta(store), hot, receipts, outbox, scheduler, extra...); err != nil {
 			return err
 		}
 		// Removal is deliberately best effort after the authoritative mailbox
@@ -1552,8 +1595,14 @@ func mailboxMessageByID(workspacePath, messageID string) (resourceMailboxMessage
 		}
 		for _, message := range store.Mailbox.Messages {
 			if message.ID == messageID {
+				if message.Status == resourceMessageHandled {
+					return mailboxHandledByID(store.Directory, messageID)
+				}
 				return cloneMailboxMessage(message), true, nil
 			}
+		}
+		if message, found, err := mailboxHandledByID(store.Directory, messageID); found || err != nil {
+			return message, found, err
 		}
 		for _, expired := range store.Receipts.Expired {
 			if expired.ID == messageID {
@@ -1577,6 +1626,9 @@ func mailboxMessageByID(workspacePath, messageID string) (resourceMailboxMessage
 		}
 		for _, message := range store.Mailbox.Messages {
 			if message.ID == messageID {
+				if message.Status == resourceMessageHandled {
+					return mailboxHandledByID(store.Directory, messageID)
+				}
 				locator := resourceMailboxLocator{Version: resourceMailboxStoreVersion, MessageID: message.ID, ResourceID: resourceID, ResourceKey: resourceMailboxKey(mailboxInstanceID(workspacePath), resourceID), State: "receipt", UpdatedAt: time.Now().Format(time.RFC3339Nano)}
 				if !message.receipt {
 					locator.State = "hot"
@@ -1584,6 +1636,9 @@ func mailboxMessageByID(workspacePath, messageID string) (resourceMailboxMessage
 				_ = writeResourceMailboxIndexJSON(resourceMailboxLocatorPath(workspacePath, message.ID), locator)
 				return cloneMailboxMessage(message), true, nil
 			}
+		}
+		if message, found, err := mailboxHandledByID(store.Directory, messageID); found || err != nil {
+			return message, found, err
 		}
 		for _, expired := range store.Receipts.Expired {
 			if expired.ID == messageID {

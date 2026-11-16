@@ -185,6 +185,7 @@ func providerMessageTextWithContext(message resourceMailboxMessage, steer bool) 
 		if c.PreviousResult != "" {
 			context += "\n" + c.PreviousResult
 		}
+		context += queueSnapshotText(c.Queue)
 		return strings.TrimSpace(localize.MustRender(c.Language, "turn-opener.md", map[string]any{
 			"Party":   providerMessageParty(c.OpenerRole, c.OpenerSender, c.Language),
 			"Visible": c.ChatVisible, "WorkID": c.WorkID, "Context": context, "Text": message.Text,
@@ -301,6 +302,15 @@ func providerContextMailboxOpener(workspacePath, resourceID, generationID, sessi
 
 func (m *agentManager) ensureProviderMessageContext(ctx context.Context, workspace serveWorkspace, client *agentHubClient, session agentHubSession, generationID string, message resourceMailboxMessage) (resourceMailboxMessage, error) {
 	if message.ProviderContext != nil {
+		if message.ProviderContext.Protocol == 1 && message.ProviderContext.Queue == nil && message.AttemptCount == 0 && message.Status == resourceMessageQueued {
+			snapshot, err := sampleMailboxQueue(workspace, message)
+			if err != nil {
+				return resourceMailboxMessage{}, err
+			}
+			return updateMailboxMessage(workspace.Path, message.ID, func(current *resourceMailboxMessage) {
+				current.ProviderContext.Queue = snapshot
+			})
+		}
 		return message, nil
 	}
 	language, err := workspaceContentLanguage(workspace.Path)
@@ -366,6 +376,12 @@ func (m *agentManager) ensureProviderMessageContext(ctx context.Context, workspa
 			if !contextValue.OpenerUnknown {
 				contextValue.OpenerResponse = providerOpenerResponse(contextValue.OpenerRole, openerMessage)
 			}
+		}
+	}
+	if contextValue.Protocol == 1 {
+		contextValue.Queue, err = sampleMailboxQueue(workspace, message)
+		if err != nil {
+			return resourceMailboxMessage{}, err
 		}
 	}
 	return updateMailboxMessage(workspace.Path, message.ID, func(current *resourceMailboxMessage) {

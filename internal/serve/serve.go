@@ -669,6 +669,14 @@ func (s *server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 			s.agents.handleResourceMessages(w, r, id, parts[2])
 			return
 		}
+		if len(parts) == 5 && parts[3] == "messages" && (parts[4] == "read" || parts[4] == "ack") {
+			s.agents.handleMailboxBatch(w, r, id, parts[2], parts[4])
+			return
+		}
+		if len(parts) == 5 && parts[3] == "message-operations" {
+			s.agents.handleMailboxBatch(w, r, id, parts[2], "operation:"+parts[4])
+			return
+		}
 		if len(parts) == 4 && parts[3] == "agent-binding" {
 			if r.Method != http.MethodPut {
 				w.WriteHeader(http.StatusMethodNotAllowed)

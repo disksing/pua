@@ -133,7 +133,7 @@ func TestOpenReplaysWhenSnapshotLagsLog(t *testing.T) {
 	if state == nil {
 		t.Fatal("session missing after reopen")
 	}
-	if !state.eventsLoaded {
+	if reopened.Diagnostics().FallbackReplays != 1 {
 		t.Fatal("a snapshot behind the log must fall back to a full replay")
 	}
 	value, err := reopened.Get(created.ID)

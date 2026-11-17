@@ -34,6 +34,7 @@ func (s *Store) TurnsPage(id string, after, before int64, latest bool, limit int
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	defer s.trimEventsLocked(state)
 	turns, err := s.turnRecordsLocked(state, id)
 	if err != nil {
 		return TurnPage{}, err
@@ -84,6 +85,7 @@ func (s *Store) Turn(id, turnID string) (TurnSummary, error) {
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	defer s.trimEventsLocked(state)
 	turns, err := s.turnRecordsLocked(state, id)
 	if err != nil {
 		return TurnSummary{}, err
@@ -100,7 +102,10 @@ func (s *Store) projectTurnEventLocked(state *sessionState, id string, event Eve
 	if event.TurnID == "" || (event.Type != "turn.started" && event.Type != EventTurnCompleted && event.Type != EventTurnFailed && event.Type != EventTurnCancelled) {
 		return nil
 	}
-	turns := s.buildTurns(state.events)
+	turns, err := s.buildStoredTurnsLocked(state, id, event.TurnID)
+	if err != nil {
+		return err
+	}
 	for i := len(turns) - 1; i >= 0; i-- {
 		if turns[i].ID != event.TurnID {
 			continue
@@ -148,10 +153,10 @@ func (s *Store) turnRecordsLocked(state *sessionState, id string) ([]TurnSummary
 		s.turnCache.put(id, state.revision, info, turns)
 		return turns, nil
 	}
-	if err := s.ensureEventsLocked(state, id); err != nil {
+	turns, err = s.buildStoredTurnsLocked(state, id, "")
+	if err != nil {
 		return nil, err
 	}
-	turns = s.buildTurns(state.events)
 	if err := writeTurnRecordsAtomic(path, turns); err != nil {
 		return nil, fmt.Errorf("rebuild turn projection: %w", err)
 	}
@@ -249,12 +254,22 @@ func writeTurnRecordsAtomic(path string, turns []TurnSummary) error {
 }
 
 func buildTurnSummaries(events []Event) []TurnSummary {
+	turns, _ := buildTurnSummariesFrom(func(visit func(Event)) error {
+		for _, event := range events {
+			visit(event)
+		}
+		return nil
+	})
+	return turns
+}
+
+func buildTurnSummariesFrom(scan func(func(Event)) error) ([]TurnSummary, error) {
 	turns := make([]TurnSummary, 0)
 	byID := make(map[string]int)
 	toolIdentities := make(map[string]map[string]struct{})
-	for _, event := range events {
+	err := scan(func(event Event) {
 		if event.TurnID == "" {
-			continue
+			return
 		}
 		index, ok := byID[event.TurnID]
 		if !ok {
@@ -328,11 +343,14 @@ func buildTurnSummaries(events []Event) []TurnSummary {
 			}
 		}
 		turn.DurationMS = durationMilliseconds(turn.StartedAt, event.Time)
+	})
+	if err != nil {
+		return nil, err
 	}
 	for index := range turns {
 		deriveFinalReply(&turns[index])
 	}
-	return turns
+	return turns, nil
 }
 
 func invisibleTurnEvent(eventType string) bool {
@@ -648,22 +666,32 @@ func (s *Store) DurableMessages(id string) ([]DurableMessage, error) {
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if err := s.ensureEventsLocked(state, id); err != nil {
-		return nil, err
-	}
-	return buildDurableMessages(state.events), nil
+	defer s.trimEventsLocked(state)
+	return buildDurableMessagesFrom(func(visit func(Event)) error {
+		return s.scanMessageEventsLocked(state, id, visit)
+	})
 }
 
 func buildDurableMessages(events []Event) []DurableMessage {
+	messages, _ := buildDurableMessagesFrom(func(visit func(Event)) error {
+		for _, event := range events {
+			visit(event)
+		}
+		return nil
+	})
+	return messages
+}
+
+func buildDurableMessagesFrom(scan func(func(Event)) error) ([]DurableMessage, error) {
 	messages := make([]DurableMessage, 0)
 	byEventID := make(map[int64]int)
 	byTurnID := make(map[string][]int)
-	for _, event := range events {
+	err := scan(func(event Event) {
 		switch event.Type {
 		case EventMessageInput:
 			var input MessageInput
 			if json.Unmarshal(event.Data, &input) != nil {
-				continue
+				return
 			}
 			byEventID[event.ID] = len(messages)
 			byTurnID[event.TurnID] = append(byTurnID[event.TurnID], len(messages))
@@ -671,14 +699,14 @@ func buildDurableMessages(events []Event) []DurableMessage {
 		case EventMessageDelivery:
 			var delivery MessageDeliveryEventData
 			if json.Unmarshal(event.Data, &delivery) != nil {
-				continue
+				return
 			}
 			index, ok := byEventID[delivery.MessageEventID]
 			if !ok {
-				continue
+				return
 			}
 			if messages[index].Terminal && !(messages[index].State == MessageDeliveryClosed && delivery.State == MessageDeliveryAccepted) {
-				continue
+				return
 			}
 			if delivery.Attempt > messages[index].Attempt {
 				messages[index].Attempt = delivery.Attempt
@@ -714,8 +742,11 @@ func buildDurableMessages(events []Event) []DurableMessage {
 				}
 			}
 		}
+	})
+	if err != nil {
+		return nil, err
 	}
-	return messages
+	return messages, nil
 }
 
 // MessageByID returns the canonical durable input for a caller-stable ID.

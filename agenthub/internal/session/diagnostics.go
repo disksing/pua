@@ -14,6 +14,9 @@ type storeMetrics struct {
 	historyLoadErrors       atomic.Uint64
 	historyLoadNanos        atomic.Int64
 	cachedEventPayloadBytes atomic.Int64
+	cachedEventBytes        atomic.Int64
+	eventIndexBuilds        atomic.Uint64
+	eventIndexBuildNanos    atomic.Int64
 	metadataQueries         atomic.Uint64
 	metadataQueryNanos      atomic.Int64
 	turnCacheHits           atomic.Uint64
@@ -28,25 +31,30 @@ type storeMetrics struct {
 // cumulative nanoseconds; gauges are estimates, not Go heap or RSS attribution.
 // No session IDs, event contents, or environment variables are exposed.
 type StoreDiagnostics struct {
-	OpenNanos               int64  `json:"openNanos"`
-	SnapshotCheckNanos      int64  `json:"snapshotCheckNanos"`
-	TrustedSnapshots        uint64 `json:"trustedSnapshots"`
-	FallbackReplays         uint64 `json:"fallbackReplays"`
-	HistoryLoads            uint64 `json:"historyLoads"`
-	HistoryLoadErrors       uint64 `json:"historyLoadErrors"`
-	HistoryLoadNanos        int64  `json:"historyLoadNanos"`
-	CachedEventPayloadBytes int64  `json:"cachedEventPayloadBytes"`
-	MetadataQueries         uint64 `json:"metadataQueries"`
-	MetadataQueryNanos      int64  `json:"metadataQueryNanos"`
-	TurnCacheHits           uint64 `json:"turnCacheHits"`
-	TurnCacheEntries        int    `json:"turnCacheEntries"`
-	TurnCacheEstimatedBytes int64  `json:"turnCacheEstimatedBytes"`
-	TurnCacheBudgetBytes    int64  `json:"turnCacheBudgetBytes"`
-	TurnProjectionReads     uint64 `json:"turnProjectionReads"`
-	TurnBuilds              uint64 `json:"turnBuilds"`
-	TurnBuildNanos          int64  `json:"turnBuildNanos"`
-	TurnRebuilds            uint64 `json:"turnRebuilds"`
-	TurnProjectionWrites    uint64 `json:"turnProjectionWrites"`
+	OpenNanos                 int64  `json:"openNanos"`
+	SnapshotCheckNanos        int64  `json:"snapshotCheckNanos"`
+	TrustedSnapshots          uint64 `json:"trustedSnapshots"`
+	FallbackReplays           uint64 `json:"fallbackReplays"`
+	HistoryLoads              uint64 `json:"historyLoads"`
+	HistoryLoadErrors         uint64 `json:"historyLoadErrors"`
+	HistoryLoadNanos          int64  `json:"historyLoadNanos"`
+	CachedEventPayloadBytes   int64  `json:"cachedEventPayloadBytes"`
+	CachedEventBytes          int64  `json:"cachedEventBytes"`
+	EventHistorySessionBudget int64  `json:"eventHistorySessionBudget"`
+	EventHistoryStoreBudget   int64  `json:"eventHistoryStoreBudget"`
+	EventIndexBuilds          uint64 `json:"eventIndexBuilds"`
+	EventIndexBuildNanos      int64  `json:"eventIndexBuildNanos"`
+	MetadataQueries           uint64 `json:"metadataQueries"`
+	MetadataQueryNanos        int64  `json:"metadataQueryNanos"`
+	TurnCacheHits             uint64 `json:"turnCacheHits"`
+	TurnCacheEntries          int    `json:"turnCacheEntries"`
+	TurnCacheEstimatedBytes   int64  `json:"turnCacheEstimatedBytes"`
+	TurnCacheBudgetBytes      int64  `json:"turnCacheBudgetBytes"`
+	TurnProjectionReads       uint64 `json:"turnProjectionReads"`
+	TurnBuilds                uint64 `json:"turnBuilds"`
+	TurnBuildNanos            int64  `json:"turnBuildNanos"`
+	TurnRebuilds              uint64 `json:"turnRebuilds"`
+	TurnProjectionWrites      uint64 `json:"turnProjectionWrites"`
 }
 
 func (s *Store) Diagnostics() StoreDiagnostics {
@@ -56,6 +64,8 @@ func (s *Store) Diagnostics() StoreDiagnostics {
 		TrustedSnapshots: s.metrics.trustedSnapshots.Load(), FallbackReplays: s.metrics.fallbackReplays.Load(),
 		HistoryLoads: s.metrics.historyLoads.Load(), HistoryLoadErrors: s.metrics.historyLoadErrors.Load(),
 		HistoryLoadNanos: s.metrics.historyLoadNanos.Load(), CachedEventPayloadBytes: s.metrics.cachedEventPayloadBytes.Load(),
+		CachedEventBytes: s.metrics.cachedEventBytes.Load(), EventHistorySessionBudget: eventHistorySessionBudget, EventHistoryStoreBudget: eventHistoryStoreBudget,
+		EventIndexBuilds: s.metrics.eventIndexBuilds.Load(), EventIndexBuildNanos: s.metrics.eventIndexBuildNanos.Load(),
 		MetadataQueries: s.metrics.metadataQueries.Load(), MetadataQueryNanos: s.metrics.metadataQueryNanos.Load(),
 		TurnCacheHits: s.metrics.turnCacheHits.Load(), TurnCacheEntries: entries, TurnCacheEstimatedBytes: bytes, TurnCacheBudgetBytes: turnCacheBudget,
 		TurnProjectionReads: s.metrics.turnProjectionReads.Load(), TurnBuilds: s.metrics.turnBuilds.Load(), TurnBuildNanos: s.metrics.turnBuildNanos.Load(),
@@ -70,20 +80,24 @@ func (s *Store) Count() int {
 }
 
 func (s *Store) readHistory(path string) ([]Event, error) {
+	var events []Event
+	err := s.scanHistory(path, func(event Event, _, _ int64) error {
+		events = append(events, event)
+		return nil
+	})
+	return events, err
+}
+
+func (s *Store) scanHistory(path string, visit func(Event, int64, int64) error) error {
 	start := time.Now()
-	events, err := readEventsRepairTail(path)
+	err := walkEventLog(path, visit)
 	s.metrics.historyLoadNanos.Add(time.Since(start).Nanoseconds())
 	if err != nil {
 		s.metrics.historyLoadErrors.Add(1)
-		return nil, err
+		return err
 	}
 	s.metrics.historyLoads.Add(1)
-	var bytes int64
-	for _, event := range events {
-		bytes += int64(len(event.Data))
-	}
-	s.metrics.cachedEventPayloadBytes.Add(bytes)
-	return events, nil
+	return nil
 }
 
 func (s *Store) buildTurns(events []Event) []TurnSummary {

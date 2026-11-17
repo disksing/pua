@@ -1,7 +1,6 @@
 package session
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -74,11 +73,12 @@ type sessionState struct {
 	session  Session
 	events   []Event
 	// eventsLoaded reports whether events holds the full durable history.
-	// Sessions opened from a trusted session.json snapshot start unloaded
-	// and parse events.jsonl only when history is first read or appended
-	// to, which keeps Open proportional to the number of sessions instead
-	// of the total event-log size.
-	eventsLoaded bool
+	// Sessions opened from a trusted session.json snapshot start unloaded.
+	// Large histories use sparse disk pages; appends need only the tail.
+	eventsLoaded      bool
+	eventPayloadBytes int64
+	eventCacheBytes   int64
+	eventIndex        *eventLogIndex
 	// revision advances for every durable content update, including delta
 	// merges that retain LastEventID. Projection stamps never survive Open.
 	revision               uint64
@@ -381,11 +381,12 @@ func (s *Store) Append(id, eventType, turnID string, data []byte) (Event, error)
 		state.mu.Unlock()
 		return Event{}, ErrArchived
 	}
-	if err := s.ensureEventsLocked(state, id); err != nil {
+	if err := s.ensureAppendTailLocked(state, id); err != nil {
 		state.mu.Unlock()
 		return Event{}, err
 	}
 	event, broadcast, err := s.appendLocked(state, id, eventType, turnID, data)
+	s.trimEventsLocked(state)
 	state.mu.Unlock()
 	if err != nil {
 		return Event{}, err
@@ -430,6 +431,13 @@ func (s *Store) appendLocked(state *sessionState, id, eventType, turnID string, 
 	}
 	state.session = projected
 	state.events = append(state.events, event)
+	state.eventPayloadBytes += int64(len(event.Data))
+	state.eventCacheBytes += estimateEventCacheBytes(event)
+	s.metrics.cachedEventBytes.Add(estimateEventCacheBytes(event))
+	if state.eventIndex != nil {
+		state.eventIndex.append(event, state.eventIndex.size, int64(len(encoded)))
+		state.eventIndex.file, _ = os.Stat(s.eventsPath(id))
+	}
 	state.revision++
 	s.turnCache.remove(id)
 	s.metrics.cachedEventPayloadBytes.Add(int64(len(event.Data)))
@@ -555,6 +563,14 @@ func (s *Store) mergeDeltaLocked(state *sessionState, last Event, mergedData, pa
 	}
 	state.session = projected
 	state.events[len(state.events)-1] = merged
+	state.eventPayloadBytes += int64(len(merged.Data) - len(last.Data))
+	cacheDelta := int64(cap(merged.Data) - cap(last.Data))
+	state.eventCacheBytes += cacheDelta
+	s.metrics.cachedEventBytes.Add(cacheDelta)
+	if state.eventIndex != nil {
+		state.eventIndex.merge(merged, int64(len(encoded)-len(oldEncoded)))
+		state.eventIndex.file, _ = os.Stat(s.eventsPath(last.SessionID))
+	}
 	state.revision++
 	s.turnCache.remove(last.SessionID)
 	s.metrics.cachedEventPayloadBytes.Add(int64(len(merged.Data) - len(last.Data)))
@@ -644,6 +660,7 @@ func (s *Store) Archive(id string) (Session, error) {
 			return Session{}, fmt.Errorf("%w: open turn or pending approval", ErrSessionActive)
 		}
 		_, broadcast, err := s.appendLocked(state, id, "session.archived", "", nil)
+		s.trimEventsLocked(state)
 		state.mu.Unlock()
 		if err != nil {
 			return Session{}, err
@@ -717,11 +734,12 @@ func (s *Store) UpdateLaunchEnvironment(id string, overlay map[string]string) (S
 		state.mu.Unlock()
 		return Session{}, err
 	}
-	if err := s.ensureEventsLocked(state, id); err != nil {
+	if err := s.ensureAppendTailLocked(state, id); err != nil {
 		state.mu.Unlock()
 		return Session{}, err
 	}
 	_, broadcast, err := s.appendLocked(state, id, "session.launch-environment", "", data)
+	s.trimEventsLocked(state)
 	state.mu.Unlock()
 	if err != nil {
 		return Session{}, err
@@ -745,13 +763,26 @@ func (s *Store) EventsPage(id string, after int64, limit int) (EventPage, error)
 	limit = normalizeEventLimit(limit)
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	defer s.trimEventsLocked(state)
 	latest := state.session.LastEventID
 	if after > latest {
 		return EventPage{After: after, Limit: limit, NextAfter: after, LatestCursor: latest},
 			fmt.Errorf("%w: %d > %d", ErrEventCursorAhead, after, latest)
 	}
-	if err := s.ensureEventsLocked(state, id); err != nil {
+	indexed, err := s.useHistoryPagesLocked(state, id)
+	if err != nil {
 		return EventPage{}, err
+	}
+	if indexed {
+		events, err := s.historyPageLocked(state, id, after, latest, limit)
+		if err != nil {
+			return EventPage{}, err
+		}
+		next := after
+		if len(events) > 0 {
+			next = events[len(events)-1].ID
+		}
+		return EventPage{Events: events, After: after, NextAfter: next, LatestCursor: latest, Limit: limit, HasMore: next < latest}, nil
 	}
 	start := sort.Search(len(state.events), func(index int) bool {
 		return state.events[index].ID > after
@@ -792,6 +823,7 @@ func (s *Store) EventsPageBefore(id string, before int64, limit int) (EventPage,
 	limit = normalizeEventLimit(limit)
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	defer s.trimEventsLocked(state)
 	latest := state.session.LastEventID
 	if before < 1 {
 		before = 1
@@ -799,8 +831,25 @@ func (s *Store) EventsPageBefore(id string, before int64, limit int) (EventPage,
 	if before > latest+1 {
 		before = latest + 1
 	}
-	if err := s.ensureEventsLocked(state, id); err != nil {
+	indexed, err := s.useHistoryPagesLocked(state, id)
+	if err != nil {
 		return EventPage{}, err
+	}
+	if indexed {
+		events, err := s.historyPageLocked(state, id, max(before-int64(limit)-1, 0), before-1, limit)
+		if err != nil {
+			return EventPage{}, err
+		}
+		next := before - 1
+		page := EventPage{Events: events, Limit: limit, Before: before, LatestCursor: latest}
+		if len(events) > 0 {
+			next = events[len(events)-1].ID
+			page.NextBefore = events[0].ID
+			page.HasMoreBefore = events[0].ID > 1
+		}
+		page.NextAfter = next
+		page.HasMore = next < latest
+		return page, nil
 	}
 	end := sort.Search(len(state.events), func(index int) bool {
 		return state.events[index].ID >= before
@@ -839,8 +888,13 @@ func (s *Store) EventsThrough(id string, after, highWater int64, limit int) ([]E
 	limit = normalizeEventLimit(limit)
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if err := s.ensureEventsLocked(state, id); err != nil {
+	defer s.trimEventsLocked(state)
+	indexed, err := s.useHistoryPagesLocked(state, id)
+	if err != nil {
 		return nil, err
+	}
+	if indexed {
+		return s.historyPageLocked(state, id, after, highWater, limit)
 	}
 	start := sort.Search(len(state.events), func(index int) bool {
 		return state.events[index].ID > after
@@ -935,26 +989,42 @@ func (s *Store) loadSession(dir, id string) (*sessionState, error) {
 		return &sessionState{session: snapshot}, nil
 	}
 	s.metrics.fallbackReplays.Add(1)
-	events, err := s.readHistory(filepath.Join(dir, "events.jsonl"))
+	var projected Session
+	var events []Event
+	var cacheBytes int64
+	loaded := true
+	err := s.scanHistory(filepath.Join(dir, "events.jsonl"), func(event Event, _, _ int64) error {
+		if event.SessionID != id {
+			return fmt.Errorf("event %d belongs to %s", event.ID, event.SessionID)
+		}
+		if err := applyEvent(&projected, event); err != nil {
+			return fmt.Errorf("event %d: %w", event.ID, err)
+		}
+		cacheBytes += estimateEventCacheBytes(event)
+		if loaded && (cacheBytes > eventHistorySessionBudget || cacheBytes+s.metrics.cachedEventBytes.Load() > eventHistoryStoreBudget) {
+			loaded = false
+			events = nil
+		}
+		if loaded || len(events) == 0 {
+			events = append(events, event)
+		} else {
+			events[0] = event
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
 	if len(events) == 0 {
 		return nil, errors.New("session has no events")
 	}
-	var projected Session
-	for _, event := range events {
-		if event.SessionID != id {
-			return nil, fmt.Errorf("event %d belongs to %s", event.ID, event.SessionID)
-		}
-		if err := applyEvent(&projected, event); err != nil {
-			return nil, fmt.Errorf("event %d: %w", event.ID, err)
-		}
-	}
 	if err := writeJSONAtomic(filepath.Join(dir, "session.json"), projected); err != nil {
 		return nil, err
 	}
-	return &sessionState{session: projected, events: events, eventsLoaded: true}, nil
+	state := &sessionState{session: projected}
+	s.setEventsLocked(state, events, loaded)
+	s.trimEventsLocked(state)
+	return state, nil
 }
 
 // snapshotTailWindow bounds the tail read used to validate a session.json
@@ -970,8 +1040,7 @@ const snapshotTailWindow = 1 << 20
 // match the snapshot's cursor. Appends always write the log first and the
 // snapshot second, so a matching watermark proves the snapshot covers every
 // durable event. The event log remains the source of truth: it is still
-// parsed in full on first actual use (history read, append, provider
-// process scan fallback), and any inconsistency found here sends the
+// validated when indexed or replayed, and any inconsistency found here sends the
 // session through the replay-and-repair path.
 func loadTrustedSnapshot(dir, id string) (Session, bool) {
 	data, err := os.ReadFile(filepath.Join(dir, "session.json"))
@@ -996,18 +1065,15 @@ func loadTrustedSnapshot(dir, id string) (Session, bool) {
 	// boundary. LastActivityAt may have been advanced solely by incoming
 	// messages and cannot safely seed the watchdog's progress clock.
 	if (snapshot.LastActivityAt == nil || snapshot.LastProgressAt == nil) && (snapshot.State == StateRunning || snapshot.State == StateWaitingApproval) {
-		events, err := readEventsRepairTail(filepath.Join(dir, "events.jsonl"))
-		if err != nil || len(events) == 0 {
-			return Session{}, false
-		}
 		var projected Session
-		for _, event := range events {
+		err := walkEventLog(filepath.Join(dir, "events.jsonl"), func(event Event, _, _ int64) error {
 			if event.SessionID != id {
-				return Session{}, false
+				return fmt.Errorf("event %d belongs to %s", event.ID, event.SessionID)
 			}
-			if err := applyEvent(&projected, event); err != nil {
-				return Session{}, false
-			}
+			return applyEvent(&projected, event)
+		})
+		if err != nil || projected.LastEventID == 0 {
+			return Session{}, false
 		}
 		if projected.LastEventID != snapshot.LastEventID {
 			return Session{}, false
@@ -1058,7 +1124,7 @@ func readLastEventRecord(path string, window int64) (Event, bool) {
 
 // ensureEventsLocked loads the durable event history on first use; callers
 // must hold state.mu. Sessions opened from a trusted snapshot defer this
-// full parse until history is actually read or appended to.
+// full parse until a caller requires all events for a projection.
 func (s *Store) ensureEventsLocked(state *sessionState, id string) error {
 	if state.eventsLoaded {
 		return nil
@@ -1070,8 +1136,7 @@ func (s *Store) ensureEventsLocked(state *sessionState, id string) error {
 	if len(events) == 0 {
 		return errors.New("session has no events")
 	}
-	state.events = events
-	state.eventsLoaded = true
+	s.setEventsLocked(state, events, true)
 	return nil
 }
 
@@ -1341,40 +1406,12 @@ func providerProcessFromRecord(line []byte) (process ProviderProcessEventData, o
 }
 
 func readEventsRepairTail(path string) ([]Event, error) {
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if len(data) > 0 && data[len(data)-1] != '\n' {
-		lastNewline := bytes.LastIndexByte(data, '\n')
-		validLength := lastNewline + 1
-		if validLength < 0 {
-			validLength = 0
-		}
-		if err := os.Truncate(path, int64(validLength)); err != nil {
-			return nil, fmt.Errorf("repair event log tail: %w", err)
-		}
-		data = data[:validLength]
-	}
 	var events []Event
-	scanner := bufio.NewScanner(bytes.NewReader(data))
-	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
-	var previousID int64
-	for scanner.Scan() {
-		var event Event
-		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
-			return nil, fmt.Errorf("invalid event log record: %w", err)
-		}
-		if event.ID != previousID+1 {
-			return nil, fmt.Errorf("non-contiguous event id: got %d after %d", event.ID, previousID)
-		}
-		previousID = event.ID
+	err := walkEventLog(path, func(event Event, _, _ int64) error {
 		events = append(events, event)
-	}
-	if err := scanner.Err(); err != nil {
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
 	return events, nil

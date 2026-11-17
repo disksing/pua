@@ -2,7 +2,6 @@ package session
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -99,8 +98,25 @@ func (s *Store) Turn(id, turnID string) (TurnSummary, error) {
 }
 
 func (s *Store) projectTurnEventLocked(state *sessionState, id string, event Event) error {
-	if event.TurnID == "" || (event.Type != "turn.started" && event.Type != EventTurnCompleted && event.Type != EventTurnFailed && event.Type != EventTurnCancelled) {
+	if event.TurnID == "" {
 		return nil
+	}
+	terminal := event.Type == EventTurnCompleted || event.Type == EventTurnFailed || event.Type == EventTurnCancelled
+	if state.turnOffsets != nil {
+		if event.Type == "turn.started" || state.turnOffsets.locations[event.TurnID].closed {
+			if _, err := s.persistDirtyTurnsLocked(state, id); err != nil {
+				state.turnOffsets, state.turnOffsetsInvalid = nil, true
+				return err
+			}
+		}
+		return nil
+	}
+	if event.Type != "turn.started" && !terminal {
+		return nil
+	}
+	if state.turnOffsetsInvalid {
+		_, err := s.rebuildTurnOffsetsLocked(state, id)
+		return err
 	}
 	turns, err := s.buildStoredTurnsLocked(state, id, event.TurnID)
 	if err != nil {
@@ -126,14 +142,44 @@ func (s *Store) projectTurnEventLocked(state *sessionState, id string, event Eve
 func (s *Store) turnRecordsLocked(state *sessionState, id string) ([]TurnSummary, error) {
 	path := s.turnsPathFor(state, id)
 	info, statErr := os.Stat(path)
-	if turns, ok := s.turnCache.get(id, state.revision, info); ok {
+	s.prepareTurnOffsetsLocked(state, id, false)
+	if turns, ok := s.turnCache.get(id, state.revision, info); ok && !state.turnOffsetsInvalid {
 		s.metrics.turnCacheHits.Add(1)
 		return turns, nil
 	}
 	s.metrics.turnProjectionReads.Add(1)
-	turns, err := readTurnRecordsRepairTail(path)
+	records, stamp, err := readTurnDiskRecords(path)
+	if state.turnOffsets != nil && !(state.turnOffsetFile == nil && errors.Is(statErr, os.ErrNotExist) && len(state.turnOffsets.locations) == len(state.turnOffsets.dirty)) &&
+		!sameProjectionFile(state.turnOffsetFile, info) {
+		state.turnOffsets, state.turnOffsetsInvalid = nil, true
+	}
+	if err == nil && state.turnOffsets == nil && stamp != nil && !state.turnOffsetsInvalid {
+		state.turnOffsets, err = restoreTurnOffsets(s.eventsPathFor(state, id), id, state.session.LastEventID, records, stamp)
+		state.turnOffsetsChecked = true
+		state.turnOffsetFile, _ = os.Stat(path)
+	}
+	if err == nil && !state.turnOffsetsInvalid && state.turnOffsets != nil {
+		changed, writeErr := s.persistDirtyTurnsLocked(state, id)
+		if writeErr == nil {
+			if len(changed) > 0 {
+				s.metrics.turnRebuilds.Add(1)
+			}
+			turns := turnSummaries(mergeTurnDiskRecords(records, changed))
+			s.turnCache.put(id, state.revision, state.turnOffsetFile, turns)
+			return turns, nil
+		}
+		err = writeErr
+	}
+	turns := turnSummaries(records)
 	needsRebuild := err != nil || errors.Is(statErr, os.ErrNotExist) || (len(turns) == 0 && state.session.CurrentTurnID != "")
+	needsRebuild = needsRebuild || state.turnOffsetsInvalid
 	if !needsRebuild {
+		for _, record := range records {
+			if record.Range != nil {
+				needsRebuild = true
+				break
+			}
+		}
 		for _, turn := range turns {
 			if !turn.Closed && state.session.CurrentTurnID == "" {
 				needsRebuild = true
@@ -153,15 +199,11 @@ func (s *Store) turnRecordsLocked(state *sessionState, id string) ([]TurnSummary
 		s.turnCache.put(id, state.revision, info, turns)
 		return turns, nil
 	}
-	turns, err = s.buildStoredTurnsLocked(state, id, "")
+	records, err = s.rebuildTurnOffsetsLocked(state, id)
 	if err != nil {
 		return nil, err
 	}
-	if err := writeTurnRecordsAtomic(path, turns); err != nil {
-		return nil, fmt.Errorf("rebuild turn projection: %w", err)
-	}
-	s.metrics.turnRebuilds.Add(1)
-	s.metrics.turnProjectionWrites.Add(1)
+	turns = turnSummaries(records)
 	state.turnProjectionRevision = state.revision
 	state.turnProjectionFile, _ = os.Stat(path)
 	s.turnCache.put(id, state.revision, state.turnProjectionFile, turns)
@@ -169,30 +211,64 @@ func (s *Store) turnRecordsLocked(state *sessionState, id string) ([]TurnSummary
 }
 
 func readTurnRecordsRepairTail(path string) ([]TurnSummary, error) {
-	data, err := os.ReadFile(path)
+	records, _, err := readTurnDiskRecords(path)
+	return turnSummaries(records), err
+}
+
+func turnSummaries(records []turnDiskRecord) []TurnSummary {
+	turns := make([]TurnSummary, 0, len(records))
+	for _, record := range records {
+		turns = append(turns, record.TurnSummary)
+	}
+	return turns
+}
+
+func mergeTurnDiskRecords(previous, updates []turnDiskRecord) []turnDiskRecord {
+	if len(updates) == 0 {
+		return previous
+	}
+	latest := make(map[string]turnDiskRecord, len(previous)+len(updates))
+	for _, group := range [][]turnDiskRecord{previous, updates} {
+		for _, record := range group {
+			latest[record.ID] = record
+		}
+	}
+	return sortTurnDiskRecords(latest)
+}
+
+func sortTurnDiskRecords(latest map[string]turnDiskRecord) []turnDiskRecord {
+	records := make([]turnDiskRecord, 0, len(latest))
+	for _, record := range latest {
+		records = append(records, record)
+	}
+	sort.Slice(records, func(left, right int) bool {
+		return records[left].StartEventID < records[right].StartEventID
+	})
+	return records
+}
+
+func readTurnDiskRecords(path string) ([]turnDiskRecord, *turnCheckpoint, error) {
+	file, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if len(data) > 0 && data[len(data)-1] != '\n' {
-		lastNewline := bytes.LastIndexByte(data, '\n')
-		validLength := lastNewline + 1
-		if err := os.Truncate(path, int64(validLength)); err != nil {
-			return nil, err
-		}
-		data = data[:validLength]
+	defer file.Close()
+	if err := repairEventTail(file); err != nil {
+		return nil, nil, err
 	}
-	latest := make(map[string]TurnSummary)
-	order := make(map[string]int64)
-	scanner := bufio.NewScanner(bytes.NewReader(data))
+	latest := make(map[string]turnDiskRecord)
+	var checkpoint *turnCheckpoint
+	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
 	for scanner.Scan() {
-		var turn TurnSummary
-		if err := json.Unmarshal(scanner.Bytes(), &turn); err != nil {
-			return nil, err
+		var record turnDiskRecord
+		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
+			return nil, nil, err
 		}
+		turn := &record.TurnSummary
 		if turn.ID == "" {
 			turn.ID = turn.TurnID
 		}
@@ -200,47 +276,37 @@ func readTurnRecordsRepairTail(path string) ([]TurnSummary, error) {
 			turn.TurnID = turn.ID
 		}
 		if turn.ID == "" || turn.StartEventID <= 0 {
-			return nil, errors.New("invalid turn projection record")
+			return nil, nil, errors.New("invalid turn projection record")
 		}
 		hasMaterializedItems := turn.Items != nil
 		turn.Items = normalizeTurnItems(turn.Items)
 		if hasMaterializedItems {
-			deriveFinalReply(&turn)
+			deriveFinalReply(turn)
 		}
-		latest[turn.ID] = turn
-		order[turn.ID] = turn.StartEventID
+		checkpoint = record.Checkpoint
+		latest[turn.ID] = record
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	turns := make([]TurnSummary, 0, len(latest))
-	for _, turn := range latest {
-		turns = append(turns, turn)
-	}
-	sort.Slice(turns, func(i, j int) bool { return order[turns[i].ID] < order[turns[j].ID] })
-	return turns, nil
+	return sortTurnDiskRecords(latest), checkpoint, nil
 }
 
-func writeTurnRecordsAtomic(path string, turns []TurnSummary) error {
-	var data []byte
-	for _, turn := range turns {
-		encoded, err := json.Marshal(turn)
-		if err != nil {
-			return err
-		}
-		data = append(data, encoded...)
-		data = append(data, '\n')
-	}
-	temp := path + ".tmp"
-	if err := os.WriteFile(temp, data, 0o600); err != nil {
-		return err
-	}
-	file, err := os.OpenFile(temp, os.O_RDWR, 0o600)
+func writeTurnRecordsAtomic[Record TurnSummary | turnDiskRecord](path string, turns []Record) error {
+	file, err := os.CreateTemp(filepath.Dir(path), ".turns-*")
 	if err != nil {
 		return err
 	}
+	temp := file.Name()
+	defer os.Remove(temp)
+	defer file.Close()
+	encoder := json.NewEncoder(file)
+	for _, turn := range turns {
+		if err := encoder.Encode(turn); err != nil {
+			return err
+		}
+	}
 	if err := file.Sync(); err != nil {
-		file.Close()
 		return err
 	}
 	if err := file.Close(); err != nil {

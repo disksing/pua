@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -359,6 +360,12 @@ func (c *Client) ArchiveSession(id string) (session.Session, error) {
 		return session.Session{}, err
 	}
 	return result.Session, nil
+}
+
+func (c *Client) BackfillTurns(id string) (session.TurnBackfillResult, error) {
+	var result session.TurnBackfillResult
+	err := c.request(http.MethodPost, "/v1/sessions/"+url.PathEscape(id)+"/turns/backfill", struct{}{}, &result)
+	return result, err
 }
 
 func (c *Client) request(method, path string, body any, target any) error {

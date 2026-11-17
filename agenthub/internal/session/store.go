@@ -75,10 +75,14 @@ type sessionState struct {
 	// eventsLoaded reports whether events holds the full durable history.
 	// Sessions opened from a trusted session.json snapshot start unloaded.
 	// Large histories use sparse disk pages; appends need only the tail.
-	eventsLoaded      bool
-	eventPayloadBytes int64
-	eventCacheBytes   int64
-	eventIndex        *eventLogIndex
+	eventsLoaded       bool
+	eventPayloadBytes  int64
+	eventCacheBytes    int64
+	eventIndex         *eventLogIndex
+	turnOffsets        *turnOffsetIndex
+	turnOffsetFile     os.FileInfo
+	turnOffsetsChecked bool
+	turnOffsetsInvalid bool
 	// revision advances for every durable content update, including delta
 	// merges that retain LastEventID. Projection stamps never survive Open.
 	revision               uint64
@@ -91,10 +95,11 @@ type sessionState struct {
 }
 
 type Store struct {
-	metrics   storeMetrics
-	turnCache turnCache
-	root      string
-	createMu  sync.Mutex
+	metrics        storeMetrics
+	turnCache      turnCache
+	root           string
+	createMu       sync.Mutex
+	turnBackfillMu sync.Mutex
 
 	mu                  sync.RWMutex
 	sessions            map[string]*sessionState
@@ -288,7 +293,7 @@ func (s *Store) CreateOrGet(input CreateInput) (Session, bool, error) {
 		CreatedAt:         now,
 		UpdatedAt:         now,
 	}
-	state := &sessionState{session: value, eventsLoaded: true}
+	state := &sessionState{session: value, eventsLoaded: true, turnOffsets: newTurnOffsetIndex(), turnOffsetsChecked: true}
 	dir := s.sessionDir(id)
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		return Session{}, false, fmt.Errorf("create session directory: %w", err)
@@ -401,6 +406,7 @@ func (s *Store) Append(id, eventType, turnID string, data []byte) (Event, error)
 // subscribers receive a small append patch, so steady-state live traffic
 // stays proportional to the fragments instead of the accumulated message.
 func (s *Store) appendLocked(state *sessionState, id, eventType, turnID string, data []byte) (Event, Event, error) {
+	s.prepareTurnOffsetsLocked(state, id, turnID != "")
 	event := Event{
 		ID:        state.session.LastEventID + 1,
 		Time:      time.Now().UTC(),
@@ -430,6 +436,7 @@ func (s *Store) appendLocked(state *sessionState, id, eventType, turnID string, 
 		return Event{}, Event{}, err
 	}
 	state.session = projected
+	s.recordTurnOffsetLocked(state, id, event, int64(len(encoded)), false)
 	state.events = append(state.events, event)
 	state.eventPayloadBytes += int64(len(event.Data))
 	state.eventCacheBytes += estimateEventCacheBytes(event)
@@ -562,6 +569,7 @@ func (s *Store) mergeDeltaLocked(state *sessionState, last Event, mergedData, pa
 		return Event{}, Event{}, true, fmt.Errorf("project event: %w", err)
 	}
 	state.session = projected
+	s.recordTurnOffsetLocked(state, last.SessionID, merged, int64(len(encoded))+1, true)
 	state.events[len(state.events)-1] = merged
 	state.eventPayloadBytes += int64(len(merged.Data) - len(last.Data))
 	cacheDelta := int64(cap(merged.Data) - cap(last.Data))
@@ -577,6 +585,9 @@ func (s *Store) mergeDeltaLocked(state *sessionState, last Event, mergedData, pa
 	state.publishMetadata()
 	if err := writeJSONAtomic(s.snapshotPath(last.SessionID), state.session); err != nil {
 		return Event{}, Event{}, true, fmt.Errorf("write session snapshot: %w", err)
+	}
+	if state.turnOffsets != nil && state.turnOffsets.locations[merged.TurnID].closed {
+		_ = s.projectTurnEventLocked(state, last.SessionID, merged)
 	}
 	return merged, patch, true, nil
 }
@@ -756,6 +767,14 @@ func (s *Store) EventsAfter(id string, after int64, limit int) ([]Event, error) 
 // EventsPage returns events after an exclusive durable cursor plus enough
 // metadata for a caller to page to the head captured by this request.
 func (s *Store) EventsPage(id string, after int64, limit int) (EventPage, error) {
+	return s.eventsPage(id, after, 0, limit)
+}
+
+func (s *Store) EventsRangePage(id string, after, rangeEnd int64, limit int) (EventPage, error) {
+	return s.eventsPage(id, after, rangeEnd, limit)
+}
+
+func (s *Store) eventsPage(id string, after, rangeEnd int64, limit int) (EventPage, error) {
 	state, err := s.state(id)
 	if err != nil {
 		return EventPage{}, err
@@ -769,12 +788,20 @@ func (s *Store) EventsPage(id string, after int64, limit int) (EventPage, error)
 		return EventPage{After: after, Limit: limit, NextAfter: after, LatestCursor: latest},
 			fmt.Errorf("%w: %d > %d", ErrEventCursorAhead, after, latest)
 	}
+	highWater := latest
+	if rangeEnd > 0 {
+		highWater = min(rangeEnd, latest)
+		if events, ok := s.indexedTurnEventPageLocked(state, id, after, highWater, limit); ok {
+			next := events[len(events)-1].ID
+			return EventPage{Events: events, After: after, NextAfter: next, LatestCursor: latest, Limit: limit, HasMore: next < highWater}, nil
+		}
+	}
 	indexed, err := s.useHistoryPagesLocked(state, id)
 	if err != nil {
 		return EventPage{}, err
 	}
 	if indexed {
-		events, err := s.historyPageLocked(state, id, after, latest, limit)
+		events, err := s.historyPageLocked(state, id, after, highWater, limit)
 		if err != nil {
 			return EventPage{}, err
 		}
@@ -782,13 +809,16 @@ func (s *Store) EventsPage(id string, after int64, limit int) (EventPage, error)
 		if len(events) > 0 {
 			next = events[len(events)-1].ID
 		}
-		return EventPage{Events: events, After: after, NextAfter: next, LatestCursor: latest, Limit: limit, HasMore: next < latest}, nil
+		return EventPage{Events: events, After: after, NextAfter: next, LatestCursor: latest, Limit: limit, HasMore: next < highWater}, nil
 	}
 	start := sort.Search(len(state.events), func(index int) bool {
 		return state.events[index].ID > after
 	})
 	events := make([]Event, 0, min(limit, len(state.events)-start))
 	for _, event := range state.events[start:] {
+		if event.ID > highWater {
+			break
+		}
 		events = append(events, cloneEvent(event))
 		if len(events) == limit {
 			break
@@ -803,7 +833,7 @@ func (s *Store) EventsPage(id string, after int64, limit int) (EventPage, error)
 		After:        after,
 		Limit:        limit,
 		NextAfter:    next,
-		HasMore:      next < latest,
+		HasMore:      next < highWater,
 		LatestCursor: latest,
 	}, nil
 }

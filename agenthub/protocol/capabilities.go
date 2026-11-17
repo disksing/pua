@@ -17,6 +17,7 @@ const (
 	CapabilityTurnsStableIndex               = "turns.stable-index"
 	CapabilityTurnsMaterialized              = "turns.materialized"
 	CapabilityTurnsActivityItems             = "turns.activity-items"
+	CapabilityTurnOffsetBackfill             = "turns.offset-backfill-v1"
 	CapabilitySessionLaunchEnvironment       = "session.launch-environment"
 	CapabilitySessionLaunchEnvironmentUpdate = "session.launch-environment-update"
 	CapabilitySessionStrictStopped           = "session.strict-stopped"

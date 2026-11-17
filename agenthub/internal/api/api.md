@@ -110,6 +110,7 @@ Current runtime-backed daemon instances advertise:
 | `turns.stable-index` | Turn pages expose event ranges, trigger/final-reply event references, status and forward/backward cursors. |
 | `turns.materialized` | Closed Turns and ordered compact items are read from rebuildable `turns.jsonl`; single-Turn queries repair projection lag and Event ranges provide bounded detail expansion. |
 | `turns.activity-items` | Compact Turn projections combine every uninterrupted thinking/tool run into one `activity` item with independent phase, update and tool-call counts. |
+| `turns.offset-backfill-v1` | The daemon persists Turn byte ranges and supports manual per-Session backfill. |
 | `session.launch-environment` | Durable per-session provider environment, including provider resume. |
 | `session.launch-environment-update` | Resume accepts a `launchEnvironment` overlay, persisted before provider start. |
 | `session.strict-stopped` | `stopped` is published only after provider exit is confirmed. |
@@ -1009,6 +1010,18 @@ the materialized record is missing or incomplete, AgentHub repairs
 ```bash
 curl -s "$BASE/v1/sessions/$SESSION/turns/$TURN"
 ```
+
+### POST /v1/sessions/{id}/turns/backfill
+
+Backfill Turn byte ranges for one idle or archived Session. The daemon
+streams the canonical events and replaces the derived `turns.jsonl` within
+the Session's write lock. A current index is skipped. Only one Session
+backfill runs at a time.
+
+- **Request body** `{}`.
+- **Success `200`** `{"sessionId":"ses_...","turns":42,"changed":true}`.
+- **Errors** `404 session_not_found` and `409 turn_backfill_conflict` for a
+  Session with active work or a backfill already running.
 
 ### POST /v1/sessions/{id}/messages
 

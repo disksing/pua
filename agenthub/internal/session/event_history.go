@@ -303,6 +303,9 @@ func (s *Store) buildStoredTurnsLocked(state *sessionState, id, turnID string) (
 		s.metrics.turnBuildNanos.Add(time.Since(started).Nanoseconds())
 	}()
 	return buildTurnSummariesFrom(func(visit func(Event)) error {
+		if turnID != "" && state.turnOffsets != nil {
+			return s.scanIndexedTurnLocked(state, id, turnID, visit)
+		}
 		if state.eventsLoaded {
 			for _, event := range state.events {
 				if turnID == "" || event.TurnID == turnID {

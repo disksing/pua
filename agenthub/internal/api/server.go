@@ -43,6 +43,7 @@ const (
 	CapabilityTurnsStableIndex         = protocol.CapabilityTurnsStableIndex
 	CapabilityTurnsMaterialized        = protocol.CapabilityTurnsMaterialized
 	CapabilityTurnsActivityItems       = protocol.CapabilityTurnsActivityItems
+	CapabilityTurnOffsetBackfill       = protocol.CapabilityTurnOffsetBackfill
 	CapabilitySessionLaunchEnvironment = protocol.CapabilitySessionLaunchEnvironment
 	// CapabilitySessionLaunchEnvironmentUpdate reports that resume accepts
 	// an optional launchEnvironment overlay persisted before provider start.
@@ -280,6 +281,7 @@ func (s *Server) capabilities() []string {
 		CapabilityTurnsStableIndex,
 		CapabilityTurnsMaterialized,
 		CapabilityTurnsActivityItems,
+		CapabilityTurnOffsetBackfill,
 	}
 	if s.runtime != nil {
 		capabilities = append(capabilities,
@@ -813,6 +815,7 @@ func (s *Server) sessionOps() []sessionOp {
 		{http.MethodGet, "event/{sourceEventId}", s.event, "GET /v1/sessions/{id}/event/{sourceEventId}"},
 		{http.MethodGet, "turns", s.turns, "GET /v1/sessions/{id}/turns"},
 		{http.MethodGet, "turns/{turnId}", s.turn, "GET /v1/sessions/{id}/turns/{turnId}"},
+		{http.MethodPost, "turns/backfill", s.backfillTurns, "POST /v1/sessions/{id}/turns/backfill"},
 		{http.MethodPost, "messages", s.sendMessage, "POST /v1/sessions/{id}/messages"},
 		{http.MethodPost, "resume", s.resumeSession, "POST /v1/sessions/{id}/resume"},
 		{http.MethodPost, "interrupt", s.interruptSession, "POST /v1/sessions/{id}/interrupt"},
@@ -1459,7 +1462,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request, id string) {
 			})
 			return
 		}
-		page, err := s.store.EventsPage(id, after, limit)
+		page, err := s.store.EventsRangePage(id, after, rangeEnd, limit)
 		if err != nil {
 			if errors.Is(err, session.ErrEventCursorAhead) {
 				writeAPIError(w, http.StatusConflict, "event_cursor_ahead", err.Error(), map[string]any{
@@ -1697,6 +1700,18 @@ func (s *Server) writeStoreError(w http.ResponseWriter, err error) {
 		return
 	}
 	writeAPIError(w, http.StatusInternalServerError, "session_store_failed", err.Error(), nil)
+}
+
+func (s *Server) backfillTurns(w http.ResponseWriter, r *http.Request, id string) {
+	result, err := s.store.BackfillTurnOffsets(r.Context(), id)
+	switch {
+	case errors.Is(err, session.ErrSessionActive), errors.Is(err, session.ErrTurnBackfillInProgress):
+		writeAPIError(w, http.StatusConflict, "turn_backfill_conflict", err.Error(), nil)
+	case err != nil:
+		s.writeStoreError(w, err)
+	default:
+		writeJSON(w, http.StatusOK, result)
+	}
 }
 
 func requestMiddleware(allowOrigin func(origin, host string) bool, next http.Handler) http.Handler {

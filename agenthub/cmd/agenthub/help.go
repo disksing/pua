@@ -293,6 +293,7 @@ Commands:
   stop        Stop the provider process
   approve     Resolve a pending approval
   archive     Archive a session
+  backfill-turns  Rebuild Turn byte ranges for an idle or archived session
 
 Use "agenthub session <command> --help" or "agenthub help session <command>"
 for details.
@@ -419,6 +420,15 @@ reason "requested". The full event log is kept. Continue later with
 provider-native session/thread on demand.
 
 See also: agenthub help session resume
+`,
+
+	"session backfill-turns": `Backfill the Turn byte ranges of an idle or archived session.
+
+Usage:
+  agenthub session backfill-turns <session-id>
+
+The daemon scans this session's durable events and updates turns.jsonl.
+Run one session at a time. Repeating the command skips a current index.
 `,
 
 	"session approve": `Resolve a pending approval request.

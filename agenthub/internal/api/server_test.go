@@ -37,6 +37,46 @@ func newGuardedTestServer(t *testing.T) (*httptest.Server, *ListenAddress) {
 	return server, listen
 }
 
+func TestBackfillTurnOffsetsHTTP(t *testing.T) {
+	store, err := session.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := store.Create(session.CreateInput{Cwd: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Append(value.ID, "turn.started", "test_turn", nil); err != nil {
+		t.Fatal(err)
+	}
+	handler := New(store, "test", time.Now()).Handler()
+	path := "/v1/sessions/" + value.ID + "/turns/backfill"
+	backfill := func() *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader("{}"))
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+	if response := backfill(); response.Code != http.StatusConflict {
+		t.Fatalf("active backfill: %d %s", response.Code, response.Body)
+	}
+	if _, err := store.Append(value.ID, session.EventTurnCompleted, "test_turn", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(store.Root(), value.ID, "turns.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	for _, changed := range []bool{true, false} {
+		response := backfill()
+		var result session.TurnBackfillResult
+		if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil || response.Code != http.StatusOK ||
+			result.SessionID != value.ID || result.Turns != 1 || result.Changed != changed {
+			t.Fatalf("backfill: %d %s, %v", response.Code, response.Body, err)
+		}
+	}
+}
+
 func TestHostGuardRejectsForeignHost(t *testing.T) {
 	server, _ := newGuardedTestServer(t)
 	for host, want := range map[string]int{
@@ -2316,6 +2356,7 @@ func TestStatusCapabilitiesAreBackedByHTTPBehavior(t *testing.T) {
 		CapabilityTurnsStableIndex,
 		CapabilityTurnsMaterialized,
 		CapabilityTurnsActivityItems,
+		CapabilityTurnOffsetBackfill,
 		CapabilityTurnScopedSteer,
 		CapabilityEventsCanonicalTerminal,
 		CapabilityRecoveryClosedTurns,
@@ -2401,7 +2442,7 @@ func TestStatusOmitsUnavailableRuntimeCapabilities(t *testing.T) {
 		CapabilityActivityGlobalSSE, CapabilitySessionSource, CapabilitySessionSourceMetadata,
 		CapabilitySessionIdempotentCreate, CapabilitySessionInputCapabilities,
 		CapabilityMessageIdempotency, CapabilityMessageAtLeastOnce, CapabilityMessageOpaquePayloadV2, CapabilityTurnsStableIndex, CapabilityTurnsMaterialized,
-		CapabilityTurnsActivityItems,
+		CapabilityTurnsActivityItems, CapabilityTurnOffsetBackfill,
 	}
 	if strings.Join(body.Capabilities, ",") != strings.Join(want, ",") {
 		t.Fatalf("capabilities = %v, want %v", body.Capabilities, want)

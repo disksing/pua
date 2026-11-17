@@ -351,6 +351,19 @@ func runSession(args []string) error {
 		return printJSON(map[string]any{"schema": "agenthub.semantic-events.v1", "frames": frames})
 	case "approve":
 		return runSessionApprove(args[1:])
+	case "backfill-turns":
+		if len(args) != 2 {
+			return usageError("agenthub session backfill-turns <session-id>", "session backfill-turns")
+		}
+		apiClient, err := client.Discover()
+		if err != nil {
+			return err
+		}
+		result, err := apiClient.BackfillTurns(args[1])
+		if err != nil {
+			return err
+		}
+		return printJSON(result)
 	case "archive":
 		if len(args) != 2 {
 			return usageError("agenthub session archive <session-id>", "session archive")

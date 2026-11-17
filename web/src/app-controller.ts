@@ -416,6 +416,8 @@ function selectWorkspaceUser(name: string): string {
 }
 
 function beginWorkspaceUserTransition(name: string): void {
+	rowActionContextVersion++;
+	closeCreateDialog();
 	controllerState.navigationVersion++;
 	controllerState.autoRefreshVersion++;
 	controllerState.treeRequestVersion++;
@@ -462,6 +464,8 @@ async function resolveWorkspaceIdentity(workspaceId = controllerState.activeWork
 		controllerState.autoRefreshVersion++;
 		controllerState.treeRequestVersion++;
 		controllerState.detailRequestVersion++;
+		rowActionContextVersion++;
+		closeCreateDialog();
 	}
 	controllerState.currentUserName = "";
 	controllerState.tree = null;
@@ -957,6 +961,8 @@ function renderAppShell() {
 		onResolveWorkspaceUser: (name, create) => resolveWorkspaceUser(name, create),
 		onAddWorkspace: () => openSettings("workspace").catch((err) => toast(err.message)),
 		onCreateProject: () => showProjectForm(),
+		onCreateTask: showTaskForm,
+		onArchive: archiveResource,
 		onOpenSettings: () => openSettings().catch((err) => toast(err.message)),
 		onRefreshDoctor: requestDoctorRefresh,
 		onToggleProject: (id) => toggleProject(id),
@@ -986,6 +992,7 @@ async function switchWorkspace(id: string): Promise<void> {
 		renderWorkspaceSelect();
 		return;
 	}
+	rowActionContextVersion++;
 	setMobileSidebar(false);
 	flushAgentDraft();
 	controllerState.navigationVersion++;
@@ -1276,8 +1283,6 @@ function detailPanelModel(): DetailPanelModel {
 		agents: svelteAgentOptions(),
 		resolveResourceTitle,
 		onNavigate: (resourceId: string) => openBreadcrumbResource(resourceId).catch((err) => toast(errorMessage(err))),
-		onCreateTask: (projectId: string) => showTaskForm(projectId),
-		onArchive: (resourceId: string) => archiveResource(resourceId).catch((err) => toast(errorMessage(err))),
 		onSaveWorkspaceAgents: (content: string, expectedContentHash: string) => saveWorkspaceAgentsFromDetail(content, expectedContentHash),
 		onSaveMarkdownFile: (path: string, content: string, expectedContentHash: string) => saveMarkdownFileFromDetail(path, content, expectedContentHash),
 		onDeleteArtifact: (path: string) => deleteArtifactFromDetail(path),
@@ -1895,47 +1900,103 @@ function relativeTime(value: string | undefined): string {
 	if (hours < 24) return `${hours}h ago`;
 	return `${Math.round(hours / 24)}d ago`;
 }
+let rowActionContextVersion = 0;
+let taskFormRequestVersion = 0;
+const pendingArchives = new Set<string>();
+
 function showProjectForm(): void {
+	taskFormRequestVersion++;
 	openCreateDialog("project");
 }
-function showTaskForm(projectId: string): void {
+async function showTaskForm(projectId: string): Promise<void> {
+	const requestVersion = ++taskFormRequestVersion;
+	const contextVersion = rowActionContextVersion;
+	const workspaceId = controllerState.activeWorkspaceId;
+	const userName = currentUserName();
+	const isCurrent = () => {
+		if (requestVersion !== taskFormRequestVersion || contextVersion !== rowActionContextVersion ||
+			workspaceId !== controllerState.activeWorkspaceId || userName !== currentUserName()) return false;
+		const project = findResource(projectId);
+		return project?.type === "project" && !project.archived;
+	};
+	if (!workspaceId || !isCurrent()) return;
+	try {
+		if (!controllerState.details[projectId]) {
+			const detail = await fetchDetail(projectId, workspaceId);
+			if (!isCurrent() || detail.id !== projectId || detail.type !== "project" || detail.archived) return;
+			applyResourceDetail(detail);
+		}
+	} catch (error) {
+		if (!isCurrent()) return;
+		throw error;
+	}
+	if (!isCurrent()) return;
 	openCreateDialog("task", projectId);
 }
 function openCreateDialog(type: "project" | "task", projectId = ""): void {
 	createDialogController.open(type === "task" ? "task" : "project", projectId);
 }
 function closeCreateDialog(): void {
+	taskFormRequestVersion++;
 	createDialogController.close();
 }
 function renderCreateDialog(): void {
 	createDialogController.render();
 }
 async function archiveResource(resourceId: string): Promise<void> {
-	const kind = findResource(resourceId)?.type === "task" ? "task" : "project";
+	const workspaceId = controllerState.activeWorkspaceId;
+	const userName = currentUserName();
+	const resource = findResource(resourceId);
+	if (!workspaceId || !resource || resource.archived || (resource.type !== "task" && resource.type !== "project")) return;
+	const requestKey = `${workspaceId}:${resourceId}`;
+	if (pendingArchives.has(requestKey)) return;
+	pendingArchives.add(requestKey);
+	taskFormRequestVersion++;
+	const kind = resource.type;
 	const title = resolveResourceTitle(resourceId) || resourceId;
-	const confirmed = await confirmDialog({
-		title: `Archive ${kind}`,
-		message: `Archive ${kind} "${title}"? This ends its open working state and stops its agent.`,
-		confirmLabel: "Archive",
-		danger: true
-	});
-	if (!confirmed) return;
-	const redirectTarget = archiveRedirectTarget(resourceId, controllerState.projectOrder, controllerState.taskOrder);
-	const result = await api<ArchiveResponse>(`/api/workspaces/${controllerState.activeWorkspaceId}/archive`, {
-		method: "POST",
-		body: JSON.stringify({ resourceId })
-	});
-	const warnings = result.warnings || [];
-	toast(warnings.length > 0
-		? [`Archived.`, ...warnings.map((warning) => `Warning: ${warning.message}`)].join("\n")
-		: "Archived.");
-	removeArchivedResourceFromTree(resourceId);
-	await selectResource(redirectTarget);
+	const contextVersion = rowActionContextVersion;
+	const sameContext = () => contextVersion === rowActionContextVersion && workspaceId === controllerState.activeWorkspaceId && userName === currentUserName();
+	try {
+		const confirmed = await confirmDialog({
+			title: `Archive ${kind}`,
+			message: `Archive ${kind} "${title}" (${resourceId})? This ends its open working state and stops its agent.${kind === "project" ? " Its tasks are archived with it." : ""}`,
+			confirmLabel: "Archive",
+			danger: true,
+			defaultToCancel: true
+		});
+		if (!confirmed || !sameContext()) return;
+		const current = findResource(resourceId);
+		if (current?.type !== kind || current.archived) return;
+		const result = await api<ArchiveResponse>(`/api/workspaces/${encodeURIComponent(workspaceId)}/archive`, {
+			method: "POST",
+			body: JSON.stringify({ resourceId })
+		});
+		if (!sameContext()) return;
+		const warnings = result.warnings || [];
+		toast(warnings.length > 0
+			? [`Archived.`, ...warnings.map((warning) => `Warning: ${warning.message}`)].join("\n")
+			: "Archived.");
+		const redirectTarget = archiveRedirectTarget(resourceId, controllerState.projectOrder, controllerState.taskOrder);
+		controllerState.treeRequestVersion++;
+		controllerState.autoRefreshVersion++;
+		const removedIds = removeArchivedResourceFromTree(resourceId);
+		if (removedIds.has(controllerState.selectedId)) {
+			await selectResource(redirectTarget);
+		} else {
+			renderAppShell();
+			await saveUIState().catch((error) => console.warn("failed to save UI state", error));
+		}
+	} catch (error) {
+		if (!sameContext()) return;
+		throw error;
+	} finally {
+		pendingArchives.delete(requestKey);
+	}
 }
 // removeArchivedResourceFromTree drops a just-archived resource (and, for
 // projects, its tasks) from the local tree so the sidebar only updates the
 // affected nodes instead of reloading the whole tree.
-function removeArchivedResourceFromTree(resourceId: string): void {
+function removeArchivedResourceFromTree(resourceId: string): Set<string> {
 	const tree = controllerState.tree;
 	const removedIds = new Set<string>([resourceId]);
 	if (tree) {
@@ -1968,7 +2029,11 @@ function removeArchivedResourceFromTree(resourceId: string): void {
 	for (const [folderId, order] of Object.entries(controllerState.folderOrder || {})) {
 		if (order.some((id) => removedIds.has(id))) controllerState.folderOrder[folderId] = order.filter((id) => !removedIds.has(id));
 	}
-	for (const id of removedIds) clearUnreadForResource(id);
+	for (const id of removedIds) {
+		resourceDetailController.reset(id);
+		clearUnreadForResource(id);
+	}
+	return removedIds;
 }
 function findResource(id: string): ResourceRecord | null {
 	if (!controllerState.tree) return null;
@@ -2202,7 +2267,9 @@ async function handleHistoryNavigation(pathname: string): Promise<void> {
 	}
 	controllerState.diff = null;
 	if (workspaceChanged) {
+		rowActionContextVersion++;
 		controllerState.tree = null;
+		clearResourceDetailState();
 		controllerState.navigationLoading = true;
 		controllerState.navigationError = "";
 		closeCreateDialog();

@@ -31,7 +31,7 @@
       model = next;
     });
     const keydown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && model.mobile.sidebarOpen) model.onMobileSidebar(false);
+      if (event.key === "Escape" && !event.defaultPrevented && model.mobile.sidebarOpen) model.onMobileSidebar(false);
     };
     const popstate = () => {
       void model.onHistoryNavigation(window.location.pathname).catch((reason) => {
@@ -79,7 +79,7 @@
       model.onPaneViewport();
       syncViewport();
     };
-    document.addEventListener("keydown", keydown);
+    window.addEventListener("keydown", keydown);
     document.addEventListener("focusout", settleViewport);
     window.addEventListener("resize", resize);
     window.addEventListener("orientationchange", settleViewport);
@@ -90,7 +90,7 @@
     syncViewport();
     return () => {
       unsubscribe();
-      document.removeEventListener("keydown", keydown);
+      window.removeEventListener("keydown", keydown);
       document.removeEventListener("focusout", settleViewport);
       window.removeEventListener("resize", resize);
       window.removeEventListener("orientationchange", settleViewport);
@@ -125,7 +125,7 @@
     {#if !model.userGate?.mode}<SchedulerNav item={model.scheduler || null} onSelect={model.onSelectResource} onToast={model.onToast} />{/if}
   </div>
   {#if !model.userGate?.mode}
-    <ProjectTree identity={model.identity} hasWorkspace={Boolean(model.activeWorkspaceId)} loading={model.loading} error={model.error} projects={model.projects} editing={model.treeEditing} filter={model.treeFilter} onFilter={model.onTreeFilter} onCreate={model.onCreateProject} onToggle={model.onToggleProject} onSelect={model.onSelectResource} onReorder={model.onReorder} onDragState={model.onDragState} onToggleEditing={model.onToggleTreeEditing} onCreateFolder={model.onCreateFolder} onRenameFolder={model.onRenameFolder} onDeleteFolder={model.onDeleteFolder} onToggleFolder={model.onToggleFolder} onToast={model.onToast} />
+    <ProjectTree identity={model.identity} hasWorkspace={Boolean(model.activeWorkspaceId)} loading={model.loading} error={model.error} projects={model.projects} editing={model.treeEditing} drawerOpen={model.mobile.sidebarOpen} filter={model.treeFilter} onFilter={model.onTreeFilter} onCreate={model.onCreateProject} onCreateTask={model.onCreateTask} onArchive={model.onArchive} onToggle={model.onToggleProject} onSelect={model.onSelectResource} onReorder={model.onReorder} onDragState={model.onDragState} onToggleEditing={model.onToggleTreeEditing} onCreateFolder={model.onCreateFolder} onRenameFolder={model.onRenameFolder} onDeleteFolder={model.onDeleteFolder} onToggleFolder={model.onToggleFolder} onToast={model.onToast} />
   {/if}
 </aside>
 <PaneResizeHandle id="sidebarResize" kind="sidebarWidth" className="sidebar-resize" label="Resize sidebar" onPreview={model.onPanePreview} onCommit={model.onPaneCommit} />

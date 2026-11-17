@@ -227,7 +227,7 @@ describe("AppShell responsibility components", () => {
     // distinct from the plain folder icon on Project rows.
     expect(folderRow.querySelector('[data-lucide="folders"]')).not.toBeNull();
     expect(folderRow.querySelector('[data-lucide="folder"]')).toBeNull();
-    const projectRow = target.querySelector<HTMLElement>("button.tree-item")!;
+    const projectRow = target.querySelector<HTMLElement>(".tree-row-navigation")!;
     expect(projectRow.querySelector('[data-lucide="folder"]')).not.toBeNull();
     // Folders are not selectable resources: clicking toggles expansion.
     folderRow.click();
@@ -549,7 +549,7 @@ describe("AppShell responsibility components", () => {
     // A pointer click on the chevron focuses the row button in browsers; a
     // focused row keeps its focus-within rule active, pinning the follow
     // star visible after the pointer leaves. The toggle must drop focus.
-    const row = target.querySelector<HTMLElement>(".tree-item")!;
+    const row = target.querySelector<HTMLElement>(".tree-item .tree-row-navigation")!;
     row.focus();
     target.querySelector<HTMLElement>('[data-project-toggle="project-a"]')!.click();
     await vi.waitFor(() => expect(onToggle).toHaveBeenCalledWith("project-a"));
@@ -574,7 +574,7 @@ describe("AppShell responsibility components", () => {
     // A pointer click on the row focuses the row button in browsers; a
     // focused row keeps its focus-within rule active, pinning the follow
     // star visible after the pointer leaves. Selection must drop focus.
-    const row = target.querySelector<HTMLElement>(".task-item")!;
+    const row = target.querySelector<HTMLElement>(".task-item .tree-row-navigation")!;
     row.focus();
     row.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, detail: 1 }));
     await vi.waitFor(() => expect(onSelect).toHaveBeenCalledWith("task-a"));

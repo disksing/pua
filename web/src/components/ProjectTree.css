@@ -475,3 +475,173 @@
   gap: 3px;
 }
 :where([data-component-owner="project-tree"]) .chat-open-icon { display: inline-flex; color: var(--sidebar-muted); }
+
+:where([data-component-owner="project-tree"]) .project-tree {
+  container: project-tree / inline-size;
+}
+
+:where([data-component-owner="project-tree"]) .tree-item.resource-row {
+  grid-template-columns: minmax(0, 1fr) 50px;
+  gap: 0;
+  padding: 0 4px 0 0;
+}
+
+:where([data-component-owner="project-tree"].editing) .tree-item.resource-row {
+  grid-template-columns: minmax(0, 1fr);
+  padding-right: 0;
+}
+
+:where([data-component-owner="project-tree"]) .tree-row-navigation {
+  display: grid;
+  grid-template-columns: 16px 16px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: inherit;
+  padding: 6px 4px 6px 8px;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+}
+
+:where([data-component-owner="project-tree"]) .has-task-status-dual > .tree-row-navigation {
+  grid-template-columns: 16px 36px minmax(0, 1fr) auto;
+}
+
+:where([data-component-owner="project-tree"].editing) .tree-row-navigation {
+  grid-template-columns: 16px 16px minmax(0, 1fr) auto 16px;
+  padding-inline-end: 8px;
+}
+
+:where([data-component-owner="project-tree"]) .resource-row .resource-chat-status {
+  grid-column: 4;
+}
+
+:where([data-component-owner="project-tree"]) .resource-row .resource-ref {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+:where([data-component-owner="project-tree"]) .resource-actions {
+  display: flex;
+  justify-content: flex-end;
+  opacity: 0;
+  pointer-events: none;
+}
+
+:where([data-component-owner="project-tree"]) .resource-row:hover .resource-actions,
+:where([data-component-owner="project-tree"]) .resource-row:has(:focus-visible) .resource-actions,
+:where([data-component-owner="project-tree"]) .resource-actions:has([aria-expanded="true"]) {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+:where([data-component-owner="project-tree"]) .resource-direct-actions {
+  display: flex;
+  gap: 2px;
+}
+
+:where([data-component-owner="project-tree"]) .resource-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--sidebar-text);
+}
+
+:where([data-component-owner="project-tree"]) .resource-actions button:hover,
+:where([data-component-owner="project-tree"]) .resource-actions button:focus-visible {
+  background: var(--sidebar-row);
+}
+
+:where([data-component-owner="project-tree"]) .resource-actions button:focus-visible,
+:where([data-component-owner="project-tree"]) .tree-row-navigation:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: -2px;
+}
+
+:where([data-component-owner="project-tree"]) .resource-actions svg {
+  width: 15px;
+  height: 15px;
+}
+
+:where([data-component-owner="project-tree"]) .resource-actions .resource-actions-toggle {
+  display: none;
+  font-size: 20px;
+  line-height: 1;
+}
+
+:where([data-component-owner="project-tree"]) .resource-actions-popover {
+  position: fixed;
+  inset: auto;
+  z-index: 80;
+  width: min(12rem, calc(100vw - 16px));
+  box-sizing: border-box;
+  overflow: auto;
+  margin: 0;
+  padding: 4px;
+  border: 1px solid var(--sidebar-row);
+  border-radius: 8px;
+  background: var(--sidebar-bg-deep);
+  color: var(--sidebar-text);
+  box-shadow: 0 4px 16px rgb(0 0 0 / 18%);
+}
+
+:where([data-component-owner="project-tree"]) .resource-actions-popover button {
+  justify-content: flex-start;
+  width: 100%;
+  min-height: 44px;
+  gap: 8px;
+  padding-inline: 10px;
+}
+
+@container project-tree (max-width: 220px) {
+  :where([data-component-owner="project-tree"]:not(.editing)) .tree-item.resource-row {
+    grid-template-columns: minmax(0, 1fr) 30px;
+  }
+  :where([data-component-owner="project-tree"]) .resource-row .project-task-summary,
+  :where([data-component-owner="project-tree"]) .resource-direct-actions { display: none; }
+  :where([data-component-owner="project-tree"]) .resource-actions .resource-actions-toggle { display: inline-flex; }
+}
+
+:where([data-component-owner="project-tree"].drawer-open:not(.editing)) .tree-item.resource-row {
+  grid-template-columns: minmax(0, 1fr) 44px;
+  min-height: 44px;
+}
+
+:where([data-component-owner="project-tree"].drawer-open) .resource-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+:where([data-component-owner="project-tree"].drawer-open) .resource-direct-actions { display: none; }
+:where([data-component-owner="project-tree"].drawer-open) .resource-actions .resource-actions-toggle {
+  display: inline-flex;
+  min-width: 44px;
+  min-height: 44px;
+}
+
+@media (max-width: 980px), (hover: none), (any-pointer: coarse) {
+  :where([data-component-owner="project-tree"]:not(.editing)) .tree-item.resource-row {
+    grid-template-columns: minmax(0, 1fr) 44px;
+    min-height: 44px;
+  }
+  :where([data-component-owner="project-tree"]) .resource-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+  :where([data-component-owner="project-tree"]) .resource-direct-actions { display: none; }
+  :where([data-component-owner="project-tree"]) .resource-actions .resource-actions-toggle {
+    display: inline-flex;
+    min-width: 44px;
+    min-height: 44px;
+  }
+}

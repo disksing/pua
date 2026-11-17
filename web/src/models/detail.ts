@@ -108,8 +108,6 @@ export interface DetailPanelModel {
   agents: AgentOption[];
   resolveResourceTitle: (resourceId: string) => string | null;
   onNavigate: (resourceId: string) => void;
-  onCreateTask: (projectId: string) => void;
-  onArchive: (resourceId: string) => void;
   onSaveWorkspaceAgents: (content: string, expectedContentHash: string) => Promise<WorkspaceAgentsModel>;
   onSaveMarkdownFile: (path: string, content: string, expectedContentHash: string) => Promise<FilePreviewModel>;
   onDeleteArtifact: (path: string) => Promise<void>;

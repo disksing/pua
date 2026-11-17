@@ -112,6 +112,8 @@ export interface AppShellModel {
   onResolveWorkspaceUser: (name: string, create: boolean) => Promise<void>;
   onAddWorkspace: () => void;
   onCreateProject: () => void;
+  onCreateTask: (projectId: string) => Promise<void>;
+  onArchive: (resourceId: string) => Promise<void>;
   onOpenSettings: () => void;
   onRefreshDoctor: () => Promise<void>;
   onToggleProject: (id: string) => Promise<void>;

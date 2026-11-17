@@ -239,7 +239,7 @@
       <button type="button" class="breadcrumb-link" onclick={() => model.onNavigate("workspace")}>{model.workspaceName}</button>
       {#if model.parent}<span class="breadcrumb-separator">/</span><button type="button" class="breadcrumb-link" onclick={() => model.onNavigate(model.parent?.id || "workspace")}>{model.parent.title}</button>{/if}
     </nav>
-    <h1 class="details-title">{model.resourceTitle}{#if model.resourceType !== "scheduler"}<code class="resource-ref-badge">{resourceReference(model.resourceId)}</code>{/if}</h1>{#if model.detail}<div class="details-actions">{#if model.resourceType === "project"}<button type="button" class="primary-button" id="newTaskButton" onclick={() => model.onCreateTask(model.resourceId)}><Icon name="plus" /><span>New Task</span></button>{/if}{#if model.resourceType !== "scheduler"}<button type="button" class="danger-button" id="archiveButton" onclick={() => model.onArchive(model.resourceId)}><Icon name="archive" /><span>Archive</span></button>{/if}</div>{/if}
+    <h1 class="details-title">{model.resourceTitle}{#if model.resourceType !== "scheduler"}<code class="resource-ref-badge">{resourceReference(model.resourceId)}</code>{/if}</h1>
   </div>
   {#if model.loading || !model.detail}<div id="detailsContent" class="details-content"><div class="empty-state"><Icon name="loader-circle" className="empty-state-icon" /><strong>Loading details...</strong></div></div>
   {:else}

@@ -1,8 +1,9 @@
 <script lang="ts">
   import "./CreateDialog.css";
 
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
 
+  import { confirmDialogChannel } from "../controllers/confirm-dialog-controller";
   import type { ModelChannel } from "./model-channel";
   import Icon from "./Icon.svelte";
   import ProjectCreateForm from "./ProjectCreateForm.svelte";
@@ -16,12 +17,22 @@
   let draft = $state(cloneDraft(model.draft));
   let identity = $state("");
   let dialogElement: HTMLElement | undefined = $state();
+  let origin: HTMLElement | null = null;
 
   const isTask = $derived(draft.type === "task");
   const projectDescriptionMissing = $derived(!isTask && !draft.description.trim());
   const projectSlugInvalid = $derived(!isTask && !isValidResourceSlug(draft.slug));
 
   onMount(() => channel.subscribe((next) => {
+    if (next.open && !model.open) {
+      origin = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      void tick().then(() => {
+        if (model.open && !dialogElement?.contains(document.activeElement)) dialogElement?.focus({ preventScroll: true });
+      });
+    } else if (!next.open && model.open) {
+      if (!model.submitting && origin?.isConnected) origin.focus({ preventScroll: true });
+      origin = null;
+    }
     model = next;
     if (next.identity !== identity) {
       identity = next.identity;
@@ -31,10 +42,10 @@
 
   onMount(() => {
     const keydown = (event: KeyboardEvent) => {
-      if (!model.open) return;
-      if (event.key === "Escape" && !model.submitting) {
+      if (!model.open || event.defaultPrevented || confirmDialogChannel.current().open) return;
+      if (event.key === "Escape") {
         event.preventDefault();
-        model.onClose();
+        if (!model.submitting) model.onClose();
         return;
       }
       if (event.key !== "Tab" || !dialogElement) return;
@@ -42,7 +53,8 @@
       if (!focusable.length) return;
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      if (document.activeElement === dialogElement) { event.preventDefault(); (event.shiftKey ? last : first).focus(); }
+      else if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
     };
     document.addEventListener("keydown", keydown);
@@ -62,7 +74,7 @@
 {#if model.open}
   <div class="create-dialog-layer" role="presentation">
     <button class="create-dialog-backdrop modal-enter" type="button" aria-label="Close" onclick={model.onClose}></button>
-    <div bind:this={dialogElement} class:create-task-dialog={isTask} class="create-dialog modal-enter" role="dialog" aria-modal="true" aria-label={isTask ? "Create task" : "Create project"}>
+    <div bind:this={dialogElement} class:create-task-dialog={isTask} class="create-dialog modal-enter" role="dialog" aria-modal="true" aria-label={isTask ? "Create task" : "Create project"} tabindex="-1">
       <header class="create-dialog-header">
         <div>
           <strong>{isTask ? "Create task" : "Create project"}</strong>

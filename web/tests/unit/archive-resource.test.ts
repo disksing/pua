@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AppShellModel } from "../../src/components/models";
+import type { CreateDialogModel } from "../../src/models/create";
 import type { DetailPanelModel } from "../../src/models/detail";
 import { confirmDialogChannel } from "../../src/controllers/confirm-dialog-controller";
 
@@ -104,6 +105,7 @@ describe("Archive resource flow", () => {
     const state = {
       treeFetchCount: 0,
       archivedResourceIds: [] as string[],
+      fetchedDetailIds: [] as string[],
       uiStateBodies: [] as Array<{ expandedProjects?: string[] }>,
     };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -135,6 +137,12 @@ describe("Archive resource flow", () => {
       const detailMatch = url.pathname.match(/^\/api\/workspaces\/ws-test\/resources\/([^/]+)$/);
       if (detailMatch && method === "GET") {
         const id = decodeURIComponent(detailMatch[1]);
+        state.fetchedDetailIds.push(id);
+        if (id === "project2") return json({
+          ...resourceDetail(id, id),
+          templates: [{ name: "project-two-template", valid: true }],
+          taskDefault: { kind: "agent", name: "project-two-agent" },
+        });
         return json(resourceDetail(id, id));
       }
       const statusMatch = url.pathname.match(/^\/api\/workspaces\/ws-test\/resources\/([^/]+)\/status$/);
@@ -147,9 +155,10 @@ describe("Archive resource flow", () => {
 
     const appShellModels: AppShellModel[] = [];
     const detailModels: DetailPanelModel[] = [];
+    const createModels: CreateDialogModel[] = [];
     const publisher = {
       renderAppShell: vi.fn((model: AppShellModel) => { appShellModels.push(model); }),
-      renderCreateDialog: vi.fn(),
+      renderCreateDialog: vi.fn((model: CreateDialogModel) => { createModels.push(model); }),
       renderSettings: vi.fn(),
       renderUploadDialog: vi.fn(),
       renderComposer: vi.fn(),
@@ -179,7 +188,7 @@ describe("Archive resource flow", () => {
       });
     }
 
-    return { state, appShellModels, detailModels, selectResource, releaseProjectStatus };
+    return { state, appShellModels, detailModels, createModels, selectResource, releaseProjectStatus };
   }
 
   it("updates only the affected tree nodes without reloading the whole tree", async () => {
@@ -190,7 +199,7 @@ describe("Archive resource flow", () => {
     const treeFetchesBeforeArchive = state.treeFetchCount;
     const loadingModelsBeforeArchive = appShellModels.filter((model) => model.loading).length;
 
-    await detailModels.at(-1)!.onArchive("project1.task1");
+    await appShellModels.at(-1)!.onArchive("project1.task1");
 
     await vi.waitFor(() => {
       const latest = appShellModels.at(-1);
@@ -204,7 +213,7 @@ describe("Archive resource flow", () => {
 
     // Archiving requires confirmation via the shared confirm dialog.
     expect(confirmRequests).toEqual([
-      { title: "Archive task", message: 'Archive task "Task One"? This ends its open working state and stops its agent.', confirmLabel: "Archive", danger: true },
+      { title: "Archive task", message: 'Archive task "Task One" (project1.task1)? This ends its open working state and stops its agent.', confirmLabel: "Archive", danger: true },
     ]);
     expect(state.archivedResourceIds).toEqual(["project1.task1"]);
     // The tree endpoint is not re-fetched: the archived node is removed locally.
@@ -221,13 +230,13 @@ describe("Archive resource flow", () => {
     // Archiving a whole project also removes it from the expanded set that is
     // persisted to ui-state, so the archived project cannot linger on disk.
     await selectResource("project2");
-    await detailModels.at(-1)!.onArchive("project2");
+    await appShellModels.at(-1)!.onArchive("project2");
     await vi.waitFor(() => {
       const latest = appShellModels.at(-1);
       expect(latest?.projects.map((project) => project.id)).toEqual(["project1"]);
       expect(latest?.projects[0]?.active).toBe(true);
     });
-    expect(confirmRequests.at(-1)).toEqual({ title: "Archive project", message: 'Archive project "Project Two"? This ends its open working state and stops its agent.', confirmLabel: "Archive", danger: true });
+    expect(confirmRequests.at(-1)).toEqual({ title: "Archive project", message: 'Archive project "Project Two" (project2)? This ends its open working state and stops its agent. Its tasks are archived with it.', confirmLabel: "Archive", danger: true });
     expect(state.archivedResourceIds).toEqual(["project1.task1", "project2"]);
     expect(state.treeFetchCount).toBe(treeFetchesBeforeArchive);
     expect(appShellModels.filter((model) => model.loading).length).toBe(loadingModelsBeforeArchive);
@@ -240,17 +249,69 @@ describe("Archive resource flow", () => {
     await selectResource("project1.task1");
 
     autoConfirmArchive = false;
-    await detailModels.at(-1)!.onArchive("project1.task1");
+    await appShellModels.at(-1)!.onArchive("project1.task1");
 
     // The confirmation dialog was shown, but the archive API was never called
     // and the tree stays untouched.
     expect(confirmRequests).toEqual([
-      { title: "Archive task", message: 'Archive task "Task One"? This ends its open working state and stops its agent.', confirmLabel: "Archive", danger: true },
+      { title: "Archive task", message: 'Archive task "Task One" (project1.task1)? This ends its open working state and stops its agent.', confirmLabel: "Archive", danger: true },
     ]);
     expect(state.archivedResourceIds).toEqual([]);
     const latest = appShellModels.at(-1);
     expect(latest?.projects.find((project) => project.id === "project1")?.children.map((task) => task.id)).toEqual(["project1.task1", "project1.task2"]);
     expect(detailModels.at(-1)?.resourceId).toBe("project1.task1");
+  });
+
+  it("preserves the detail and URL when archiving a different row", async () => {
+    stubConfirmDialog();
+    const { state, appShellModels, detailModels, selectResource } = await startApp();
+    await selectResource("project1.task2");
+    const pathname = window.location.pathname;
+    const detail = detailModels.at(-1);
+
+    await Promise.all([
+      appShellModels.at(-1)!.onArchive("project1.task1"),
+      appShellModels.at(-1)!.onArchive("project1.task1"),
+    ]);
+
+    expect(state.archivedResourceIds).toEqual(["project1.task1"]);
+    expect(confirmRequests).toHaveLength(1);
+    expect(detailModels.at(-1)).toBe(detail);
+    expect(window.location.pathname).toBe(pathname);
+    expect(appShellModels.at(-1)?.projects[0].children.map((task) => [task.id, task.active])).toEqual([["project1.task2", true]]);
+  });
+
+  it("uses the fallback when archiving the selected task's project", async () => {
+    stubConfirmDialog();
+    const { state, appShellModels, detailModels, selectResource } = await startApp();
+    await selectResource("project1.task2");
+
+    await appShellModels.at(-1)!.onArchive("project1");
+
+    expect(state.archivedResourceIds).toEqual(["project1"]);
+    expect(detailModels.at(-1)?.resourceId).toBe("project2");
+    expect(appShellModels.at(-1)?.projects.map((project) => project.id)).toEqual(["project2"]);
+  });
+
+  it("loads wizard templates and default binding for an unselected project's row", async () => {
+    const { state, appShellModels, detailModels, createModels, selectResource } = await startApp();
+    await selectResource("project1.task2");
+    const pathname = window.location.pathname;
+    expect(state.fetchedDetailIds).not.toContain("project2");
+
+    await appShellModels.at(-1)!.onCreateTask("project2");
+
+    const wizard = createModels.at(-1);
+    expect(wizard).toMatchObject({
+      open: true,
+      draft: { projectId: "project2" },
+      templates: [{ name: "project-two-template" }],
+      defaultTaskBinding: { kind: "agent", name: "project-two-agent" },
+    });
+    expect(state.fetchedDetailIds).toContain("project2");
+    expect(detailModels.at(-1)?.resourceId).toBe("project1.task2");
+    expect(window.location.pathname).toBe(pathname);
+    wizard?.onClose();
   });
 
   it("publishes project details before a delayed status response", async () => {

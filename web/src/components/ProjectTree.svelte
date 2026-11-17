@@ -1,7 +1,7 @@
 <script lang="ts">
   import "./ProjectTree.css";
 
-  import { onDestroy, onMount, tick } from "svelte";
+  import { onDestroy, onMount, tick, untrack } from "svelte";
 
   import Icon from "./Icon.svelte";
   import StatusPresentation from "./StatusPresentation.svelte";
@@ -16,7 +16,10 @@
     hasWorkspace = true,
     filter = "all",
     onFilter = () => {},
+    drawerOpen = false,
     onCreate,
+    onCreateTask = async () => {},
+    onArchive = async () => {},
     onToggle,
     onSelect,
     onReorder,
@@ -36,7 +39,10 @@
     hasWorkspace?: boolean;
     filter?: ShellTreeFilter;
     onFilter?: (filter: ShellTreeFilter) => void;
+    drawerOpen?: boolean;
     onCreate: () => void;
+    onCreateTask?: (id: string) => Promise<void>;
+    onArchive?: (id: string) => Promise<void>;
     onToggle: (id: string) => Promise<void>;
     onSelect: (id: string) => Promise<void>;
     onReorder: (drag: ShellDragTarget, target: ShellDragTarget, after: boolean) => Promise<void>;
@@ -55,6 +61,8 @@
   let stateTooltip = $state<{ resourceId: string; text: string; left: number; top: number; pinned: boolean } | null>(null);
   let renamingId = $state("");
   let renameDraft = $state("");
+  let actionsMenu = $state<{ id: string; trigger: HTMLButtonElement } | null>(null);
+  let actionsPopover = $state<HTMLDivElement | null>(null);
   // svelte-ignore state_referenced_locally
   let previousIdentity = $state(identity);
   // svelte-ignore state_referenced_locally
@@ -75,6 +83,7 @@
   $effect(() => {
     if (identity === previousIdentity) return;
     previousIdentity = identity;
+    closeActions();
     hideStateTooltip();
     cancelRename();
     finishDrag();
@@ -83,10 +92,23 @@
   $effect(() => {
     if (editing === previousEditing) return;
     previousEditing = editing;
+    closeActions();
     if (editing) return;
     hideStateTooltip();
     cancelRename();
     finishDrag();
+  });
+
+  $effect(() => {
+    const menu = actionsMenu;
+    if (!menu) return;
+    if (loading || error || !projects.some((project) => project.id === menu.id || project.expanded && project.children.some((item) =>
+      item.id === menu.id || item.type === "folder" && item.expanded && item.children.some((task) => task.id === menu.id)
+    ))) closeActions();
+  });
+
+  $effect(() => {
+    if (!drawerOpen) untrack(closeActions);
   });
 
   $effect(() => {
@@ -107,13 +129,22 @@
 
   onMount(() => {
     const onPointerDown = (event: PointerEvent) => {
+      if (actionsMenu && !insideActions(event.target)) closeActions();
       if (!stateTooltip?.pinned) return;
       const target = event.target instanceof Element ? event.target : null;
       if (target?.closest(".task-state-tooltip") || target?.closest(".task-state-icon")) return;
       hideStateTooltip();
     };
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") hideStateTooltip();
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (actionsMenu) {
+        event.preventDefault();
+        closeActions(true);
+      }
+      hideStateTooltip();
+    };
+    const onFocusIn = (event: FocusEvent) => {
+      if (actionsMenu && !insideActions(event.target)) closeActions();
     };
     // Scrolls in unrelated containers (e.g. the chat timeline auto-scrolling
     // on new messages) do not move the tooltip anchor; only a viewport scroll
@@ -121,20 +152,86 @@
     // position.
     const onViewportChange = (event: Event) => {
       const target = event.target;
+      if (target instanceof Node && actionsPopover?.contains(target)) return;
       if (target instanceof Element && (!treeRoot || (target !== treeRoot && !target.contains(treeRoot)))) return;
+      closeActions();
       hideStateTooltip();
     };
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => closeActions());
+    if (treeRoot) observer?.observe(treeRoot);
     document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("focusin", onFocusIn);
     document.addEventListener("keydown", onKeyDown);
     window.addEventListener("resize", onViewportChange);
     window.addEventListener("scroll", onViewportChange, true);
     return () => {
       document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("focusin", onFocusIn);
       document.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("resize", onViewportChange);
       window.removeEventListener("scroll", onViewportChange, true);
+      observer?.disconnect();
     };
   });
+
+  function insideActions(target: EventTarget | null): boolean {
+    return target instanceof Node && Boolean(actionsMenu?.trigger.contains(target) || actionsPopover?.contains(target));
+  }
+
+  function closeActions(restoreFocus = false): void {
+    const menu = actionsMenu;
+    actionsMenu = null;
+    actionsPopover?.hidePopover?.();
+    if (restoreFocus && menu?.trigger.isConnected) menu.trigger.focus({ preventScroll: true });
+  }
+
+  async function toggleActions(event: MouseEvent, item: ShellResourceItem): Promise<void> {
+    const trigger = event.currentTarget as HTMLButtonElement;
+    const alreadyOpen = actionsMenu?.trigger === trigger;
+    closeActions();
+    if (alreadyOpen) return;
+    hideStateTooltip();
+    actionsMenu = { id: item.id, trigger };
+    await tick();
+    const popover = actionsPopover;
+    if (!popover || actionsMenu?.trigger !== trigger || !trigger.isConnected) return;
+    popover.showPopover?.();
+    const anchor = trigger.getBoundingClientRect();
+    const bounds = popover.getBoundingClientRect();
+    const viewport = window.visualViewport;
+    const left = viewport?.offsetLeft ?? 0;
+    const top = viewport?.offsetTop ?? 0;
+    const right = left + (viewport?.width ?? window.innerWidth);
+    const bottom = top + (viewport?.height ?? window.innerHeight);
+    popover.style.left = `${Math.max(left + 8, Math.min(anchor.right - bounds.width, right - bounds.width - 8))}px`;
+    const below = bottom - anchor.bottom - 12;
+    const above = anchor.top - top - 12;
+    const placeAbove = bounds.height > below && above > below;
+    const height = Math.min(bounds.height, Math.max(0, placeAbove ? above : below));
+    popover.style.maxHeight = `${height}px`;
+    popover.style.top = `${placeAbove ? anchor.top - height - 4 : anchor.bottom + 4}px`;
+    popover.querySelector("button")?.focus({ preventScroll: true });
+  }
+
+  async function runResourceAction(event: MouseEvent, item: ShellResourceItem, action: "create" | "archive"): Promise<void> {
+    const trigger = actionsMenu?.trigger ?? event.currentTarget as HTMLButtonElement;
+    closeActions();
+    hideStateTooltip();
+    trigger.focus({ preventScroll: true });
+    const actionIdentity = identity;
+    try {
+      await (action === "create" ? onCreateTask(item.id) : onArchive(item.id));
+    } catch (reason) {
+      onToast(reason instanceof Error ? reason.message : String(reason));
+    }
+    await tick();
+    if (action === "archive" && identity === actionIdentity && !trigger.isConnected && document.activeElement === document.body) {
+      const fallback = treeRoot?.querySelector<HTMLElement>(".tree-item.active .tree-row-navigation") ??
+        treeRoot?.closest(".tree-section")?.querySelector<HTMLElement>("#newProjectButton");
+      fallback?.focus({ preventScroll: true });
+      if (fallback && document.activeElement !== fallback) document.querySelector<HTMLElement>("#splitMenuButton, #mobileMenuButton")?.focus();
+    }
+  }
 
   onDestroy(() => {
     hideStateTooltip();
@@ -389,7 +486,7 @@
   }
 </script>
 
-<section class="tree-section" class:editing data-component-owner="project-tree">
+<section class="tree-section" class:editing class:drawer-open={drawerOpen} data-component-owner="project-tree">
   <div class="section-title">
     <span class="section-label">Projects</span>
     <span class="section-actions">
@@ -414,7 +511,9 @@
       <div class="empty-state"><Icon name="folder-search" className="empty-state-icon" /><strong>No workspace yet</strong><span>Add a workspace path to begin.</span></div>
     {:else}
       {#each projects as project (project.id)}
-        <button type="button" class={`tree-item ${statusClass(project.status)} ${project.active ? "active" : ""} ${drag?.id === project.id ? "drag-source" : ""} ${rowDropClass(project.id)}`} aria-label={project.ariaLabel || undefined} onclick={(event) => activate(event, project)} ondragover={(event) => updateDrop(event, { kind: "project", id: project.id, projectId: "" })} ondrop={(event) => commitDrop(event, { kind: "project", id: project.id, projectId: "" })}>
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div class={`tree-item resource-row ${statusClass(project.status)} ${project.active ? "active" : ""} ${drag?.id === project.id ? "drag-source" : ""} ${rowDropClass(project.id)}`} ondragover={(event) => updateDrop(event, { kind: "project", id: project.id, projectId: "" })} ondrop={(event) => commitDrop(event, { kind: "project", id: project.id, projectId: "" })}>
+        <button type="button" class="tree-row-navigation" aria-label={project.ariaLabel || project.title} onclick={(event) => activate(event, project)}>
           <span class="chevron" class:expanded={project.expanded} data-project-toggle={project.children.length ? project.id : undefined}>{#if project.children.length}<Icon name="chevron-right" />{/if}</span>
           {#if editing}
             <Icon name="folder" className="tree-icon" />
@@ -432,6 +531,8 @@
             <span class="drag-handle" draggable="true" title="Drag to reorder" ondragstart={(event) => beginDrag(event, { kind: "project", id: project.id, projectId: "" })} ondragend={finishDrag}><Icon name="grip-vertical" className="drag-handle-icon" /></span>
           {/if}
         </button>
+        {#if !editing}{@render resourceActions(project)}{/if}
+        </div>
         {#if project.expanded}
           <div class="task-group">
             {#each project.children as child (child.id)}
@@ -485,7 +586,9 @@
 </section>
 
 {#snippet taskRow(task: ShellResourceItem, project: ShellResourceItem, containerId: string)}
-  <button type="button" class={`tree-item task-item ${statusClass(task.status)} ${task.active ? "active" : ""} ${drag?.id === task.id ? "drag-source" : ""} ${rowDropClass(task.id)}`} data-task-id={task.id} aria-label={task.ariaLabel || undefined} onmouseenter={(event) => showStateTooltip(event, task)} onmouseleave={() => leaveStateTooltip(task)} onclick={(event) => activate(event, task)} ondragover={(event) => updateDrop(event, { kind: "task", id: task.id, projectId: project.id, containerId })} ondrop={(event) => commitDrop(event, { kind: "task", id: task.id, projectId: project.id, containerId })}>
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class={`tree-item task-item resource-row ${statusClass(task.status)} ${task.active ? "active" : ""} ${drag?.id === task.id ? "drag-source" : ""} ${rowDropClass(task.id)}`} data-task-id={task.id} onmouseenter={(event) => showStateTooltip(event, task)} onmouseleave={() => leaveStateTooltip(task)} ondragover={(event) => updateDrop(event, { kind: "task", id: task.id, projectId: project.id, containerId })} ondrop={(event) => commitDrop(event, { kind: "task", id: task.id, projectId: project.id, containerId })}>
+  <button type="button" class="tree-row-navigation" aria-label={task.ariaLabel || task.title} onclick={(event) => activate(event, task)}>
     <span class="chevron"></span>
     {#if editing}
       <span class="tree-icon-placeholder"></span>
@@ -502,6 +605,28 @@
       <span class="drag-handle" draggable="true" title="Drag to reorder" ondragstart={(event) => beginDrag(event, { kind: "task", id: task.id, projectId: project.id, containerId })} ondragend={finishDrag}><Icon name="grip-vertical" className="drag-handle-icon" /></span>
     {/if}
   </button>
+  {#if !editing}{@render resourceActions(task)}{/if}
+  </div>
+{/snippet}
+
+{#snippet resourceActions(item: ShellResourceItem)}
+  {@const label = item.ref ? `${item.title} (${item.ref})` : item.title}
+  {@const expanded = actionsMenu?.id === item.id}
+  <div class="resource-actions">
+    <div class="resource-direct-actions">
+      {#if item.type === "project"}
+        <button type="button" aria-label={`New Task in ${label}`} title="New Task" onclick={(event) => runResourceAction(event, item, "create")}><Icon name="plus" /></button>
+      {/if}
+      <button type="button" aria-label={`Archive ${label}`} title="Archive" onclick={(event) => runResourceAction(event, item, "archive")}><Icon name="archive" /></button>
+    </div>
+    <button type="button" class="resource-actions-toggle" aria-label={`Actions for ${label}`} aria-expanded={expanded} aria-controls={expanded ? "tree-resource-actions" : undefined} onclick={(event) => toggleActions(event, item)}><span aria-hidden="true">⋯</span></button>
+    {#if expanded}
+      <div id="tree-resource-actions" class="resource-actions-popover" popover="manual" bind:this={actionsPopover}>
+        {#if item.type === "project"}<button type="button" onclick={(event) => runResourceAction(event, item, "create")}><Icon name="plus" />New Task</button>{/if}
+        <button type="button" class="resource-archive-action" onclick={(event) => runResourceAction(event, item, "archive")}><Icon name="archive" />Archive</button>
+      </div>
+    {/if}
+  </div>
 {/snippet}
 
 {#snippet chatIndicator(item: ShellResourceItem)}

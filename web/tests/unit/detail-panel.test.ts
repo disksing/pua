@@ -39,7 +39,7 @@ function resourceModel(overrides: Partial<DetailPanelModel> = {}): DetailPanelMo
     agentProfiles: [{ key: "default", description: "Default", agentName: "fake-agent" }],
     agents: [{ id: "fake-agent", label: "Fake Agent", summary: "fake" }],
     resolveResourceTitle: () => null,
-    onNavigate: vi.fn(), onCreateTask: vi.fn(), onArchive: vi.fn(),
+    onNavigate: vi.fn(),
     onSaveWorkspaceAgents: vi.fn(async () => ({ path: "AGENTS.md", content: "", contentHash: "saved" })),
     onSaveMarkdownFile: vi.fn(async (path, content) => ({ path, content, contentHash: "saved" })),
     onDeleteArtifact: vi.fn(async () => undefined),

@@ -25,5 +25,6 @@ export interface ConfirmDialogModel {
   confirmLabel: string;
   cancelLabel: string;
   danger: boolean;
+  defaultToCancel?: boolean;
   onResult: (confirmed: boolean) => void;
 }

@@ -7,6 +7,7 @@ export interface ConfirmDialogOptions {
 	confirmLabel?: string;
 	cancelLabel?: string;
 	danger?: boolean;
+	defaultToCancel?: boolean;
 }
 
 export interface ConfirmDialogController {
@@ -50,6 +51,7 @@ export function createConfirmDialogController(): ConfirmDialogController {
 				confirmLabel: options.confirmLabel?.trim() || "Confirm",
 				cancelLabel: options.cancelLabel?.trim() || "Cancel",
 				danger: Boolean(options.danger),
+				defaultToCancel: options.defaultToCancel,
 				onResult: settle
 			});
 		});

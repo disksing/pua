@@ -11,21 +11,30 @@
   // svelte-ignore state_referenced_locally
   let model = $state(channel.current());
   let confirmButton: HTMLButtonElement = $state()!;
+  let cancelButton: HTMLButtonElement = $state()!;
 
   onMount(() => {
+    let origin: HTMLElement | null = null;
     const unsubscribe = channel.subscribe((next) => {
       const wasOpen = model.open;
       model = next;
-      if (next.open && !wasOpen) queueMicrotask(() => {
-        confirmButton?.focus({ preventScroll: true });
-      });
+      if (next.open && !wasOpen) {
+        origin = next.defaultToCancel && document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        queueMicrotask(() => (next.defaultToCancel ? cancelButton : confirmButton)?.focus({ preventScroll: true }));
+      } else if (!next.open && wasOpen) {
+        origin?.focus({ preventScroll: true });
+        origin = null;
+      }
     });
     const keydown = (event: KeyboardEvent) => {
-      if (!model.open) return;
+      if (!model.open || event.defaultPrevented) return;
       if (event.key === "Escape") {
         event.preventDefault();
         model.onResult(false);
-      } else if (event.key === "Enter") {
+      } else if (model.defaultToCancel && event.key === "Tab") {
+        event.preventDefault();
+        (document.activeElement === cancelButton ? confirmButton : cancelButton)?.focus();
+      } else if (!model.defaultToCancel && event.key === "Enter") {
         event.preventDefault();
         model.onResult(true);
       }
@@ -48,7 +57,7 @@
       </header>
       <div class="confirm-dialog-content"><p>{model.message}</p></div>
       <footer class="confirm-dialog-footer">
-        <button type="button" class="secondary-button" onclick={() => model.onResult(false)}>{model.cancelLabel}</button>
+        <button bind:this={cancelButton} type="button" class="secondary-button" onclick={() => model.onResult(false)}>{model.cancelLabel}</button>
         <button bind:this={confirmButton} type="button" class="primary-button" class:danger-button={model.danger} onclick={() => model.onResult(true)}>{model.confirmLabel}</button>
       </footer>
     </div>

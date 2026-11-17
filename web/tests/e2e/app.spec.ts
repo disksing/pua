@@ -663,7 +663,8 @@ test("navigates resources and creates a task through the canonical application f
   await bindingMenu.getByRole("option", { name: "other-agent review" }).click();
   await expect.poll(() => harness.bindingBodies).toEqual([{ kind: "agent", name: "other-agent" }]);
   await page.getByRole("button", { name: "Migration project", exact: true }).click();
-  await page.getByRole("button", { name: "New Task" }).click();
+  await page.locator("#projectTree > .resource-row").first().hover();
+  await page.getByRole("button", { name: /^New Task in / }).click();
   const createDialog = page.getByRole("dialog", { name: "Create task" });
   await createDialog.getByRole("button", { name: "Next", exact: true }).click();
   await createDialog.locator('input[name="title"]').fill("Created from baseline");
@@ -1784,7 +1785,8 @@ test("keeps resource chat free of AgentHub Session lifecycle controls", async ({
 test("switches wizard templates and ignores an older preview response", async ({ page }) => {
   const harness = await installMockApi(page, "project1");
   await page.goto("/w/ws-test/r/project1");
-  await page.getByRole("button", { name: "New Task" }).click();
+  await page.locator("#projectTree > .resource-row").first().hover();
+  await page.getByRole("button", { name: /^New Task in / }).click();
 
   const dialog = page.getByRole("dialog", { name: "Create task" });
   await dialog.getByRole("option", { name: /Feature A/ }).click();
@@ -1844,7 +1846,8 @@ test("creates and starts a task with a chosen agent from the wizard", async ({ p
     return route.fallback();
   });
   await page.goto("/w/ws-test/r/project1");
-  await page.getByRole("button", { name: "New Task" }).click();
+  await page.locator("#projectTree > .resource-row").first().hover();
+  await page.getByRole("button", { name: /^New Task in / }).click();
 
   const dialog = page.getByRole("dialog", { name: "Create task" });
   await dialog.getByRole("button", { name: "Next", exact: true }).click();
@@ -1882,7 +1885,8 @@ test("anchors the wizard binding menu to its trigger under the Riso theme", asyn
   await page.addInitScript(() => window.localStorage.setItem("pua.web.themePreference", "riso"));
   await installMockApi(page, "project1");
   await page.goto("/w/ws-test/r/project1");
-  await page.getByRole("button", { name: "New Task" }).click();
+  await page.locator("#projectTree > .resource-row").first().hover();
+  await page.getByRole("button", { name: /^New Task in / }).click();
 
   const dialog = page.getByRole("dialog", { name: "Create task" });
   await dialog.getByRole("button", { name: "Next", exact: true }).click();
@@ -1912,7 +1916,8 @@ test("anchors the wizard binding menu to its trigger under the Riso theme", asyn
 test("keeps the Create task wizard usable across desktop and mobile layouts", async ({ page }) => {
   await installMockApi(page, "project1");
   await page.goto("/w/ws-test/r/project1");
-  await page.getByRole("button", { name: "New Task" }).click();
+  await page.locator("#projectTree > .resource-row").first().hover();
+  await page.getByRole("button", { name: /^New Task in / }).click();
 
   const dialog = page.getByRole("dialog", { name: "Create task" });
   const wizard = dialog.locator('[data-component-owner="task-wizard"]');
@@ -1935,6 +1940,56 @@ test("keeps the Create task wizard usable across desktop and mobile layouts", as
   expect(bounds!.x).toBeGreaterThanOrEqual(0);
   expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(390);
   expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(844);
+});
+
+test("opens touch row actions and separates archive cancellation from drawer dismissal", async ({ browser }) => {
+  const page = await browser.newPage({ viewport: { width: 320, height: 670 }, hasTouch: true, isMobile: true });
+  try {
+    await installMockApi(page, "project1.task2");
+    const archiveRequests: unknown[] = [];
+    await page.route("**/api/workspaces/ws-test/archive", (route) => {
+      archiveRequests.push(route.request().postDataJSON());
+      return json(route, { path: "project1/archive/task1", warnings: [] });
+    });
+    await page.goto("/w/ws-test/r/project1.task2");
+    const drawerToggle = page.locator("#mobileMenuButton");
+    await drawerToggle.tap();
+    const firstTask = page.locator('[data-task-id="project1.task1"]');
+    const actions = firstTask.getByRole("button", { name: /^Actions for / });
+    await expect(actions).toBeVisible();
+    const bounds = (await actions.boundingBox())!;
+    expect(bounds.width).toBeGreaterThanOrEqual(44);
+    expect(bounds.height).toBeGreaterThanOrEqual(44);
+
+    await actions.tap();
+    const popover = page.locator("#tree-resource-actions");
+    const archive = popover.getByRole("button", { name: "Archive" });
+    await expect(archive).toBeInViewport();
+    await expect(popover.getByRole("button", { name: "New Task" })).toHaveCount(0);
+    await archive.press("Enter");
+    const confirm = page.getByRole("alertdialog", { name: "Archive task" });
+    await expect(confirm.getByRole("button", { name: "Cancel" })).toBeFocused();
+    await expect(confirm).toContainText("project1.task1");
+    await page.keyboard.press("Escape");
+    await expect(confirm).toHaveCount(0);
+    await expect(actions).toBeFocused();
+    await expect(drawerToggle).toHaveAttribute("aria-expanded", "true");
+    expect(archiveRequests).toEqual([]);
+
+    await actions.tap();
+    await page.keyboard.press("Escape");
+    await expect(popover).toHaveCount(0);
+    await expect(drawerToggle).toHaveAttribute("aria-expanded", "true");
+    await actions.tap();
+    await archive.tap();
+    await confirm.getByRole("button", { name: "Archive", exact: true }).tap();
+    await expect(firstTask).toHaveCount(0);
+    await expect(page).toHaveURL(/project1\.task2$/);
+    await expect(drawerToggle).toHaveAttribute("aria-expanded", "true");
+    expect(archiveRequests).toEqual([{ resourceId: "project1.task1" }]);
+  } finally {
+    await page.close();
+  }
 });
 
 test("normalizes a Workspace user name in the input before saving", async ({ page }) => {
@@ -3101,6 +3156,18 @@ for (const sidebarWidth of [280, 220]) {
     await page.goto("/w/ws-test/r/project1.task2");
     const markers = page.locator('#projectTree .resource-chat-status');
     await expect(markers).toHaveCount(4);
+    const projectRow = page.locator("#projectTree > .resource-row").first();
+    const actions = projectRow.locator(".resource-actions");
+    await expect(actions).toHaveCSS("opacity", "0");
+    const markerBefore = await markers.first().boundingBox();
+    await projectRow.locator(".tree-row-navigation").press("Tab");
+    await expect(actions).toHaveCSS("opacity", "1");
+    if (sidebarWidth === 280) {
+      await expect(actions.getByRole("button", { name: /^New Task in / })).toBeFocused();
+    } else {
+      await expect(actions.getByRole("button", { name: /^Actions for / })).toBeFocused();
+    }
+    expect(await markers.first().boundingBox()).toEqual(markerBefore);
     const geometry = await markers.evaluateAll(elements => elements.map(group => {
       const row=group.parentElement!,name=row.querySelector('.name')!,title=name.querySelector('.name-text')!,icon=group.querySelector('.chat-open-icon')!,badge=group.querySelector('.unread-badge');
       return {right:group.getBoundingClientRect().right,rowRight:row.getBoundingClientRect().right-parseFloat(getComputedStyle(row).paddingRight),left:group.getBoundingClientRect().left,nameRight:name.getBoundingClientRect().right,

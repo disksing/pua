@@ -37,7 +37,7 @@ function model(overrides: Partial<AppShellModel> = {}): AppShellModel {
     mobile: { sidebarOpen: false },
     layout: { preference: "auto", effective: "three" },
     route: { path: "", revision: 0, replace: true },
-    onSwitchWorkspace: vi.fn(async () => undefined), onResolveWorkspaceUser: vi.fn(async () => undefined), onAddWorkspace: vi.fn(), onCreateProject: vi.fn(), onOpenSettings: vi.fn(), onRefreshDoctor: vi.fn(async () => undefined),
+    onSwitchWorkspace: vi.fn(async () => undefined), onResolveWorkspaceUser: vi.fn(async () => undefined), onAddWorkspace: vi.fn(), onCreateProject: vi.fn(), onCreateTask: vi.fn(async () => undefined), onArchive: vi.fn(async () => undefined), onOpenSettings: vi.fn(), onRefreshDoctor: vi.fn(async () => undefined),
     onToggleProject: vi.fn(async () => undefined), onSelectResource: vi.fn(async () => undefined), onReorder: vi.fn(async () => undefined),
     onDragState: vi.fn(), onToggleTreeEditing: vi.fn(), onTreeFilter: vi.fn(), onCreateFolder: vi.fn(async () => ""), onRenameFolder: vi.fn(async () => undefined),
     onDeleteFolder: vi.fn(async () => undefined), onToggleFolder: vi.fn(async () => undefined), onPanePreview: vi.fn(), onPaneCommit: vi.fn(), onPaneViewport: vi.fn(), onMobileSidebar: vi.fn(),
@@ -113,9 +113,9 @@ describe("AppShell", () => {
     cleanups.push(() => unmount(component));
     await tick();
 
-    const projectA = target.querySelector<HTMLElement>('.tree-item[aria-label="Project A"]')!;
+    const projectA = target.querySelector<HTMLElement>('.tree-row-navigation[aria-label="Project A"]')!;
     projectA.dataset.identityProbe = "stable";
-    target.querySelector<HTMLButtonElement>('.tree-item[aria-label="Project A"]')!.click();
+    projectA.click();
     await vi.waitFor(() => expect(onSelectResource).toHaveBeenCalledWith("project-a"));
 
     channel.publish({
@@ -126,9 +126,9 @@ describe("AppShell", () => {
     });
     await tick();
 
-    expect(target.querySelector('.tree-item[aria-label="Project A"]')).toBe(projectA);
+    expect(target.querySelector('.tree-row-navigation[aria-label="Project A"]')).toBe(projectA);
     expect(projectA.dataset.identityProbe).toBe("stable");
-    expect(projectA.classList.contains("active")).toBe(true);
+    expect(projectA.closest(".tree-item")?.classList.contains("active")).toBe(true);
   });
 
   it("keeps a hovered Task state tooltip open across unrelated Tree updates", async () => {

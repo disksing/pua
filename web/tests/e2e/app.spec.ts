@@ -1992,41 +1992,48 @@ test("opens touch row actions and separates archive cancellation from drawer dis
   }
 });
 
-test("closes touch row actions when a Running filter match finishes", async ({ browser }) => {
-  const page = await browser.newPage({ viewport: { width: 320, height: 670 }, hasTouch: true, isMobile: true });
-  try {
-    await installMockApi(page, "project1.task1", false, true);
-    let activeTurn = true;
-    await page.route("**/api/workspaces/ws-test/tree", (route) => json(route, {
-      projects: [{ ...project, children: project.children.map((task) =>
-        task.id === "project1.task1" ? { ...task, runtime: { activeTurn, status: activeTurn ? "running" : "idle" } } : task
-      ) }],
-      workspace: { id: "workspace", type: "workspace", title: "Isolated E2E" },
-    }));
-    await page.goto("/w/ws-test/r/project1.task1");
-    const drawerToggle = page.locator("#mobileMenuButton");
-    await drawerToggle.tap();
-    const filter = page.getByRole("combobox", { name: "Filter projects and tasks" });
-    await filter.selectOption("running");
-    const task = page.locator('[data-task-id="project1.task1"]');
-    await task.getByRole("button", { name: /^Actions for / }).tap();
-    const menu = page.locator("#tree-resource-actions");
-    await expect(menu.getByRole("button", { name: "Archive" })).toBeFocused();
+test.describe("Touch row actions in filtered trees", () => {
+  test.use({ viewport: { width: 320, height: 670 }, hasTouch: true, isMobile: true });
 
-    activeTurn = false;
-    await expect(task).toHaveCount(0, { timeout: 15_000 });
-    await expect(menu).toHaveCount(0);
-    await expect(filter).toBeFocused();
-    await expect(drawerToggle).toHaveAttribute("aria-expanded", "true");
-    await expect(page).toHaveURL(/project1\.task1$/);
+  for (const filterMode of ["running", "unread"] as const) {
+    test(`closes the row menu when a task leaves the ${filterMode} filter`, async ({ page }) => {
+      const running = filterMode === "running";
+      const selectedId = running ? "project1.task1" : "project1.task2";
+      await installMockApi(page, selectedId, false, running);
+      let matchesFilter = true;
+      await page.route("**/api/workspaces/ws-test/tree", (route) => json(route, {
+        projects: [{ ...project, children: project.children.map((task) => {
+          if (task.id !== "project1.task1") return task;
+          return running
+            ? { ...task, runtime: { activeTurn: matchesFilter, status: matchesFilter ? "running" : "idle" } }
+            : { ...task, chat: { open: false, unreadCount: matchesFilter ? 1 : 0 } };
+        }) }],
+        workspace: { id: "workspace", type: "workspace", title: "Isolated E2E" },
+      }));
+      const detailPath = `/w/ws-test/r/${selectedId}`;
+      await page.goto(detailPath);
+      const drawerToggle = page.locator("#mobileMenuButton");
+      await drawerToggle.tap();
+      const filter = page.getByRole("combobox", { name: "Filter projects and tasks" });
+      await filter.selectOption(filterMode);
+      const task = page.locator('[data-task-id="project1.task1"]');
+      await task.getByRole("button", { name: /^Actions for / }).tap();
+      const menu = page.locator("#tree-resource-actions");
+      await expect(menu.getByRole("button", { name: "Archive" })).toBeFocused();
 
-    await page.locator("#treeEditButton").tap();
-    await expect(filter).toHaveValue("all");
-    await expect(task).toBeVisible();
-    await expect(task.locator(".resource-actions")).toHaveCount(0);
-    await expect(task.locator(".drag-handle")).toBeVisible();
-  } finally {
-    await page.close();
+      matchesFilter = false;
+      await expect(task).toHaveCount(0, { timeout: 15_000 });
+      await expect(menu).toHaveCount(0);
+      await expect(filter).toBeFocused();
+      await expect(drawerToggle).toHaveAttribute("aria-expanded", "true");
+      await expect(page).toHaveURL(detailPath);
+
+      await page.locator("#treeEditButton").tap();
+      await expect(filter).toHaveValue("all");
+      await expect(task).toBeVisible();
+      await expect(task.locator(".resource-actions")).toHaveCount(0);
+      await expect(task.locator(".drag-handle")).toBeVisible();
+    });
   }
 });
 

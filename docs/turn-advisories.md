@@ -16,6 +16,10 @@ Pi 原生 `steer` 在空闲时只入队而不启动运行，不能代替本方�
 
 服务端先落盘保留稳定输入，再发送给 Hub。响应不明时从 canonical `message.input` 恢复归属；无法确认时保留 `unknown` 并阻止后续正式输入。重试使用原 ID 和原内容，不重新广播新 ID；已确认的终态提示不重发。模型侧仍遵守 Hub 的至少一次交付语义。
 
+语义事件投影保留 scoped steer 的 `expectedTurnId`。兼容旧 Hub 时，仅在该字段从语义事件中缺失、且持久提示携带非空期望 Turn 的情况下，读取同一事件游标的 event-detail 原始输入；核对事件 ID、类型、Session、Turn、稳定消息 ID 及原始输入内容后恢复归属，不把缺失值当作相等。显式空值、不同期望 Turn、正文或 payload 冲突、原始事件无法读取时继续阻止正式投递。scoped 提示还必须归属其期望的原 Turn。
+
+已持久化的 unknown 提示沿正常协调恢复，不需要删除提示或改写回执。确认其原 Turn 已终态后，提示收敛为 completed/failed，后续正式消息继续按 FIFO 各自投递；恢复过程不重发已接受的提示。此行为需运行包含修复的 PUA，或在原始事件完整时运行包含投影修复的 Hub，源码交付本身不会改变运行中的实例。
+
 可以提前选择下一个正式输入，但实际提交必须等待提示所归属的 Turn 终态。独立提示轮不会接收普通正式输入作为 steer；原消息随后以自己的 opener/work/受众独立投递。明确的 interrupt 继续使用原中断流程。
 
 提示独立成轮时没有合法当前正式 work。Agent 应结束该轮，等待正式输入，不能沿用原 work ID 调用 yield、notify、finish 或 cancel-resume。提示轮的完成不创建业务 work 或隐式续接，也不据此完成业务 Task。
@@ -51,3 +55,5 @@ Chat open 与本轮可见性独立。内部正式工作需要用户获知时，�
 ## 验证
 
 `internal/serve/turn_advisory_test.go` 使用临时 Workspace 与回环 fake Hub，覆盖 Pi 活动/边界投递、未知响应恢复、提示轮 History、正式输入串行、无 work 控制、Codex/Pi 两种正式受众开关、快速变化合并、空闲不唤醒和业务状态保持。既有 Turn、Chat epoch、续接、输出与指引刷新测试继续适用。
+
+`agenthub/internal/api/server_advisory_input_test.go` 从真实 Store 经 HTTP 分页与 event-detail 验证 scoped/普通输入投影。`internal/serve/turn_advisory_canonical_test.go` 覆盖旧投影的严格原始事件核对、身份/内容冲突、原始事件暂不可用，以及 scoped unknown 在 manager 重启、活动/已终态 Turn 下的收敛、FIFO 和不重发；真实冲突在重启后仍保留栅栏。

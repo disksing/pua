@@ -165,7 +165,7 @@ func unknown(sourceType, reason, code string) []Event {
 }
 
 func messageInput(data map[string]any) map[string]any {
-	result := selectFields(data, "schemaVersion", "text", "payload", "role", "sender", "steer", "messageId", "replyTo", "correlationId")
+	result := selectFields(data, "schemaVersion", "text", "payload", "role", "sender", "steer", "expectedTurnId", "messageId", "replyTo", "correlationId")
 	if stringValue(result["role"]) == "" {
 		result["role"] = "user"
 	}

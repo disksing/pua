@@ -226,6 +226,28 @@ func canonicalAdvisory(ctx context.Context, client *agentHubClient, advisory *tu
 				if json.Unmarshal(event.Data, &input) != nil || input.MessageID != advisory.ID {
 					continue
 				}
+				if event.SourceEventID != frame.Cursor || frame.Source.Type != "message.input" ||
+					frame.Source.TurnID != event.TurnID || event.SessionID != advisory.SessionID {
+					return "", false, errors.New("advisory canonical event identity mismatch")
+				}
+				if input.ExpectedTurnID == "" && advisory.Input.ExpectedTurnID != "" {
+					var fields map[string]json.RawMessage
+					if err := json.Unmarshal(event.Data, &fields); err != nil {
+						return "", false, err
+					}
+					if _, present := fields["expectedTurnId"]; !present {
+						detail, err := client.SessionEvent(ctx, advisory.SessionID, frame.Cursor)
+						if err != nil {
+							return "", false, err
+						}
+						source := detail.SourceEvent
+						if source.Type != "message.input" || source.SessionID != advisory.SessionID ||
+							source.TurnID != event.TurnID ||
+							json.Unmarshal(source.Data, &input) != nil || input.MessageID != advisory.ID {
+							return "", false, errors.New("advisory canonical source identity mismatch")
+						}
+					}
+				}
 				actual, actualOK := decodePUAMessagePayload(input.Payload)
 				expected, expectedOK := decodePUAMessagePayload(advisory.Input.Payload)
 				if !actualOK || !expectedOK || !reflect.DeepEqual(actual, expected) ||
@@ -235,6 +257,9 @@ func canonicalAdvisory(ctx context.Context, client *agentHubClient, advisory *tu
 				}
 				if event.TurnID == "" {
 					return "", false, errors.New("advisory canonical input has no Turn identity")
+				}
+				if input.ExpectedTurnID != "" && (event.TurnID != input.ExpectedTurnID || event.TurnID != advisory.OriginTurnID) {
+					return "", false, errors.New("advisory canonical input belongs to another Turn")
 				}
 				return event.TurnID, true, nil
 			}

@@ -26,8 +26,6 @@ export interface ResourceRecord {
   userState?: ResourceUserState;
   latestTurnNumber?: number;
   latestTurnAt?: string;
-  latestChatAt?: string;
-  latestUnreadChatAt?: string;
   latestAgentName?: string;
   unreadCount?: number;
   chat?: { open: boolean; unreadCount: number };
@@ -111,15 +109,9 @@ export interface WorkspaceTree {
   workspace?: ResourceRecord;
   scheduler?: ResourceRecord;
   projects: ResourceRecord[];
-  activity?: ResourceActivityLists;
   wiki?: { exists?: boolean; error?: string; entries?: FileTreeModel[] };
 }
 
-export interface ResourceActivityLists {
-  running: ResourceRecord[];
-  unread: ResourceRecord[];
-  problems: ResourceRecord[];
-}
 
 export interface WorkspaceFileRecord {
   path: string;

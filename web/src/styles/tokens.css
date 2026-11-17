@@ -220,5 +220,4 @@
   /* Stacked two-column mode shrinks each pane down to its header band. */
   --details-min-height: var(--pane-header-height);
   --chat-min-height: var(--pane-header-height);
-  --sidebar-attention-height: 210px;
 }

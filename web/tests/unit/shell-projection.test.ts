@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { createShellProjection } from "../../src/controllers/shell-projection";
+import { createShellProjection, filterProjectTree } from "../../src/controllers/shell-projection";
+import type { ShellResourceItem } from "../../src/models/shell";
 import type { WorkspaceTree } from "../../src/models/workspace";
 
 describe("shell projection", () => {
@@ -10,7 +11,41 @@ describe("shell projection", () => {
       { id: "task2", type: "task" },
     ] }],
   };
-  const projection = createShellProjection({ tree: () => tree, findResource: () => null, agentName: (id) => id || "agent", now: () => Date.parse("2026-08-11T02:00:30Z") });
+  const projection = createShellProjection({ tree: () => tree, findResource: () => null, agentName: (id) => id || "agent" });
+
+  it("filters the ordered hierarchy without changing the original expansion, selection, or counts", () => {
+    function row(id: string, type: ShellResourceItem["type"], overrides: Partial<ShellResourceItem> = {}): ShellResourceItem {
+      return {
+        id, type, title: id, ref: "", active: false, expanded: false, ariaLabel: id, statusLabel: "",
+        status: { hasTaskState: false, className: "", layoutClassName: "", slotClassName: "", statuses: [] },
+        summary: null, children: [], unreadCount: 0, ...overrides
+      };
+    }
+    const idle = row("In progress workflow", "task", { active: true, statusLabel: "In progress" });
+    const unread = row("Unread closed chat", "task", { unreadCount: 2, chatOpen: false });
+    const running = row("Waiting for approval", "task", { running: true });
+    const folder = row("Folder", "folder", { children: [idle, unread, running] });
+    const direct = row("Direct task", "task", { running: true, unreadCount: 1 });
+    const project = row("Parent", "project", { children: [direct, folder] });
+    const idleProject = row("Idle", "project", { children: [row("Empty folder", "folder")] });
+    const ownTurn = row("Project turn", "project", { running: true, children: [idle] });
+    const ownUnread = row("Project unread", "project", { unreadCount: 3, children: [idle] });
+    const projects = [idleProject, ownTurn, project, ownUnread];
+
+    expect(filterProjectTree(projects, "all", new Set())).toBe(projects);
+    const runningTree = filterProjectTree(projects, "running", new Set([folder.id]));
+    expect(runningTree.map(({ id }) => id)).toEqual([ownTurn.id, project.id]);
+    expect(runningTree[0].children).toEqual([]);
+    expect(runningTree[1].children).toMatchObject([{ id: direct.id }, { id: folder.id, expanded: false, children: [{ id: running.id }] }]);
+    expect(runningTree[1].summary?.ariaLabel).toBe("2 running tasks");
+    const unreadTree = filterProjectTree(projects, "unread", new Set());
+    expect(unreadTree.map(({ id }) => id)).toEqual([project.id, ownUnread.id]);
+    expect(unreadTree[0].children).toMatchObject([{ id: direct.id }, { id: folder.id, expanded: true, children: [{ id: unread.id }] }]);
+    expect(unreadTree[0].summary?.ariaLabel).toBe("2 tasks with unread chat");
+    expect(project.expanded).toBe(false);
+    expect(folder.children).toEqual([idle, unread, running]);
+    expect(idle.active).toBe(true);
+  });
 
   it("keeps custom order stable and moves only known targets", () => {
     expect(projection.applyCustomOrder([{ id: "a" }, { id: "b" }, { id: "c" }], ["c", "a"]).map((item) => item.id)).toEqual(["c", "a", "b"]);
@@ -25,13 +60,7 @@ describe("shell projection", () => {
     expect(state.label).toBe("Blocked: Need deployment approval");
   });
 
-  it("projects resource generation status without losing recent output", () => {
-    const task = tree.projects[0].children![0];
-    task.runtime = { generationId: "gen-task1", status: "running", lastOutputAt: "2026-08-11T02:00:00Z" };
-    task.state = "in_progress";
-    const state = projection.taskOperationalState(task);
-    expect(state.session).toMatchObject({ kind: "resource-running", recentOutput: true });
-    expect(state.statusPresentation.layoutClassName).toBe("has-task-status");
+  it("counts open and in-progress tasks in the All summary", () => {
     expect(projection.projectTaskSummary(tree.projects[0])).toMatchObject({ taskCount: 2, runningCount: 1 });
   });
 
@@ -50,46 +79,6 @@ describe("shell projection", () => {
     expect(projection.resourceNavigationState(project)).toMatchObject({
       session: { kind: "resource-working", iconName: "loader-circle", label: "Working" },
       statusPresentation: { hasTaskState: true, statuses: [{ className: "task-status-session-running" }] },
-    });
-  });
-
-  it("shows the approval icon for a resource waiting for approval", () => {
-    const task = tree.projects[0].children![0];
-    task.runtime = { generationId: "gen-task1", status: "waiting_approval" };
-    const state = projection.taskOperationalState(task);
-    expect(state.session).toMatchObject({ kind: "resource-approval", label: "Resource waiting for approval" });
-    expect(state.statusPresentation).toMatchObject({
-      hasTaskState: true,
-      statuses: [{ iconName: "shield-question" }],
-    });
-  });
-
-  it("shows no status icon for resting or transitional generations across resources", () => {
-    const task = tree.projects[0].children![0];
-    const project = tree.projects[0];
-    for (const status of ["starting", "stopping", "recovering", "idle", "idle-suspended", "stopped"]) {
-      task.runtime = { generationId: "gen-task1", status };
-      const taskState = projection.taskOperationalState(task);
-      expect(taskState.session).toBeNull();
-      expect(taskState.label).toBe("");
-      expect(taskState.statusPresentation).toMatchObject({ hasTaskState: false, statuses: [] });
-
-      project.runtime = { generationId: "gen-project1", status };
-      const projectState = projection.taskOperationalState(project);
-      expect(projectState.session).toBeNull();
-      expect(projectState.label).toBe("");
-      expect(projectState.statusPresentation).toMatchObject({ hasTaskState: false, statuses: [] });
-    }
-  });
-
-  it("keeps the neutral fallback icon for unknown generation statuses", () => {
-    const task = tree.projects[0].children![0];
-    task.runtime = { generationId: "gen-task1", status: "failed" };
-    const state = projection.taskOperationalState(task);
-    expect(state.session).toMatchObject({ kind: "resource-active", label: "Resource failed" });
-    expect(state.statusPresentation).toMatchObject({
-      hasTaskState: true,
-      statuses: [{ iconName: "circle-dot" }],
     });
   });
 

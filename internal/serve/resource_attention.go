@@ -31,10 +31,8 @@ type resourceUserStateSnapshot struct {
 	ReadTurnNumber *int `json:"readTurnNumber,omitempty"`
 }
 
-type resourceActivityLists struct {
-	Running  []resourceSnapshot `json:"running"`
-	Unread   []resourceSnapshot `json:"unread"` // Legacy wire key for all current-user chats.
-	Problems []resourceSnapshot `json:"problems"`
+type desktopActivitySnapshot struct {
+	Running []resourceSnapshot `json:"running"`
 }
 
 func resourceUserStateSnapshotForState(state resourceUserState) *resourceUserStateSnapshot {
@@ -643,14 +641,14 @@ func sortResourceActivity(items []resourceSnapshot, timestamp func(resourceSnaps
 	})
 }
 
-func (s *server) enrichTreeResourceActivity(workspacePath string, tree *workspaceTree, userNames ...string) error {
+func (s *server) enrichTreeUserState(workspacePath string, tree *workspaceTree, userNames ...string) error {
 	resourceStates, err := s.loadResourceStatesAtPath(workspacePath, userNames...)
 	if err != nil {
 		return fmt.Errorf("load user resource state for tree: %w", err)
 	}
 	records, err := loadGenerationRecords(workspacePath)
 	if err != nil {
-		return fmt.Errorf("load resource generations for activity: %w", err)
+		return fmt.Errorf("load resource generations for user state: %w", err)
 	}
 	chats := make(map[string]resourceChat)
 	// Migrate existing chats without creating unrelated resources or waking models.
@@ -677,6 +675,7 @@ func (s *server) enrichTreeResourceActivity(workspacePath string, tree *workspac
 		return chatErr
 	}
 	latestCompletedTurns := latestCompletedTurnByResource(records)
+	tree.Activity.Running = make([]resourceSnapshot, 0)
 	var applyState func(*resourceSnapshot)
 	applyState = func(item *resourceSnapshot) {
 		resourceID := normalizedResourceID(item.ID)
@@ -714,6 +713,11 @@ func (s *server) enrichTreeResourceActivity(workspacePath string, tree *workspac
 		if item.LatestTurnNumber > readTurnNumber {
 			item.UnreadCount = item.LatestTurnNumber - readTurnNumber
 		}
+		if !item.Archived && item.Runtime != nil && item.Runtime.ActiveTurn {
+			running := *item
+			running.Children = nil
+			tree.Activity.Running = append(tree.Activity.Running, running)
+		}
 		for i := range item.Children {
 			applyState(&item.Children[i])
 		}
@@ -723,51 +727,6 @@ func (s *server) enrichTreeResourceActivity(workspacePath string, tree *workspac
 	for i := range tree.Projects {
 		applyState(&tree.Projects[i])
 	}
-	candidates := make([]resourceSnapshot, 0, 2+len(tree.Projects))
-	candidates = append(candidates, tree.Workspace, tree.Scheduler)
-	for _, project := range tree.Projects {
-		project.Children = append([]resourceSnapshot(nil), project.Children...)
-		candidates = append(candidates, project)
-		candidates = append(candidates, project.Children...)
-	}
-	tree.Activity = resourceActivityLists{
-		Running: make([]resourceSnapshot, 0),
-		Unread:  make([]resourceSnapshot, 0), Problems: make([]resourceSnapshot, 0),
-	}
-	for _, item := range candidates {
-		if item.Archived {
-			continue
-		}
-		item.Children = nil
-		if item.Runtime != nil && item.Runtime.ActiveTurn {
-			tree.Activity.Running = append(tree.Activity.Running, item)
-		}
-		if item.Chat != nil {
-			unreadItem := item
-			chat := chats[normalizedResourceID(item.ID)]
-			user := selectedUserName(userNames)
-			legacyUnread := chat.legacyUnreadSet(user)
-			for i, message := range chat.Messages {
-				if resourceActivitySortTime(message.CreatedAt).After(resourceActivitySortTime(unreadItem.LatestChatAt)) {
-					unreadItem.LatestChatAt = message.CreatedAt
-				}
-				if chat.unread(user, i, message, legacyUnread) && resourceActivitySortTime(message.CreatedAt).After(resourceActivitySortTime(unreadItem.LatestUnreadChatAt)) {
-					unreadItem.LatestUnreadChatAt = message.CreatedAt
-				}
-			}
-			tree.Activity.Unread = append(tree.Activity.Unread, unreadItem)
-		}
-		if item.Type == "task" && (item.State == app.TaskStateBlocked || item.State == app.TaskStateError) {
-			tree.Activity.Problems = append(tree.Activity.Problems, item)
-		}
-	}
-	sortResourceActivity(tree.Activity.Running, func(item resourceSnapshot) string {
-		if item.Runtime != nil {
-			return item.Runtime.TurnStartedAt
-		}
-		return ""
-	})
-	sortResourceActivity(tree.Activity.Unread, func(item resourceSnapshot) string { return item.LatestChatAt })
-	sortResourceActivity(tree.Activity.Problems, func(item resourceSnapshot) string { return item.StateUpdatedAt })
+	sortResourceActivity(tree.Activity.Running, func(item resourceSnapshot) string { return item.Runtime.TurnStartedAt })
 	return nil
 }

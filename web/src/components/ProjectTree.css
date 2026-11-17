@@ -30,6 +30,8 @@
 
 :where([data-component-owner="project-tree"]) .section-title {
   display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
   justify-content: space-between;
   align-items: center;
   margin-bottom: 8px;
@@ -187,9 +189,20 @@
 
 :where([data-component-owner="project-tree"]) .section-actions {
   display: inline-flex;
-  flex: 0 0 auto;
+  flex-wrap: wrap;
+  margin-inline-start: auto;
   align-items: center;
   gap: 4px;
+}
+
+:where([data-component-owner="project-tree"]) .tree-filter {
+  min-height: 24px;
+  padding-inline: 4px;
+  border: 1px solid var(--sidebar-line);
+  border-radius: 6px;
+  background: var(--sidebar-row);
+  color: var(--sidebar-text);
+  font-size: calc(11px * var(--sidebar-font-scale, 1));
 }
 
 :where([data-component-owner="project-tree"]) #treeEditButton.active {
@@ -202,7 +215,7 @@
 }
 
 :where([data-component-owner="project-tree"]) .section-title {
-  height: 22px;
+  min-height: 24px;
   margin-bottom: 6px;
   padding: 0 8px;
   color: var(--sidebar-muted);
@@ -417,7 +430,7 @@
   word-break: break-word;
 }
 
-@media (max-width: 980px) {
+@media (max-width: 980px), (pointer: coarse) {
   /* Project and Task rows are navigation controls; keep the visual content
      compact while making the complete resource row a reliable touch target. */
   :where([data-component-owner="project-tree"]) .tree-item {
@@ -444,7 +457,8 @@
     height: auto;
   }
 
-  :where([data-component-owner="project-tree"]) .section-title button {
+  :where([data-component-owner="project-tree"]) .section-title button,
+  :where([data-component-owner="project-tree"]) .tree-filter {
     min-width: 44px;
     height: 44px;
     padding: 0 10px;

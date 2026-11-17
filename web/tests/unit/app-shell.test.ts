@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import AppShell from "../../src/components/AppShell.svelte";
 import { createModelChannel } from "../../src/components/model-channel";
-import type { AppShellModel, ShellActivityItem, ShellResourceItem, ShellStatusPresentation } from "../../src/components/models";
+import type { AppShellModel, ShellResourceItem, ShellStatusPresentation } from "../../src/components/models";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -23,14 +23,6 @@ function resource(id: string, title: string, type: "project" | "task" = "project
   };
 }
 
-function activity(status: ShellStatusPresentation = emptyStatus): ShellActivityItem {
-  return {
-    id: "project-a", type: "project", title: "Project A", ref: "#1", selected: true,
-    activeTurn: status.hasTaskState, unreadCount: status.hasTaskState ? 1 : 0, turnNumber: status.hasTaskState ? 1 : 0,
-    agentName: status.hasTaskState ? "Codex" : "", statusLabel: status.hasTaskState ? "Resource working" : "Active turn", status,
-  };
-}
-
 function model(overrides: Partial<AppShellModel> = {}): AppShellModel {
   return {
     identity: "workspace-a", loading: false, error: "", version: "v0.1.0", activeWorkspaceId: "workspace-a", workspaceName: "Workspace A",
@@ -39,16 +31,15 @@ function model(overrides: Partial<AppShellModel> = {}): AppShellModel {
       { id: "workspace-a", name: "Workspace A", path: "/tmp/a", iconSrc: "/favicon.svg" },
       { id: "workspace-b", name: "Workspace B", path: "/tmp/b", iconSrc: "/favicon.svg" },
     ],
-    projects: [resource("project-a", "Project A"), resource("project-b", "Project B")], treeEditing: false, activity: { running: [], unread: [], problems: [] },
+    projects: [resource("project-a", "Project A"), resource("project-b", "Project B")], treeEditing: false, treeFilter: "all",
     doctor: { checking: false, complete: true, summary: { errors: 0, warnings: 0 }, workspaces: [] },
-    paneSizes: { sidebarWidth: 280, chatWidth: 420, chatHeight: 320, sidebarAttentionHeight: 210 },
+    paneSizes: { sidebarWidth: 280, chatWidth: 420, chatHeight: 320 },
     mobile: { sidebarOpen: false },
     layout: { preference: "auto", effective: "three" },
     route: { path: "", revision: 0, replace: true },
-    resolveResourceTitle: () => null,
     onSwitchWorkspace: vi.fn(async () => undefined), onResolveWorkspaceUser: vi.fn(async () => undefined), onAddWorkspace: vi.fn(), onCreateProject: vi.fn(), onOpenSettings: vi.fn(), onRefreshDoctor: vi.fn(async () => undefined),
     onToggleProject: vi.fn(async () => undefined), onSelectResource: vi.fn(async () => undefined), onReorder: vi.fn(async () => undefined),
-    onDragState: vi.fn(), onToggleTreeEditing: vi.fn(), onCreateFolder: vi.fn(async () => ""), onRenameFolder: vi.fn(async () => undefined),
+    onDragState: vi.fn(), onToggleTreeEditing: vi.fn(), onTreeFilter: vi.fn(), onCreateFolder: vi.fn(async () => ""), onRenameFolder: vi.fn(async () => undefined),
     onDeleteFolder: vi.fn(async () => undefined), onToggleFolder: vi.fn(async () => undefined), onPanePreview: vi.fn(), onPaneCommit: vi.fn(), onPaneViewport: vi.fn(), onMobileSidebar: vi.fn(),
     onToast: vi.fn(),
     onHistoryNavigation: vi.fn(async () => undefined),
@@ -212,49 +203,39 @@ describe("AppShell", () => {
     expect(target.querySelector(".task-state-tooltip")).toBeNull();
   });
 
-  it("keeps the Activity grid stable when a new resource starts its first turn", async () => {
-      const initial = model({ activity: { running: [activity()], unread: [], problems: [] } });
+  it("exposes the tree filters and restores focus when a filtered row disappears", async () => {
+    const initial = model();
     const channel = createModelChannel(initial);
     const target = document.body.appendChild(document.createElement("div"));
     const component = mount(AppShell, { target, props: { channel } });
     cleanups.push(() => unmount(component));
     await tick();
 
-    const row = target.querySelector<HTMLElement>('[data-component-owner="attention-list"] button.activity-row')!;
-    const status = row.querySelector<HTMLElement>(".activity-status")!;
-    expect([...row.children].map((child) => child.className)).toEqual([
-      "activity-status", "activity-title",
-    ]);
-    const fallbackSlot = status.querySelector<HTMLElement>(".activity-status-fallback-slot")!;
-    const runtimeSlot = status.querySelector<HTMLElement>(".activity-status-runtime-slot")!;
-    expect(fallbackSlot.hidden).toBe(false);
-    expect(runtimeSlot.hidden).toBe(true);
-    expect(fallbackSlot.querySelector('[data-lucide="folder"]')).not.toBeNull();
-
-    const runningStatus: ShellStatusPresentation = {
-      hasTaskState: true,
-      className: "task-status-session-running",
-      layoutClassName: "has-task-status",
-      slotClassName: "task-status-single",
-      statuses: [{ key: "resource-running:0", className: "task-status-session-running", iconName: "loader-circle", recentOutput: true }],
-    };
-      channel.publish({ ...initial, activity: { ...initial.activity, running: [activity(runningStatus)] } });
+    const filter = target.querySelector<HTMLSelectElement>('select[aria-label="Filter projects and tasks"]')!;
+    expect([...filter.options].map((option) => option.text)).toEqual(["All", "Running", "Unread"]);
+    expect(filter.value).toBe("all");
+    expect(target.querySelector("#activityResize, .attention-section")).toBeNull();
+    filter.value = "unread";
+    filter.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(initial.onTreeFilter).toHaveBeenCalledWith("unread");
+    channel.publish({ ...initial, treeFilter: "unread", projects: [initial.projects[0]] });
     await tick();
 
-    expect(target.querySelector('[data-component-owner="attention-list"] button.activity-row')).toBe(row);
-    expect([...row.children].map((child) => child.className)).toEqual([
-      "activity-status", "activity-title",
-    ]);
-    expect(row.querySelector(".activity-status")).toBe(status);
-    expect(fallbackSlot.hidden).toBe(true);
-    expect(runtimeSlot.hidden).toBe(false);
-    expect(runtimeSlot.querySelectorAll('[data-lucide="loader-circle"]')).toHaveLength(1);
-    expect(fallbackSlot.querySelector('[data-lucide="folder"]')).not.toBeNull();
+    const row = target.querySelector<HTMLElement>(".tree-item button, button.tree-item")!;
+    row.focus();
+    expect(document.activeElement).toBe(row);
+    channel.publish({ ...initial, treeFilter: "unread", projects: [] });
+    await vi.waitFor(() => expect(document.activeElement).toBe(filter));
+    expect(target.querySelector("#projectTree")?.textContent).toContain("No projects or tasks with unread chat");
+    expect(initial.onSelectResource).not.toHaveBeenCalled();
 
-      channel.publish({ ...initial, activity: { ...initial.activity, running: [activity()] } });
+    channel.publish({ ...initial, treeFilter: "running", projects: [] });
     await tick();
-
-    expect(target.querySelector('[data-component-owner="attention-list"] button.activity-row')).toBe(row);
+    expect(target.querySelector("#projectTree")?.textContent).toContain("No running projects or tasks");
+    channel.publish({ ...initial, treeEditing: true });
+    await tick();
+    expect(filter.disabled).toBe(true);
+    expect(filter.value).toBe("all");
   });
 
   it("keeps drag state local and sends one typed reorder transaction in tree edit mode", async () => {

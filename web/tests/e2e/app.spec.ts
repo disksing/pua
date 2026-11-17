@@ -62,20 +62,6 @@ const project = {
 type MockProject = typeof project;
 type MockTask = MockProject["children"][number];
 type MockResource = MockProject | MockTask;
-type MockActivityResource = {
-  id: string;
-  type: string;
-  title: string;
-  path: string;
-  archived: boolean;
-  state?: string;
-  userState?: { readTurnNumber?: number };
-  latestTurnNumber?: number;
-  unreadCount?: number;
-  chat?: { open: boolean; unreadCount: number };
-  runtime?: { activeTurn?: boolean; [key: string]: unknown };
-};
-
 const schedulerResource = {
   id: "scheduler",
   type: "scheduler",
@@ -314,18 +300,11 @@ async function installMockApi(page: Page, lastResourceId = "project1.task1", wit
           ...(runtimeExists ? { runtime: { generation: 1, generationId: "gen-1", status: turnRunning ? "running" : initialIdleStatus, agentName: "test-agent", updatedAt: now, resumable: initialIdleStatus === "idle-suspended", turnNumber, activeTurn: turnRunning } } : {}),
         } : { ...resource, userState: resourceStates[resource.id], latestTurnNumber: 0, unreadCount: 0 }),
       };
-      const activityCandidates: MockActivityResource[] = [projectSnapshot, ...projectSnapshot.children].map((item) => ({ ...item, children: undefined }));
-      const activity = {
-        running: activityCandidates.filter((item) => item.runtime?.activeTurn),
-        unread: activityCandidates.filter((item) => item.chat),
-        problems: activityCandidates.filter((item) => item.type === "task" && (item.state === "blocked" || item.state === "error")),
-      };
       return json(route, {
         root: "/tmp/pua-e2e",
         workspace: { id: "workspace", type: "workspace", title: "Isolated E2E", path: ".", archived: false, latestTurnNumber: 0, unreadCount: 0 },
         scheduler: { ...schedulerResource, scheduler: schedulerConfig },
         projects: [projectSnapshot, ...(createdProject ? [{ ...createdProject, userState: resourceStates[createdProject.id] }] : [])],
-        activity,
         wiki: { exists: true, entries: [
           { name: "index.md", path: "wiki/index.md", type: "file", size: 28 },
           { name: "link-preview.md", path: "wiki/link-preview.md", type: "file", size: 28 },
@@ -1089,29 +1068,27 @@ test("navigates to a newly created project", async ({ page }) => {
   await expect(page.locator("#toast")).toContainText("Project created");
 });
 
-test("always shows all Activity tab counts and supports resizing the panel", async ({ page }) => {
+test("starts with All and keeps the current detail when Running has no results", async ({ page }) => {
   await installMockApi(page, "project1");
   await page.goto("/w/ws-test/r/project1");
 
-  await expect(page.getByRole("tab", { name: "Running 0", exact: true })).toBeVisible();
-  await expect(page.getByRole("tab", { name: "Chat 0", exact: true })).toBeVisible();
-  await expect(page.getByRole("tab", { name: "Issues 0", exact: true })).toBeVisible();
-  await expect(page.getByRole("tab", { name: "Inbox 0", exact: true })).toBeVisible();
-
-  const activityPanel = page.locator('[data-component-owner="attention-list"]');
-  const initialHeight = await activityPanel.evaluate((element) => element.getBoundingClientRect().height);
-  const resizeHandle = page.locator("#activityResize");
-  const handleBox = await resizeHandle.boundingBox();
-  if (!handleBox) throw new Error("Activity resize handle is not visible");
-  await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
-  await page.mouse.down();
-  await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y - 60);
-  await page.mouse.up();
-  await expect.poll(() => activityPanel.evaluate((element) => element.getBoundingClientRect().height)).toBeGreaterThan(initialHeight + 40);
-  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("pua.web.paneSizes") || "{}").sidebarAttentionHeight)).toBeGreaterThan(initialHeight + 40);
+  const filter = page.getByRole("combobox", { name: "Filter projects and tasks" });
+  await expect(filter).toHaveValue("all");
+  await expect(page.locator("#activityResize, .attention-section")).toHaveCount(0);
+  await filter.selectOption("running");
+  await expect(page.locator("#projectTree")).toContainText("No running projects or tasks");
+  await expect(page).toHaveURL(/\/r\/project1$/);
+  await expect(page.locator("#detailsPanel")).toContainText(project.title);
+  await page.locator("#treeEditButton").click();
+  await expect(filter).toHaveValue("all");
+  await expect(filter).toBeDisabled();
+  await expect(page.locator("#projectTree")).toContainText(project.title);
+  await page.locator("#treeEditButton").click();
+  await expect(filter).toBeEnabled();
+  await expect(filter).toHaveValue("all");
 });
 
-test("uses Task workflow state in the tree and the Activity running list", async ({ page }) => {
+test("keeps workflow presentation when the Running filter matches an active Turn", async ({ page }) => {
   await installMockApi(page, "project1.task1", false, true);
   await page.goto("/w/ws-test/r/project1.task1");
 
@@ -1120,11 +1097,10 @@ test("uses Task workflow state in the tree and the Activity running list", async
   await expect(taskRow.locator('[data-lucide="file-text"]')).toHaveCount(0);
   await expect(taskRow.locator('[data-lucide="message-square"]')).toHaveCount(0);
 
-  await page.getByRole("tab", { name: "Running 1", exact: true }).click();
-  const activityRow = page.locator('[data-component-owner="attention-list"] button.activity-row', { hasText: "Infrastructure task" });
-  await expect(activityRow).toContainText("Resource working");
-  await expect(activityRow.locator('.activity-status [data-lucide="file-text"]')).toHaveCount(1);
-  await expect(activityRow.locator('.activity-status [data-lucide="message-square"]')).toHaveCount(0);
+  await page.getByRole("combobox", { name: "Filter projects and tasks" }).selectOption("running");
+  await expect(taskRow).toHaveClass(/\bactive\b/);
+  await expect(taskRow.locator('[data-lucide="loader-circle"]')).toHaveCount(1);
+  await expect(page.locator("#projectTree")).not.toContainText("Follow-up task");
 });
 
 test("keeps Task workflow state independent from a sleeping Session", async ({ page }) => {
@@ -1135,48 +1111,98 @@ test("keeps Task workflow state independent from a sleeping Session", async ({ p
   await expect(taskRow.locator('[data-lucide="circle"]')).toHaveCount(1);
   await expect(taskRow.locator('[data-lucide="file-text"]')).toHaveCount(0);
   await expect(taskRow.locator('[data-lucide="pause-circle"]')).toHaveCount(0);
-  await expect(page.getByRole("tab", { name: "Running 0", exact: true })).toBeVisible();
+  await page.getByRole("combobox", { name: "Filter projects and tasks" }).selectOption("running");
+  await expect(taskRow).toHaveCount(0);
 });
 
-test("highlights the selected Activity resource instead of every active turn", async ({ page }) => {
+test("opens matched paths temporarily and retains Folder membership in Running", async ({ page }) => {
   await installMockApi(page, "project1", false, true);
+  const folderId = "folder-test";
+  const writes: unknown[] = [];
+  await page.route("**/api/workspaces/ws-test/ui-state", async (route) => {
+    if (route.request().method() === "PUT") {
+      writes.push(route.request().postDataJSON());
+      return route.fallback();
+    }
+    return json(route, { version: 1, lastResourceId: "project1", expandedProjects: [],
+      taskOrder: { project1: [folderId, "project1.task2"] },
+      folders: [{ id: folderId, projectId: "project1", name: "Work folder", expanded: false }],
+      folderOrder: { [folderId]: ["project1.task1"] } });
+  });
   await page.goto("/w/ws-test/r/project1");
 
-  const runningActivity = page.locator('[data-component-owner="attention-list"] button.activity-row', { hasText: "Infrastructure task" });
-  await expect(runningActivity).not.toHaveClass(/\bselected\b/);
-  await expect(runningActivity).not.toHaveAttribute("aria-current");
-  await expect(runningActivity).toHaveAttribute("data-active-turn", "true");
-  await expect(runningActivity).toContainText("Resource working");
-
-  await page.goto("/w/ws-test/r/project1.task1");
-  await expect(runningActivity).toHaveClass(/\bselected\b/);
-  await expect(runningActivity).toHaveAttribute("aria-current", "page");
-  await expect(runningActivity).toHaveAttribute("data-active-turn", "true");
+  const tree = page.locator("#projectTree");
+  const taskRow = tree.locator('[data-task-id="project1.task1"]');
+  const folder = tree.locator(".folder-item", { hasText: "Work folder" });
+  const filter = page.getByRole("combobox", { name: "Filter projects and tasks" });
+  await expect(taskRow).toHaveCount(0);
+  await filter.selectOption("running");
+  await expect(folder).toBeVisible();
+  await expect(tree.locator('.folder-task-group [data-task-id="project1.task1"]')).toBeVisible();
+  await expect(taskRow).not.toHaveClass(/\bactive\b/);
+  await folder.click();
+  await expect(taskRow).toHaveCount(0);
+  await expect(folder).toBeVisible();
+  await filter.selectOption("all");
+  await expect(folder).toHaveCount(0);
+  expect(writes).toHaveLength(0);
 });
 
-test("keeps a newly created task Activity row aligned when its first turn starts", async ({ page }) => {
-  const harness = await installMockApi(page, "project1.task1", false, false, true);
+test("updates Running as the shared tree snapshot changes", async ({ page }) => {
+  await installMockApi(page, "project1.task1");
+  let activeTurn = false;
+  await page.route("**/api/workspaces/ws-test/tree", (route) => json(route, {
+    projects: [{ ...project, children: project.children.map((task) => task.id === "project1.task1"
+      ? { ...task, state: "in_progress", runtime: { activeTurn, status: activeTurn ? "waiting_approval" : "idle" } }
+      : task) }],
+    workspace: { id: "workspace", type: "workspace", title: "Isolated E2E" }
+  }));
   await page.goto("/w/ws-test/r/project1.task1");
 
-  const activityRow = page.locator('[data-component-owner="attention-list"] button.activity-row', { hasText: "Infrastructure task" });
-  await expect(activityRow).toHaveCount(0);
+  const filter = page.getByRole("combobox", { name: "Filter projects and tasks" });
+  const tree = page.locator("#projectTree");
+  const taskRow = tree.locator('[data-task-id="project1.task1"]');
+  await filter.selectOption("running");
+  await expect(tree).toContainText("No running projects or tasks");
+  activeTurn = true;
+  await expect(taskRow).toHaveClass(/\bactive\b/, { timeout: 10_000 });
+  activeTurn = false;
+  await expect(taskRow).toHaveCount(0, { timeout: 10_000 });
+  await expect(page).toHaveURL(/\/r\/project1\.task1$/);
+  await expect(page.locator("#detailsPanel")).toContainText("Infrastructure task");
+});
 
-  const input = page.locator("#chatInput");
-  await input.fill("Start the first turn");
-  await input.press("Enter");
-  await expect.poll(() => harness.inputBodies.length).toBe(1);
-  await expect(activityRow).toHaveCount(1);
-  await expect(activityRow).toHaveAttribute("data-active-turn", "true", { timeout: 8_000 });
-  await expect(activityRow.locator(".activity-status-runtime-slot [data-lucide=\"loader-circle\"]")).toBeVisible();
-  await expect(activityRow.locator(".activity-status-fallback-slot [data-lucide=\"file-text\"]")).toBeHidden();
+test.describe("Tree filters on touch layouts", () => {
+  test.use({ hasTouch: true, isMobile: true });
 
-  const layout = await activityRow.evaluate((row) => ({
-    directChildren: row.children.length,
-    statusTop: row.querySelector(".activity-status")!.getBoundingClientRect().top,
-    titleTop: row.querySelector(".activity-title")!.getBoundingClientRect().top,
-  }));
-  expect(layout.directChildren).toBe(2);
-  expect(Math.abs(layout.titleTop - layout.statusTop)).toBeLessThan(2);
+  for (const width of [320, 375]) {
+    test(`keeps the filter and Reorder reachable at ${width}px with larger sidebar text`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 740 });
+      await page.addInitScript(() => localStorage.setItem("pua.web.fontScales", JSON.stringify({ sidebar: 1.4 })));
+      await installMockApi(page, "project1", false, true);
+      await page.goto("/w/ws-test/r/project1");
+      await page.locator("#mobileMenuButton").tap();
+
+      const filter = page.getByRole("combobox", { name: "Filter projects and tasks" });
+      const reorder = page.locator("#treeEditButton");
+      for (const control of [filter, reorder]) {
+        await expect(async () => {
+          const box = await control.boundingBox({ timeout: 1000 });
+          expect(box).not.toBeNull();
+          expect(box!.height).toBeGreaterThanOrEqual(44);
+          expect(box!.width).toBeGreaterThanOrEqual(44);
+          expect(box!.x).toBeGreaterThanOrEqual(0);
+          expect(box!.x + box!.width).toBeLessThanOrEqual(width);
+        }).toPass({ timeout: 5000 });
+      }
+      await filter.selectOption("running");
+      await expect(page.locator('#projectTree [data-task-id="project1.task1"]')).toBeVisible();
+      await reorder.tap();
+      await expect(filter).toHaveValue("all");
+      await expect(filter).toBeDisabled();
+      await expect(page.locator("#mobileSidebar")).toBeVisible();
+    });
+  }
 });
 
 for (const viewport of [{ width: 1500, height: 800 }, { width: 440, height: 844 }]) {
@@ -3102,15 +3128,13 @@ for (const sidebarWidth of [280, 220]) {
   });
 }
 
-test("Activity Chat keeps read and closed chats with unread message pills and independent event cursors", async ({ page }, testInfo) => {
-  test.setTimeout(120_000);
+test("Unread follows public Chat badges and keeps the selected detail after reading", async ({ page }) => {
   await installMockApi(page, "project1.task2");
-  let newestTaskFirst = false;
   const writes: Array<{ user: string; resource: string; op: string; through?: number }> = [];
   const states = new Map<string, { open: boolean; unread: number; execution: number; dialogue: number; readExecution: number; readDialogue: number }>();
   const state = (user: string, resource: string) => {
     const key = `${user}:${resource}`;
-    if (!states.has(key)) states.set(key, { open: user === "User" && resource === "project1.task1", unread: user === "User" ? resource === "project1.task1" ? 2 : resource === "project1" ? 5 : 0 : 0, execution: 3, dialogue: 4, readExecution: 0, readDialogue: 0 });
+    if (!states.has(key)) states.set(key, { open: false, unread: user === "User" && resource === "project1.task1" ? 2 : 0, execution: 3, dialogue: 4, readExecution: 0, readDialogue: 0 });
     return states.get(key)!;
   };
   await page.route("**/api/workspaces/ws-test/**", async route => {
@@ -3123,11 +3147,7 @@ test("Activity Chat keeps read and closed chats with unread message pills and in
           ...(user === "User" ? {chat:{open:s.open,unreadCount:s.unread}} : {}),
           dialogueEvents:{latestTurnNumber:s.dialogue,readTurnNumber:s.readDialogue,unreadCount:s.dialogue-s.readDialogue} };
       };
-      return json(route, { projects:[{...item(project),children:project.children.map(item)}], workspace:{id:"workspace",type:"workspace",title:"Isolated E2E"}, activity:{
-        running:[{...item(project.children[1]), runtime:{activeTurn:true,turnNumber:7,turnStartedAt:now}}],
-        unread:(newestTaskFirst ? [item(project.children[1]),item(project.children[0]),item(project)] : [item(project),...project.children.map(item)]).filter(r=>r.chat),
-        problems:[{...item(project.children[1]),state:"blocked",stateNote:"Needs review"}]
-      } });
+      return json(route, { projects:[{...item(project),children:project.children.map(item)}], workspace:{id:"workspace",type:"workspace",title:"Isolated E2E"} });
     }
     const match = path.match(/\/resources\/([^/]+)(\/chat\/runtime)?\/(.*)$/);
     if (!match) return route.fallback();
@@ -3150,73 +3170,31 @@ test("Activity Chat keeps read and closed chats with unread message pills and in
     return route.fallback();
   });
   await page.goto("/w/ws-test/r/project1.task2");
-  await page.getByRole("button",{name:"U User No preference set",exact:true}).click();
-  const activity=page.locator('.attention-section');
-  await expect(activity.getByRole('tab',{name:'Running 1',exact:true})).toBeVisible();
-  await expect(activity.locator('.activity-meta')).toContainText('Turn 7');
-  await activity.getByRole('tab',{name:'Issues 1',exact:true}).click();
-  await expect(activity.locator('.activity-meta')).toContainText('Turn 3');
-  await activity.getByRole('tab',{name:'Chat 2',exact:true}).click();
-  await expect(activity.locator('button.activity-row')).toHaveCount(3);
-  await expect(activity.locator('.activity-chat-unread-count')).toHaveText(['5', '2']);
-  await expect(activity.locator('.activity-meta').first()).toContainText('Turn 3');
-  await expect(activity.locator('.activity-meta').nth(1)).toContainText('Agent Codex');
-  await expect(activity.locator('.activity-meta').nth(2)).toContainText('Not started');
-  await expect(activity.locator('button.activity-row').nth(2).locator('.activity-chat-unread-count')).toHaveCount(0);
-  await activity.locator('button.activity-row').nth(1).click();
-  const chat=page.getByRole('region',{name:'Resource chat',exact:true});
-  await expect(chat).toBeFocused();
-  await expect(activity.getByRole('tab',{name:'Chat 1',exact:true})).toBeVisible();
-  await expect(activity.locator('button.activity-row')).toHaveCount(3);
-  await expect(activity.locator('.activity-chat-unread-count')).toHaveText(['5']);
-  expect(writes.filter(w=>w.op.endsWith('-read'))).toHaveLength(0);
-  const details=page.locator('#detailsPanel');
-  await details.getByRole('tab',{name:/^Execution events/}).click();
-  await expect.poll(()=>state('User','project1.task1').readExecution).toBe(3);
-  await page.locator('#projectTree [data-task-id="project1.task2"]').click();
-  const target=state('User','project1.task1');
-  target.open=false;target.unread=2;target.execution=4;
-  await expect(activity.getByRole('tab',{name:'Chat 2',exact:true})).toBeVisible({timeout:10_000});
-  await expect(activity.locator('button.activity-row')).toHaveCount(3);
-  await expect(activity.locator('.activity-chat-unread-count')).toHaveText(['5', '2']);
-  await page.screenshot({path:testInfo.outputPath('chat-list-unread.png')});
-  const originalTitle=project.title;
-  project.title="A long chat title that must truncate while keeping the unread badge visible";
-  state('User','project1').unread=12345;
-  await expect(activity.locator('.activity-chat-unread-count').first()).toHaveText('12345',{timeout:10_000});
-  for (const theme of ['default','slate','riso']) {
-    await page.evaluate(({theme})=>{document.documentElement.dataset.theme=theme;document.documentElement.style.setProperty('--sidebar-width','220px');},{theme});
-    const pill=activity.locator('.activity-chat-unread-count').first();
-    await expect(pill).toHaveCSS('border-radius','999px');
-    const fits=await pill.evaluate(el=>{const row=el.closest('button')!;return el.getBoundingClientRect().right<=row.getBoundingClientRect().right && el.scrollWidth<=el.clientWidth;});
-    expect(fits).toBe(true);
-    await activity.screenshot({path:testInfo.outputPath(`chat-list-${theme}-220.png`)});
-  }
-  project.title=originalTitle;
-  state('User','project1').unread=0;
-  await expect(activity.getByRole('tab',{name:'Chat 1',exact:true})).toBeVisible({timeout:10_000});
-  const readCount=writes.filter(w=>w.op.endsWith('-read')).length;
-  await activity.locator('button.activity-row').nth(1).click();
-  await expect(chat).toBeFocused();
-  await expect(chat).toContainText('Public history preserved');
-  await expect(chat.getByRole('button',{name:'Reopen chat',exact:true})).toBeVisible();
-  await expect(details.getByRole('tab',{name:'Task',exact:true})).toHaveAttribute('aria-selected','true');
-  await expect(details.getByRole('tab',{name:/^Execution events/})).toContainText('1');
-  await expect(details.getByRole('tab',{name:/^Dialog events/})).toHaveCount(0);
-  await expect(activity.getByRole('tab',{name:'Chat 0',exact:true})).toBeVisible();
-  await expect(activity.locator('button.activity-row')).toHaveCount(3);
-  await expect(activity.locator('.activity-chat-unread-count')).toHaveCount(0);
-  expect(writes.filter(w=>w.op.endsWith('-read'))).toHaveLength(readCount);
-  expect(writes.filter(w=>/chat\/(open|close|messages|timer)$/.test(w.op))).toEqual([]);
-  expect(target.open).toBe(false);
-  newestTaskFirst = true;
-  await expect(activity.locator('.activity-title strong')).toHaveText(['Follow-up task', 'Infrastructure task', originalTitle], {timeout:10_000});
-  await expect(activity.locator('.activity-chat-unread-count')).toHaveCount(0);
-  await activity.getByRole('tab',{name:'Running 1',exact:true}).click();
-  await expect(activity.locator('.activity-meta')).toContainText('Turn 7');
-  await activity.getByRole('tab',{name:'Issues 1',exact:true}).click();
-  await expect(activity.locator('.activity-meta')).toContainText('Turn 3');
-  await page.screenshot({path:testInfo.outputPath('chat-list-focus.png')});
+  await page.getByRole("button", { name: "U User No preference set", exact: true }).click();
+  const filter = page.getByRole("combobox", { name: "Filter projects and tasks" });
+  const tree = page.locator("#projectTree");
+  const task = tree.locator('[data-task-id="project1.task1"]');
+  await filter.selectOption("unread");
+  await expect(task.locator(".unread-badge")).toHaveText("2");
+  await expect(task.locator(".chat-open-icon")).toHaveCount(0);
+  await expect(tree.locator('[data-task-id="project1.task2"]')).toHaveCount(0);
+  await expect(page).toHaveURL(/\/r\/project1\.task2$/);
+
+  await task.click();
+  await expect.poll(() => state("User", "project1.task1").unread).toBe(0);
+  await expect(task).toHaveCount(0);
+  await expect(tree).toContainText("No projects or tasks with unread chat");
+  await expect(page).toHaveURL(/\/r\/project1\.task1$/);
+  const details = page.locator("#detailsPanel");
+  await expect(details).toContainText("Infrastructure task");
+  await expect(details.getByRole("tab", { name: /^Execution events/ })).toContainText("3");
+  expect(writes.filter((entry) => entry.op.endsWith("-read"))).toHaveLength(0);
+
+  state("User", "project1.task2").unread = 1;
+  await expect(tree.locator('[data-task-id="project1.task2"] .unread-badge')).toHaveText("1", { timeout: 10_000 });
+  await page.locator("#treeEditButton").click();
+  await expect(filter).toHaveValue("all");
+  await expect(filter).toBeDisabled();
 });
 
 test("public Chat restores the upload dialog, send card and execution model selector", async ({ page }, testInfo) => {

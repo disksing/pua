@@ -1,5 +1,5 @@
-import type { ShellStatusPresentation } from "../models/shell";
-import type { ResourceRecord, ResourceRuntime, WorkspaceTree } from "../models/workspace";
+import type { ShellResourceItem, ShellStatusPresentation, ShellTreeFilter } from "../models/shell";
+import type { ResourceRecord, WorkspaceTree } from "../models/workspace";
 
 export interface TaskStatusState {
   kind: string;
@@ -37,14 +37,55 @@ export interface ShellProjectionDependencies {
   tree(): WorkspaceTree | null;
   findResource(id: string): ResourceRecord | null;
   agentName(agentId: string | undefined): string;
-  now?(): number;
 }
 
-const RUNNING_RESOURCE_STATES = new Set(["starting", "running", "waiting_approval", "recovering", "stopping"]);
-const OUTPUT_FRESH_WINDOW_MS = 60_000;
+export function filterProjectTree(projects: ShellResourceItem[], filter: ShellTreeFilter, collapsed: ReadonlySet<string>): ShellResourceItem[] {
+  if (filter === "all") return projects;
+  const matches = (item: ShellResourceItem) => filter === "running" ? item.running === true : item.unreadCount > 0;
+  const taskLabelFor = (count: number) => `${count} ${filter === "running" ? "running" : "with unread chat"}`;
+  const taskAriaLabel = (count: number) => filter === "running"
+    ? `${count} running ${count === 1 ? "task" : "tasks"}`
+    : `${count} ${count === 1 ? "task" : "tasks"} with unread chat`;
+  const result: ShellResourceItem[] = [];
+  for (const project of projects) {
+    const children: ShellResourceItem[] = [];
+    let taskCount = 0;
+    for (const child of project.children) {
+      if (child.type === "folder") {
+        const tasks = child.children.filter(matches);
+        if (tasks.length === 0) continue;
+        taskCount += tasks.length;
+        children.push({
+          ...child,
+          children: tasks,
+          expanded: !collapsed.has(child.id),
+          ariaLabel: `Folder ${child.title}. ${taskAriaLabel(tasks.length)}`
+        });
+      } else if (matches(child)) {
+        taskCount++;
+        children.push(child);
+      }
+    }
+    if (!matches(project) && children.length === 0) continue;
+    const taskLabel = `${taskCount} ${taskCount === 1 ? "task" : "tasks"}`;
+    const ariaLabel = taskAriaLabel(taskCount);
+    result.push({
+      ...project,
+      children,
+      expanded: children.length > 0 && !collapsed.has(project.id),
+      summary: taskCount ? { taskLabel, runningLabel: taskLabelFor(taskCount), ariaLabel } : null,
+      ariaLabel: [
+        project.title,
+        project.running ? "Active turn" : "",
+        ariaLabel,
+        project.unreadCount ? `${project.unreadCount} unread chat ${project.unreadCount === 1 ? "message" : "messages"}` : ""
+      ].filter(Boolean).join(". ")
+    });
+  }
+  return result;
+}
 
 export function createShellProjection(dependencies: ShellProjectionDependencies) {
-  const now = dependencies.now || Date.now;
 
   function resourceRefText(id: string): string {
     if (!id) return "";
@@ -89,31 +130,6 @@ export function createShellProjection(dependencies: ShellProjectionDependencies)
     return next;
   }
 
-  function hasRecentAgentOutput(runtime: ResourceRuntime): boolean {
-    const outputAt = new Date(runtime.lastOutputAt || "").getTime();
-    if (Number.isFinite(outputAt)) return now() - outputAt <= OUTPUT_FRESH_WINDOW_MS;
-    if (!RUNNING_RESOURCE_STATES.has(runtime.status || "")) return false;
-    const updatedAt = new Date(runtime.updatedAt || "").getTime();
-    return Number.isFinite(updatedAt) && now() - updatedAt <= OUTPUT_FRESH_WINDOW_MS;
-  }
-
-  function resourceStatusState(runtime: ResourceRuntime | undefined): TaskStatusState | null {
-    if (!runtime?.status || runtime.status === "archived") return null;
-    const recentOutput = hasRecentAgentOutput(runtime);
-    switch (runtime.status) {
-      case "running": return { kind: "resource-running", className: "task-status-session-running", iconName: "loader-circle", label: "Resource working", recentOutput };
-      case "waiting_approval": return { kind: "resource-approval", className: "task-status-attention", iconName: "shield-question", label: "Resource waiting for approval", recentOutput };
-      case "starting":
-      case "stopping":
-      case "recovering":
-      case "idle":
-      case "idle-suspended":
-      case "stopped":
-        return null;
-      default: return { kind: "resource-active", className: "task-status-neutral", iconName: "circle-dot", label: `Resource ${runtime.status}`, recentOutput };
-    }
-  }
-
   function operationalStatusPresentation(statuses: Array<TaskStatusState | null>): OperationalStatusPresentation {
     const visible = statuses.filter((status): status is TaskStatusState => Boolean(status));
     const hasTaskState = visible.length > 0;
@@ -124,13 +140,6 @@ export function createShellProjection(dependencies: ShellProjectionDependencies)
       layoutClassName: !hasTaskState ? "" : visible.length > 1 ? "has-task-status-dual" : "has-task-status",
       slotClassName: [visible.length === 1 ? "task-status-single" : "", visible.length > 1 ? "task-status-dual" : ""].filter(Boolean).join(" "),
     };
-  }
-
-  function taskOperationalState(item: ResourceRecord): TaskOperationalState {
-    const status = resourceStatusState(item.runtime);
-    const label = status?.label || "";
-    const statusPresentation = operationalStatusPresentation(status ? [status] : []);
-    return { session: status, statusPresentation, className: statusPresentation.className, label };
   }
 
   function taskWorkflowState(item: ResourceRecord): TaskOperationalState {
@@ -243,9 +252,7 @@ export function createShellProjection(dependencies: ShellProjectionDependencies)
     projectTaskSummary,
     resourceNavigationState,
     resourceRefText,
-    resourceStatusState,
     statusModel,
-    taskOperationalState,
     taskWorkflowState,
     taskOperationalStateKey,
   };

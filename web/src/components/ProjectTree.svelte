@@ -5,7 +5,7 @@
 
   import Icon from "./Icon.svelte";
   import StatusPresentation from "./StatusPresentation.svelte";
-  import type { ShellDragTarget, ShellResourceItem, ShellStatusPresentation } from "./models";
+  import type { ShellDragTarget, ShellResourceItem, ShellStatusPresentation, ShellTreeFilter } from "./models";
 
   let {
     identity,
@@ -13,6 +13,9 @@
     error,
     projects,
     editing,
+    hasWorkspace = true,
+    filter = "all",
+    onFilter = () => {},
     onCreate,
     onToggle,
     onSelect,
@@ -30,6 +33,9 @@
     error: string;
     projects: ShellResourceItem[];
     editing: boolean;
+    hasWorkspace?: boolean;
+    filter?: ShellTreeFilter;
+    onFilter?: (filter: ShellTreeFilter) => void;
     onCreate: () => void;
     onToggle: (id: string) => Promise<void>;
     onSelect: (id: string) => Promise<void>;
@@ -45,6 +51,7 @@
   let drag = $state<ShellDragTarget | null>(null);
   let drop = $state<{ id: string; after: boolean; into: boolean } | null>(null);
   let treeRoot = $state<HTMLElement | null>(null);
+  let filterControl: HTMLSelectElement;
   let stateTooltip = $state<{ resourceId: string; text: string; left: number; top: number; pinned: boolean } | null>(null);
   let renamingId = $state("");
   let renameDraft = $state("");
@@ -52,6 +59,18 @@
   let previousIdentity = $state(identity);
   // svelte-ignore state_referenced_locally
   let previousEditing = $state(editing);
+
+  $effect.pre(() => {
+    if (filter === "all" || !treeRoot) return;
+    const currentProjects = projects;
+    const focused = document.activeElement;
+    if (!focused || !treeRoot.contains(focused)) return;
+    void tick().then(() => {
+      if (projects === currentProjects && !focused.isConnected && document.activeElement === document.body) {
+        filterControl?.focus({ preventScroll: true });
+      }
+    });
+  });
 
   $effect(() => {
     if (identity === previousIdentity) return;
@@ -374,7 +393,13 @@
   <div class="section-title">
     <span class="section-label">Projects</span>
     <span class="section-actions">
-      <button id="treeEditButton" type="button" class:active={editing} aria-pressed={editing} title={editing ? "Done reordering" : "Reorder projects"} onclick={onToggleEditing}><Icon name={editing ? "check" : "list-ordered"} /><span>{editing ? "Done" : "Reorder"}</span></button>
+      <select class="tree-filter" aria-label="Filter projects and tasks" disabled={editing || !hasWorkspace} value={filter} bind:this={filterControl} onchange={(event) => onFilter(event.currentTarget.value as ShellTreeFilter)}>
+        <option value="all">All</option>
+        <option value="running">Running</option>
+        <option value="unread">Unread</option>
+      </select>
+      <button id="treeEditButton" type="button" class:active={editing} aria-pressed={editing} aria-describedby={filter !== "all" ? "treeReorderHint" : undefined} title={editing ? "Done reordering" : filter !== "all" ? "Show all projects and tasks to reorder" : "Reorder projects"} onclick={onToggleEditing}><Icon name={editing ? "check" : "list-ordered"} /><span>{editing ? "Done" : "Reorder"}</span></button>
+      {#if filter !== "all"}<span id="treeReorderHint" hidden>Shows all projects and tasks for reordering.</span>{/if}
       <button id="newProjectButton" type="button" title="New project" onclick={onCreate}><Icon name="plus" /><span>New</span></button>
     </span>
   </div>
@@ -383,6 +408,8 @@
       <div class="empty-state"><Icon name="loader-circle" className="empty-state-icon" /><strong>Loading workspace</strong><span>Refreshing navigation...</span></div>
     {:else if error}
       <div class="empty-state" role="alert"><Icon name="circle-alert" className="empty-state-icon" /><strong>Workspace unavailable</strong><span>{error}</span></div>
+    {:else if hasWorkspace && filter !== "all" && projects.length === 0}
+      <div class="empty-state"><Icon name="folder-search" className="empty-state-icon" /><strong>{filter === "running" ? "No running projects or tasks" : "No projects or tasks with unread chat"}</strong></div>
     {:else if projects.length === 0}
       <div class="empty-state"><Icon name="folder-search" className="empty-state-icon" /><strong>No workspace yet</strong><span>Add a workspace path to begin.</span></div>
     {:else}

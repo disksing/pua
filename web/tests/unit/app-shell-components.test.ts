@@ -3,12 +3,11 @@ import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import MobileToolbar from "../../src/components/MobileToolbar.svelte";
-import ActivityPanel from "../../src/components/ActivityPanel.svelte";
 import ProjectTree from "../../src/components/ProjectTree.svelte";
 import PaneResizeHandle from "../../src/components/PaneResizeHandle.svelte";
 import SchedulerNav from "../../src/components/SchedulerNav.svelte";
 import WorkspaceSwitcher from "../../src/components/WorkspaceSwitcher.svelte";
-import type { ShellActivityItem, ShellResourceItem, ShellStatusPresentation } from "../../src/components/models";
+import type { ShellResourceItem, ShellStatusPresentation } from "../../src/components/models";
 
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -590,79 +589,33 @@ describe("AppShell responsibility components", () => {
     expect(document.activeElement).toBe(row);
   });
 
-  it("ActivityPanel counts unread chats and keeps read chats without badges", async () => {
-    const onSelect = vi.fn(async () => undefined);
-    const item: ShellActivityItem = {
-      id: "project-a", type: "project", title: "Project A", ref: "#1", selected: true, activeTurn: false, unreadCount: 2,
-      turnNumber: 2, agentName: "Codex", statusLabel: "Idle", status: emptyStatus,
-    };
-    const activeItem: ShellActivityItem = {
-      id: "task-b", type: "task", title: "Task B", ref: "#2", selected: false, activeTurn: true, unreadCount: 1,
-      turnNumber: 3, agentName: "Codex", statusLabel: "Resource working", status: emptyStatus,
-    };
-    const target = document.body.appendChild(document.createElement("div"));
-    const readItem = { ...item, id: "task-read", title: "Read chat", unreadCount: 0 };
-    const activity = { running: [activeItem], unread: [activeItem, item, readItem], problems: [] };
-    const onSelectChat = vi.fn(async () => undefined);
-    const component = mount(ActivityPanel, { target, props: { activity, onSelect, onSelectChat, onToast: vi.fn() } });
-    cleanups.push(() => unmount(component));
-    await tick();
-
-    expect([...target.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent?.trim())).toEqual(["Running 1", "Chat 2", "Issues 0"]);
-    const activeRow = target.querySelector<HTMLElement>('[aria-label^="Task B."]')!;
-    expect(activeRow.classList.contains("selected")).toBe(false);
-    expect(activeRow.getAttribute("data-active-turn")).toBe("true");
-    expect(target.querySelector('[aria-label^="Dismiss "]')).toBeNull();
-
-    target.querySelector<HTMLElement>('[role="tab"]:nth-child(2)')!.click();
-    await tick();
-    expect(target.querySelectorAll("button.activity-row")).toHaveLength(3);
-    expect([...target.querySelectorAll(".activity-chat-unread-count")].map((badge) => badge.textContent)).toEqual(["1", "2"]);
-    expect(target.querySelector('[aria-label^="Read chat."] .activity-chat-unread-count')).toBeNull();
-    expect(target.querySelector('[aria-label^="Task B."]')?.getAttribute("aria-label")).toContain("1 unread chat message");
-    expect(target.querySelector('[aria-label^="Task B."] .activity-meta')?.textContent).toBe("#2 · Agent Codex · Turn 3 · Resource working");
-    expect(target.querySelector('[aria-label^="Task B."]')?.getAttribute("title")).toBe("#2 · Agent Codex · Turn 3 · Resource working");
-    expect(target.querySelector('[aria-label^="Read chat."] .activity-meta')?.textContent).toBe("#1 · Agent Codex · Turn 2 · Idle");
-    target.querySelector<HTMLElement>('[aria-label^="Project A."]')!.click();
-    await vi.waitFor(() => expect(onSelectChat).toHaveBeenCalledWith("project-a"));
-    expect(onSelect).not.toHaveBeenCalled();
-    target.querySelector<HTMLElement>('[role="tab"]:nth-child(1)')!.click();
-    await tick();
-    expect(target.querySelector(".activity-title")?.textContent).toContain("#2 · Agent Codex · Turn 3 · Resource working");
-    target.querySelector<HTMLElement>('[aria-label^="Task B."]')!.click();
-    await vi.waitFor(() => expect(onSelect).toHaveBeenCalledWith("task-b"));
-  });
-
-  it("PaneResizeHandle resizes and commits the Activity panel height", async () => {
+  it("PaneResizeHandle resizes and commits the sidebar without an Activity panel", async () => {
     const app = document.body.appendChild(document.createElement("div"));
     app.id = "app";
     const sidebar = app.appendChild(document.createElement("aside"));
     sidebar.id = "mobileSidebar";
-    const activity = sidebar.appendChild(document.createElement("section"));
-    activity.className = "attention-section";
     const workspace = app.appendChild(document.createElement("main"));
     workspace.className = "workspace-panel";
     const chat = workspace.appendChild(document.createElement("aside"));
     chat.id = "agentPanel";
     vi.spyOn(app, "getBoundingClientRect").mockReturnValue({ width: 1_200 } as DOMRect);
     vi.spyOn(sidebar, "getBoundingClientRect").mockReturnValue({ width: 280, height: 800 } as DOMRect);
-    vi.spyOn(activity, "getBoundingClientRect").mockReturnValue({ height: 210 } as DOMRect);
     vi.spyOn(workspace, "getBoundingClientRect").mockReturnValue({ width: 912 } as DOMRect);
     vi.spyOn(chat, "getBoundingClientRect").mockReturnValue({ width: 420 } as DOMRect);
     const onPreview = vi.fn();
     const onCommit = vi.fn();
     const component = mount(PaneResizeHandle, { target: sidebar, props: {
-      id: "activityResize", kind: "sidebarAttentionHeight", className: "horizontal-resize sidebar-activity-resize",
-      label: "Resize activity panel", onPreview, onCommit,
+      id: "sidebarResize", kind: "sidebarWidth", className: "sidebar-resize",
+      label: "Resize sidebar", onPreview, onCommit,
     } });
     cleanups.push(() => unmount(component));
 
-    sidebar.querySelector<HTMLElement>("#activityResize")!.dispatchEvent(pointerEvent("pointerdown", 10, 100));
-    window.dispatchEvent(pointerEvent("pointermove", 10, 140));
-    expect(onPreview).toHaveBeenCalledWith("sidebarAttentionHeight", 170);
-    expect(document.body.classList.contains("resizing-y")).toBe(true);
-    window.dispatchEvent(pointerEvent("pointerup", 10, 140));
-    expect(onCommit).toHaveBeenCalledWith("sidebarAttentionHeight");
-    expect(document.body.classList.contains("resizing-y")).toBe(false);
+    sidebar.querySelector<HTMLElement>("#sidebarResize")!.dispatchEvent(pointerEvent("pointerdown", 10, 100));
+    window.dispatchEvent(pointerEvent("pointermove", 50, 100));
+    expect(onPreview).toHaveBeenCalledWith("sidebarWidth", 320);
+    expect(document.body.classList.contains("resizing-x")).toBe(true);
+    window.dispatchEvent(pointerEvent("pointerup", 50, 100));
+    expect(onCommit).toHaveBeenCalledWith("sidebarWidth");
+    expect(document.body.classList.contains("resizing-x")).toBe(false);
   });
 });

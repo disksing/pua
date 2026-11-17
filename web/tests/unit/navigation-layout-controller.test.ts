@@ -34,8 +34,7 @@ describe("route and pane layout controllers", () => {
 		expect(normalizePaneSizes({ detailsWidth: 500, sidebarWidth: 100 }, 1_200)).toEqual({
 			sidebarWidth: 220,
 			chatWidth: 692,
-			chatHeight: 320,
-			sidebarAttentionHeight: 210
+			chatHeight: 320
 		});
 		const layout = createPaneLayoutController(() => undefined, storage);
 		layout.initialize();
@@ -44,11 +43,14 @@ describe("route and pane layout controllers", () => {
 		expect(JSON.parse(storage.getItem("pua.web.paneSizes") || "{}").chatWidth).toBe(510);
 	});
 
-	it("ignores the former sessions panel height key", () => {
-		storage.setItem("pua.web.paneSizes", JSON.stringify({ sidebarWidth: 300, chatWidth: 480, sidebarSessionHeight: 260 }));
+	it("ignores and drops the former Activity height while preserving other pane sizes", () => {
+		storage.setItem("pua.web.paneSizes", JSON.stringify({ sidebarWidth: 300, chatWidth: 480, sidebarAttentionHeight: 260 }));
 		const layout = createPaneLayoutController(() => undefined, storage);
 		layout.initialize();
-		expect(layout.snapshot().paneSizes.sidebarAttentionHeight).not.toBe(260);
+		expect(layout.snapshot().paneSizes).toEqual({ sidebarWidth: 300, chatWidth: 480, chatHeight: 320 });
+		layout.previewPane("chatHeight", 280);
+		layout.commitPane("chatHeight");
+		expect(JSON.parse(storage.getItem("pua.web.paneSizes") || "{}")).toEqual({ sidebarWidth: 300, chatWidth: 480, chatHeight: 280 });
 	});
 
 	function mockMatchMedia(matches: Record<string, boolean>): void {

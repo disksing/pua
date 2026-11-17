@@ -3,7 +3,7 @@ import type { ToastModel } from "./models/common";
 import type { CreateDialogModel, TaskTemplate } from "./models/create";
 import type { DetailPanelModel } from "./models/detail";
 import type { SettingsModel } from "./models/settings";
-import type { AppShellModel, DoctorSnapshotModel, ShellActivityItem, ShellActivityLists, ShellDragTarget, ShellResourceItem, ShellStatusPresentation } from "./models/shell";
+import type { AppShellModel, DoctorSnapshotModel, ShellDragTarget, ShellResourceItem, ShellStatusPresentation, ShellTreeFilter } from "./models/shell";
 import type { AgentConfig, AgentProfile, DiffRecord, ResourceRecord, WorkspaceConfig, WorkspaceFileRecord, WorkspaceTree, WorkspaceUser } from "./models/workspace";
 import type { ApiErrorResponse, ArchiveResponse } from "./api/types";
 import { createAgentDraftController } from "./controllers/agent-draft-controller";
@@ -17,7 +17,7 @@ import { createThemeController } from "./controllers/theme-controller";
 import { createResourceDetailController } from "./controllers/resource-detail-controller";
 import { createRouteController } from "./controllers/route-controller";
 import { createSettingsController, type AgentHubData } from "./controllers/settings-controller";
-import { createShellProjection } from "./controllers/shell-projection";
+import { createShellProjection, filterProjectTree } from "./controllers/shell-projection";
 import {
 	createSidebarFolderId,
 	foldersForProject,
@@ -74,6 +74,8 @@ interface ControllerState {
 	folders: SidebarFolder[];
 	folderOrder: Record<string, string[]>;
 	treeEditing: boolean;
+	treeFilter: ShellTreeFilter;
+	filteredCollapsed: Set<string>;
 	listDrag: ShellDragTarget | null;
 	expandedPaths: Set<string>;
 	diff: DiffRecord | null;
@@ -85,7 +87,6 @@ interface ControllerState {
 	autoRefreshVersion: number;
 	treeRequestVersion: number;
 	navigationVersion: number;
-	chatFocusRequest: number;
 	detailRequestVersion: number;
 	workspaceAgentsRequestVersion: number;
 	diffRequestVersion: number;
@@ -137,6 +138,8 @@ const controllerState: ControllerState = {
 	folders: [] as SidebarFolder[],
 	folderOrder: {} as Record<string, string[]>,
 	treeEditing: false,
+	treeFilter: "all",
+	filteredCollapsed: new Set<string>(),
 	listDrag: null as ShellDragTarget | null,
 	expandedPaths: /* @__PURE__ */ new Set<string>(),
 	diff: null,
@@ -154,7 +157,6 @@ const controllerState: ControllerState = {
 	autoRefreshVersion: 0,
 	treeRequestVersion: 0,
 	navigationVersion: 0,
-	chatFocusRequest: 0,
 	detailRequestVersion: 0,
 	workspaceAgentsRequestVersion: 0,
 	diffRequestVersion: 0,
@@ -242,7 +244,7 @@ interface LoadTreeOptions { updateURL?: boolean; replaceURL?: boolean }
 interface LoadDetailOptions { force?: boolean }
 interface FetchDetailOptions {}
 interface WorkspaceAgentsOptions { force?: boolean }
-interface SelectResourceOptions { clearUnread?: boolean; forceDetail?: boolean; focusChat?: boolean }
+interface SelectResourceOptions { clearUnread?: boolean; forceDetail?: boolean }
 interface RenderOptions { skipDraftSync?: boolean }
 interface UploadContext { workspaceId?: string; resourceId?: string }
 const {
@@ -254,7 +256,6 @@ const {
 	statusModel: appShellStatusModel,
 	noTaskOperationalState,
 	resourceNavigationState,
-	taskOperationalState,
 	taskWorkflowState,
 	taskOperationalStateKey,
 } = createShellProjection({
@@ -271,7 +272,7 @@ const settingsController = createSettingsController({
 	},
 	activeWorkspaceId: () => controllerState.activeWorkspaceId,
 	workspaceUserName: (workspace) => workspace.id === controllerState.activeWorkspaceId ? currentUserName() : userSettingsController?.selected(workspace.instanceId || workspace.id) || "",
-	setActiveWorkspaceId: (id) => { controllerState.activeWorkspaceId = id; },
+	setActiveWorkspaceId: setActiveWorkspace,
 	selectWorkspaceResource: () => { controllerState.selectedId = "workspace"; },
 	request: (path, init) => api(path, init),
 	publish: (model) => publisher.renderSettings(model),
@@ -575,7 +576,7 @@ async function load() {
 	controllerState.settingsRevision = String(base.revision || "");
 	controllerState.doctor = doctor;
 	applyAgentConfig();
-	controllerState.activeWorkspaceId = workspaceExists(route.workspaceId) ? route.workspaceId || "" : controllerState.config?.activeId || controllerState.config?.workspaces[0]?.id || "";
+	setActiveWorkspace(workspaceExists(route.workspaceId) ? route.workspaceId || "" : controllerState.config?.activeId || controllerState.config?.workspaces[0]?.id || "");
 	controllerState.selectedId = route.resourceId || "workspace";
 	renderWorkspaceSelect();
 	if (controllerState.activeWorkspaceId) {
@@ -762,9 +763,6 @@ async function autoRefresh() {
 			changed = true;
 			selectedId = controllerState.selectedId;
 		}
-		const expandedCount = controllerState.expandedProjects.size;
-		ensureSelectedProjectExpanded(false);
-		changed = changed || expandedCount !== controllerState.expandedProjects.size;
 		if (controllerState.selectedId === "workspace") {
 			const previousAgents = controllerState.workspaceAgents;
 			const previousDocument = controllerState.workspaceDocument;
@@ -852,6 +850,7 @@ function appShellResourceModel(item: ResourceRecord, kind: "project" | "task", p
 		children: kind === "project" ? appShellProjectChildrenModel(item) : [],
 		projectId,
 		chatOpen: Boolean(item.chat?.open),
+		running: item.archived !== true && item.runtime?.activeTurn === true,
 		unreadCount
 	};
 }
@@ -926,32 +925,8 @@ function appShellSchedulerModel(item: ResourceRecord | null | undefined): ShellR
 		unreadCount: Number(item.unreadCount) || 0
 	};
 }
-function appShellActivityModel(item: ResourceRecord, category: keyof ShellActivityLists): ShellActivityItem {
-	const state = item.type === "task" && (category === "unread" || item.state === "blocked" || item.state === "error") ? taskWorkflowState(item) : taskOperationalState(item);
-	const type = item.type === "scheduler" || item.type === "project" || item.type === "task" ? item.type : "workspace";
-	const title = item.title || item.id;
-	return {
-		id: item.id,
-		type,
-		title,
-		ref: type === "project" || type === "task" ? resourceRefText(item.id) : "",
-		selected: controllerState.selectedId === item.id,
-		activeTurn: Boolean(item.runtime?.activeTurn),
-		unreadCount: Number(category === "unread" ? item.chat?.unreadCount : item.unreadCount) || 0,
-		turnNumber: category === "running" ? Number(item.runtime?.turnNumber) || 0 : Number(item.latestTurnNumber) || 0,
-		agentName: String(item.runtime?.agentName || item.latestAgentName || "").trim(),
-		statusLabel: state.label || (category === "unread" ? "Idle" : "Active turn"),
-		status: appShellStatusModel(state.statusPresentation)
-	};
-}
 function renderAppShell() {
 	const projects = controllerState.tree ? applyCustomOrder(controllerState.tree.projects || [], controllerState.projectOrder).map((project) => appShellResourceModel(project, "project")) : [];
-	const activitySource = controllerState.tree?.activity;
-	const activity: ShellActivityLists = {
-		running: activitySource?.running?.map((item) => appShellActivityModel(item, "running")) || [],
-		unread: activitySource?.unread?.map((item) => appShellActivityModel(item, "unread")) || [],
-		problems: activitySource?.problems?.map((item) => appShellActivityModel(item, "problems")) || [],
-	};
 	if (controllerState.tree) controllerState.taskOperationalStateKey = taskOperationalStateKey();
 	const workspaceState = resourceNavigationState(controllerState.tree?.workspace);
 	publisher.renderAppShell({
@@ -972,13 +947,12 @@ function renderAppShell() {
 			statusLabel: workspace.id === controllerState.activeWorkspaceId ? workspaceState.label : ""
 		})),
 		scheduler: appShellSchedulerModel(controllerState.tree?.scheduler),
-		projects,
+		projects: filterProjectTree(projects, controllerState.treeFilter, controllerState.filteredCollapsed),
 		treeEditing: controllerState.treeEditing,
-		activity,
+		treeFilter: controllerState.treeFilter,
 		doctor: doctorSnapshotForWorkspace(controllerState.doctor, controllerState.activeWorkspaceId),
 		...paneLayoutController.snapshot(),
 		route: routeController.projection(),
-		resolveResourceTitle,
 		onSwitchWorkspace: (id) => switchWorkspace(id),
 		onResolveWorkspaceUser: (name, create) => resolveWorkspaceUser(name, create),
 		onAddWorkspace: () => openSettings("workspace").catch((err) => toast(err.message)),
@@ -987,12 +961,12 @@ function renderAppShell() {
 		onRefreshDoctor: requestDoctorRefresh,
 		onToggleProject: (id) => toggleProject(id),
 		onSelectResource: (id) => selectResource(id),
-		onSelectChat: (id) => selectResource(id, { focusChat: true, clearUnread: false }),
 		onReorder: (drag, target, after) => commitListDrag(drag, target, after),
 		onDragState: (drag) => {
 			controllerState.listDrag = drag;
 		},
 		onToggleTreeEditing: () => toggleTreeEditing(),
+		onTreeFilter: (filter) => setTreeFilter(filter),
 		onCreateFolder: (projectId) => createFolder(projectId),
 		onRenameFolder: (id, name) => renameFolder(id, name),
 		onDeleteFolder: (id) => deleteFolder(id),
@@ -1022,10 +996,9 @@ async function switchWorkspace(id: string): Promise<void> {
 	controllerState.diffRequestVersion++;
 	const navigationVersion = controllerState.navigationVersion;
 	await saveUIState().catch((err) => console.warn("failed to save UI state", err));
-	controllerState.activeWorkspaceId = id;
+	setActiveWorkspace(id);
 	controllerState.selectedId = "workspace";
 	controllerState.tree = null;
-	controllerState.treeEditing = false;
 	controllerState.navigationLoading = true;
 	controllerState.navigationError = "";
 	clearResourceDetailState();
@@ -1041,6 +1014,7 @@ async function switchWorkspace(id: string): Promise<void> {
 	await loadTree();
 }
 async function commitListDrag(drag: ShellDragTarget, target: ShellDragTarget, after: boolean): Promise<void> {
+	if (!controllerState.treeEditing || controllerState.treeFilter !== "all") return;
 	const previous = {
 		projectOrder: [...controllerState.projectOrder],
 		taskOrder: Object.fromEntries(Object.entries(controllerState.taskOrder).map(([id, order]) => [id, Array.isArray(order) ? [...order] : []])),
@@ -1104,6 +1078,28 @@ async function commitFolderChange(apply: () => void): Promise<void> {
 }
 function toggleTreeEditing(): void {
 	controllerState.treeEditing = !controllerState.treeEditing;
+	if (controllerState.treeEditing) {
+		controllerState.treeFilter = "all";
+		controllerState.filteredCollapsed.clear();
+	}
+	renderAppShell();
+}
+function setTreeFilter(filter: ShellTreeFilter): void {
+	if (controllerState.treeEditing || filter === controllerState.treeFilter) return;
+	controllerState.treeFilter = filter;
+	controllerState.filteredCollapsed.clear();
+	renderAppShell();
+}
+function setActiveWorkspace(id: string): void {
+	if (controllerState.activeWorkspaceId === id) return;
+	controllerState.activeWorkspaceId = id;
+	controllerState.treeEditing = false;
+	controllerState.treeFilter = "all";
+	controllerState.filteredCollapsed.clear();
+}
+function toggleFilteredBranch(id: string): void {
+	const collapsed = controllerState.filteredCollapsed;
+	if (!collapsed.delete(id)) collapsed.add(id);
 	renderAppShell();
 }
 async function createFolder(projectId: string): Promise<string> {
@@ -1153,6 +1149,10 @@ async function deleteFolder(id: string): Promise<void> {
 	});
 }
 async function toggleFolder(id: string): Promise<void> {
+	if (controllerState.treeFilter !== "all") {
+		toggleFilteredBranch(id);
+		return;
+	}
 	const folder = sidebarFolderById(controllerState.folders, id);
 	if (!folder) return;
 	await commitFolderChange(() => {
@@ -1160,7 +1160,6 @@ async function toggleFolder(id: string): Promise<void> {
 	});
 }
 async function selectResource(id: string, options: SelectResourceOptions = {}): Promise<void> {
-	if (options.focusChat) controllerState.chatFocusRequest++;
 	const selectionChanged = controllerState.selectedId !== id;
 	if (options.clearUnread !== false) clearUnreadForResource(id);
 	const forceDetail = selectionChanged || Boolean(options.forceDetail);
@@ -1213,6 +1212,10 @@ async function selectResource(id: string, options: SelectResourceOptions = {}): 
 	renderSelectionPanels();
 }
 async function toggleProject(id: string): Promise<void> {
+	if (controllerState.treeFilter !== "all") {
+		toggleFilteredBranch(id);
+		return;
+	}
 	if (controllerState.expandedProjects.has(id)) controllerState.expandedProjects.delete(id);
 	else controllerState.expandedProjects.add(id);
 	renderAppShell();
@@ -1231,7 +1234,6 @@ function detailPanelModel(): DetailPanelModel {
 	const userName = currentUserName();
 	const unreadResource = findTreeResource(resourceId);
 	const base: DetailPanelModel = {
-		chatFocusRequest: controllerState.chatFocusRequest,
 		executionUnreadCount: unreadResource?.unreadCount || 0,
 		dialogueUnreadCount: unreadResource?.dialogueEvents?.unreadCount || 0,
 		onChatState: (chat) => {
@@ -1240,10 +1242,6 @@ function detailPanelModel(): DetailPanelModel {
 			if (!item || (!item.chat && !chat.open && !chat.unreadCount) || sameJSON(item.chat, chat)) return;
 			controllerState.treeRequestVersion++;
 			item.chat = chat;
-			if (controllerState.tree?.activity) {
-				const entry = controllerState.tree.activity.unread.find(entry => entry.id === resourceId);
-				if (entry) entry.chat = chat;
-			}
 			renderAppShell();
 			void refreshTreeAfterResourceMutation().then(() => publishViewModels()).catch(err => console.warn("chat state refresh failed", err));
 		},
@@ -1954,11 +1952,6 @@ function removeArchivedResourceFromTree(resourceId: string): void {
 				break;
 			}
 		}
-		if (tree.activity) {
-			for (const key of Object.keys(tree.activity) as Array<keyof typeof tree.activity>) {
-				tree.activity[key] = tree.activity[key].filter((item) => !removedIds.has(item.id));
-			}
-		}
 	}
 	controllerState.projectOrder = controllerState.projectOrder.filter((id) => !removedIds.has(id));
 	for (const id of removedIds) controllerState.expandedProjects.delete(id);
@@ -2013,6 +2006,7 @@ function isProjectExpanded(id: string): boolean {
 	return controllerState.expandedProjects.has(id);
 }
 function ensureSelectedProjectExpanded(persist = false): void {
+	if (controllerState.treeFilter !== "all") return;
 	const parent = parentProject(controllerState.selectedId);
 	if (!parent || parent.id === controllerState.selectedId || controllerState.expandedProjects.has(parent.id)) return;
 	controllerState.expandedProjects.add(parent.id);
@@ -2200,7 +2194,7 @@ async function handleHistoryNavigation(pathname: string): Promise<void> {
 	controllerState.workspaceAgentsRequestVersion++;
 	controllerState.diffRequestVersion++;
 	const navigationVersion = controllerState.navigationVersion;
-	controllerState.activeWorkspaceId = route.workspaceId || "";
+	setActiveWorkspace(route.workspaceId || "");
 	controllerState.selectedId = route.resourceId || "workspace";
 	if (!workspaceChanged && previousSelectedId !== controllerState.selectedId && controllerState.selectedId !== "workspace") {
 		resourceDetailController.reset(controllerState.selectedId);

@@ -21,6 +21,8 @@ export interface ShellProjectSummary {
   ariaLabel: string;
 }
 
+export type ShellTreeFilter = "all" | "running" | "unread";
+
 export interface ShellResourceItem {
   id: string;
   type: "scheduler" | "project" | "task" | "folder";
@@ -36,29 +38,8 @@ export interface ShellResourceItem {
   projectId?: string;
   unreadCount: number;
   chatOpen?: boolean;
+  running?: boolean;
 }
-
-export interface ShellActivityItem {
-  id: string;
-  type: "workspace" | "scheduler" | "project" | "task";
-  title: string;
-  ref: string;
-  selected: boolean;
-  activeTurn: boolean;
-  unreadCount: number;
-  turnNumber: number;
-  agentName: string;
-  statusLabel: string;
-  status: ShellStatusPresentation;
-}
-
-export interface ShellActivityLists {
-  running: ShellActivityItem[];
-  unread: ShellActivityItem[];
-  problems: ShellActivityItem[];
-}
-
-
 
 export interface ShellWorkspaceItem extends WorkspaceOption {
   iconSrc: string;
@@ -121,13 +102,12 @@ export interface AppShellModel {
   scheduler?: ShellResourceItem | null;
   projects: ShellResourceItem[];
   treeEditing: boolean;
-  activity: ShellActivityLists;
+  treeFilter: ShellTreeFilter;
   doctor: DoctorSnapshotModel;
-  paneSizes: { sidebarWidth: number; chatWidth: number; chatHeight: number; sidebarAttentionHeight: number };
+  paneSizes: { sidebarWidth: number; chatWidth: number; chatHeight: number };
   mobile: { sidebarOpen: boolean };
   layout: { preference: "auto" | "three" | "two" | "split"; effective: "three" | "two" | "split" | "single" };
   route: { path: string; revision: number; replace: boolean };
-  resolveResourceTitle: (resourceId: string) => string | null;
   onSwitchWorkspace: (id: string) => Promise<void>;
   onResolveWorkspaceUser: (name: string, create: boolean) => Promise<void>;
   onAddWorkspace: () => void;
@@ -136,10 +116,10 @@ export interface AppShellModel {
   onRefreshDoctor: () => Promise<void>;
   onToggleProject: (id: string) => Promise<void>;
   onSelectResource: (id: string) => Promise<void>;
-  onSelectChat?: (id: string) => Promise<void>;
   onReorder: (drag: ShellDragTarget, target: ShellDragTarget, after: boolean) => Promise<void>;
   onDragState: (drag: ShellDragTarget | null) => void;
   onToggleTreeEditing: () => void;
+  onTreeFilter: (filter: ShellTreeFilter) => void;
   onCreateFolder: (projectId: string) => Promise<string>;
   onRenameFolder: (id: string, name: string) => Promise<void>;
   onDeleteFolder: (id: string) => Promise<void>;

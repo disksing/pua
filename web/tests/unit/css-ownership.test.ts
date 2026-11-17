@@ -8,7 +8,6 @@ const components = [
   "AgentPanelHeader",
   "ActivityGroup",
   "AppearanceSettingsPanel",
-  "ActivityPanel",
   "ApprovalCard",
   "AppShell",
   "AgentHubSettingsPanel",
@@ -54,7 +53,6 @@ const owners: Record<(typeof components)[number], string> = {
   AgentPanelHeader: "agent-panel-header",
   ActivityGroup: "event-timeline",
   AppearanceSettingsPanel: "appearance-settings-panel",
-  ActivityPanel: "attention-list",
   ApprovalCard: "event-timeline",
   AppShell: "app-shell",
   AgentHubSettingsPanel: "agenthub-settings-panel",
@@ -137,14 +135,14 @@ describe("CSS ownership", () => {
     // Tokens applied at runtime by controllers (pane sizes, font scales,
     // mobile viewport metrics) rather than by stylesheets.
     const runtimeTokens = new Set([
-      "--sidebar-width", "--chat-width", "--sidebar-attention-height",
+      "--sidebar-width", "--chat-width",
       "--sidebar-font-scale", "--details-font-scale", "--chat-font-scale",
       "--app-viewport-height", "--app-viewport-offset-top", "--app-viewport-offset-left",
       // Component-local variables set inline by FileBrowser rows.
       "--depth"
     ]);
     const sources = [
-      ...components.map((name) => `src/components/${name === "ActivityPanel" ? "AttentionList" : name}.css`),
+      ...components.map((name) => `src/components/${name}.css`),
       "src/styles/base.css", "src/styles/primitives.css", "src/styles/rich-content.css", "src/styles/themes-riso.css"
     ];
     const missing = new Map<string, string[]>();
@@ -175,7 +173,7 @@ describe("CSS ownership", () => {
 	  it.each(components)("keeps %s selectors inside its component boundary", (component) => {
 	    const owner = owners[component];
 	    const componentSource = read(`src/components/${component}.svelte`);
-	    const cssName = component === "ActivityPanel" ? "AttentionList" : component;
+	    const cssName = component;
 	    const css = read(`src/components/${cssName}.css`);
 	    expect(componentSource).toContain(`import "./${cssName}.css";`);
     for (const header of selectorHeaders(css)) {
@@ -318,7 +316,8 @@ describe("CSS ownership", () => {
     const title = body(':where([data-component-owner="project-tree"]) .section-title {');
     expect(title).toContain("min-height: 44px;");
 
-    const actions = body(':where([data-component-owner="project-tree"]) .section-title button {');
+    expect(css.slice(mobileStart)).toContain(':where([data-component-owner="project-tree"]) .section-title button,');
+    const actions = body(':where([data-component-owner="project-tree"]) .tree-filter {');
     expect(actions).toContain("min-width: 44px;");
     expect(actions).toContain("height: 44px;");
   });
@@ -705,7 +704,7 @@ describe("CSS ownership", () => {
   });
 
   it("marks nested component roots with the same owner used by their CSS", () => {
-	    for (const component of ["AgentPanelHeader", "ActivityGroup", "AppearanceSettingsPanel", "ActivityPanel", "AgentHubSettingsPanel", "ApprovalCard", "DiffModal", "DoctorDialog", "FileBrowser", "FilePreviewModal", "HistoryTimeline", "LifecycleNotice", "MarkdownDocument", "MobileToolbar", "NotificationSettingsPanel", "PaneResizeHandle", "ProfilesSettingsPanel", "ProjectCreateForm", "ProjectTree", "SettingsNavigation", "StatusPresentation", "TaskWizard", "TemplateFieldGroup", "TemplatePicker", "ThinkingBlock", "TimelineMessage", "TimelineNotice", "ToolGroup", "ToolItem", "UnknownEvent", "WorkspaceSettingsPanel", "WorkspaceSwitcher"] as const) {
+	    for (const component of ["AgentPanelHeader", "ActivityGroup", "AppearanceSettingsPanel", "AgentHubSettingsPanel", "ApprovalCard", "DiffModal", "DoctorDialog", "FileBrowser", "FilePreviewModal", "HistoryTimeline", "LifecycleNotice", "MarkdownDocument", "MobileToolbar", "NotificationSettingsPanel", "PaneResizeHandle", "ProfilesSettingsPanel", "ProjectCreateForm", "ProjectTree", "SettingsNavigation", "StatusPresentation", "TaskWizard", "TemplateFieldGroup", "TemplatePicker", "ThinkingBlock", "TimelineMessage", "TimelineNotice", "ToolGroup", "ToolItem", "UnknownEvent", "WorkspaceSettingsPanel", "WorkspaceSwitcher"] as const) {
       expect(read(`src/components/${component}.svelte`)).toContain(`data-component-owner="${owners[component]}"`);
     }
   });
@@ -718,21 +717,4 @@ describe("CSS ownership", () => {
     expect(css).not.toContain(':where([data-component-owner="workspace-switcher"]).workspace-open');
   });
 
-  it("keeps the selected Activity row background while hovered", () => {
-    const css = read("src/components/AttentionList.css");
-    const body = (selector: string) => {
-      const start = css.indexOf(selector);
-      expect(start).toBeGreaterThanOrEqual(0);
-      return css.slice(css.indexOf("{", start), css.indexOf("}", start) + 1);
-    };
-    const backgroundOf = (selector: string) => {
-      const match = body(selector).match(/background:\s*([^;]+);/);
-      expect(match, selector).not.toBeNull();
-      return match![1].trim();
-    };
-    // Hovering the open resource must not wash out its selected state.
-    expect(backgroundOf('.activity-row.selected:hover')).toBe(backgroundOf('.activity-row.selected'));
-    // Non-selected rows keep the dedicated hover tint.
-    expect(backgroundOf('.activity-row:hover')).toBe("var(--sidebar-row)");
-  });
 });

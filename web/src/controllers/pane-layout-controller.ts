@@ -13,7 +13,6 @@ export interface PaneSizes {
 	sidebarWidth: number;
 	chatWidth: number;
 	chatHeight: number;
-	sidebarAttentionHeight: number;
 }
 
 export interface MobilePaneState {
@@ -37,22 +36,19 @@ export type PaneName = keyof PaneSizes;
 const PANE_DEFAULTS: PaneSizes = Object.freeze({
 	sidebarWidth: 280,
 	chatWidth: 420,
-	chatHeight: 320,
-	sidebarAttentionHeight: 210
+	chatHeight: 320
 });
 
 const PANE_CSS_VARIABLES: Record<PaneName, string> = Object.freeze({
 	sidebarWidth: "--sidebar-width",
 	chatWidth: "--chat-width",
-	chatHeight: "--chat-height",
-	sidebarAttentionHeight: "--sidebar-attention-height"
+	chatHeight: "--chat-height"
 });
 
 const PANE_MIN_SIZES: Record<PaneName, number> = Object.freeze({
 	sidebarWidth: SIDEBAR_MIN_WIDTH,
 	chatWidth: CHAT_MIN_WIDTH,
-	chatHeight: CHAT_MIN_HEIGHT,
-	sidebarAttentionHeight: 84
+	chatHeight: CHAT_MIN_HEIGHT
 });
 
 function clamp(value: number, min: number, max: number): number {
@@ -105,7 +101,6 @@ export function normalizePaneSizes(raw: unknown, availableWorkspaceWidth = 0): P
 		sizes.chatWidth = clamp(availableWorkspaceWidth - PANE_HANDLE_WIDTH - detailsWidth, CHAT_MIN_WIDTH, PANE_MAX_SIZE);
 	}
 	if (finiteSize(source.chatHeight)) sizes.chatHeight = clamp(source.chatHeight, CHAT_MIN_HEIGHT, PANE_MAX_SIZE);
-	if (finiteSize(source.sidebarAttentionHeight)) sizes.sidebarAttentionHeight = clamp(source.sidebarAttentionHeight, 84, PANE_MAX_SIZE);
 	return sizes;
 }
 
@@ -199,11 +194,7 @@ export function createPaneLayoutController(onChange: () => void, storage: Storag
 	function commitPane(name: string): void {
 		if (!Object.hasOwn(PANE_CSS_VARIABLES, name) || !storage) return;
 		const paneName = name as PaneName;
-		const saved = readStoredPaneSizes();
-		delete saved.detailsWidth;
-		for (const candidate of Object.keys(PANE_CSS_VARIABLES) as PaneName[]) {
-			if (!finiteSize(saved[candidate])) saved[candidate] = paneSizes[candidate];
-		}
+		const saved = normalizePaneSizes(readStoredPaneSizes());
 		saved[paneName] = paneSizes[paneName];
 		storage.setItem(PANE_SIZE_KEY, JSON.stringify(saved));
 	}

@@ -317,34 +317,6 @@
   color: #f6f1e7;
 }
 
-/* segmented activity tabs: one ink frame split into passes, the active pass
-   printed in sunflower */
-:root[data-theme="riso"] [data-component-owner="attention-list"] .activity-tabs {
-  padding: 0;
-  border: 2.5px solid #1a1a1a;
-  border-radius: 2px;
-  background: transparent;
-  overflow: hidden;
-}
-
-:root[data-theme="riso"] [data-component-owner="attention-list"] .activity-tabs button {
-  border-radius: 0;
-  color: #1a1a1a;
-  font-family: "Arial Black", "Helvetica Neue", Inter, sans-serif;
-  letter-spacing: 0.04em;
-}
-
-:root[data-theme="riso"] [data-component-owner="attention-list"] .activity-tabs button + button {
-  border-left: 2.5px solid #1a1a1a;
-}
-
-:root[data-theme="riso"] [data-component-owner="attention-list"] .activity-tabs button.active,
-:root[data-theme="riso"] [data-component-owner="attention-list"] .activity-tabs button.active:hover {
-  background: var(--amber-bright);
-  color: #1a1a1a;
-  box-shadow: none;
-}
-
 /* composer: an ink-ruled channel on dimmed paper; the bar actions keep
    their 44px hit areas, so the stencil frames are painted inside them via
    outline + content-box fill (overlapping hit boxes cannot clash). Send is

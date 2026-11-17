@@ -111,18 +111,6 @@
     void refresh(); const timer = setInterval(refresh, 2000);
     return () => { disposed = true; clearInterval(timer); loadOlder = () => {}; refreshNow = () => {}; };
   });
-  let lastFocusRequest = 0;
-  $effect(() => {
-    const request = model.chatFocusRequest;
-    if (!request || request === lastFocusRequest) return;
-    lastFocusRequest = request;
-    const key = identity;
-    void tick().then(() => {
-      if (key !== identity) return;
-      root?.focus({ preventScroll: true });
-      root?.scrollIntoView({ block: "nearest" });
-    });
-  });
   function trackScroll(element: HTMLElement) {
     root = element;
     const container = element.closest<HTMLElement>("#chatTimeline");

@@ -29,8 +29,7 @@
     const sidebar = document.getElementById("mobileSidebar");
     const workspace = document.querySelector<HTMLElement>(".workspace-panel");
     const chat = document.getElementById("agentPanel");
-    const activity = document.querySelector<HTMLElement>(".attention-section");
-    if (!app || !sidebar || !workspace || !chat || !activity) return;
+    if (!app || !sidebar || !workspace || !chat) return;
     // Two-column mode stacks details above chat in one column, so the sidebar
     // only has to leave room for the details minimum.
     const twoColumn = document.body.dataset.layout === "two";
@@ -39,8 +38,7 @@
     const startSidebar = sidebar.getBoundingClientRect().width;
     const startChat = chat.getBoundingClientRect().width;
     const startChatHeight = chat.getBoundingClientRect().height;
-    const startActivity = activity.getBoundingClientRect().height;
-    const vertical = kind === "sidebarAttentionHeight" || kind === "chatHeight";
+    const vertical = kind === "chatHeight";
     const bodyClass = vertical ? "resizing-y" : "resizing-x";
     handle.classList.add("dragging");
     document.body.classList.add(bodyClass);
@@ -52,13 +50,10 @@
       } else if (kind === "chatWidth") {
         const max = Math.max(320, workspace.getBoundingClientRect().width - 360 - 8);
         onPreview(kind, Math.min(max, Math.max(320, startChat - (moveEvent.clientX - startX))));
-      } else if (kind === "chatHeight") {
+      } else {
         // Stacked panes shrink down to their 56px header band at most.
         const max = Math.max(56, workspace.getBoundingClientRect().height - 56 - 8);
         onPreview(kind, Math.min(max, Math.max(56, startChatHeight - (moveEvent.clientY - startY))));
-      } else {
-        const max = Math.max(120, sidebar.getBoundingClientRect().height - 250);
-        onPreview(kind, Math.min(max, Math.max(84, startActivity - (moveEvent.clientY - startY))));
       }
     };
     const done = () => {
@@ -77,4 +72,4 @@
   }
 </script>
 
-<div {id} class={`resize-handle ${className}`} data-component-owner="pane-resize-handle" role="separator" aria-orientation={kind === "sidebarAttentionHeight" || kind === "chatHeight" ? "horizontal" : "vertical"} aria-label={label} onpointerdown={beginResize}></div>
+<div {id} class={`resize-handle ${className}`} data-component-owner="pane-resize-handle" role="separator" aria-orientation={kind === "chatHeight" ? "horizontal" : "vertical"} aria-label={label} onpointerdown={beginResize}></div>

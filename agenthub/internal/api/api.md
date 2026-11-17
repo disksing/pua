@@ -316,10 +316,9 @@ curl -s "$BASE/v1/status"
 Read the effective configuration.
 
 - **Success `200`:** `{"config": {...}}` — the configuration object
-  (`version`, `agentProviders`, `agents`, `onWatch`; see
-  `PUT /v1/config` for the schema and constraints). `onWatch.password` is
-  always returned as an empty string; the stored secret never leaves the
-  daemon.
+  (`version`, `agentProviders`, `agents`, `magpie`; see
+  `PUT /v1/config` for the schema and constraints). Legacy OnWatch settings
+  are omitted from the response.
 - **Errors:** `503 runtime_unavailable`.
 
 ```bash
@@ -344,12 +343,9 @@ only writer) and applies it in memory.
     "agents": [
       {"name": "Codex", "providerId": "codex", "options": {"approval": "never", "sandbox": "danger-full-access"}, "environment": {"FOO": "bar"}}
     ],
-    "onWatch": {
+    "magpie": {
       "enabled": false,
-      "serverUrl": "http://127.0.0.1:9211",
-      "authMode": "trusted_proxy",
-      "username": "admin",
-      "password": "",
+      "serverUrl": "http://127.0.0.1:3425",
       "refreshIntervalSeconds": 60
     }
   }
@@ -364,11 +360,12 @@ only writer) and applies it in memory.
   resumes (the session `launchEnvironment` wins on conflicts); names cannot
   be empty or contain `=` or NUL, and values cannot contain NUL. Unknown
   fields are rejected.
-- **OnWatch constraints:** `serverUrl` is an absolute HTTP(S) URL without
-  embedded credentials; `authMode` is `trusted_proxy`, `basic` or `none`;
-  refresh is 30, 60 or 300 seconds. Basic Auth requires a username and, when
-  enabled, a password. Because GET responses redact the password, an empty
-  Basic password in PUT preserves the currently stored value.
+- **Magpie constraints:** `serverUrl` uses HTTP(S) with a loopback IP literal
+  and an optional port. Snapshot refresh is 30, 60 or 300 seconds. The
+  daemon sends anonymous requests with redirects disabled. When a legacy
+  config lacks `magpie`, it adopts the valid OnWatch interval and starts
+  disabled. `migratedFromOnWatch` indicates that a previously enabled OnWatch
+  integration needs setup. Saving enabled Magpie settings clears the marker.
 - **Browser preferences:** Activity Monitor controls are stored only in the
   browser's `localStorage` and are absent from this API. For upgrade
   compatibility, a legacy top-level `companion` object is accepted and
@@ -416,46 +413,44 @@ curl -s -X PUT "$BASE/v1/config/providers/kimi" \
   -d '{"command": "/opt/homebrew/bin/kimi"}'
 ```
 
-### POST /v1/onwatch/test
+### POST /v1/magpie/test
 
-Test an OnWatch connection without saving the supplied settings. The request
-body is `{"onWatch": {...}}` using the same object as `PUT /v1/config`.
-An empty Basic Auth password reuses the currently stored secret. The daemon
-requests OnWatch `/api/providers`; it never returns credentials.
+Test a Magpie connection without saving the supplied settings. The request
+body is `{"magpie": {...}}` using the same object as `PUT /v1/config`.
+The daemon reads `GET /v1/magpie/quotas?kept=1` and returns the card count.
 
-- **Success `200`:** `{"connected": true, "providers": ["codex", ...]}`.
+- **Success `200`:** `{"connected": true, "cards": 2}`. Zero is a valid count.
 - **Errors:** `400 invalid_request`, `415 json_required`,
-  `422 invalid_config`, `502 onwatch_unavailable`, `503 runtime_unavailable`.
+  `422 invalid_config`, `502 magpie_unavailable`, `503 runtime_unavailable`.
 
 ```bash
-curl -s -X POST "$BASE/v1/onwatch/test" \
+curl -s -X POST "$BASE/v1/magpie/test" \
   -H "Content-Type: application/json" \
-  -d '{"onWatch":{"enabled":true,"serverUrl":"http://127.0.0.1:9211","authMode":"trusted_proxy","username":"admin","refreshIntervalSeconds":60}}'
+  -d '{"magpie":{"enabled":false,"serverUrl":"http://127.0.0.1:3425","refreshIntervalSeconds":60}}'
 ```
 
 ### GET /v1/quota
 
-Read the companion's normalized Provider quota snapshot. The browser never
-contacts OnWatch directly. The daemon discovers Provider order from
-`/api/providers`, reads each `/api/current?provider=...` response, normalizes
-remaining/used percentages, reset data and status, and caches the result for
-the configured refresh interval.
+Read the Companion's normalized quota snapshot. The daemon caches the
+result of one Magpie `GET /v1/magpie/quotas?kept=1` per refresh interval.
+Magpie serves its existing readings without triggering vendor requests.
 
 - **Success `200`:** `{"quota": {"configured", "connected", "stale?",
-  "error?", "updatedAt", "staleAfterSeconds", "providers": [...]}}`.
-  Each Provider carries `provider`, `label`, optional `planLabel`, `status`,
-  `capturedAt`, optional stale/error state, and `quotas`. Each quota carries
-  `kind`, `label`, `remainingPercent`, `usedPercent`, reset/window fields when
-  available, `status`, and optional `used`, `limit`, rate and projection data.
-  Providers that report a `balance` payload instead of a `quotas` array (e.g.
-  DeepSeek credit balance) are normalized into one quota row with
-  `kind:"balance"`, whose remaining share defaults to current balance / 100.
-  The raw balance is also exposed as `value` so browsers can re-derive
-  percentages against a per-provider balance total configured in the Activity
-  settings.
+  "error?", "updatedAt?", "staleAfterSeconds", "providers": [...]}}`.
+  Each row is an account, plan, or balance card. Use `id` as the unique card
+  key because `provider` can repeat. Each card carries `label`,
+  `accountLabel`, `status`, `quotas`, and optional `planLabel`, `capturedAt`,
+  `readDeferred`, `stale` and `error`. Raw account identities are omitted.
+  Each quota has a per-card `key`, `kind`, `label`, `status`, and nullable
+  `remainingPercent` and `usedPercent`. A balance uses `kind:"balance"` and
+  `display`. Text-only and unlimited quotas also have null percentages.
+  Counts, units, and reset fields appear when available.
   `windowPositionPercent` is the percentage of the known reset window still
   remaining: `100` is the right edge at the start of a window and it moves
   toward the left edge (`0`) as reset approaches.
+- `updatedAt` is the last successful daemon fetch. `capturedAt` is the
+  Magpie reading time. A known reading older than 15 minutes is stale. A
+  past reset with no subsequent reading sets `expired` on that window.
 - When an upstream refresh fails after a successful read, the last cached
   snapshot is returned with `connected:false`, `stale:true` and an error.
 - **Errors:** `503 runtime_unavailable`. Upstream availability is represented

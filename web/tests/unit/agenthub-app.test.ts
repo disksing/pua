@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import { sessionsQuery } from "../../src/agenthub/core/archive";
 import { buildCreatePayload } from "../../src/agenthub/core/new-session";
 import { TonePlayer } from "../../src/agenthub/companion/audio";
-import { ACTIVITY_LEAD_MS, ACTIVITY_WAVEFORMS, activityPulsesForFrame, activitySessions, activityWaveformIndex, activityWaveformPatchRange, applyBalanceTotals, filterQuotaSnapshot, pruneActivityPulses, quotaVisibilityKey, SessionToneAllocator, TERMINAL_TONE_HOLD_MS, waveformSampleY } from "../../src/agenthub/companion/model";
+import { ACTIVITY_LEAD_MS, ACTIVITY_WAVEFORMS, activityPulsesForFrame, activitySessions, activityWaveformIndex, activityWaveformPatchRange, filterQuotaSnapshot, pruneActivityPulses, quotaCycleItems, quotaValue, quotaVisibilityKey, SessionToneAllocator, TERMINAL_TONE_HOLD_MS, waveformSampleY } from "../../src/agenthub/companion/model";
 import { activityPlaybackPlan } from "../../src/agenthub/companion/schedule";
 import { buildProviderRows } from "../../src/agenthub/settings/provider-rows";
 
@@ -100,12 +100,18 @@ describe("AgentHub audit application", () => {
     vi.useRealTimers();
   });
 
-  it("applies balance totals and persisted quota visibility preferences", () => {
-    const snapshot = { providers: [{ provider: "deepseek", label: "DeepSeek", quotas: [{ kind: "balance", label: "Credit", value: 40, remainingPercent: 40 }] }] };
-    const quota = (applyBalanceTotals as any)(snapshot, { deepseek: 200 });
-    expect(quota.providers[0].quotas[0]).toMatchObject({ remainingPercent: 20, limit: 200 });
-    const hiddenKey = (quotaVisibilityKey as any)(quota.providers[0], quota.providers[0].quotas[0]);
-    expect((filterQuotaSnapshot as any)(quota, [hiddenKey]).providers).toEqual([]);
+  it("keeps Magpie quota visibility account-specific and rotates only eligible percentages", () => {
+    const balance = { key: "balance", kind: "balance", remainingPercent: null, display: "¥0.00" };
+    const expired = { key: "expired", kind: "5h", remainingPercent: 80, expired: true };
+    const limit = { key: "remaining", kind: "5h", remainingPercent: 0 };
+    const unlimited = { key: "unlimited", kind: "7d", remainingPercent: null, unlimited: true };
+    const first = { id: "one", provider: "codex", label: "Codex", accountLabel: "0001", quotas: [balance, expired, limit] };
+    const second = { id: "two", provider: "codex", label: "Codex", accountLabel: "0002", quotas: [unlimited, limit] };
+    const oldHidden = JSON.stringify(["codex", "5h"]);
+    const quota = filterQuotaSnapshot({ providers: [first, second] }, [oldHidden, quotaVisibilityKey(first, limit)]);
+    expect(quota.providers.map((provider: any) => provider.quotas.length)).toEqual([2, 2]);
+    expect(quotaCycleItems(quota)).toMatchObject([{ provider: "Codex · 0002", value: 0 }]);
+    expect([quotaValue(balance), quotaValue(unlimited), quotaValue(limit), quotaValue({})]).toEqual(["¥0.00", "Unlimited", "0% left", "Unknown"]);
   });
 
   it("combines simultaneous activity into one waveform and adds deterministic idle peaks", () => {
@@ -163,6 +169,6 @@ describe("AgentHub audit application", () => {
     expect(companion).toContain("projectedSingleContentHeight > quotaScroll.clientHeight");
     expect(companion).toContain("class:dense={quotaDense}");
     expect(settings).toContain("Quota visibility");
-    expect(settings).toContain("Balance totals");
+    expect(settings).toContain("Magpie Integration");
   });
 });

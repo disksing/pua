@@ -134,12 +134,9 @@ On first startup, if the config does not exist, AgentHub generates its own minim
       "options": { "mode": "build", "model": "kimi-coding/k3" }
     }
   ],
-  "onWatch": {
+  "magpie": {
     "enabled": false,
-    "serverUrl": "http://127.0.0.1:9211",
-    "authMode": "trusted_proxy",
-    "username": "admin",
-    "password": "",
+    "serverUrl": "http://127.0.0.1:3425",
     "refreshIntervalSeconds": 60
   }
 }
@@ -212,7 +209,11 @@ In the Web settings, the agent **Model** field is a dropdown fed by this endpoin
 
 The Web UI's **Settings** panel is the recommended way to manage this configuration. The **Providers** section is intentionally minimal: the four built-in providers (Codex, Kimi, Grok/Pi, OpenCode) are listed with their availability. There is no user-controlled enable/disable switch and no provider add/delete — a provider is available whenever its executable resolves. On startup the daemon probes PATH and common install directories; a found executable marks the provider available and displays the resolved path, and each row offers an inline editor for the executable path that validates the entered path on confirm and rejects paths that do not resolve (`PUT /v1/config/providers/{id}`). Clearing the path restores automatic detection. The **Agents** section keeps structured, validated forms. All changes go through the daemon API, which remains the only writer of the config file — no manual JSON editing is required.
 
-The **General** section configures the daemon-backed OnWatch integration. Provider quota is fetched only by the daemon from OnWatch, normalized, cached for the configured interval, and exposed through `GET /v1/quota`; Basic Auth passwords are stored in the local `0600` config but redacted from every API response. The **Activity** section contains browser-local preferences for activity, sounds, and per-quota visibility, stored under the current browser origin and never sent through `GET` or `PUT /v1/config`. It lists the quota rows currently returned by `/v1/quota`; hiding one removes that row from both the expanded Beeper card and the collapsed quota rotation. Balance-style quota rows (e.g. DeepSeek credit balance) also expose a per-provider balance total: remaining share is re-derived as current balance / total (default `100`). Session activity comes only from AgentHub's own durably appended, user-visible Turn events and is aggregated per Session into one-second frames at `GET /v1/activity/events`. Messages, reasoning, tools, approvals, Turn errors, and Turn terminals count as activity; Session/process lifecycle bookkeeping, message-delivery bookkeeping, raw Provider notifications, background metadata, and stderr do not. This prevents daemon restarts and idle Provider maintenance from making old Sessions appear active. The browser keeps one global EventSource and synthesizes optional activity beeps with Web Audio. Each active Session receives the first available tone from the selected major or minor triad in octave-band order 5, 4, 6, 3, then 7, prioritizing the lower bands before the highest tone; the tone remains stable until ten seconds after the current Turn ends or until the Session leaves the active window, and the first 15 concurrent Sessions use distinct slots. Terminal rows remain visible for five minutes: successful Turns are yellow, failed or cancelled Turns are red, and a new Turn restores the active state and obtains a tone again. Playback is quantized to four 250ms subdivisions with deterministic patterns and rotation; above four Sessions, chord tones share subdivisions with normalized gain instead of creating irregular fractions of a second. The Activity settings can switch between holding the selected chord and the built-in Canon in C progression (`C - G - Am - Em - F - C - F - G`). Each progression chord independently lasts a random one to six one-second frames; all Sessions switch immediately at the boundary, using discrete pitches without bends or staggered migration. The selected local MP3 completion sound remains independent of the activity chord. AgentHub never scans Codex or another Provider's native Session files for this feature.
+In **Settings → General → Magpie Integration**, enter the same-host loopback URL, select **Test connection**, enable Magpie, and save. Magpie starts disabled. The daemon reads Magpie's cached readings and exposes them through `GET /v1/quota`. Each account has its own windows and balances. The refresh interval controls snapshot polling. To refresh vendor readings, use Magpie's Usage page. If Magpie becomes unavailable, Beeper marks the last snapshot stale.
+
+When upgrading from OnWatch, Magpie inherits the refresh interval. Back up the original config before saving new settings, and restore it alongside the previous binary if you roll back. **Activity** settings stay in the current browser origin. Hiding a quota row removes it from both the expanded card and the collapsed rotation.
+
+Session activity comes only from AgentHub's own durably appended, user-visible Turn events and is aggregated per Session into one-second frames at `GET /v1/activity/events`. Messages, reasoning, tools, approvals, Turn errors, and Turn terminals count as activity; Session/process lifecycle bookkeeping, message-delivery bookkeeping, raw Provider notifications, background metadata, and stderr do not. This prevents daemon restarts and idle Provider maintenance from making old Sessions appear active. The browser keeps one global EventSource and synthesizes optional activity beeps with Web Audio. Each active Session receives the first available tone from the selected major or minor triad in octave-band order 5, 4, 6, 3, then 7, prioritizing the lower bands before the highest tone; the tone remains stable until ten seconds after the current Turn ends or until the Session leaves the active window, and the first 15 concurrent Sessions use distinct slots. Terminal rows remain visible for five minutes: successful Turns are yellow, failed or cancelled Turns are red, and a new Turn restores the active state and obtains a tone again. Playback is quantized to four 250ms subdivisions with deterministic patterns and rotation; above four Sessions, chord tones share subdivisions with normalized gain instead of creating irregular fractions of a second. The Activity settings can switch between holding the selected chord and the built-in Canon in C progression (`C - G - Am - Em - F - C - F - G`). Each progression chord independently lasts a random one to six one-second frames; all Sessions switch immediately at the boundary, using discrete pitches without bends or staggered migration. The selected local MP3 completion sound remains independent of the activity chord. AgentHub never scans Codex or another Provider's native Session files for this feature.
 
 An unavailable provider's agents are reported as unavailable (`available: false` with a reason in `GET /v1/agents`) and are hidden from the new-session choices. Unavailability never interrupts an already running session, and existing session history stays readable.
 
@@ -272,7 +273,7 @@ GET    /v1/health
 GET    /v1/status
 GET    /v1/config
 PUT    /v1/config
-POST   /v1/onwatch/test
+POST   /v1/magpie/test
 GET    /v1/quota
 GET    /v1/activity/events
 GET    /v1/agents

@@ -10,45 +10,54 @@ import (
 	"io"
 	"math"
 	"net/http"
-	"net/url"
+	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/disksing/pua/agenthub/internal/config"
 )
 
-const upstreamTimeout = 8 * time.Second
+const (
+	upstreamTimeout = 8 * time.Second
+	maxResponseSize = 2 << 20
+	staleAfter      = 15 * time.Minute
+	retryAfter      = 5 * time.Second
+)
 
 type Quota struct {
+	Key                   string   `json:"key"`
 	Kind                  string   `json:"kind"`
 	Label                 string   `json:"label"`
-	RemainingPercent      float64  `json:"remainingPercent"`
-	UsedPercent           float64  `json:"usedPercent"`
+	RemainingPercent      *float64 `json:"remainingPercent"`
+	UsedPercent           *float64 `json:"usedPercent"`
 	ResetInSeconds        *int64   `json:"resetInSeconds,omitempty"`
 	ResetsAt              string   `json:"resetsAt,omitempty"`
 	WindowPositionPercent *float64 `json:"windowPositionPercent,omitempty"`
 	Status                string   `json:"status"`
 	Used                  *float64 `json:"used,omitempty"`
 	Limit                 *float64 `json:"limit,omitempty"`
-	CurrentRate           *float64 `json:"currentRate,omitempty"`
-	ProjectedUtil         *float64 `json:"projectedUtil,omitempty"`
+	Unit                  string   `json:"unit,omitempty"`
+	Display               string   `json:"display,omitempty"`
+	Unlimited             bool     `json:"unlimited,omitempty"`
+	Expired               bool     `json:"expired,omitempty"`
 	Stale                 bool     `json:"stale,omitempty"`
-	// Value is the raw underlying amount of a balance-style quota (e.g. a
-	// provider credit balance) before any display normalization. Clients use
-	// it to re-derive percentages against their own balance total.
-	Value *float64 `json:"value,omitempty"`
 }
 
 type ProviderQuota struct {
-	Provider   string  `json:"provider"`
-	Label      string  `json:"label"`
-	PlanLabel  string  `json:"planLabel,omitempty"`
-	CapturedAt string  `json:"capturedAt,omitempty"`
-	Status     string  `json:"status"`
-	Stale      bool    `json:"stale,omitempty"`
-	Error      string  `json:"error,omitempty"`
-	Quotas     []Quota `json:"quotas"`
+	ID           string  `json:"id"`
+	Provider     string  `json:"provider"`
+	Label        string  `json:"label"`
+	AccountLabel string  `json:"accountLabel,omitempty"`
+	PlanLabel    string  `json:"planLabel,omitempty"`
+	CapturedAt   string  `json:"capturedAt,omitempty"`
+	Status       string  `json:"status"`
+	Stale        bool    `json:"stale,omitempty"`
+	ReadDeferred bool    `json:"readDeferred,omitempty"`
+	Error        string  `json:"error,omitempty"`
+	Quotas       []Quota `json:"quotas"`
 }
 
 type QuotaSnapshot struct {
@@ -56,399 +65,378 @@ type QuotaSnapshot struct {
 	Connected         bool            `json:"connected"`
 	Stale             bool            `json:"stale,omitempty"`
 	Error             string          `json:"error,omitempty"`
-	UpdatedAt         time.Time       `json:"updatedAt"`
+	UpdatedAt         time.Time       `json:"updatedAt,omitzero"`
 	StaleAfterSeconds int             `json:"staleAfterSeconds"`
 	Providers         []ProviderQuota `json:"providers"`
 }
 
-type ProviderCatalog struct {
-	Providers []string          `json:"providers"`
-	Labels    map[string]string `json:"providerLabels"`
+type quotaCache struct {
+	settings  config.Magpie
+	expiresAt time.Time
+	snapshot  QuotaSnapshot
+	inFlight  chan struct{}
 }
 
 type Service struct {
 	client *http.Client
-
-	refreshMu sync.Mutex
-	mu        sync.Mutex
-	signature string
-	expiresAt time.Time
-	cached    *QuotaSnapshot
+	now    func() time.Time
+	mu     sync.Mutex
+	cache  *quotaCache
 }
 
 func NewService(client *http.Client) *Service {
-	if client == nil {
-		client = &http.Client{Timeout: upstreamTimeout}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	localClient := http.Client{Transport: transport, Timeout: upstreamTimeout}
+	if client != nil {
+		localClient = *client
 	}
-	return &Service{client: client}
+	localClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &Service{client: &localClient, now: time.Now, cache: &quotaCache{}}
 }
 
-func (s *Service) Invalidate() {
-	s.mu.Lock()
-	s.signature = ""
-	s.expiresAt = time.Time{}
-	s.cached = nil
-	s.mu.Unlock()
+func (service *Service) Configure(settings config.Magpie) {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	if service.cache.settings != settings {
+		service.cache = &quotaCache{settings: settings}
+	}
 }
 
-func (s *Service) Snapshot(ctx context.Context, settings config.OnWatch) QuotaSnapshot {
-	now := time.Now().UTC()
-	if !settings.Enabled {
-		return QuotaSnapshot{
-			Configured: false, Connected: false, UpdatedAt: now,
-			StaleAfterSeconds: settings.RefreshIntervalSeconds * 2,
-			Providers:         []ProviderQuota{},
+func emptySnapshot(enabled bool) QuotaSnapshot {
+	return QuotaSnapshot{
+		Configured: enabled, StaleAfterSeconds: int(staleAfter.Seconds()),
+		Providers: []ProviderQuota{},
+	}
+}
+
+func (service *Service) Snapshot(ctx context.Context) QuotaSnapshot {
+	for {
+		service.mu.Lock()
+		cache := service.cache
+		now := service.now()
+		if !cache.settings.Enabled || ctx.Err() != nil {
+			service.mu.Unlock()
+			return emptySnapshot(cache.settings.Enabled)
 		}
-	}
-	signature := settingsSignature(settings)
-	s.mu.Lock()
-	if s.signature == signature && s.cached != nil && now.Before(s.expiresAt) {
-		result := cloneSnapshot(*s.cached)
-		s.mu.Unlock()
-		return result
-	}
-	s.mu.Unlock()
-
-	s.refreshMu.Lock()
-	defer s.refreshMu.Unlock()
-	s.mu.Lock()
-	if s.signature == signature && s.cached != nil && now.Before(s.expiresAt) {
-		result := cloneSnapshot(*s.cached)
-		s.mu.Unlock()
-		return result
-	}
-	s.mu.Unlock()
-
-	result, err := s.fetch(ctx, settings, now)
-	if err != nil {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		if s.signature == signature && s.cached != nil {
-			stale := cloneSnapshot(*s.cached)
-			stale.Connected = false
-			stale.Stale = true
-			stale.Error = err.Error()
-			for index := range stale.Providers {
-				stale.Providers[index].Stale = true
-				for quotaIndex := range stale.Providers[index].Quotas {
-					stale.Providers[index].Quotas[quotaIndex].Stale = true
-				}
+		if now.Before(cache.expiresAt) {
+			snapshot := cache.snapshot
+			service.mu.Unlock()
+			return snapshot.at(now)
+		}
+		if pending := cache.inFlight; pending != nil {
+			service.mu.Unlock()
+			select {
+			case <-pending:
+			case <-ctx.Done():
 			}
-			return stale
+			continue
 		}
-		return QuotaSnapshot{
-			Configured: true, Connected: false, Error: err.Error(), UpdatedAt: now,
-			StaleAfterSeconds: settings.RefreshIntervalSeconds * 2,
-			Providers:         []ProviderQuota{},
+		pending := make(chan struct{})
+		cache.inFlight = pending
+		previous := cache.snapshot
+		service.mu.Unlock()
+
+		providers, err := service.fetch(context.WithoutCancel(ctx), cache.settings)
+		finishedAt := service.now()
+		snapshot := emptySnapshot(true)
+		ttl := time.Duration(cache.settings.RefreshIntervalSeconds) * time.Second
+		if err == nil {
+			snapshot.Connected = true
+			snapshot.UpdatedAt = finishedAt
+			snapshot.Providers = mergeReadings(providers, previous.Providers)
+		} else {
+			snapshot.UpdatedAt = previous.UpdatedAt
+			if !previous.UpdatedAt.IsZero() {
+				snapshot.Providers = previous.Providers
+				snapshot.Stale = true
+			}
+			snapshot.Error = err.Error()
+			ttl = retryAfter
+		}
+
+		service.mu.Lock()
+		cache.inFlight = nil
+		close(pending)
+		current := cache == service.cache
+		if current {
+			cache.snapshot, cache.expiresAt = snapshot, finishedAt.Add(ttl)
+		}
+		service.mu.Unlock()
+		if current {
+			return snapshot.at(finishedAt)
 		}
 	}
-	s.mu.Lock()
-	if s.signature == signature && s.cached != nil {
-		result = mergePartialSnapshot(result, *s.cached)
-	}
-	s.signature = signature
-	s.expiresAt = now.Add(time.Duration(settings.RefreshIntervalSeconds) * time.Second)
-	copy := cloneSnapshot(result)
-	s.cached = &copy
-	s.mu.Unlock()
-	return result
 }
 
-func (s *Service) TestConnection(ctx context.Context, settings config.OnWatch) (ProviderCatalog, error) {
-	return s.fetchCatalog(ctx, settings)
+func (service *Service) TestConnection(ctx context.Context, settings config.Magpie) (int, error) {
+	providers, err := service.fetch(ctx, settings)
+	return len(providers), err
 }
 
-func (s *Service) fetch(ctx context.Context, settings config.OnWatch, now time.Time) (QuotaSnapshot, error) {
-	catalog, err := s.fetchCatalog(ctx, settings)
+type magpieRow struct {
+	Provider     string         `json:"provider"`
+	Name         string         `json:"name"`
+	Kind         string         `json:"kind"`
+	Plan         string         `json:"plan"`
+	User         string         `json:"user"`
+	From         string         `json:"from"`
+	Alias        string         `json:"alias"`
+	Seat         string         `json:"seat"`
+	Windows      []magpieWindow `json:"windows"`
+	Balance      string         `json:"balance"`
+	ReadAt       string         `json:"readAt"`
+	AsOf         string         `json:"asOf"`
+	ReadDeferred bool           `json:"readDeferred"`
+	Error        string         `json:"error"`
+}
+
+type magpieWindow struct {
+	Name      string   `json:"name"`
+	Used      *float64 `json:"used"`
+	Remaining *float64 `json:"remaining"`
+	ResetsAt  string   `json:"resetsAt"`
+	Display   string   `json:"display"`
+	Amount    *float64 `json:"amount"`
+	Limit     *float64 `json:"limit"`
+	Unit      string   `json:"unit"`
+	Balance   *float64 `json:"balance"`
+	Text      bool     `json:"text"`
+	Unlimited bool     `json:"unlimited"`
+}
+
+func (service *Service) fetch(ctx context.Context, settings config.Magpie) ([]ProviderQuota, error) {
+	endpoint, err := settings.QuotaURL()
 	if err != nil {
-		return QuotaSnapshot{}, err
+		return nil, err
 	}
-	result := QuotaSnapshot{
-		Configured: true, Connected: true, UpdatedAt: now,
-		StaleAfterSeconds: settings.RefreshIntervalSeconds * 2,
-		Providers:         make([]ProviderQuota, 0, len(catalog.Providers)),
+	ctx, cancel := context.WithTimeout(ctx, upstreamTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, errors.New("Invalid Magpie quota endpoint")
 	}
-	type providerResult struct {
-		id       string
-		label    string
-		provider ProviderQuota
-		err      error
+	request.Header.Set("Accept", "application/json")
+	response, err := service.client.Do(request)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, errors.New("Magpie quota request timed out")
+		}
+		return nil, errors.New("Could not connect to Magpie")
 	}
-	results := make([]providerResult, 0, len(catalog.Providers))
-	for _, id := range catalog.Providers {
-		if id == "" || id == "both" {
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, fmt.Errorf("Magpie quota request returned HTTP %d", response.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxResponseSize+1))
+	if err != nil || len(body) > maxResponseSize {
+		return nil, errors.New("Could not read the Magpie quota response")
+	}
+	var envelope struct {
+		Data []magpieRow `json:"data"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil || envelope.Data == nil {
+		return nil, errors.New("Magpie returned an invalid quota response")
+	}
+	return mapRows(envelope.Data)
+}
+
+var providerIdentifier = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,127}$`)
+
+func mapRows(rows []magpieRow) ([]ProviderQuota, error) {
+	providers := make([]ProviderQuota, 0, len(rows))
+	indexByID := make(map[string]int, len(rows))
+	for _, row := range rows {
+		if strings.TrimSpace(row.Provider) == "" || strings.TrimSpace(row.Kind) == "" {
+			return nil, errors.New("Magpie returned a quota row without an identity")
+		}
+		identity := firstNonEmpty(row.User, row.Alias, row.Seat)
+		id := stableID("magpie", row.From, row.Provider, row.Kind, strings.ToLower(identity))
+		provider := normalizeRow(id, row)
+		if index, exists := indexByID[id]; exists {
+			if identity == "" {
+				provider.AccountLabel = "Unknown account"
+				provider.Error = "Magpie did not distinguish these accounts"
+				provider.Quotas = []Quota{}
+				provider.Status = "unavailable"
+				provider.CapturedAt = ""
+				providers[index] = provider
+			} else if preferReading(provider, providers[index]) {
+				providers[index] = provider
+			}
 			continue
 		}
-		results = append(results, providerResult{id: id, label: catalog.Labels[id]})
+		indexByID[id] = len(providers)
+		providers = append(providers, provider)
 	}
-	var wait sync.WaitGroup
-	for index := range results {
-		wait.Add(1)
-		go func(target *providerResult) {
-			defer wait.Done()
-			target.provider, target.err = s.fetchProvider(ctx, settings, target.id, target.label, now)
-		}(&results[index])
-	}
-	wait.Wait()
-	for _, fetched := range results {
-		if fetched.err != nil {
-			result.Providers = append(result.Providers, ProviderQuota{
-				Provider: fetched.id, Label: providerLabel(fetched.id, fetched.label), Status: "unavailable",
-				Error: fetched.err.Error(), Quotas: []Quota{},
-			})
-			continue
-		}
-		result.Providers = append(result.Providers, fetched.provider)
-	}
-	return result, nil
+	return providers, nil
 }
 
-func (s *Service) fetchCatalog(ctx context.Context, settings config.OnWatch) (ProviderCatalog, error) {
-	var upstream struct {
-		Providers []string          `json:"providers"`
-		Labels    map[string]string `json:"provider_labels"`
-	}
-	if err := s.getJSON(ctx, settings, "/api/providers", nil, &upstream); err != nil {
-		return ProviderCatalog{}, err
-	}
-	providers := make([]string, 0, len(upstream.Providers))
-	for _, provider := range upstream.Providers {
-		if provider != "both" && provider != "" {
-			providers = append(providers, provider)
-		}
-	}
-	if len(providers) == 0 {
-		return ProviderCatalog{}, errors.New("OnWatch returned no providers")
-	}
-	return ProviderCatalog{Providers: providers, Labels: upstream.Labels}, nil
-}
-
-type upstreamQuota struct {
-	Name                  string   `json:"name"`
-	DisplayName           string   `json:"displayName"`
-	Label                 string   `json:"label"`
-	RemainingPercent      *float64 `json:"remainingPercent"`
-	Headroom              *float64 `json:"headroom"`
-	CardPercent           *float64 `json:"cardPercent"`
-	Utilization           *float64 `json:"utilization"`
-	TimeUntilResetSeconds *int64   `json:"timeUntilResetSeconds"`
-	ResetsAt              string   `json:"resetsAt"`
-	Status                string   `json:"status"`
-	Used                  *float64 `json:"used"`
-	Limit                 *float64 `json:"limit"`
-	CurrentRate           *float64 `json:"currentRate"`
-	ProjectedUtil         *float64 `json:"projectedUtil"`
-	IsStale               bool     `json:"isStale"`
-	AgeSeconds            *int64   `json:"ageSeconds"`
-}
-
-// upstreamBalance mirrors the "balance" payload OnWatch serves for
-// balance-tracked providers (e.g. DeepSeek credit balance), as an alternative
-// to the "quotas" array other providers return.
-type upstreamBalance struct {
-	Name         string  `json:"name"`
-	Description  string  `json:"description"`
-	Available    bool    `json:"available"`
-	Currency     string  `json:"currency"`
-	Total        float64 `json:"total"`
-	Granted      float64 `json:"granted"`
-	ToppedUp     float64 `json:"toppedUp"`
-	Rate         float64 `json:"rate"`
-	Status       string  `json:"status"`
-	TotalTracked float64 `json:"totalTracked"`
-}
-
-func (s *Service) fetchProvider(ctx context.Context, settings config.OnWatch, id, label string, now time.Time) (ProviderQuota, error) {
-	var upstream struct {
-		CapturedAt  string           `json:"capturedAt"`
-		PlanType    string           `json:"planType"`
-		PlanName    string           `json:"planName"`
-		Membership  string           `json:"membership"`
-		LoginMethod string           `json:"login_method"`
-		Quotas      []upstreamQuota  `json:"quotas"`
-		Balance     *upstreamBalance `json:"balance"`
-	}
-	if err := s.getJSON(ctx, settings, "/api/current", url.Values{"provider": []string{id}}, &upstream); err != nil {
-		return ProviderQuota{}, err
+func normalizeRow(id string, row magpieRow) ProviderQuota {
+	providerID := row.Provider
+	if !providerIdentifier.MatchString(providerID) || cleanDisplay(providerID, row.User) == "" {
+		providerID = stableID("provider", row.Provider)
 	}
 	provider := ProviderQuota{
-		Provider: id, Label: providerLabel(id, label), PlanLabel: firstNonEmpty(upstream.PlanName, upstream.PlanType, upstream.Membership, upstream.LoginMethod),
-		CapturedAt: upstream.CapturedAt, Status: "healthy", Quotas: make([]Quota, 0, len(upstream.Quotas)+1),
+		ID: id, Provider: providerID, Label: firstNonEmpty(cleanDisplay(row.Name, row.User), cleanDisplay(row.Provider, row.User), "Provider"),
+		AccountLabel: id[:8], PlanLabel: cleanDisplay(row.Plan, row.User), Status: "healthy",
+		ReadDeferred: row.ReadDeferred, Quotas: make([]Quota, 0, len(row.Windows)+1),
 	}
-	absorb := func(quota Quota) {
+	if captured := readingTime(row.ReadAt, row.AsOf); !captured.IsZero() {
+		provider.CapturedAt = captured.Format(time.RFC3339Nano)
+	}
+	keys := make(map[string]int, len(row.Windows))
+	for _, window := range row.Windows {
+		quota := normalizeWindow(window, row.User)
+		keys[quota.Key]++
+		if count := keys[quota.Key]; count > 1 {
+			quota.Key = stableID(quota.Key, fmt.Sprint(count))
+		}
 		provider.Quotas = append(provider.Quotas, quota)
 		if statusRank(quota.Status) > statusRank(provider.Status) {
 			provider.Status = quota.Status
 		}
-		provider.Stale = provider.Stale || quota.Stale
 	}
-	for _, value := range upstream.Quotas {
-		absorb(normalizeQuota(value, now, settings.RefreshIntervalSeconds))
+	if balance := cleanDisplay(row.Balance, row.User); balance != "" {
+		provider.Quotas = append(provider.Quotas, Quota{
+			Key: stableID("balance"), Kind: "balance", Label: "Balance", Display: balance, Status: "healthy",
+		})
 	}
-	if value := upstream.Balance; value != nil {
-		absorb(normalizeBalance(*value))
+	if row.Error != "" {
+		provider.Error = "Magpie could not refresh this account"
+		provider.Status = "unavailable"
 	}
-	if capturedAt, err := time.Parse(time.RFC3339, upstream.CapturedAt); err == nil && now.Sub(capturedAt) > time.Duration(settings.RefreshIntervalSeconds*2)*time.Second {
-		provider.Stale = true
-		for index := range provider.Quotas {
-			provider.Quotas[index].Stale = true
+	if len(provider.Quotas) == 0 && provider.Error == "" {
+		provider.Error = "Magpie has no quota reading for this account"
+		provider.Status = "unavailable"
+	}
+	return provider
+}
+
+func normalizeWindow(window magpieWindow, user string) Quota {
+	name := firstNonEmpty(cleanDisplay(window.Name, user), "Quota")
+	quota := Quota{
+		Key: stableID("window", window.Name), Kind: quotaKind(name), Label: name,
+		Unlimited: window.Unlimited, Status: "healthy",
+		Display: cleanDisplay(window.Display, user),
+	}
+	if reset := readingTime(window.ResetsAt); !reset.IsZero() {
+		quota.ResetsAt = reset.Format(time.RFC3339Nano)
+	}
+	unit := cleanDisplay(window.Unit, user)
+	if window.Balance != nil {
+		quota.Kind = "balance"
+		if quota.Display == "" {
+			quota.Display = strings.TrimSpace(fmt.Sprintf("%g %s", *window.Balance, unit))
 		}
 	}
-	return provider, nil
+	if window.Unlimited || window.Text || window.Balance != nil {
+		return quota
+	}
+	quota.RemainingPercent, quota.UsedPercent = percentage(window.Remaining), percentage(window.Used)
+	switch {
+	case quota.RemainingPercent != nil && quota.UsedPercent == nil:
+		quota.UsedPercent = percentageComplement(quota.RemainingPercent)
+	case quota.RemainingPercent == nil && quota.UsedPercent != nil:
+		quota.RemainingPercent = percentageComplement(quota.UsedPercent)
+	}
+	if quota.RemainingPercent != nil {
+		quota.Status = derivedStatus(*quota.RemainingPercent)
+	} else if quota.Display == "" {
+		quota.Status = "unavailable"
+	}
+	if unit != "" && window.Limit != nil {
+		quota.Used, quota.Limit, quota.Unit = window.Amount, window.Limit, unit
+	}
+	return quota
 }
 
-func normalizeQuota(value upstreamQuota, now time.Time, refreshInterval int) Quota {
-	remaining := firstNumber(value.RemainingPercent, value.Headroom, value.CardPercent)
-	if remaining == nil && value.Utilization != nil {
-		computed := 100 - *value.Utilization
-		remaining = &computed
+func mergeReadings(providers, previous []ProviderQuota) []ProviderQuota {
+	byID := make(map[string]ProviderQuota, len(previous))
+	for _, provider := range previous {
+		byID[provider.ID] = provider
 	}
-	remainingValue := clamp(percentValue(remaining), 0, 100)
-	usedValue := 100 - remainingValue
-	if value.Utilization != nil {
-		usedValue = clamp(*value.Utilization, 0, 100)
-	}
-	resetSeconds := value.TimeUntilResetSeconds
-	if resetSeconds == nil && value.ResetsAt != "" {
-		if resetAt, err := time.Parse(time.RFC3339, value.ResetsAt); err == nil {
-			seconds := int64(math.Max(0, resetAt.Sub(now).Seconds()))
-			resetSeconds = &seconds
-		}
-	}
-	kind := quotaKind(value.Name, value.DisplayName)
-	windowPosition := windowPosition(kind, resetSeconds)
-	stale := value.IsStale || (value.AgeSeconds != nil && *value.AgeSeconds > int64(refreshInterval*2))
-	status := strings.ToLower(strings.TrimSpace(value.Status))
-	if status == "" {
-		status = derivedStatus(remainingValue)
-	}
-	return Quota{
-		Kind: kind, Label: firstNonEmpty(value.DisplayName, value.Label, value.Name),
-		RemainingPercent: remainingValue, UsedPercent: usedValue,
-		ResetInSeconds: resetSeconds, ResetsAt: value.ResetsAt, WindowPositionPercent: windowPosition,
-		Status: status, Used: value.Used, Limit: value.Limit, CurrentRate: value.CurrentRate,
-		ProjectedUtil: value.ProjectedUtil, Stale: stale,
-	}
-}
-
-// normalizeBalance converts a balance payload into a single quota row. The
-// remaining share is computed against a default balance total of 100 so the
-// API stays self-consistent without a configured denominator; the raw current
-// balance is exposed through Value so browsers can re-derive percentages
-// against their own per-provider balance total.
-func normalizeBalance(value upstreamBalance) Quota {
-	limit := float64(100)
-	remaining := clamp(100*value.Total/limit, 0, 100)
-	used := clamp(limit-value.Total, 0, limit)
-	status := strings.ToLower(strings.TrimSpace(value.Status))
-	if status == "" {
-		if value.Available {
-			status = "healthy"
-		} else {
-			status = "unavailable"
-		}
-	}
-	return Quota{
-		Kind: "balance", Label: firstNonEmpty(value.Name, "Balance"),
-		RemainingPercent: remaining, UsedPercent: clamp(100-remaining, 0, 100),
-		Status: status, Used: &used, Limit: &limit, CurrentRate: &value.Rate,
-		Value: &value.Total,
-	}
-}
-
-func (s *Service) getJSON(ctx context.Context, settings config.OnWatch, path string, query url.Values, target any) error {
-	endpoint, err := endpointURL(settings.ServerURL, path, query)
-	if err != nil {
-		return err
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return err
-	}
-	request.Header.Set("Accept", "application/json")
-	switch settings.AuthMode {
-	case "trusted_proxy":
-		user := strings.TrimSpace(settings.Username)
-		if user == "" {
-			user = "admin"
-		}
-		request.Header.Set("X-Forwarded-User", user)
-	case "basic":
-		request.SetBasicAuth(settings.Username, settings.Password)
-	}
-	response, err := s.client.Do(request)
-	if err != nil {
-		return fmt.Errorf("OnWatch request failed: %w", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("OnWatch returned %s", response.Status)
-	}
-	decoder := json.NewDecoder(io.LimitReader(response.Body, 2<<20))
-	if err := decoder.Decode(target); err != nil {
-		return fmt.Errorf("decode OnWatch response: %w", err)
-	}
-	return nil
-}
-
-func endpointURL(baseURL, path string, query url.Values) (string, error) {
-	base, err := url.Parse(strings.TrimSpace(baseURL))
-	if err != nil {
-		return "", err
-	}
-	base.Path = strings.TrimRight(base.Path, "/") + path
-	base.RawQuery = query.Encode()
-	base.Fragment = ""
-	return base.String(), nil
-}
-
-func settingsSignature(settings config.OnWatch) string {
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%d", settings.ServerURL, settings.AuthMode, settings.Username, settings.Password, settings.RefreshIntervalSeconds)))
-	return hex.EncodeToString(sum[:])
-}
-
-func cloneSnapshot(value QuotaSnapshot) QuotaSnapshot {
-	data, _ := json.Marshal(value)
-	var result QuotaSnapshot
-	_ = json.Unmarshal(data, &result)
-	return result
-}
-
-func mergePartialSnapshot(current, previous QuotaSnapshot) QuotaSnapshot {
-	previousByID := make(map[string]ProviderQuota, len(previous.Providers))
-	for _, provider := range previous.Providers {
-		previousByID[provider.Provider] = provider
-	}
-	for index := range current.Providers {
-		provider := &current.Providers[index]
-		if provider.Error == "" {
+	for index, provider := range providers {
+		old, exists := byID[provider.ID]
+		if !exists || len(old.Quotas) == 0 || provider.AccountLabel == "Unknown account" {
 			continue
 		}
-		cached, ok := previousByID[provider.Provider]
-		if !ok || len(cached.Quotas) == 0 {
-			continue
+		if (provider.Error != "" || provider.ReadDeferred) && (len(provider.Quotas) == 0 || preferReading(old, provider)) {
+			old.Error, old.ReadDeferred = provider.Error, provider.ReadDeferred
+			providers[index] = old
 		}
-		errorMessage := provider.Error
-		*provider = cached
-		provider.Error = errorMessage
-		provider.Stale = true
+	}
+	return providers
+}
+
+func (snapshot QuotaSnapshot) at(now time.Time) QuotaSnapshot {
+	markAllStale := snapshot.Stale
+	snapshot.Providers = slices.Clone(snapshot.Providers)
+	for index := range snapshot.Providers {
+		provider := &snapshot.Providers[index]
+		captured := readingTime(provider.CapturedAt)
+		markCardStale := markAllStale || (!captured.IsZero() && now.Sub(captured) > staleAfter) || (len(provider.Quotas) > 0 && provider.Error != "")
+		provider.Quotas = slices.Clone(provider.Quotas)
 		for quotaIndex := range provider.Quotas {
-			provider.Quotas[quotaIndex].Stale = true
+			window := &provider.Quotas[quotaIndex]
+			reset := readingTime(window.ResetsAt)
+			if !reset.IsZero() {
+				seconds := int64(math.Max(0, math.Ceil(reset.Sub(now).Seconds())))
+				window.Expired = !reset.After(now) && (captured.IsZero() || !captured.After(reset))
+				if !window.Expired && reset.After(now) {
+					window.ResetInSeconds = &seconds
+					window.WindowPositionPercent = windowPosition(window.Kind, seconds)
+				}
+			}
+			window.Stale = markCardStale || window.Expired
+			provider.Stale = provider.Stale || window.Stale
 		}
-		current.Stale = true
+		provider.Stale = provider.Stale || markCardStale
+		snapshot.Stale = snapshot.Stale || provider.Stale
 	}
-	return current
+	return snapshot
 }
 
-func providerLabel(id, upstream string) string {
-	if strings.TrimSpace(upstream) != "" {
-		return upstream
-	}
-	return map[string]string{"codex": "Codex", "kimi": "Kimi Code", "grok": "Grok", "opencode": "OpenCode"}[id]
+func preferReading(candidate, existing ProviderQuota) bool {
+	newTime, oldTime := readingTime(candidate.CapturedAt), readingTime(existing.CapturedAt)
+	return newTime.After(oldTime) || (newTime.Equal(oldTime) && candidate.Error == "" && existing.Error != "")
 }
 
-func quotaKind(name, label string) string {
-	value := strings.ToLower(name + " " + label)
+func stableID(parts ...string) string {
+	data, _ := json.Marshal(parts)
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:16])
+}
+
+func cleanDisplay(value, user string) string {
+	value, user = strings.TrimSpace(value), strings.TrimSpace(user)
+	if strings.Contains(value, "@") || (len(user) >= 4 && strings.Contains(strings.ToLower(value), strings.ToLower(user))) {
+		return ""
+	}
+	value = strings.Map(func(character rune) rune {
+		if unicode.IsControl(character) {
+			return -1
+		}
+		return character
+	}, value)
+	characters := []rune(value)
+	if len(characters) > 128 {
+		return string(characters[:128])
+	}
+	return value
+}
+
+func readingTime(values ...string) time.Time {
+	for _, value := range values {
+		if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil {
+			return parsed
+		}
+	}
+	return time.Time{}
+}
+
+func quotaKind(name string) string {
+	value := strings.ToLower(name)
 	switch {
 	case strings.Contains(value, "five") || strings.Contains(value, "5h") || strings.Contains(value, "5-hour"):
 		return "5h"
@@ -459,49 +447,40 @@ func quotaKind(name, label string) string {
 	case strings.Contains(value, "credit"):
 		return "credits"
 	default:
-		return strings.TrimSpace(name)
+		return name
 	}
 }
 
-func windowPosition(kind string, resetSeconds *int64) *float64 {
-	if resetSeconds == nil {
-		return nil
-	}
+func windowPosition(kind string, seconds int64) *float64 {
 	durations := map[string]float64{"5h": 5 * 60 * 60, "7d": 7 * 24 * 60 * 60, "monthly": 30 * 24 * 60 * 60}
-	duration, ok := durations[kind]
-	if !ok {
-		return nil
-	}
-	// The track is a countdown: a full reset window starts at the right edge
-	// and moves toward the left edge as the reset approaches.
-	value := clamp(100*float64(*resetSeconds)/duration, 0, 100)
-	return &value
-}
-
-func firstNumber(values ...*float64) *float64 {
-	for _, value := range values {
-		if value != nil {
-			return value
-		}
+	if duration, ok := durations[kind]; ok {
+		value := clampPercent(100 * float64(seconds) / duration)
+		return &value
 	}
 	return nil
 }
 
-func percentValue(value *float64) float64 {
+func percentage(value *float64) *float64 {
 	if value == nil {
-		return 0
+		return nil
 	}
-	return *value
+	result := clampPercent(*value)
+	return &result
 }
 
-func clamp(value, low, high float64) float64 {
-	return math.Min(high, math.Max(low, value))
+func percentageComplement(value *float64) *float64 {
+	result := 100 - *value
+	return &result
+}
+
+func clampPercent(value float64) float64 {
+	return math.Min(100, math.Max(0, value))
 }
 
 func firstNonEmpty(values ...string) string {
 	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
 		}
 	}
 	return ""

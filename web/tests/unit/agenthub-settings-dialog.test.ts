@@ -20,13 +20,13 @@ const initial = () => createDraft({
   ],
 });
 
-async function render() {
+async function render(section = "Agents") {
   target = document.body.appendChild(document.createElement("div"));
   component = mount(SettingsDialog, { target, props: { onClose: vi.fn(), onSaved: vi.fn() } });
   await tick();
   await vi.waitFor(() => expect(target.querySelector(".settings-nav")).not.toBeNull());
-  const agents = [...target.querySelectorAll<HTMLButtonElement>(".settings-nav button")].find((button) => button.textContent?.includes("Agents"))!;
-  agents.click();
+  const tab = [...target.querySelectorAll<HTMLButtonElement>(".settings-nav button")].find((button) => button.textContent?.includes(section))!;
+  tab.click();
   await tick();
 }
 
@@ -45,6 +45,7 @@ beforeEach(() => {
     if (url === "/v1/config") return { config: structuredClone(config) };
     if (url === "/v1/agents") return { probes };
     if (url === "/v1/quota") return { quota: { providers: [] } };
+    if (url === "/v1/magpie/test") return { connected: true, cards: 3 };
     if (url.includes("/models")) return { models: [{ id: "old" }] };
     if (url.startsWith("/v1/config/providers/") && options?.method === "PUT") {
       const id = decodeURIComponent(url.split("/").at(-1)!);
@@ -67,6 +68,36 @@ afterEach(async () => {
 });
 
 describe("AgentHub settings agent and provider controls", () => {
+  it("tests a migrated Magpie connection before the user enables and saves it", async () => {
+    config.magpie.migratedFromOnWatch = true;
+    config.magpie.refreshIntervalSeconds = 300;
+    await render("General");
+    const enable = target.querySelector<HTMLInputElement>('input[aria-label="Enable Magpie"]')!;
+    expect(enable.disabled).toBe(true);
+    expect(enable.checked).toBe(false);
+    expect(target.textContent).toContain("OnWatch refresh interval");
+    expect(target.querySelector<HTMLSelectElement>(".settings-content select")?.value).toBe("300");
+    await click("Test connection");
+    await vi.waitFor(() => expect(target.textContent).toContain("Connected · 3 quota cards"));
+    expect(api.mock.calls.find(([path]) => path === "/v1/magpie/test")?.[1].body).toContain('"refreshIntervalSeconds":300');
+    expect(enable.disabled).toBe(false);
+    expect(config.magpie.enabled).toBe(false);
+    enable.click();
+    await tick();
+    await click("Save all");
+    await vi.waitFor(() => expect(config.magpie.enabled).toBe(true));
+    await vi.waitFor(() => expect(target.textContent).toContain("Saved"));
+    expect(config.magpie.migratedFromOnWatch).toBe(false);
+
+    const url = target.querySelector<HTMLInputElement>(".settings-content label input:not([type])")!;
+    expect(url.value).toBe("http://127.0.0.1:3425");
+    url.value = "http://127.0.0.1:4425";
+    url.dispatchEvent(new Event("input", { bubbles: true }));
+    await tick();
+    expect(enable.disabled).toBe(true);
+    expect(enable.checked).toBe(false);
+  });
+
   it("starts collapsed, expands an agent, persists add/edit/delete and keyboard/drag reorder", async () => {
     await render();
     expect(target.querySelectorAll(".settings-agent-card")).toHaveLength(2);

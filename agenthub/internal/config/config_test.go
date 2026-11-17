@@ -1,8 +1,8 @@
 package config
 
 import (
-	"encoding/json"
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -151,8 +151,8 @@ func TestLoadAcceptsAndDropsLegacyCompanionConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.OnWatch.ServerURL != "http://127.0.0.1:9211" || loaded.OnWatch.RefreshIntervalSeconds != 60 {
-		t.Fatalf("OnWatch defaults = %+v", loaded.OnWatch)
+	if loaded.Magpie.ServerURL != "http://127.0.0.1:3425" || loaded.Magpie.RefreshIntervalSeconds != 60 || loaded.Magpie.Enabled {
+		t.Fatalf("Magpie defaults = %+v", loaded.Magpie)
 	}
 	if loaded.LegacyCompanion != nil {
 		t.Fatalf("legacy companion config survived normalization: %s", loaded.LegacyCompanion)
@@ -169,37 +169,57 @@ func TestLoadAcceptsAndDropsLegacyCompanionConfig(t *testing.T) {
 	}
 }
 
-func TestConfigRedactsAndPreservesOnWatchPassword(t *testing.T) {
-	previous := Defaults()
-	previous.OnWatch.Enabled = true
-	previous.OnWatch.AuthMode = "basic"
-	previous.OnWatch.Username = "alice"
-	previous.OnWatch.Password = "secret"
-	public := previous.Redacted()
-	if public.OnWatch.Password != "" || previous.OnWatch.Password != "secret" {
-		t.Fatalf("redaction mutated or exposed password: public=%+v stored=%+v", public.OnWatch, previous.OnWatch)
+func TestMagpieMigratesOnlyOnWatchInterval(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	legacy := []byte(`{"version":1,"agentProviders":[],"agents":[],"onWatch":{"enabled":true,"refreshIntervalSeconds":300,"serverUrl":"https://old.example","authMode":"basic","username":"alice","password":"secret"}}`)
+	if err := os.WriteFile(path, legacy, 0o600); err != nil {
+		t.Fatal(err)
 	}
-	next := public.PreserveSecrets(previous)
-	if next.OnWatch.Password != "secret" {
-		t.Fatalf("preserved config = %+v", next)
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := next.Validate(); err != nil {
-		t.Fatalf("preserved config is invalid: %v", err)
+	want := Magpie{ServerURL: "http://127.0.0.1:3425", RefreshIntervalSeconds: 300, MigratedFromOnWatch: true}
+	if loaded.Magpie != want || loaded.LegacyOnWatch != nil {
+		t.Fatalf("migrated config = %+v", loaded)
+	}
+	original, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(original, legacy) {
+		t.Fatalf("load modified original config: %v", err)
+	}
+	loaded.Magpie.Enabled = true
+	if err := Save(path, loaded); err != nil {
+		t.Fatal(err)
+	}
+	written, err := os.ReadFile(path)
+	if err != nil || bytes.Contains(written, []byte(`"onWatch"`)) || bytes.Contains(written, []byte("secret")) {
+		t.Fatalf("legacy settings were copied into the new file: %v", err)
+	}
+	reloaded, err := Load(path)
+	if err != nil || !reloaded.Magpie.Enabled || reloaded.Magpie.MigratedFromOnWatch {
+		t.Fatalf("reloaded config = %+v, err = %v", reloaded, err)
 	}
 }
 
-func TestOnWatchConfigValidation(t *testing.T) {
-	cfg := Defaults()
-	cfg.OnWatch.ServerURL = "file:///tmp/quota"
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "serverUrl") {
-		t.Fatalf("unsafe URL validation = %v", err)
+func TestMagpieConfigValidation(t *testing.T) {
+	settings := Defaults().Magpie
+	for _, value := range []string{
+		"file:///tmp/quota", "http://192.0.2.1", "http://localhost:3425",
+		"http://alice:secret@127.0.0.1", "http://127.0.0.1:65536", "http://127.0.0.1:0",
+		"http://127.0.0.1/private", "http://127.0.0.1/?token=secret", "http://127.0.0.1/#secret",
+	} {
+		settings.ServerURL = value
+		if _, err := settings.QuotaURL(); err == nil {
+			t.Errorf("accepted invalid URL %q", value)
+		}
 	}
-	cfg = Defaults()
-	cfg.OnWatch.Enabled = true
-	cfg.OnWatch.AuthMode = "basic"
-	cfg.OnWatch.Password = ""
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "password") {
-		t.Fatalf("missing password validation = %v", err)
+	settings.ServerURL = "http://[::1]:3425/"
+	if endpoint, err := settings.QuotaURL(); err != nil || endpoint != "http://[::1]:3425/v1/magpie/quotas?kept=1" {
+		t.Fatalf("quota endpoint = %q, %v", endpoint, err)
+	}
+	settings.RefreshIntervalSeconds = 1
+	if _, err := settings.QuotaURL(); err == nil {
+		t.Fatal("invalid interval accepted")
 	}
 }
 

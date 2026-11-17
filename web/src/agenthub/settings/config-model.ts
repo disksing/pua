@@ -49,13 +49,11 @@ export function normalizeAgentName(name) {
 
 export const AGENT_NAME_MAX_LENGTH = 80;
 
-export const DEFAULT_ONWATCH = {
+export const DEFAULT_MAGPIE = {
   enabled: false,
-  serverUrl: "http://127.0.0.1:9211",
-  authMode: "trusted_proxy",
-  username: "admin",
-  password: "",
+  serverUrl: "http://127.0.0.1:3425",
   refreshIntervalSeconds: 60,
+  migratedFromOnWatch: false,
 };
 
 // The model option is not a free-text field: the settings UI loads the
@@ -134,20 +132,18 @@ export function normalizeConfig(config = {}) {
     return result;
   });
 
-  const rawOnWatch = config.onWatch || {};
-  const onWatch = {
-    enabled: Boolean(rawOnWatch.enabled),
-    serverUrl: String(rawOnWatch.serverUrl ?? DEFAULT_ONWATCH.serverUrl).trim(),
-    authMode: String(rawOnWatch.authMode ?? DEFAULT_ONWATCH.authMode),
-    username: String(rawOnWatch.username ?? DEFAULT_ONWATCH.username).trim(),
-    password: String(rawOnWatch.password ?? ""),
-    refreshIntervalSeconds: Number(rawOnWatch.refreshIntervalSeconds) || DEFAULT_ONWATCH.refreshIntervalSeconds,
+  const rawMagpie = config.magpie || {};
+  const magpie = {
+    enabled: Boolean(rawMagpie.enabled),
+    serverUrl: String(rawMagpie.serverUrl ?? DEFAULT_MAGPIE.serverUrl).trim(),
+    refreshIntervalSeconds: Number(rawMagpie.refreshIntervalSeconds) || DEFAULT_MAGPIE.refreshIntervalSeconds,
+    migratedFromOnWatch: Boolean(rawMagpie.migratedFromOnWatch && !rawMagpie.enabled),
   };
   return {
     version: Number(config.version) || 1,
     agentProviders: providers,
     agents,
-    onWatch,
+    magpie,
   };
 }
 
@@ -207,18 +203,15 @@ export function validateDraft(draft) {
   const push = (section, index, field, message) => errors.push({ section, index, field, message });
 
   try {
-    const parsed = new URL(draft.onWatch.serverUrl);
-    if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) throw new Error("invalid URL");
+    const parsed = new URL(draft.magpie.serverUrl);
+    const loopback = parsed.hostname === "[::1]" || /^127\.\d+\.\d+\.\d+$/.test(parsed.hostname);
+    if (!loopback || !["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password || parsed.pathname !== "/" || /[?#]/.test(parsed.href)) {
+      throw new Error("invalid URL");
+    }
   } catch {
-    push("general", 0, "serverUrl", "Enter an absolute HTTP or HTTPS URL without credentials");
+    push("general", 0, "serverUrl", "Enter a loopback URL such as http://127.0.0.1:3425");
   }
-  if (!["trusted_proxy", "basic", "none"].includes(draft.onWatch.authMode)) {
-    push("general", 0, "authMode", "Select a supported authentication mode");
-  }
-  if (draft.onWatch.authMode === "basic" && !draft.onWatch.username.trim()) {
-    push("general", 0, "username", "Username is required for Basic Auth");
-  }
-  if (![30, 60, 300].includes(draft.onWatch.refreshIntervalSeconds)) {
+  if (![30, 60, 300].includes(draft.magpie.refreshIntervalSeconds)) {
     push("general", 0, "refreshIntervalSeconds", "Select a supported refresh interval");
   }
   const providers = draft.agentProviders || [];

@@ -5,7 +5,7 @@
   import Icon from "../components/Icon.svelte";
   import { COMPLETION_SOUNDS, TonePlayer } from "./companion/audio";
   import { BEEP_PROGRESSIONS } from "./companion/chords";
-  import { applyBalanceTotals, DEFAULT_BALANCE_TOTAL, quotaVisibilityKey } from "./companion/model";
+  import { quotaProviderLabel, quotaValue, quotaVisibilityKey } from "./companion/model";
   import { companionPreferencesEqual, loadCompanionPreferences, saveCompanionPreferences, validateCompanionPreferences } from "./companion/preferences";
   import { api } from "./core/api";
   import ModelSelect from "./ModelSelect.svelte";
@@ -32,17 +32,17 @@
   let saved = $state(false);
   let testing = $state(false);
   let testMessage = $state("");
+  let testedURL = $state("");
   const player = new TonePlayer();
 
   const errors = $derived(draft && activity ? [...validateDraft(draft), ...validateCompanionPreferences(activity)] : []);
   const dirty = $derived(Boolean(draft && snapshot && (isDirty(draft, snapshot) || !companionPreferencesEqual(activity, activitySnapshot))));
-  const effectiveQuota = $derived(activity ? applyBalanceTotals(quota, activity.balanceTotals) : quota);
-  const quotaEntries = $derived((effectiveQuota?.providers || []).flatMap((provider: any) => (
+  const quotaEntries = $derived((quota?.providers || []).flatMap((provider: any) => (
     (provider.quotas || []).map((item: any) => ({ provider, item, key: quotaVisibilityKey(provider, item) }))
   )));
-  const balanceProviders = $derived((quota?.providers || []).filter((provider: any) => (
-    (provider.quotas || []).some((item: any) => item.kind === "balance")
-  )));
+  const testedCurrentURL = $derived(Boolean(draft && (testedURL === draft.magpie.serverUrl.trim() || (
+    snapshot?.magpie.enabled && snapshot.magpie.serverUrl === draft.magpie.serverUrl.trim()
+  ))));
 
   onMount(() => {
     void load();
@@ -113,12 +113,18 @@
     finally { pendingProvider = ""; }
   }
 
-  async function testOnWatch(): Promise<void> {
-    testing = true; testMessage = "";
+  async function testMagpie(): Promise<void> {
+    const magpie = { ...draft.magpie, serverUrl: draft.magpie.serverUrl.trim() };
+    testing = true; testMessage = ""; testedURL = "";
     try {
-      const result = await api<any>("/v1/onwatch/test", { method: "POST", body: JSON.stringify({ onWatch: draft.onWatch }) });
-      testMessage = `Connected · ${(result.providers || []).length} providers`;
-    } catch (reason) { testMessage = message(reason); }
+      const result = await api<any>("/v1/magpie/test", { method: "POST", body: JSON.stringify({ magpie }) });
+      if (magpie.serverUrl === draft.magpie.serverUrl.trim()) {
+        testedURL = magpie.serverUrl;
+        testMessage = result.cards ? `Connected · ${result.cards} quota cards` : "Connected · no quota readings yet";
+      }
+    } catch (reason) {
+      if (magpie.serverUrl === draft.magpie.serverUrl.trim()) testMessage = message(reason);
+    }
     finally { testing = false; }
   }
 
@@ -144,8 +150,8 @@
       }
       if (isDirty(draft, snapshot)) {
         const payload = buildPayload(draft);
-        await api("/v1/config", { method: "PUT", body: JSON.stringify({ config: payload }) });
-        draft = createDraft(payload); snapshot = clone(draft);
+        const result = await api<any>("/v1/config", { method: "PUT", body: JSON.stringify({ config: payload }) });
+        draft = createDraft(result.config || payload); snapshot = clone(draft);
       }
       saved = true; onSaved();
     } catch (reason) { error = message(reason); }
@@ -180,17 +186,6 @@
     if (visible) hidden.delete(key); else hidden.add(key);
     mutateActivity({ hiddenQuotaKeys: [...hidden].sort() });
   }
-  function setBalanceTotal(providerId: string, raw: string): void {
-    const totals = { ...(activity.balanceTotals || {}) };
-    const numeric = Number(raw);
-    if (Number.isFinite(numeric) && numeric > 0) totals[providerId] = numeric;
-    else delete totals[providerId];
-    mutateActivity({ balanceTotals: totals });
-  }
-  function balanceTotalFor(providerId: string): number {
-    const numeric = Number(activity.balanceTotals?.[providerId]);
-    return Number.isFinite(numeric) && numeric > 0 ? numeric : DEFAULT_BALANCE_TOTAL;
-  }
   function changeProvider(index: number, providerId: string): void {
     mutate((next) => {
       const agent = next.agents[index]; agent.providerId = providerId;
@@ -213,7 +208,7 @@
 
 <div class="modal-backdrop" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) requestClose(); }}>
   <div class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
-    <header class="settings-header"><div><span class="eyebrow">AgentHub</span><h2 id="settings-title">Settings</h2><p>Configure OnWatch, activity feedback, and agents.</p></div><button type="button" class="icon-button" aria-label="Close settings" onclick={requestClose}><Icon name="x" /></button></header>
+    <header class="settings-header"><div><span class="eyebrow">AgentHub</span><h2 id="settings-title">Settings</h2><p>Configure Magpie, activity feedback, and agents.</p></div><button type="button" class="icon-button" aria-label="Close settings" onclick={requestClose}><Icon name="x" /></button></header>
     {#if phase === "loading"}<div class="settings-status"><span class="spinner"></span>Loading configuration…</div>
     {:else if phase === "error"}<div class="settings-status"><p role="alert">{error}</p><button type="button" class="secondary-button" onclick={load}>Retry</button></div>
     {:else}
@@ -226,12 +221,15 @@
         <div class="settings-main">
           <div class="settings-content">
             {#if section === "general"}
-              <section class="settings-card"><header><div><h3>OnWatch Integration</h3><p>Connect the Companion to the existing local quota service.</p></div><label class="switch"><input type="checkbox" checked={draft.onWatch.enabled} onchange={(event) => mutate((next) => next.onWatch.enabled = event.currentTarget.checked)} /><span></span></label></header>
-                <label><span>Server URL</span><input value={draft.onWatch.serverUrl} aria-invalid={Boolean(fieldError("serverUrl"))} oninput={(event) => mutate((next) => next.onWatch.serverUrl = event.currentTarget.value)} />{#if fieldError("serverUrl")}<small class="field-error">{fieldError("serverUrl")}</small>{/if}</label>
-                <div class="settings-grid-two"><label><span>Authentication</span><select value={draft.onWatch.authMode} onchange={(event) => mutate((next) => next.onWatch.authMode = event.currentTarget.value)}><option value="trusted_proxy">Trusted proxy</option><option value="basic">Basic Auth</option><option value="none">None</option></select></label><label><span>Refresh</span><select value={draft.onWatch.refreshIntervalSeconds} onchange={(event) => mutate((next) => next.onWatch.refreshIntervalSeconds = Number(event.currentTarget.value))}><option value="30">30 seconds</option><option value="60">60 seconds</option><option value="300">5 minutes</option></select></label></div>
-                {#if draft.onWatch.authMode !== "none"}<label><span>{draft.onWatch.authMode === "basic" ? "Username" : "Forwarded user"}</span><input value={draft.onWatch.username} oninput={(event) => mutate((next) => next.onWatch.username = event.currentTarget.value)} /></label>{/if}
-                {#if draft.onWatch.authMode === "basic"}<label><span>Password</span><input type="password" value={draft.onWatch.password} autocomplete="new-password" oninput={(event) => mutate((next) => next.onWatch.password = event.currentTarget.value)} /><small>Leave blank to keep the stored password.</small></label>{/if}
-                <div class="settings-inline"><button type="button" class="secondary-button" disabled={testing} onclick={testOnWatch}>{testing ? "Testing…" : "Test connection"}</button>{#if testMessage}<span>{testMessage}</span>{/if}</div>
+              <section class="settings-card">
+                <header><div><h3>Magpie Integration</h3><p>Read cached quotas from Magpie on this computer.</p></div><label class="switch"><input type="checkbox" aria-label="Enable Magpie" disabled={!testedCurrentURL && !draft.magpie.enabled} checked={draft.magpie.enabled} onchange={(event) => mutate((next) => next.magpie.enabled = event.currentTarget.checked)} /><span></span></label></header>
+                {#if draft.magpie.migratedFromOnWatch}<p>The OnWatch refresh interval was carried over. Test the Magpie connection, then enable it.</p>{/if}
+                <label><span>Server URL</span><input value={draft.magpie.serverUrl} aria-invalid={Boolean(fieldError("serverUrl"))} oninput={(event) => {
+                  testMessage = ""; testedURL = "";
+                  mutate((next) => { next.magpie.serverUrl = event.currentTarget.value; next.magpie.enabled = false; });
+                }} />{#if fieldError("serverUrl")}<small class="field-error">{fieldError("serverUrl")}</small>{/if}</label>
+                <label><span>Snapshot refresh</span><select value={String(draft.magpie.refreshIntervalSeconds)} onchange={(event) => mutate((next) => next.magpie.refreshIntervalSeconds = Number(event.currentTarget.value))}><option value="30">30 seconds</option><option value="60">60 seconds</option><option value="300">5 minutes</option></select></label>
+                <div class="settings-inline"><button type="button" class="secondary-button" disabled={testing || Boolean(fieldError("serverUrl"))} onclick={testMagpie}>{testing ? "Testing…" : "Test connection"}</button><span role="status">{testMessage}</span></div>
               </section>
             {:else if section === "activity"}
               <section class="settings-stack">
@@ -243,18 +241,9 @@
                 </section>
                 <section class="settings-card"><header><div><h3>Quota visibility</h3><p>Choose which current quota rows appear in Beeper and its collapsed rotation.</p></div></header>
                   {#each quotaEntries as entry (entry.key)}
-                    <div class="quota-pref"><span><strong>{entry.provider.label || entry.provider.provider} / {entry.item.label || entry.item.kind}</strong><small>{Math.round(Number(entry.item.remainingPercent) || 0)}% remaining</small></span><label class="switch"><input type="checkbox" checked={!new Set(activity.hiddenQuotaKeys || []).has(entry.key)} aria-label={`Show ${entry.provider.label || entry.provider.provider} / ${entry.item.label || entry.item.kind}`} onchange={(event) => toggleQuota(entry.key, event.currentTarget.checked)} /><span></span></label></div>
+                    <div class="quota-pref"><span><strong>{quotaProviderLabel(entry.provider)} / {entry.item.label || entry.item.kind}</strong><small>{quotaValue(entry.item)}</small></span><label class="switch"><input type="checkbox" checked={!activity.hiddenQuotaKeys.includes(entry.key)} aria-label={`Show ${quotaProviderLabel(entry.provider)} / ${entry.item.label || entry.item.kind}`} onchange={(event) => toggleQuota(entry.key, event.currentTarget.checked)} /><span></span></label></div>
                   {:else}<div class="settings-empty">{quota?.error || "No current quota data."}</div>{/each}
                 </section>
-                {#if balanceProviders.length}
-                  <section class="settings-card"><header><div><h3>Balance totals</h3><p>Set the denominator used to calculate the remaining percentage of balance quota entries.</p></div></header>
-                    {#each balanceProviders as provider (provider.provider)}
-                      {@const balance = (provider.quotas || []).find((item: any) => item.kind === "balance")}
-                      {@const total = balanceTotalFor(provider.provider)}
-                      <label><span>{provider.label || provider.provider} / {balance?.label || "Balance"}</span><input type="number" min="0" step="any" value={activity.balanceTotals?.[provider.provider] ?? DEFAULT_BALANCE_TOTAL} oninput={(event) => setBalanceTotal(provider.provider, event.currentTarget.value)} /><small>Current balance {balance?.value != null ? Number(balance.value).toFixed(2) : "—"} out of {total}. Clear to reset to {DEFAULT_BALANCE_TOTAL}.</small></label>
-                    {/each}
-                  </section>
-                {/if}
               </section>
             {:else}
               <div class="settings-agent-panel agenthub-settings-panel" data-component-owner="agenthub-settings-panel" data-settings-panel>

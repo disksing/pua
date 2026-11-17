@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/disksing/pua/agenthub/internal/companion"
 	"github.com/disksing/pua/agenthub/internal/config"
 	"github.com/disksing/pua/agenthub/internal/runtime"
 	"github.com/disksing/pua/agenthub/internal/session"
@@ -38,12 +39,10 @@ func companionTestServer(t *testing.T, cfg config.Config, upstream *httptest.Ser
 	return server, configPath, store
 }
 
-func TestConfigAPIKeepsOnWatchPasswordServerSide(t *testing.T) {
+func TestConfigAPIDropsLegacyCompanionAndOnWatchCredentials(t *testing.T) {
 	cfg := config.Defaults()
-	cfg.OnWatch.Enabled = true
-	cfg.OnWatch.AuthMode = "basic"
-	cfg.OnWatch.Username = "alice"
-	cfg.OnWatch.Password = "secret"
+	cfg.Magpie = config.Magpie{}
+	cfg.LegacyOnWatch = json.RawMessage(`{"enabled":true,"refreshIntervalSeconds":30,"password":"secret"}`)
 	server, configPath, _ := companionTestServer(t, cfg, nil)
 
 	response, err := http.Get(server.URL + "/v1/config")
@@ -57,8 +56,8 @@ func TestConfigAPIKeepsOnWatchPasswordServerSide(t *testing.T) {
 		t.Fatal(err)
 	}
 	response.Body.Close()
-	if fetched.Config.OnWatch.Password != "" {
-		t.Fatal("GET /v1/config exposed the OnWatch password")
+	if fetched.Config.LegacyOnWatch != nil || fetched.Config.Magpie.Enabled || !fetched.Config.Magpie.MigratedFromOnWatch || fetched.Config.Magpie.RefreshIntervalSeconds != 30 {
+		t.Fatalf("GET /v1/config did not migrate the legacy configuration: %+v", fetched)
 	}
 	if fetched.Config.LegacyCompanion != nil {
 		t.Fatal("GET /v1/config exposed legacy companion settings")
@@ -66,6 +65,7 @@ func TestConfigAPIKeepsOnWatchPasswordServerSide(t *testing.T) {
 	// Old clients may still submit this field during a rolling upgrade. Accept
 	// it for compatibility, but discard it before updating runtime or disk.
 	fetched.Config.LegacyCompanion = json.RawMessage(`{"enableBeeping":false,"beepChord":"a-minor"}`)
+	fetched.Config.LegacyOnWatch = cfg.LegacyOnWatch
 	body, _ := json.Marshal(map[string]any{"config": fetched.Config})
 	request, _ := http.NewRequest(http.MethodPut, server.URL+"/v1/config", bytes.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
@@ -83,8 +83,8 @@ func TestConfigAPIKeepsOnWatchPasswordServerSide(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&savedResponse); err != nil {
 		t.Fatal(err)
 	}
-	if savedResponse.Config.OnWatch.Password != "" {
-		t.Fatal("PUT /v1/config response exposed the OnWatch password")
+	if savedResponse.Config.LegacyOnWatch != nil {
+		t.Fatal("PUT /v1/config response exposed the legacy OnWatch config")
 	}
 	if savedResponse.Config.LegacyCompanion != nil {
 		t.Fatal("PUT /v1/config response exposed legacy companion settings")
@@ -93,70 +93,86 @@ func TestConfigAPIKeepsOnWatchPasswordServerSide(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored.OnWatch.Password != "secret" || stored.LegacyCompanion != nil {
+	if stored.LegacyOnWatch != nil || stored.LegacyCompanion != nil || stored.Magpie != fetched.Config.Magpie {
 		t.Fatalf("stored config = %+v", stored)
 	}
 	written, err := os.ReadFile(configPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(written, []byte(`"companion"`)) {
-		t.Fatalf("stored config retained legacy companion settings: %s", written)
+	for _, value := range []string{`"companion"`, `"onWatch"`, "secret"} {
+		if bytes.Contains(written, []byte(value)) {
+			t.Errorf("stored config retained %q", value)
+		}
 	}
 }
 
-func TestQuotaAndOnWatchTestRoutes(t *testing.T) {
+func TestQuotaAndMagpieTestRoutes(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Forwarded-User") != "admin" {
-			t.Fatalf("trusted proxy header = %q", r.Header.Get("X-Forwarded-User"))
+		if r.Method != http.MethodGet || r.URL.RequestURI() != "/v1/magpie/quotas?kept=1" {
+			t.Errorf("unexpected Magpie request: %s %s", r.Method, r.URL)
 		}
-		if r.URL.Path == "/api/providers" {
-			_, _ = w.Write([]byte(`{"providers":["kimi","both"],"provider_labels":{"kimi":"Kimi Code"}}`))
-			return
+		if r.Header.Get("Authorization") != "" || r.Header.Get("X-Forwarded-User") != "" {
+			t.Error("received unexpected credentials")
 		}
-		_, _ = w.Write([]byte(`{"membership":"Allegro","quotas":[{"name":"5h","displayName":"5-hour","utilization":12,"status":"healthy"}]}`))
+		_, _ = w.Write([]byte(`{"object":"list","data":[{"provider":"kimi","name":"Kimi Code","kind":"subscription","user":"account@example.test","windows":[{"name":"5h","used":12,"remaining":88}]}]}`))
 	}))
 	defer upstream.Close()
 	cfg := config.Defaults()
-	cfg.OnWatch.Enabled = true
-	cfg.OnWatch.ServerURL = upstream.URL
-	server, _, _ := companionTestServer(t, cfg, upstream)
-
-	response, err := http.Get(server.URL + "/v1/quota")
+	cfg.Magpie.ServerURL = upstream.URL
+	server, configPath, _ := companionTestServer(t, cfg, upstream)
+	testBody, _ := json.Marshal(map[string]any{"magpie": cfg.Magpie})
+	request, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/magpie/test", bytes.NewReader(testBody))
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var quotaBody struct {
-		Quota struct {
-			Connected bool `json:"connected"`
-			Providers []struct {
-				Provider string `json:"provider"`
-				Quotas   []struct {
-					Remaining float64 `json:"remainingPercent"`
-				} `json:"quotas"`
-			} `json:"providers"`
-		} `json:"quota"`
+	var tested struct {
+		Connected bool `json:"connected"`
+		Cards     int  `json:"cards"`
 	}
-	if err := json.NewDecoder(response.Body).Decode(&quotaBody); err != nil {
-		t.Fatal(err)
+	if err := json.NewDecoder(response.Body).Decode(&tested); err != nil || response.StatusCode != http.StatusOK || !tested.Connected || tested.Cards != 1 {
+		t.Fatalf("connection test = %+v, status = %s, err = %v", tested, response.Status, err)
 	}
 	response.Body.Close()
-	if !quotaBody.Quota.Connected || quotaBody.Quota.Providers[0].Provider != "kimi" || quotaBody.Quota.Providers[0].Quotas[0].Remaining != 88 {
-		t.Fatalf("quota response = %+v", quotaBody)
+	stored, err := config.Load(configPath)
+	if err != nil || stored.Magpie.Enabled {
+		t.Fatalf("connection test changed config: %+v, %v", stored.Magpie, err)
 	}
-
-	testSettings := cfg.OnWatch
-	testSettings.Password = ""
-	testBody, _ := json.Marshal(map[string]any{"onWatch": testSettings})
-	request, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/onwatch/test", bytes.NewReader(testBody))
+	readQuota := func() companion.QuotaSnapshot {
+		t.Helper()
+		response, err := http.Get(server.URL + "/v1/quota")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		var body struct {
+			Quota companion.QuotaSnapshot `json:"quota"`
+		}
+		if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		return body.Quota
+	}
+	if quota := readQuota(); quota.Configured || quota.Connected {
+		t.Fatalf("connection test enabled quota: %+v", quota)
+	}
+	cfg.Magpie.Enabled = true
+	body, _ := json.Marshal(map[string]any{"config": cfg})
+	request, _ = http.NewRequest(http.MethodPut, server.URL+"/v1/config", bytes.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	response, err = http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer response.Body.Close()
+	response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		t.Fatalf("test connection status = %s", response.Status)
+		t.Fatalf("enable Magpie status = %s", response.Status)
+	}
+	quota := readQuota()
+	if !quota.Connected || len(quota.Providers) != 1 || quota.Providers[0].Provider != "kimi" || *quota.Providers[0].Quotas[0].RemainingPercent != 88 {
+		t.Fatalf("enabled quota = %+v", quota)
 	}
 }
 

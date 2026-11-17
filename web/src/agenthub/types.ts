@@ -77,20 +77,18 @@ export interface AgentHubProbe {
   error?: string;
 }
 
-export interface OnWatchConfig {
+export interface MagpieConfig {
   enabled: boolean;
   serverUrl: string;
-  authMode: string;
-  username: string;
-  password: string;
   refreshIntervalSeconds: number;
+  migratedFromOnWatch?: boolean;
 }
 
 export interface AgentHubConfig {
   version: number;
   agentProviders: AgentHubProvider[];
   agents: AgentHubAgent[];
-  onWatch: OnWatchConfig;
+  magpie: MagpieConfig;
 }
 
 export interface AgentCatalog {

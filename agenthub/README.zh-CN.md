@@ -16,7 +16,7 @@ AgentHub 是一个本地 Agent 启动器与 Session 中枢。一个 Go daemon �
 - Session 创建、聊天、steer、interrupt、stop、resume、archive 和 approval。
 - daemon 重启后按需恢复 provider 原生 session/thread。
 - 同源 Web UI：Session 列表、实时聊天、状态、审批、停止，以及包含四个内置 Provider 可用性探测、结构化 Agent 表单和按 Provider 加载的模型下拉框的设置界面。
-- 浮动伙伴：展示由 OnWatch 提供的 Provider 配额，以及由 AgentHub 自身事件聚合出的实时 Session 活动，可选 Web Audio 提示音。
+- 浮动伙伴展示 Magpie 配额和 AgentHub 实时 Session 活动，可选 Web Audio 提示音。
 - Provider 模型枚举：每个内置 Provider 都能通过各自的官方接口报告当前可用模型，统一为一个只读 API。
 - CLI：一次性运行、交互聊天、attach、事件查询和 Session 管理。
 - 每个 Session 保存唯一事实来源 `events.jsonl`，以及可重建的 `session.json` 和紧凑 `turns.jsonl` 投影；Approval 仍只以规范 Event 为准。
@@ -127,12 +127,9 @@ $HOME/.agenthub/config.json
       "options": { "mode": "build", "model": "kimi-coding/k3" }
     }
   ],
-  "onWatch": {
+  "magpie": {
     "enabled": false,
-    "serverUrl": "http://127.0.0.1:9211",
-    "authMode": "trusted_proxy",
-    "username": "admin",
-    "password": "",
+    "serverUrl": "http://127.0.0.1:3425",
     "refreshIntervalSeconds": 60
   }
 }
@@ -146,7 +143,11 @@ Provider 封装一个本地 Agent 运行时或协议；Agent 引用一个 Provid
 
 推荐使用 Web UI 的 **Settings** 界面管理配置。**Providers** 区块刻意保持极简：列出四个内置 Provider（Codex、Kimi、Grok/Pi、OpenCode）及其可用性，不提供用户控制的启用/停用开关，也不提供 Provider 增删——只要可执行文件能解析成功，Provider 就可用。启动后 daemon 会自动从 PATH 和常用安装目录探测可执行文件；找到则显示为可用并展示解析出的路径，每行提供内联编辑器修改可执行文件路径，确认时校验路径有效性、无法解析的路径会被拒绝保存（`PUT /v1/config/providers/{id}`）；清空路径则恢复自动探测。**Agents** 区块保留结构化、带校验的表单。所有修改都通过 daemon API 提交，daemon 仍是配置文件的唯一写入者，无需手动编辑 JSON。
 
-**General** 区块配置由 daemon 管理的 OnWatch 集成；**Activity** 区块的活动、声音和逐条 quota 可见性偏好只保存在当前浏览器来源的本地存储中，不通过 `GET` 或 `PUT /v1/config` 同步。设置页会列出 `/v1/quota` 当前返回的 quota 条目；隐藏某条后，展开的 Beeper 列表和折叠态 quota 轮播都会过滤该条。余额型 quota 行（例如 DeepSeek 余额）还可以为每个 Provider 配置余额总额：剩余占比按 当前余额/总额 重新计算（默认 `100`）。Provider 配额只由 daemon 从 OnWatch 拉取，经归一化和按配置间隔缓存后通过 `GET /v1/quota` 暴露；Basic Auth 密码保存在本机权限为 `0600` 的配置文件中，但所有 API 响应都会将其抹除。Session 活动只来自 AgentHub 自身持久化追加且用户可感知的 Turn 事件，并在 `GET /v1/activity/events` 中按 Session 聚合为一秒一帧。消息、思考、工具、审批、Turn 错误与 Turn 终态计为活动；Session/进程生命周期记账、消息投递记账、原始 Provider 通知、后台 metadata 和 stderr 不计为活动，避免 daemon 重启或空闲 Provider 维护动作让旧 Session 重新显示为活跃。浏览器只保持一条全局 EventSource，并通过 Web Audio 合成可选的运行蜂鸣。每个活跃 Session 按第 5、4、6、3、7 八度带的顺序领取所选大三和弦或小三和弦中的第一个可用音高，优先使用较低八度后再到最高音位；该音高保持稳定，直到当前 Turn 结束 10 秒后或 Session 退出活跃窗口，前 15 个并发 Session 使用互不重复的音位。结束态行继续保留 5 分钟：成功为黄色，失败或取消为红色；新 Turn 会清除旧结束态并重新领取音高。播放量化到四个固定的 250ms subdivision，并使用确定性节奏型和轮换；超过四个 Session 后，和弦音以归一化音量共享 subdivision，不再产生不规则的一秒分数间隔。用户选择的本地 MP3 完成提示音与活动和弦相互独立。此功能不会扫描 Codex 或其他 Provider 的原生 Session 文件。
+Magpie 默认关闭。在 **Settings → General → Magpie Integration** 配置本机回环地址，点击 **Test connection**，然后启用并保存。daemon 定时取回 Magpie 已缓存的读数，通过 `GET /v1/quota` 提供配额。卡片逐账户显示额度与余额，连接故障时保留上次快照并标记陈旧。如需触发供应商更新，请在 Magpie 的 Usage 页刷新。
+
+从 OnWatch 升级时自动沿用轮询间隔。保存新设置前备份原配置。回滚时同时恢复旧二进制和原配置。**Activity** 区块的活动、音效和额度可见性偏好只保存在当前浏览器来源。隐藏某条额度后，展开列表和折叠轮播都会过滤该条。
+
+Session 活动只来自 AgentHub 自身持久化追加且用户可感知的 Turn 事件，并在 `GET /v1/activity/events` 中按 Session 聚合为一秒一帧。消息、思考、工具、审批、Turn 错误与 Turn 终态计为活动；Session/进程生命周期记账、消息投递记账、原始 Provider 通知、后台 metadata 和 stderr 不计为活动，避免 daemon 重启或空闲 Provider 维护动作让旧 Session 重新显示为活跃。浏览器只保持一条全局 EventSource，并通过 Web Audio 合成可选的运行蜂鸣。每个活跃 Session 按第 5、4、6、3、7 八度带的顺序领取所选大三和弦或小三和弦中的第一个可用音高，优先使用较低八度后再到最高音位；该音高保持稳定，直到当前 Turn 结束 10 秒后或 Session 退出活跃窗口，前 15 个并发 Session 使用互不重复的音位。结束态行继续保留 5 分钟：成功为黄色，失败或取消为红色；新 Turn 会清除旧结束态并重新领取音高。播放量化到四个固定的 250ms subdivision，并使用确定性节奏型和轮换；超过四个 Session 后，和弦音以归一化音量共享 subdivision，不再产生不规则的一秒分数间隔。用户选择的本地 MP3 完成提示音与活动和弦相互独立。此功能不会扫描 Codex 或其他 Provider 的原生 Session 文件。
 
 Provider 的可执行文件无法解析时，其 Agent 会被标记为不可用（`GET /v1/agents` 中 `available: false` 并附原因），不会出现在新建 Session 的选择中。不可用不会中断已经在运行的 Session，既有 Session 历史仍可查看。
 
@@ -204,7 +205,7 @@ GET    /v1/health
 GET    /v1/status
 GET    /v1/config
 PUT    /v1/config
-POST   /v1/onwatch/test
+POST   /v1/magpie/test
 GET    /v1/quota
 GET    /v1/activity/events
 GET    /v1/agents

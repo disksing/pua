@@ -5,14 +5,14 @@
   import ActivityWaveform from "./ActivityWaveform.svelte";
   import { activityPlaybackPlan, COMPLETION_SOUNDS, TonePlayer } from "./companion/audio";
   import { DEFAULT_BEEP_CHORD, nextProgressionFrame, noteForToneSlot } from "./companion/chords";
-  import { ACTIVITY_LEAD_MS, activityPulsesForFrame, activitySessionHoldsTone, activitySessionNeedsTone, activitySessions, activitySessionTerminal, applyBalanceTotals, filterQuotaSnapshot, formatDuration, pruneActivityPulses, quotaCycleItems, SessionToneAllocator } from "./companion/model";
+  import { ACTIVITY_LEAD_MS, activityPulsesForFrame, activitySessionHoldsTone, activitySessionNeedsTone, activitySessions, activitySessionTerminal, filterQuotaSnapshot, formatDuration, pruneActivityPulses, quotaCycleItems, quotaProviderLabel, quotaValue, SessionToneAllocator } from "./companion/model";
   import { loadCompanionPreferences, saveCompanionPreferences, subscribeCompanionPreferences } from "./companion/preferences";
   import { agentHubPath, api } from "./core/api";
 
   let { standalone = false, pauseLiveUpdates = false, revision = 0, onOpenSettings }: { standalone?: boolean; pauseLiveUpdates?: boolean; revision?: number; onOpenSettings: () => void } = $props();
   let open = $state(false);
   let preferences = $state<any>(loadCompanionPreferences());
-  let config = $state<any>({ onWatch: {} });
+  let config = $state<any>({ magpie: {} });
   let quota = $state<any>({ configured: false, connected: false, providers: [] });
   let quotaLoading = $state(true);
   let quotaIndex = $state(0);
@@ -30,7 +30,7 @@
   const player = new TonePlayer();
   const allocator = new SessionToneAllocator();
   const expanded = $derived(standalone || open);
-  const visibleQuota = $derived(filterQuotaSnapshot(applyBalanceTotals(quota, preferences.balanceTotals), preferences.hiddenQuotaKeys));
+  const visibleQuota = $derived(filterQuotaSnapshot(quota, preferences.hiddenQuotaKeys));
   const cycleItems = $derived(quotaCycleItems(visibleQuota));
   const cycleItem = $derived(cycleItems[quotaIndex % Math.max(1, cycleItems.length)]);
   const activeList = $derived([...sessions.values()].sort((left, right) => left.sessionId.localeCompare(right.sessionId)));
@@ -98,23 +98,35 @@
     revision;
     if (pauseLiveUpdates) return;
     const controller = new AbortController();
-    void api<any>("/v1/config", { signal: controller.signal }).then((body) => config = body.config || { onWatch: {} }).catch(() => {});
+    void api<any>("/v1/config", { signal: controller.signal }).then((body) => config = body.config || { magpie: {} }).catch(() => {});
     return () => controller.abort();
   });
 
   $effect(() => {
-    revision; config.onWatch?.enabled; config.onWatch?.refreshIntervalSeconds;
+    revision; config.magpie?.enabled; config.magpie?.serverUrl;
     if (pauseLiveUpdates) { quotaLoading = false; return; }
-    let disposed = false;
+    const controller = new AbortController();
+    let fetching = false;
     const load = async () => {
+      if (fetching) return;
+      fetching = true;
       quotaLoading = true;
-      try { const body = await api<any>("/v1/quota"); if (!disposed) quota = body.quota || { configured: false, connected: false, providers: [] }; }
-      catch (reason) { if (!disposed) quota = { ...quota, connected: false, stale: true, error: message(reason) }; }
-      finally { if (!disposed) quotaLoading = false; }
+      try {
+        const body = await api<any>("/v1/quota", { signal: controller.signal });
+        if (!controller.signal.aborted) quota = body.quota || { configured: false, connected: false, providers: [] };
+      } catch (reason) {
+        if (!controller.signal.aborted) {
+          const providers = quota.providers.map((provider: any) => ({ ...provider, stale: true }));
+          quota = { ...quota, providers, connected: false, stale: true, error: message(reason) };
+        }
+      } finally {
+        fetching = false;
+        if (!controller.signal.aborted) quotaLoading = false;
+      }
     };
     void load();
-    const timer = window.setInterval(load, Math.max(30, Number(config.onWatch?.refreshIntervalSeconds) || 60) * 1000);
-    return () => { disposed = true; window.clearInterval(timer); };
+    const timer = window.setInterval(load, Math.max(30, Number(config.magpie?.refreshIntervalSeconds) || 60) * 1000);
+    return () => { controller.abort(); window.clearInterval(timer); };
   });
 
   $effect(() => {
@@ -168,20 +180,41 @@
   {#if !expanded}
     <button type="button" class="companion-pill" title="Open activity Companion" onclick={async () => { open = true; if (preferences.enableBeeping) audioBlocked = !(await player.resume()); }}>
       <svg class="companion-spark" viewBox="0 0 52 22" preserveAspectRatio="none" aria-hidden="true"><polyline points="0,13 6,13 9,10 12,13 19,13 22,4 25,19 28,13 36,13 39,10 42,13 47,13 49,7 51,13" /></svg>
-      <span class:active={activeList.length > 0} class="companion-live-dot"></span><span class={`companion-cycle ${cycleItem ? statusTone(cycleItem.status) : ""}`}>{cycleItem ? `${cycleItem.provider} ${cycleItem.value}%` : "No quota data"}</span><Icon name={preferences.enableBeeping ? "volume-2" : "volume-x"} />
+      <span class:active={activeList.length > 0} class="companion-live-dot"></span><span class={`companion-cycle ${cycleItem ? statusTone(cycleItem.status) : ""}`}>{cycleItem ? `${cycleItem.provider} ${cycleItem.value}%${cycleItem.stale ? " · Stale" : ""}` : "No quota data"}</span><Icon name={preferences.enableBeeping ? "volume-2" : "volume-x"} />
     </button>
   {:else}
     <section class="companion-card" aria-label="Activity and provider quota companion">
-      <header class="companion-card-header"><span class:connected={quota.connected} class="companion-connection"><i></i>OnWatch · {!quota.configured ? "Not configured" : quota.connected ? "Connected" : "Disconnected"}</span><span>{quotaLoading ? "updating…" : updatedAgo(quota.updatedAt)}</span><div><button type="button" aria-label="Open settings" title="Open settings" onclick={onOpenSettings}><Icon name="settings" /></button>{#if !standalone}<a class="companion-header-action" href="/agenthub/beeper" target="_blank" rel="noreferrer" aria-label="Open Beeper in a new window" title="Open Beeper in a new window"><Icon name="external-link" /><span>Beeper</span></a><button type="button" class="companion-header-action" aria-label="Collapse Companion" title="Collapse Companion" onclick={() => open = false}><Icon name="x" /><span>Collapse</span></button>{/if}</div></header>
+      <header class="companion-card-header"><span class:connected={quota.connected} class="companion-connection"><i></i>Magpie · {!quota.configured ? "Not configured" : quota.connected ? "Connected" : "Disconnected"}</span><span>{quotaLoading ? "updating…" : updatedAgo(quota.updatedAt)}</span><div><button type="button" aria-label="Open settings" title="Open settings" onclick={onOpenSettings}><Icon name="settings" /></button>{#if !standalone}<a class="companion-header-action" href="/agenthub/beeper" target="_blank" rel="noreferrer" aria-label="Open Beeper in a new window" title="Open Beeper in a new window"><Icon name="external-link" /><span>Beeper</span></a><button type="button" class="companion-header-action" aria-label="Collapse Companion" title="Collapse Companion" onclick={() => open = false}><Icon name="x" /><span>Collapse</span></button>{/if}</div></header>
       <div bind:this={quotaScroll} class="companion-scroll"><div class="companion-dark">
         <div class="companion-cap-row"><span class="companion-cap">Activity Monitor</span><span class={`companion-live-state ${activityState}`}>{activityState === "live" ? "AgentHub Live" : activityState === "paused" ? "Paused" : "Connecting"}</span></div>
         <div class="companion-thread-stat"><strong>{activeList.length}</strong><span>active threads · last 5 min</span></div>
         <ActivityWaveform {pulses} live={activityState === "live"} />
         <div class="companion-thread-list">{#each activeList as session (session.sessionId)}<div class={`companion-thread-row ${terminalClass(session)}`}>{#if !activitySessionTerminal(session)}{#key session.lastActiveAt}<span class="companion-thread-highlight" aria-hidden="true"><span class="companion-thread-title">{session.title || session.sessionId.slice(0, 8)}</span><span class="companion-thread-note">{noteForToneSlot(session.toneSlot, activityChord).name}</span></span>{/key}{/if}<span class="companion-thread-title">{session.title || session.sessionId.slice(0, 8)}</span><span class="companion-thread-note">{noteForToneSlot(session.toneSlot, activityChord).name}</span></div>{:else}<span class="idle">Waiting for activity</span>{/each}</div>
         <div class="companion-controls"><label><span><strong>Enable beeping</strong><small>{audioBlocked ? "Click to enable audio" : "Beep while agents are active"}</small></span><button type="button" role="switch" aria-label="Enable activity beeping" aria-checked={preferences.enableBeeping} class:on={preferences.enableBeeping} class="companion-switch" onclick={toggleBeeping}><span></span></button></label><label><strong>On finish</strong><span class="companion-sound-controls"><select value={preferences.completionSound} onchange={(event) => savePreference({ completionSound: event.currentTarget.value })}>{#each COMPLETION_SOUNDS as option}<option value={option.value}>{option.label}</option>{/each}</select><button type="button" aria-label="Preview completion sound" onclick={preview}><Icon name="play" /></button></span></label>{#if controlError}<p role="alert">{controlError}</p>{/if}</div>
-        <div class="companion-quota-heading"><span class="companion-cap">Provider Quota</span><small>All data from OnWatch</small></div>
+        <div class="companion-quota-heading"><span class="companion-cap">Provider Quota</span></div>
         {#if quota.error}<div class="companion-quota-error">{quota.error}</div>{/if}
-        <div bind:this={quotaGrid} class:dense={quotaDense} class="companion-provider-grid">{#each visibleQuota.providers || [] as provider (provider.provider)}<section class="companion-provider"><header><strong>{provider.label}</strong><em class={statusTone(provider.status)}>{provider.stale ? "Stale" : provider.status}</em></header>{#each provider.quotas || [] as item}<div class={`companion-quota-row ${statusTone(item.status)}`}><div><span>{item.label || item.kind}</span><strong>{Math.round(Number(item.remainingPercent) || 0)}% <small>left</small></strong></div><div class="companion-quota-track"><span style={`width:${Math.max(0, Math.min(100, Number(item.remainingPercent) || 0))}%`}></span>{#if item.windowPositionPercent != null}<i style={`left:${item.windowPositionPercent}%`}></i>{/if}</div><small>{item.resetInSeconds != null ? `resets in ${formatDuration(item.resetInSeconds)}` : `${Math.round(item.usedPercent || 0)}% used`}</small></div>{/each}</section>{/each}</div>
+        <div bind:this={quotaGrid} class:dense={quotaDense} class="companion-provider-grid">
+          {#each visibleQuota.providers || [] as provider (provider.id || provider.provider)}
+            <section class="companion-provider">
+              <header><strong>{quotaProviderLabel(provider)}</strong><em class={statusTone(provider.status)}>{provider.stale ? "Stale" : provider.status}</em></header>
+              <small title={provider.capturedAt}>{provider.capturedAt ? `Read ${updatedAgo(provider.capturedAt)}` : "Reading time unknown"}</small>
+              {#if provider.error}<p class="companion-quota-error">{provider.error}</p>
+              {:else if provider.readDeferred}<small>Magpie deferred this reading</small>{/if}
+              {#each provider.quotas || [] as item (item.key || item.kind)}
+                <div class={`companion-quota-row ${statusTone(item.status)}`}>
+                  <div><span>{item.label || item.kind}</span><strong>{quotaValue(item)}</strong></div>
+                  {#if Number.isFinite(item.remainingPercent)}
+                    <div class="companion-quota-track"><span style:width={`${item.remainingPercent}%`}></span>{#if item.windowPositionPercent != null}<i style:left={`${item.windowPositionPercent}%`}></i>{/if}</div>
+                  {/if}
+                  {#if item.expired}<small>Reset due · awaiting new reading</small>
+                  {:else if item.resetInSeconds != null}<small>Resets in {formatDuration(item.resetInSeconds)}</small>
+                  {:else if Number.isFinite(item.usedPercent)}<small>{Math.round(item.usedPercent)}% used</small>{/if}
+                  {#if Number.isFinite(item.used) && Number.isFinite(item.limit) && item.unit}<small>{item.used} / {item.limit} {item.unit}</small>{/if}
+                </div>
+              {/each}
+            </section>
+          {/each}
+        </div>
         {#if !quotaLoading && !(visibleQuota.providers || []).length}<p class="companion-empty-quota">No visible quota data</p>{/if}
       </div></div>
     </section>

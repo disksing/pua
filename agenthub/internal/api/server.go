@@ -108,7 +108,7 @@ type Dependencies struct {
 	Listen *ListenAddress
 	// Models, when set, enables the provider model enumeration endpoint.
 	Models ModelLister
-	// QuotaHTTPClient, when set, is used for OnWatch requests. Tests inject a
+	// QuotaHTTPClient, when set, is used for Magpie requests. Tests inject a
 	// local upstream; production uses a bounded standard-library client.
 	QuotaHTTPClient *http.Client
 	// LogsDir is the directory service logs are written to, reported by
@@ -136,6 +136,9 @@ func New(store *session.Store, version string, startedAt time.Time, dependencies
 		server.listen = dependencies[0].Listen
 		server.models = dependencies[0].Models
 		server.quotas = companion.NewService(dependencies[0].QuotaHTTPClient)
+		if server.runtime != nil {
+			server.quotas.Configure(server.runtime.Config().WithDefaults().Magpie)
+		}
 		server.closing = dependencies[0].Closing
 		if origins := dependencies[0].AllowedOrigins; len(origins) > 0 {
 			server.allowedOrigins = make(map[string]bool, len(origins))
@@ -168,7 +171,7 @@ func (s *Server) routes() []apiRoute {
 		{"GET /v1/config", s.getConfig, "GET /v1/config"},
 		{"PUT /v1/config", s.putConfig, "PUT /v1/config"},
 		{"PUT /v1/config/providers/{id}", s.putProviderCommand, "PUT /v1/config/providers/{id}"},
-		{"POST /v1/onwatch/test", s.testOnWatch, "POST /v1/onwatch/test"},
+		{"POST /v1/magpie/test", s.testMagpie, "POST /v1/magpie/test"},
 		{"GET /v1/quota", s.quota, "GET /v1/quota"},
 		{"GET /v1/activity/events", s.activityEvents, "GET /v1/activity/events"},
 		{"GET /v1/providers/{id}/models", s.providerModels, "GET /v1/providers/{id}/models"},
@@ -308,7 +311,7 @@ func (s *Server) getConfig(w http.ResponseWriter, _ *http.Request) {
 		writeAPIError(w, http.StatusServiceUnavailable, "runtime_unavailable", "runtime is unavailable", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"config": s.runtime.Config().Redacted()})
+	writeJSON(w, http.StatusOK, map[string]any{"config": s.runtime.Config().WithDefaults()})
 }
 
 func (s *Server) putConfig(w http.ResponseWriter, r *http.Request) {
@@ -326,7 +329,7 @@ func (s *Server) putConfig(w http.ResponseWriter, r *http.Request) {
 	s.configMu.Lock()
 	defer s.configMu.Unlock()
 	previous := s.runtime.Config()
-	next := body.Config.WithDefaults().PreserveSecrets(previous)
+	next := body.Config.WithDefaults()
 	renames, err := config.DetectRenames(previous, next)
 	if err != nil {
 		writeAPIError(w, http.StatusUnprocessableEntity, "ambiguous_rename", err.Error(), nil)
@@ -338,12 +341,12 @@ func (s *Server) putConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.runtime.SetConfig(next)
 	s.invalidateModels()
-	s.quotas.Invalidate()
+	s.quotas.Configure(next.Magpie)
 	if err := s.migrateSessionAgentReferences(renames); err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "agent_rename_failed", err.Error(), nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"config": next.Redacted()})
+	writeJSON(w, http.StatusOK, map[string]any{"config": next})
 }
 
 func (s *Server) quota(w http.ResponseWriter, r *http.Request) {
@@ -351,35 +354,31 @@ func (s *Server) quota(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusServiceUnavailable, "runtime_unavailable", "runtime is unavailable", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"quota": s.quotas.Snapshot(r.Context(), s.runtime.Config().OnWatch)})
+	writeJSON(w, http.StatusOK, map[string]any{"quota": s.quotas.Snapshot(r.Context())})
 }
 
-func (s *Server) testOnWatch(w http.ResponseWriter, r *http.Request) {
+func (s *Server) testMagpie(w http.ResponseWriter, r *http.Request) {
 	if s.runtime == nil {
 		writeAPIError(w, http.StatusServiceUnavailable, "runtime_unavailable", "runtime is unavailable", nil)
 		return
 	}
 	var body struct {
-		OnWatch config.OnWatch `json:"onWatch"`
+		Magpie config.Magpie `json:"magpie"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		writeAPIError(w, http.StatusBadRequest, "invalid_request", err.Error(), nil)
 		return
 	}
-	candidate := config.Defaults()
-	candidate.OnWatch = body.OnWatch
-	candidate.OnWatch.Enabled = true
-	candidate = candidate.PreserveSecrets(s.runtime.Config())
-	if err := candidate.Validate(); err != nil {
+	if _, err := body.Magpie.QuotaURL(); err != nil {
 		writeAPIError(w, http.StatusUnprocessableEntity, "invalid_config", err.Error(), nil)
 		return
 	}
-	catalog, err := s.quotas.TestConnection(r.Context(), candidate.OnWatch)
+	count, err := s.quotas.TestConnection(r.Context(), body.Magpie)
 	if err != nil {
-		writeAPIError(w, http.StatusBadGateway, "onwatch_unavailable", err.Error(), nil)
+		writeAPIError(w, http.StatusBadGateway, "magpie_unavailable", err.Error(), nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"connected": true, "providers": catalog.Providers})
+	writeJSON(w, http.StatusOK, map[string]any{"connected": true, "cards": count})
 }
 
 // migrateSessionAgentReferences re-points sessions at renamed agents by

@@ -42,11 +42,11 @@ export class SessionToneAllocator {
 
 export function quotaCycleItems(snapshot) {
   return (snapshot?.providers || []).flatMap((provider) => {
-    const quota = (provider.quotas || [])[0];
+    const quota = (provider.quotas || []).find((item) => Number.isFinite(item.remainingPercent) && !item.expired);
     if (!quota) return [];
     return [{
-      provider: provider.label || provider.provider,
-      value: Math.round(Number(quota.remainingPercent) || 0),
+      provider: quotaProviderLabel(provider),
+      value: Math.round(quota.remainingPercent),
       label: quota.kind || quota.label,
       status: quota.status || provider.status || "healthy",
       stale: Boolean(provider.stale || quota.stale),
@@ -55,44 +55,24 @@ export function quotaCycleItems(snapshot) {
 }
 
 export function quotaVisibilityKey(provider, quota) {
+  if (provider?.id && quota?.key) return JSON.stringify(["magpie", provider.id, quota.key]);
   return JSON.stringify([
     String(provider?.provider || provider?.label || ""),
     String(quota?.kind || quota?.label || ""),
   ]);
 }
 
-// DEFAULT_BALANCE_TOTAL is the denominator used to display balance-style
-// quotas (e.g. a DeepSeek credit balance) until a per-provider total is
-// configured in the Activity settings.
-export const DEFAULT_BALANCE_TOTAL = 100;
-
-// applyBalanceTotals re-derives the percentages of balance-style quotas
-// against per-provider balance totals from companion preferences. The daemon
-// reports balance quotas with a raw Value and a remaining share computed
-// against a default total of 100; this normalizes them for display without
-// mutating the source snapshot.
-export function applyBalanceTotals(snapshot, balanceTotals = {}) {
-  const totals = {};
-  for (const [provider, total] of Object.entries(balanceTotals || {})) {
-    const numeric = Number(total);
-    if (provider && Number.isFinite(numeric) && numeric > 0) totals[String(provider)] = numeric;
-  }
-  return {
-    ...(snapshot || {}),
-    providers: (snapshot?.providers || []).map((provider) => {
-      const total = totals[provider.provider] ?? DEFAULT_BALANCE_TOTAL;
-      const quotas = (provider.quotas || []).map((quota) => {
-        if (quota.kind !== "balance" || quota.value == null) return quota;
-        const remaining = Math.min(100, Math.max(0, (100 * quota.value) / total));
-        const used = Math.min(total, Math.max(0, total - quota.value));
-        return { ...quota, remainingPercent: remaining, usedPercent: 100 - remaining, used, limit: total };
-      });
-      return { ...provider, quotas };
-    }),
-  };
+export function quotaProviderLabel(provider) {
+  return [provider.label || provider.provider, provider.accountLabel].filter(Boolean).join(" · ");
 }
 
-export function filterQuotaSnapshot(snapshot, hiddenQuotaKeys = []) {
+export function quotaValue(quota) {
+  if (quota.unlimited) return "Unlimited";
+  if (Number.isFinite(quota.remainingPercent)) return `${Math.round(quota.remainingPercent)}% left`;
+  return quota.display || "Unknown";
+}
+
+export function filterQuotaSnapshot(snapshot, hiddenQuotaKeys: string[] = []) {
   const hidden = new Set((hiddenQuotaKeys || []).map(String));
   return {
     ...(snapshot || {}),

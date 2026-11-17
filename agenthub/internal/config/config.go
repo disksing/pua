@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/exec"
@@ -35,13 +36,11 @@ type Agent struct {
 	Environment map[string]string `json:"environment,omitempty"`
 }
 
-type OnWatch struct {
+type Magpie struct {
 	Enabled                bool   `json:"enabled"`
 	ServerURL              string `json:"serverUrl"`
-	AuthMode               string `json:"authMode"`
-	Username               string `json:"username,omitempty"`
-	Password               string `json:"password"`
 	RefreshIntervalSeconds int    `json:"refreshIntervalSeconds"`
+	MigratedFromOnWatch    bool   `json:"migratedFromOnWatch,omitempty"`
 }
 
 // AgentNameMaxLength bounds the length of an agent name (counted in runes
@@ -61,7 +60,8 @@ type Config struct {
 	Version         int             `json:"version"`
 	AgentProviders  []Provider      `json:"agentProviders"`
 	Agents          []Agent         `json:"agents"`
-	OnWatch         OnWatch         `json:"onWatch"`
+	Magpie          Magpie          `json:"magpie"`
+	LegacyOnWatch   json.RawMessage `json:"onWatch,omitempty"`
 	LegacyCompanion json.RawMessage `json:"companion,omitempty"`
 }
 
@@ -85,7 +85,7 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	cfg := Config{OnWatch: defaultOnWatch()}
+	var cfg Config
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&cfg); err != nil {
@@ -142,7 +142,7 @@ func Save(path string, cfg Config) error {
 
 func (c Config) Validate() error {
 	effective := c.WithDefaults()
-	if err := effective.OnWatch.validate(); err != nil {
+	if _, err := effective.Magpie.QuotaURL(); err != nil {
 		return err
 	}
 	providers := make(map[string]Provider)
@@ -251,7 +251,7 @@ func (c Config) SetProviderCommand(id string, command string) (Config, Provider,
 		Version:        c.Version,
 		AgentProviders: make([]Provider, len(c.AgentProviders)),
 		Agents:         make([]Agent, len(c.Agents)),
-		OnWatch:        c.OnWatch,
+		Magpie:         c.Magpie,
 	}
 	copy(next.AgentProviders, c.AgentProviders)
 	for i, agent := range c.Agents {
@@ -289,17 +289,12 @@ func Defaults() Config {
 		Version:        1,
 		AgentProviders: providers,
 		Agents:         []Agent{{Name: "Codex", ProviderID: "codex", Options: map[string]string{"approval": "never", "sandbox": "danger-full-access"}}},
-		OnWatch:        defaultOnWatch(),
+		Magpie:         Magpie{ServerURL: "http://127.0.0.1:3425", RefreshIntervalSeconds: 60},
 	}
 }
 
-func defaultOnWatch() OnWatch {
-	return OnWatch{
-		ServerURL:              "http://127.0.0.1:9211",
-		AuthMode:               "trusted_proxy",
-		Username:               "admin",
-		RefreshIntervalSeconds: 60,
-	}
+func validQuotaInterval(seconds int) bool {
+	return seconds == 30 || seconds == 60 || seconds == 300
 }
 
 // WithDefaults fills fields absent from configurations written by older
@@ -308,9 +303,23 @@ func defaultOnWatch() OnWatch {
 // probing; accepting and clearing the legacy fields keeps existing config
 // files loadable while ensuring the daemon never returns or writes them again.
 func (c Config) WithDefaults() Config {
-	if c.OnWatch.ServerURL == "" && c.OnWatch.AuthMode == "" && c.OnWatch.RefreshIntervalSeconds == 0 {
-		c.OnWatch = defaultOnWatch()
+	if c.Magpie == (Magpie{}) {
+		c.Magpie = Defaults().Magpie
+		var legacy struct {
+			Enabled                bool `json:"enabled"`
+			RefreshIntervalSeconds int  `json:"refreshIntervalSeconds"`
+		}
+		if len(c.LegacyOnWatch) > 0 && json.Unmarshal(c.LegacyOnWatch, &legacy) == nil {
+			if validQuotaInterval(legacy.RefreshIntervalSeconds) {
+				c.Magpie.RefreshIntervalSeconds = legacy.RefreshIntervalSeconds
+			}
+			c.Magpie.MigratedFromOnWatch = legacy.Enabled
+		}
 	}
+	if c.Magpie.Enabled {
+		c.Magpie.MigratedFromOnWatch = false
+	}
+	c.LegacyOnWatch = nil
 	c.LegacyCompanion = nil
 	for i := range c.AgentProviders {
 		c.AgentProviders[i].LegacyEnabled = nil
@@ -318,47 +327,29 @@ func (c Config) WithDefaults() Config {
 	return c
 }
 
-func (value OnWatch) validate() error {
+func (value Magpie) QuotaURL() (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(value.ServerURL))
 	if err != nil || parsed == nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-		return errors.New("onWatch.serverUrl must be an absolute HTTP or HTTPS URL")
+		return "", errors.New("magpie.serverUrl must be an absolute HTTP or HTTPS loopback URL")
 	}
-	if parsed.User != nil {
-		return errors.New("onWatch.serverUrl must not contain credentials")
+	address, err := netip.ParseAddr(parsed.Hostname())
+	if err != nil || !address.IsLoopback() || address.Zone() != "" {
+		return "", errors.New("magpie.serverUrl must use a loopback IP address")
 	}
-	switch value.AuthMode {
-	case "trusted_proxy", "basic", "none":
-	default:
-		return fmt.Errorf("onWatch.authMode %q is unsupported", value.AuthMode)
+	if parsed.User != nil || parsed.ForceQuery || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.EscapedPath() != "" && parsed.EscapedPath() != "/") {
+		return "", errors.New("magpie.serverUrl must contain only the scheme, loopback address, and optional port")
 	}
-	if value.RefreshIntervalSeconds != 30 && value.RefreshIntervalSeconds != 60 && value.RefreshIntervalSeconds != 300 {
-		return errors.New("onWatch.refreshIntervalSeconds must be 30, 60, or 300")
+	if port := parsed.Port(); port != "" {
+		number, err := strconv.ParseUint(port, 10, 16)
+		if err != nil || number == 0 {
+			return "", errors.New("magpie.serverUrl has an invalid port")
+		}
 	}
-	if value.AuthMode == "basic" && strings.TrimSpace(value.Username) == "" {
-		return errors.New("onWatch.username is required for basic authentication")
+	if !validQuotaInterval(value.RefreshIntervalSeconds) {
+		return "", errors.New("magpie.refreshIntervalSeconds must be 30, 60, or 300")
 	}
-	if value.Enabled && value.AuthMode == "basic" && value.Password == "" {
-		return errors.New("onWatch.password is required for basic authentication")
-	}
-	return nil
-}
-
-// Redacted returns a copy safe to expose through the public configuration API.
-// The stored Basic Auth password remains available only inside the daemon.
-func (c Config) Redacted() Config {
-	c = c.WithDefaults()
-	c.OnWatch.Password = ""
-	return c
-}
-
-// PreserveSecrets carries forward an omitted Basic Auth password from the
-// current configuration. This lets settings clients edit unrelated fields
-// without receiving or resubmitting the stored secret.
-func (c Config) PreserveSecrets(previous Config) Config {
-	if c.OnWatch.Password == "" && c.OnWatch.AuthMode == "basic" {
-		c.OnWatch.Password = previous.OnWatch.Password
-	}
-	return c
+	parsed.Path, parsed.RawPath, parsed.RawQuery = "/v1/magpie/quotas", "", "kept=1"
+	return parsed.String(), nil
 }
 
 // Agent resolves an agent by name. Matching is case-insensitive and ignores

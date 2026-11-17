@@ -646,7 +646,7 @@ test("navigates resources and creates a task through the canonical application f
 
   await expect(page.locator(".brand-copy span")).toHaveText("v0.1.0");
   await expect(page.getByRole("heading", { name: "Migration project", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: /Infrastructure task/ }).click();
+  await page.getByRole("button", { name: /^Infrastructure task/ }).click();
   await expect(page).toHaveURL(/project1\.task1/);
   await expect(page.getByRole("heading", { name: /Infrastructure task/ }).first()).toBeVisible();
   const bindingSelector = page.getByRole("button", { name: "Binding target" });
@@ -2128,7 +2128,7 @@ test("keeps canonical navigation synchronized across history, workspace restore,
   await expect(detailPanel).toHaveAttribute("data-component-owner", "detail-panel");
   await detailPanel.evaluate((node) => { node.dataset.identityProbe = "persistent-detail"; });
 
-  await page.getByRole("button", { name: /Follow-up task/ }).click();
+  await page.getByRole("button", { name: /^Follow-up task/ }).click();
   await expect(page).toHaveURL(/\/w\/ws-a\/r\/project1\.task2$/);
   await expect(page.locator('#projectTree .tree-item.active')).toContainText("Follow-up task");
   await page.goBack();

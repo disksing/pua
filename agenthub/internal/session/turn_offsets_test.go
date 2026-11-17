@@ -104,7 +104,10 @@ func TestTurnOffsetsBackfillLegacyArchive(t *testing.T) {
 	if _, err := store.BackfillTurnOffsets(t.Context(), id); err != ErrSessionActive {
 		t.Fatalf("active backfill: %v", err)
 	}
-	appendProjectionEvent(t, store, id, EventTurnCompleted, turnID, nil)
+	largeEvent := appendProjectionEvent(t, store, id, "provider.event", turnID, map[string]any{
+		"output": strings.Repeat("x", 15<<20),
+	})
+	terminal := appendProjectionEvent(t, store, id, EventTurnCompleted, turnID, nil)
 	appendProjectionEvent(t, store, id, "session.state", "", StateEventData{State: StateStopped})
 	if _, err := store.Archive(id); err != nil {
 		t.Fatal(err)
@@ -141,6 +144,20 @@ func TestTurnOffsetsBackfillLegacyArchive(t *testing.T) {
 	after, err := os.ReadFile(eventPath)
 	if err != nil || !bytes.Equal(before, after) {
 		t.Fatalf("event log changed during backfill: %v", err)
+	}
+	restarted, err := Open(store.Root())
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := restarted.EventsRangePage(id, largeEvent.ID-1, terminal.ID, 1)
+	if err != nil {
+		t.Fatalf("read backfilled range after restart: %v", err)
+	}
+	if len(page.Events) != 1 || page.Events[0].ID != largeEvent.ID || !bytes.Equal(page.Events[0].Data, largeEvent.Data) {
+		t.Fatal("range page did not preserve the legacy provider event")
+	}
+	if restarted.Diagnostics().EventIndexBuilds != 0 {
+		t.Fatal("range pagination built the whole event index")
 	}
 	summary, err := reopened.Turn(id, turnID)
 	if err != nil {

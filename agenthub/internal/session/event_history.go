@@ -15,7 +15,7 @@ const (
 	eventHistorySessionBudget = 4 << 20
 	eventHistoryStoreBudget   = 32 << 20
 	eventIndexStride          = 128
-	eventRecordLimit          = 8 << 20
+	eventRecordLimit          = 16 << 20
 )
 
 type eventLogIndex struct {

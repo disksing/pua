@@ -41,6 +41,9 @@ func taskWaitingScheduleMessageID(resourceID, generationID, chainID, marker stri
 }
 
 func taskDetail(workspacePath, resourceID string) (app.ResourceDetailView, bool, error) {
+	if strings.TrimSpace(resourceID) == "workspace" {
+		return app.ResourceDetailView{}, false, nil
+	}
 	puaWorkspace, err := app.OpenWorkspace(workspacePath)
 	if err != nil {
 		return app.ResourceDetailView{}, false, err

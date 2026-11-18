@@ -127,6 +127,8 @@ Inbox 路由统一返回 410，旧 `users/*/inbox.json` 在取得 Workspace 所�
 
 跨页读取会按 work 累计有效 claim，而不是让后一页覆盖前一页；重启后 claim 会按当前 generation、正文和 eligibility 重新校验。read/ack 除 Session 当前状态外还查询 canonical Turn，Session 投影仍显示 running 但 Turn 已 closed 时拒绝写入。CLI 在发送 ack 前把 operationId、work、IDs、receipts 和 summary 冻结到受控目录；响应或 operation 查询都失败时保留原 operation，并提示用 `pua message ack --resume=<operation>` 或以 `pua message operation show` 核对，重试不会生成新的随机 operation。
 
+跨 Turn 恢复时，先用 `pua message operation show --id=<operation-id>` 核对服务端结果。已提交的操作可通过相同请求幂等取回结果，即使原 Turn 已结束。服务端明确返回操作不存在且原 work 仍活动时，可用 `pua message ack --resume=<operation-id>` 重试原请求。若服务端明确返回操作不存在且原 work 已结束，应留存旧 operation ID 和查询结果。在新的活动内部 Turn 中，重新核对消息状态、读取仍在等待且有资格确认的正文，并确认所需工作已完成。确认时显式传入新的 `--operation=<new-id>`，避免相同 IDs 和摘要匹配到旧的本地冻结请求。查询失败且结果仍未知时，先核实旧操作结果。
+
 带 `Files` 附加文档的事务使用字符串版本 `mailbox-batch-v2`，并将资源文档版本提升到 2。旧版 Server 按整数解析事务版本会直接拒绝该 journal，不会忽略 `Files` 后删除提交标记；新版仍可读取无附加文档的 v1 存储。回退到旧版前应停止写入并确认没有未恢复的 v2 journal；旧版会拒绝 v2 metadata，而不是静默降级。事务恢复会校验每个 `Files` 项的临时或最终文件，缺失时不删除 journal。
 
 curl 示例：

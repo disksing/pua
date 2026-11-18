@@ -1,6 +1,7 @@
 package serve
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -85,6 +87,109 @@ func TestMailboxBatchListUsesStableSourceAndFrozenUpper(t *testing.T) {
 	status, found, err := mailboxMessageByID(workspace.Path, same.ID)
 	if err != nil || !found || status.Status != resourceMessageQueued {
 		t.Fatalf("list consumed message: found=%v err=%v %#v", found, err, status)
+	}
+}
+
+func TestMailboxBatchWorkspaceRoutes(t *testing.T) {
+	manager, workspace, fake, _ := workflowFixture(t)
+	const resource = "workspace"
+	const source = "project1"
+	instance, err := workspaceInstanceID(workspace.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opener := acceptBatchAgent(t, manager, workspace, resource, "current report", source, instance)
+	works, err := loadTurnWork(workspace.Path, resource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	work := works.find(opener.ID)
+	if work == nil || work.TurnID == "" {
+		t.Fatalf("Workspace opener did not start a Turn: %#v", work)
+	}
+	explicit := acceptBatchQueued(t, workspace, resource, "explicit report", "project1.task1", instance)
+	filtered := acceptBatchQueued(t, workspace, resource, "source report", source, instance)
+	waiting := acceptBatchQueued(t, workspace, resource, "still waiting", "project1.task1", instance)
+
+	call := func(method, path string, input, output any, status int) {
+		t.Helper()
+		body, err := json.Marshal(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := httptest.NewRequest(method, "/api/workspaces/"+workspace.ID+"/resources/"+resource+path, bytes.NewReader(body))
+		recorder := httptest.NewRecorder()
+		manager.server.handleWorkspace(recorder, request)
+		if recorder.Code != status {
+			t.Fatalf("%s %s returned %d, want %d: %s", method, path, recorder.Code, status, recorder.Body)
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), output); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read := func(id, text string) {
+		t.Helper()
+		var response mailboxReadResponse
+		call(http.MethodPost, "/messages/read", mailboxReadRequest{WorkID: work.ID, IDs: []string{id}}, &response, http.StatusOK)
+		if len(response.Items) != 1 {
+			t.Fatalf("expected one read item: %#v", response.Items)
+		}
+		item := response.Items[0]
+		if item.MessageID != id || item.Text != text || !item.Complete || !item.CanAck || item.ReadReceipt == "" {
+			t.Fatalf("Workspace read did not return full, eligible body: %#v", item)
+		}
+	}
+	read(explicit.ID, explicit.Text)
+	var listed mailboxListResponse
+	call(http.MethodGet, "/messages?status=waiting&role=agent&fromResource="+source, nil, &listed, http.StatusOK)
+	if len(listed.Items) != 1 || listed.Items[0].MessageID != filtered.ID || !listed.Items[0].CanAck {
+		t.Fatalf("source filter returned unexpected messages: %#v", listed.Items)
+	}
+	read(listed.Items[0].MessageID, filtered.Text)
+	read(waiting.ID, waiting.Text)
+
+	request := mailboxAckRequest{OperationID: "op-workspace", WorkID: work.ID, IDs: []string{explicit.ID, filtered.ID}, Summary: "reports handled"}
+	var committed mailboxAckResult
+	call(http.MethodPost, "/messages/ack", request, &committed, http.StatusOK)
+	if committed.Handled != 2 || committed.History == "" || committed.Queue.WaitingTotal != 1 {
+		t.Fatalf("Workspace ack result: %#v", committed)
+	}
+	for _, id := range request.IDs {
+		message, found, err := mailboxMessageByID(workspace.Path, id)
+		if err != nil || !found || message.Status != resourceMessageHandled || message.Handling == nil || message.Handling.OperationID != request.OperationID {
+			t.Fatalf("message %s missing durable handling: found=%t err=%v message=%#v", id, found, err, message)
+		}
+	}
+
+	stale := mailboxAckRequest{OperationID: "op-workspace-stale", WorkID: work.ID, IDs: []string{waiting.ID}, Summary: "report handled"}
+	closeWorkflowTurn(fake, *work, "completed", "done")
+	var replay, lookedUp mailboxAckResult
+	call(http.MethodPost, "/messages/ack", request, &replay, http.StatusOK)
+	call(http.MethodGet, "/message-operations/"+request.OperationID, nil, &lookedUp, http.StatusOK)
+	if !reflect.DeepEqual(replay, committed) || !reflect.DeepEqual(lookedUp, committed) {
+		t.Fatalf("replay or lookup changed the committed result: replay=%#v lookup=%#v", replay, lookedUp)
+	}
+
+	var failure struct {
+		Code string
+	}
+	call(http.MethodPost, "/messages/read", mailboxReadRequest{WorkID: work.ID, IDs: stale.IDs}, &failure, http.StatusConflict)
+	if failure.Code != "batch_work_unavailable" {
+		t.Fatalf("unexpected stale read error: %#v", failure)
+	}
+	failure.Code = ""
+	call(http.MethodPost, "/messages/ack", stale, &failure, http.StatusConflict)
+	if failure.Code != "batch_work_unavailable" {
+		t.Fatalf("unexpected stale work error: %#v", failure)
+	}
+	call(http.MethodGet, "/message-operations/"+stale.OperationID, nil, &failure, http.StatusNotFound)
+	if failure.Code != "message_not_found" {
+		t.Fatalf("unexpected uncommitted operation lookup: %#v", failure)
+	}
+	listed = mailboxListResponse{}
+	call(http.MethodGet, "/messages?status=waiting&role=agent", nil, &listed, http.StatusOK)
+	if len(listed.Items) != 1 || listed.Items[0].MessageID != waiting.ID {
+		t.Fatalf("closed work changed remaining queue: %#v", listed.Items)
 	}
 }
 

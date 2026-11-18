@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"reflect"
 	"strings"
@@ -113,32 +114,60 @@ func TestMailboxAckCLIRecoversCommittedRequestAfterLostResponses(t *testing.T) {
 	}
 }
 
-func TestMailboxReadCLIKeepsCursorBudgetAndHidesReceipts(t *testing.T) {
+func TestMailboxReadCLISelectsWorkspaceMessagesAndHidesReceipts(t *testing.T) {
 	t.Setenv("PUA_CHANNEL", "")
 	t.Setenv(puaWorkspaceRootEnvironment, "")
 	t.Setenv(puaWorkspaceInstanceEnvironment, "")
 	t.Setenv(puaResourceIDEnvironment, "workspace")
 	withTempCwd(t, func(root string) {
 		run(t, "init")
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			switch {
-			case strings.HasSuffix(r.URL.Path, "/turn-work"):
-				_, _ = fmt.Fprint(w, `{"works":[{"id":"work-original","state":"running"}]}`)
-			case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/messages"):
-				if r.URL.Query().Get("cursor") != "cursor-limit-one" || r.URL.Query().Has("limit") {
-					t.Errorf("cursor limit was replaced by default: %s", r.URL.RawQuery)
+		for _, test := range []struct {
+			name  string
+			flag  string
+			query url.Values
+		}{
+			{name: "explicit IDs", flag: "--ids=one"},
+			{name: "source", flag: "--from=project1", query: url.Values{"fromResource": {"project1"}, "limit": {"20"}}},
+			{name: "cursor", flag: "--cursor=cursor-limit-one", query: url.Values{"cursor": {"cursor-limit-one"}}},
+		} {
+			t.Run(test.name, func(t *testing.T) {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					switch {
+					case strings.HasSuffix(r.URL.Path, "/resources/workspace/turn-work"):
+						_, _ = fmt.Fprint(w, `{"works":[{"id":"work-original","state":"running"}]}`)
+					case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/resources/workspace/messages"):
+						query := r.URL.Query()
+						query.Del("status")
+						query.Del("role")
+						if !reflect.DeepEqual(query, test.query) {
+							t.Errorf("unexpected list selector: %s", r.URL.RawQuery)
+						}
+						_, _ = fmt.Fprint(w, `{"items":[{"messageId":"one","canAck":true},{"messageId":"ineligible","canAck":false}],"nextCursor":"page-three"}`)
+					case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/resources/workspace/messages/read"):
+						var body struct {
+							IDs      []string `json:"ids"`
+							WorkID   string   `json:"workId"`
+							MaxBytes int      `json:"maxBytes"`
+						}
+						if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+							t.Error(err)
+						}
+						if !reflect.DeepEqual(body.IDs, []string{"one"}) || body.WorkID != "work-original" || body.MaxBytes != 1024 {
+							t.Errorf("unexpected Workspace read request: %#v", body)
+						}
+						_, _ = fmt.Fprint(w, `{"capability":"mailbox_batch_v1","items":[{"messageId":"one","text":"report","complete":true,"canAck":true,"readReceipt":"opaque-secret"}],"remainingIds":[],"queue":{"waitingTotal":2}}`)
+					default:
+						t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+						http.NotFound(w, r)
+					}
+				}))
+				defer server.Close()
+				output, err := runErr(t, "message", "read", test.flag, "--max-bytes=1024", "--server="+server.URL)
+				if err != nil || strings.Contains(output, "opaque-secret") || !strings.Contains(output, `"text": "report"`) ||
+					!strings.Contains(output, `"waitingTotal": 2`) || strings.Contains(output, `"nextCursor": "page-three"`) != (test.query != nil) {
+					t.Fatalf("CLI read contract mismatch: output=%s err=%v", output, err)
 				}
-				_, _ = fmt.Fprint(w, `{"items":[{"messageId":"one","canAck":true}],"nextCursor":"page-three"}`)
-			case strings.HasSuffix(r.URL.Path, "/messages/read"):
-				_, _ = fmt.Fprint(w, `{"capability":"mailbox_batch_v1","items":[{"messageId":"one","text":"report","complete":true,"canAck":true,"readReceipt":"opaque-secret"}],"remainingIds":[],"queue":{"waitingTotal":2}}`)
-			default:
-				http.NotFound(w, r)
-			}
-		}))
-		defer server.Close()
-		output, err := runErr(t, "message", "read", "--cursor=cursor-limit-one", "--server="+server.URL)
-		if err != nil || strings.Contains(output, "opaque-secret") || !strings.Contains(output, `"nextCursor": "page-three"`) || !strings.Contains(output, `"waitingTotal": 2`) {
-			t.Fatalf("CLI paging contract mismatch: output=%s err=%v", output, err)
+			})
 		}
 	})
 }

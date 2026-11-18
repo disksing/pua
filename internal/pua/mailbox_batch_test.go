@@ -127,6 +127,7 @@ func TestMailboxReadCLISelectsWorkspaceMessagesAndHidesReceipts(t *testing.T) {
 			query url.Values
 		}{
 			{name: "explicit IDs", flag: "--ids=one"},
+			{name: "mixed eligibility", flag: "--ids=one,two,three"},
 			{name: "source", flag: "--from=project1", query: url.Values{"fromResource": {"project1"}, "limit": {"20"}}},
 			{name: "cursor", flag: "--cursor=cursor-limit-one", query: url.Values{"cursor": {"cursor-limit-one"}}},
 		} {
@@ -152,10 +153,16 @@ func TestMailboxReadCLISelectsWorkspaceMessagesAndHidesReceipts(t *testing.T) {
 						if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 							t.Error(err)
 						}
-						if !reflect.DeepEqual(body.IDs, []string{"one"}) || body.WorkID != "work-original" || body.MaxBytes != 1024 {
+						expectedIDs := []string{"one"}
+						items := `[{"messageId":"one","text":"report","complete":true,"canAck":true,"readReceipt":"opaque-secret"}]`
+						if test.flag == "--ids=one,two,three" {
+							expectedIDs = []string{"one", "two", "three"}
+							items = `[{"messageId":"one","text":"report","complete":true,"canAck":true,"readReceipt":"opaque-secret"},{"messageId":"two","complete":true,"canAck":false},{"messageId":"three","complete":false,"canAck":false}]`
+						}
+						if !reflect.DeepEqual(body.IDs, expectedIDs) || body.WorkID != "work-original" || body.MaxBytes != 1024 {
 							t.Errorf("unexpected Workspace read request: %#v", body)
 						}
-						_, _ = fmt.Fprint(w, `{"capability":"mailbox_batch_v1","items":[{"messageId":"one","text":"report","complete":true,"canAck":true,"readReceipt":"opaque-secret"}],"remainingIds":[],"queue":{"waitingTotal":2}}`)
+						_, _ = fmt.Fprintf(w, `{"capability":"mailbox_batch_v1","items":%s,"remainingIds":[],"queue":{"waitingTotal":2}}`, items)
 					default:
 						t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 						http.NotFound(w, r)
@@ -166,6 +173,14 @@ func TestMailboxReadCLISelectsWorkspaceMessagesAndHidesReceipts(t *testing.T) {
 				if err != nil || strings.Contains(output, "opaque-secret") || !strings.Contains(output, `"text": "report"`) ||
 					!strings.Contains(output, `"waitingTotal": 2`) || strings.Contains(output, `"nextCursor": "page-three"`) != (test.query != nil) {
 					t.Fatalf("CLI read contract mismatch: output=%s err=%v", output, err)
+				}
+				var read struct {
+					Items []struct{ AckAfterHandling string }
+				}
+				if err := json.Unmarshal([]byte(output), &read); err != nil || len(read.Items) == 0 ||
+					read.Items[0].AckAfterHandling != "pua message ack --ids='one' --summary='…'" ||
+					strings.Count(output, `"ackAfterHandling"`) != 1 {
+					t.Fatalf("missing per-item ack instruction: %s", output)
 				}
 			})
 		}

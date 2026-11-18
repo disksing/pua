@@ -1039,13 +1039,14 @@ func runMessageRead(args []string) error {
 		Queue      json.RawMessage `json:"queue,omitempty"`
 		NextCursor string          `json:"nextCursor,omitempty"`
 		Items      []struct {
-			MessageID   string `json:"messageId"`
-			Text        string `json:"text,omitempty"`
-			Complete    bool   `json:"complete"`
-			CanAck      bool   `json:"canAck"`
-			Reason      string `json:"reason,omitempty"`
-			BodyDigest  string `json:"bodyDigest,omitempty"`
-			ReadReceipt string `json:"readReceipt,omitempty"`
+			MessageID        string `json:"messageId"`
+			Text             string `json:"text,omitempty"`
+			Complete         bool   `json:"complete"`
+			CanAck           bool   `json:"canAck"`
+			Reason           string `json:"reason,omitempty"`
+			BodyDigest       string `json:"bodyDigest,omitempty"`
+			ReadReceipt      string `json:"readReceipt,omitempty"`
+			AckAfterHandling string `json:"ackAfterHandling,omitempty"`
 		} `json:"items"`
 		RemainingIDs []string `json:"remainingIds"`
 	}
@@ -1053,17 +1054,15 @@ func runMessageRead(args []string) error {
 	if err := client.request(context.Background(), http.MethodPost, path, body, &response); err != nil {
 		return err
 	}
-	eligible := make([]string, 0)
 	for index, item := range response.Items {
-		if item.CanAck && item.ReadReceipt != "" {
-			eligible = append(eligible, item.MessageID)
+		response.Items[index].AckAfterHandling = ""
+		if item.Complete && item.CanAck && item.ReadReceipt != "" {
+			quotedID := strings.ReplaceAll(item.MessageID, "'", `'\''`)
+			response.Items[index].AckAfterHandling = fmt.Sprintf("pua message ack --ids='%s' --summary='…'", quotedID)
 		}
 		response.Items[index].ReadReceipt = ""
 	}
 	response.NextCursor = options.Cursor
-	if len(eligible) > 0 {
-		fmt.Fprintf(os.Stderr, "pua: after completing required work, explicitly confirm: pua message ack --ids=%s --summary='<what was completed>'\n", strings.Join(eligible, ","))
-	}
 	if options.Cursor != "" {
 		fmt.Fprintf(os.Stderr, "pua: next source page: pua message read --cursor=%s\n", options.Cursor)
 	}

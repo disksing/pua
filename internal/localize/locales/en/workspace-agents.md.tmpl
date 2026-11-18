@@ -234,7 +234,7 @@ Turn openers fix the audience and Chat visibility for the entire Turn and carry 
 
 Control commands verify the active formal work. If a notice opens a standalone advisory Turn, end it and await the queued input. Check `currentControl` in `pua turn status` when the Turn is unclear.
 
-During internal work, use the read command in a preview for related results. Confirm completed IDs after handling them. Leave other inputs queued for delivery. Inspect `pua message list` for queue details and History for uncertain deliveries.
+In an internal Turn, use the preview's read command to read a related Agent message in full. After handling it, run that item's `ackAfterHandling` command with the actual result in `--summary`. A successful ack marks it `handled` and prevents another Turn for it. Leave unfinished items queued. In a user Chat Turn, leave queued messages for formal delivery.
 
 New queued messages may arrive as a preview. A preview does not consume the original message, change the audience or authorize responding in the wrong Turn. It may inform whether to continue or end the current work. Choose deliberately:
 - Continue the current work if no switch is needed.

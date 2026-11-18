@@ -1,1 +1,1 @@
-{{if .Compact}}按 AGENTS.md Turn 控制；先查 `pua turn status`，无匹配正式 work 则结束提示轮，等待正式输入。{{else}}这是提示，不是正式输入。先查 `pua turn status`，仅当 currentControl 的 generation、Session、活动正式 Turn/work 匹配时才可使用 yield/notify/finish/cancel-resume。没有匹配时收录提示并结束提示轮，等待单独排队的正式输入；不沿用已结束或来源 work ID，不把业务任务标为完成，不从提示轮创建续接。{{end -}}
+若单独收到此提示，查 `pua turn status`。{{if not .Compact}}currentControl 标明当前轮次。{{end}}独立提示轮直接结束，等待正式消息。

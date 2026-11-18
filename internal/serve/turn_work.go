@@ -15,6 +15,7 @@ import (
 
 	"github.com/disksing/pua/agenthub/protocol"
 	"github.com/disksing/pua/internal/app"
+	"github.com/disksing/pua/internal/localize"
 	"github.com/disksing/pua/internal/workspacepath"
 )
 
@@ -43,6 +44,7 @@ type turnWork struct {
 	Command              *turnWorkCommand                  `json:"command,omitempty"`
 	Notification         *resourceMailboxMessage           `json:"notification,omitempty"`
 	Previews             map[string]bool                   `json:"previews,omitempty"`
+	GroupedPreviews      map[string]string                 `json:"groupedPreviews,omitempty"`
 	PreviewAttempts      map[string]agentHubInboundMessage `json:"previewAttempts,omitempty"`
 	PreviewErrors        map[string]string                 `json:"previewErrors,omitempty"`
 }
@@ -119,7 +121,7 @@ func (f turnWorkFile) canPreview(work *turnWork, messageID string) bool {
 		}
 	}
 	for _, previous := range f.Works {
-		if previous.Previews[messageID] {
+		if previous.Previews[messageID] || previous.GroupedPreviews[messageID] != "" {
 			return false
 		}
 		if _, attempted := previous.PreviewAttempts[messageID]; attempted && previous.ID != work.ID {
@@ -403,8 +405,9 @@ func (m *agentManager) reconcileTurnWorkLocked(ctx context.Context, workspace se
 		resumeID := "resume-" + chatID(parent.ID, child.ID)
 		resumeContext := parent.Context
 		resumeContext.WorkID = resumeID
-		text := fmt.Sprintf("Resume unfinished work. Read `pua history turn show --ref=%s`.\nCheckpoint:\n%s\nIntervening Turn: `pua history turn show --ref=%s`.\nCheck its changes or cancellation and external operation results before continuing; do not repeat completed actions.",
-			parent.History, parent.Checkpoint, child.History)
+		text := localize.MustRender(parent.Context.Language, "turn-resume.md", map[string]string{
+			"Checkpoint": parent.Checkpoint, "ParentHistory": parent.History, "ChildHistory": child.History,
+		})
 		resume := resourceMailboxMessage{ID: resumeID, ResourceID: resource, Text: text, Type: "turn_resume",
 			RequestedMode: resourceMessageModeEnqueue, ProviderContext: &resumeContext,
 			Causation: &resourceMessageCausation{Type: "turn_resume", SourceResourceID: resource, MessageID: parent.ID, TurnReference: parent.History}}
@@ -465,13 +468,9 @@ func (m *agentManager) previewQueuedInput(ctx context.Context, workspace serveWo
 		if err != nil {
 			return err
 		}
-		snapshot := queueSnapshot(mailboxInstanceID(workspace.Path), message.ResourceID, mailbox, &message, "", file)
-		snapshot.IncludesPreviewMessage = true
 		if err := m.reserveAdvisory(ctx, workspace, message.ResourceID, &file, current, client, *work,
 			"preview-"+chatID(work.ID, message.ID), "queue_preview", message.ID,
-			func(language string, compact bool) (string, error) {
-				return localizedQueuePreview(language, compact, message, snapshot)
-			}); err != nil {
+			queuePreviewRenderer(&file, work, current, message, mailbox)); err != nil {
 			return err
 		}
 		return saveTurnWork(workspace.Path, message.ResourceID, file)
@@ -496,11 +495,7 @@ func (m *agentManager) previewQueuedInput(ctx context.Context, workspace serveWo
 		if err != nil {
 			return err
 		}
-		snapshot := queueSnapshot(mailboxInstanceID(workspace.Path), message.ResourceID, mailbox, &message, "", file)
-		snapshot.IncludesPreviewMessage = true
-		text, err := renderWorkspaceAdvisory(workspace, func(language string, compact bool) (string, error) {
-			return localizedQueuePreview(language, compact, message, snapshot)
-		})
+		text, err := renderWorkspaceAdvisory(workspace, queuePreviewRenderer(&file, work, session, message, mailbox))
 		if err != nil {
 			return err
 		}
@@ -619,6 +614,11 @@ func (m *agentManager) handleTurnWork(w http.ResponseWriter, r *http.Request, wo
 	writeJSON(w, result)
 }
 
+func yieldInputSupported(message resourceMailboxMessage) bool {
+	return (message.ProviderContext == nil || message.ProviderContext.Protocol == 1) &&
+		(message.Type != "user_chat_input" || message.Causation != nil && message.Causation.AutomaticChat)
+}
+
 func (m *agentManager) controlTurnWork(ctx context.Context, workspace serveWorkspace, resource string, file *turnWorkFile, command turnWorkCommand) (any, error) {
 	work := file.find(command.WorkID)
 	if work == nil {
@@ -672,8 +672,7 @@ func (m *agentManager) controlTurnWork(ctx context.Context, workspace serveWorks
 			message.RequestedMode == resourceMessageModeInterrupt {
 			return nil, errors.New("select a queued message belonging to this resource")
 		}
-		if (message.ProviderContext != nil && message.ProviderContext.Protocol != 1) ||
-			(message.Type == "user_chat_input" && (message.Causation == nil || !message.Causation.AutomaticChat)) {
+		if !yieldInputSupported(message) {
 			return nil, errors.New("legacy input cannot own a continuation; finish current work before processing it")
 		}
 		work.State, work.TargetID, work.Checkpoint = "yield_requested", message.ID, command.Checkpoint

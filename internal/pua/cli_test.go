@@ -209,7 +209,7 @@ func TestStatusAndMessageCommandsUseOwningServerAndProvenance(t *testing.T) {
 		if !strings.Contains(sent, `"messageId": "msg-test"`) {
 			t.Fatalf("unexpected send response: %s", sent)
 		}
-		if requestBody["text"] != "coordinate now" || requestBody["mode"] != "interrupt" || requestBody["role"] != "agent" {
+		if requestBody["text"] != "coordinate now" || requestBody["mode"] != "enqueue" || requestBody["role"] != "agent" {
 			t.Fatalf("unexpected resource message request: %#v", requestBody)
 		}
 		sender, _ := requestBody["sender"].(map[string]any)

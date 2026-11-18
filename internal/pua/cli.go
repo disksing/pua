@@ -671,7 +671,7 @@ Commands:
 
 func printMessageHelp() {
 	fmt.Print(`Usage:
-  pua message send --to=<resource|user> [--mode=steer|enqueue|interrupt] [--server=<url>] <message>
+  pua message send --to=<resource> [--server=<url>] <message>
   pua message show --id=<message-id> [--server=<url>]
 
   pua message list [--from=<resource>] [--from-workspace=<instance-id>] [--limit=<1-100>] [--cursor=<cursor>] [--server=<url>]
@@ -680,7 +680,7 @@ func printMessageHelp() {
   pua message operation show --id=<operation-id> [--server=<url>]
 
 Commands:
-  pua message send --to=<resource|user> [--mode=steer|enqueue|interrupt] [--server=<url>] <message>
+  pua message send --to=<resource> [--server=<url>] <message>
     When --to is a stable resource id (workspace, scheduler, projectN, or
     projectN.taskM), persist a message in the target resource mailbox through
     the owning pua serve process. steer is the default.

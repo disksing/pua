@@ -1,4 +1,4 @@
-队列预告：{{.MessageID}}，来自{{.Party}}；仍排队，受众不变。
-{{.Queue}}{{if not .Compact}}查 `pua message list`；用 `pua message read --from=<resource>` 或 `--ids=<id,id...>` 读取完整正文。仅确认所选且工作已完成的普通 Agent 输入；不得确认用户、系统、Scheduler、interrupt、续接、投递中或未读消息。预告不消费原消息，也不授权在本轮回复。
-{{end}}{{.Hint}}
+{{.Party}}有 {{.Count}} 条消息排队。继续当前工作即可。{{if .Standalone}}先查 `pua turn status`，若为独立提示轮，请结束本轮等正式消息。{{end}}{{if .Read}}
+与手头工作相关时可提前处理：`pua message read --ids={{.IDs}}`。办完后按读取结果确认。{{end}}{{if .Yield}}
+若要先处理此消息再回来，在安全点执行 `pua turn yield --work={{.WorkID}} --message={{.MessageID}} --checkpoint='已完成事项、下一步和未决操作'`，接受后结束本轮。{{end}}
 {{.Body -}}

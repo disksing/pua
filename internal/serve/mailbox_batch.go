@@ -9,7 +9,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -42,7 +41,7 @@ type mailboxQueueSnapshot struct {
 
 func ordinaryBatchMessage(message resourceMailboxMessage) bool {
 	return message.Role == "agent" && message.Type == "" && message.Causation == nil &&
-		message.Sender != nil && isStablePUAResourceID(message.Sender.ID) &&
+		message.Sender != nil && message.Sender.ID != app.SchedulerResourceID && isStablePUAResourceID(message.Sender.ID) &&
 		message.SenderWorkspaceInstanceID != "" && message.RequestedMode != resourceMessageModeInterrupt
 }
 
@@ -92,15 +91,6 @@ func queueSnapshot(instanceID, resource string, mailbox resourceMailbox, source 
 		}
 	}
 	return snapshot
-}
-
-func queueSnapshotText(snapshot *mailboxQueueSnapshot) string {
-	if snapshot == nil {
-		return ""
-	}
-	return fmt.Sprintf("\nQueue snapshot at %s: waiting=%d, same_source_waiting=%d, batch_eligible_from_source=%d, delivering=%d, interrupting=%d, delivery_unknown=%d; current_excluded=%t, includes_preview_message=%t. Inspect `pua message list`; read complete bodies with `pua message read --from=<resource>`, then explicitly ack selected IDs only after completing their work.",
-		snapshot.SampledAt, snapshot.WaitingTotal, snapshot.SameSourceWaiting, snapshot.BatchEligibleFromSource,
-		snapshot.Delivering, snapshot.Interrupting, snapshot.DeliveryUnknown, snapshot.CurrentExcluded, snapshot.IncludesPreviewMessage)
 }
 
 func sampleMailboxQueue(workspace serveWorkspace, message resourceMailboxMessage) (*mailboxQueueSnapshot, error) {

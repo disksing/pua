@@ -185,7 +185,7 @@ func providerMessageTextWithContext(message resourceMailboxMessage, steer bool) 
 		if c.PreviousResult != "" {
 			context += "\n" + c.PreviousResult
 		}
-		if c.Chat != nil && c.OpenerRole != "user" {
+		if c.Chat != nil && c.OpenerRole != "user" && !c.Concise {
 			if c.Language == localize.SimplifiedChinese {
 				context += fmt.Sprintf("\nChat 状态快照：open=%t，epoch=%d，revision=%d，observedAt=%s；上层=%s。本轮固定可见性不随开关变化；内部工作需用户获知时，开启则用 turn notify 请求独立可见通知，关闭则向上层发必要业务摘要。委派回报义务保留；快照不授予发布资格。",
 					c.Chat.Open, c.Chat.Epoch, c.Chat.Revision, c.Chat.ObservedAt, c.Chat.ParentID)
@@ -194,7 +194,14 @@ func providerMessageTextWithContext(message resourceMailboxMessage, steer bool) 
 					c.Chat.Open, c.Chat.Epoch, c.Chat.Revision, c.Chat.ObservedAt, c.Chat.ParentID)
 			}
 		}
-		context += queueSnapshotText(c.Queue)
+		if queue := c.Queue; !c.Concise && queue != nil {
+			context += fmt.Sprintf("\nQueue snapshot at %s: waiting=%d, same_source_waiting=%d, batch_eligible_from_source=%d, delivering=%d, interrupting=%d, delivery_unknown=%d; current_excluded=%t, includes_preview_message=%t. Inspect `pua message list`; read complete bodies with `pua message read --from=<resource>`, then explicitly ack selected IDs only after completing their work.",
+				queue.SampledAt, queue.WaitingTotal, queue.SameSourceWaiting, queue.BatchEligibleFromSource, queue.Delivering, queue.Interrupting, queue.DeliveryUnknown, queue.CurrentExcluded, queue.IncludesPreviewMessage)
+		} else if queue != nil && queue.WaitingTotal > 0 {
+			context += "\n" + localize.MustRender(c.Language, "queue-notice.md", map[string]any{
+				"Count": queue.WaitingTotal, "Read": !c.ChatVisible && queue.BatchEligibleFromSource > 0,
+			})
+		}
 		return strings.TrimSpace(localize.MustRender(c.Language, "turn-opener.md", map[string]any{
 			"Party":   providerMessageParty(c.OpenerRole, c.OpenerSender, c.Language),
 			"Visible": c.ChatVisible, "WorkID": c.WorkID, "Context": context, "Text": message.Text,
@@ -311,7 +318,7 @@ func providerContextMailboxOpener(workspacePath, resourceID, generationID, sessi
 
 func (m *agentManager) ensureProviderMessageContext(ctx context.Context, workspace serveWorkspace, client *agentHubClient, session agentHubSession, generationID string, message resourceMailboxMessage) (resourceMailboxMessage, error) {
 	if message.ProviderContext != nil {
-		if message.ProviderContext.Protocol == 1 && (message.ProviderContext.Queue == nil || (message.ProviderContext.OpenerRole != "user" && message.ProviderContext.Chat == nil)) &&
+		if message.ProviderContext.Protocol == 1 && (!message.ProviderContext.Concise || message.ProviderContext.Queue == nil || (message.ProviderContext.OpenerRole != "user" && message.ProviderContext.Chat == nil)) &&
 			message.AttemptCount == 0 && message.Status == resourceMessageQueued {
 			queue, err := sampleMailboxQueue(workspace, message)
 			if err != nil {
@@ -322,6 +329,7 @@ func (m *agentManager) ensureProviderMessageContext(ctx context.Context, workspa
 				return resourceMailboxMessage{}, err
 			}
 			return updateMailboxMessage(workspace.Path, message.ID, func(current *resourceMailboxMessage) {
+				current.ProviderContext.Concise = true
 				if current.ProviderContext.Queue == nil {
 					current.ProviderContext.Queue = queue
 				}
@@ -343,7 +351,7 @@ func (m *agentManager) ensureProviderMessageContext(ctx context.Context, workspa
 	// Existing frozen inputs retain their old presentation during upgrades.
 	if message.ActualMode != resourceMessageModeSteer &&
 		(message.Type != "user_chat_input" || (message.Causation != nil && message.Causation.AutomaticChat)) {
-		contextValue.Protocol, contextValue.WorkID = 1, message.ID
+		contextValue.Protocol, contextValue.WorkID, contextValue.Concise = 1, message.ID, true
 		if message.Causation != nil {
 			contextValue.ChatEpoch = message.Causation.ChatEpoch
 			contextValue.ChatVisible = message.Causation.AutomaticChat

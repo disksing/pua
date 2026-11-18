@@ -200,7 +200,7 @@ PUA persists each resource generation under `<workspace>/.pua/runtime/resources/
 
 A ready current generation is automatically slept after 30 minutes of continuous idle when there is no active Turn or approval, pending mailbox delivery, or lifecycle convergence. PUA persists the ready boundary and Stop-confirms the exact AgentHub Session, then retains that same generation and Session as an addressable idle-suspended resource. A later user, agent, system, or Scheduler message normally resumes that exact Session on demand and only delivers after the Session is ready; a stopped current Session observed after a PUA or AgentHub restart follows the same path. Before a queued message starts a new Turn, the Workspace's independent Generation policies can instead replace the current Generation: usage rotation defaults to 20 completed Turns or 120 accumulated active Turn minutes, while inactivity rotation defaults to 24 hours since AgentHub's latest semantic Turn activity. Replacement happens before Resume or delivery, so the same durable mailbox message moves to the successor without waking a stale Session; active-Turn steer is never rotated. Temporary Resume failures use durable exponential backoff from five seconds to five minutes, so polling and Server restarts cannot create a restart storm. With no pending message, a stopped Session stays stopped and no provider work starts. Only a binding/profile change, explicit generation end, resource archive, archived/missing Session, explicit provider/native resume failure, an enabled automatic rotation policy, or another replacement intent archives and retires the generation. Polling and Server restarts do not reset the idle deadline or proactively rotate inactive generations, and resource history remains continuous across generations.
 
-Resource messages use `steer` (default), `enqueue`, or `interrupt`. A supported active Turn receives steer immediately; an unsupported steer is durably downgraded to enqueue. Enqueue waits for a ready boundary. Interrupt first persists its mailbox item, records the exact active Turn, interrupts only that Turn, waits for terminal state, and then opens a new Turn. Already-delivering messages resolve first; otherwise interrupt outranks steer, and steer outranks queued enqueue, with acceptance order preserved inside each class. A live steer or interrupt may therefore bypass older enqueue work. Generation replacement never moves mailbox ownership: delivered steer remains with the old Turn, enqueue waits for the new generation, and interrupt terminates the old Turn before replacement delivery. The periodic reconciler recovers all modes after Server or AgentHub failures. Archived resources reject new messages: items not yet sent become `undeliverable`, while an already-attempted item whose AgentHub outcome cannot be confirmed becomes `delivery_unknown`; both remain queryable by message ID.
+Agent messages queue in acceptance order. Older senders may still specify a mode. The server enqueues their Agent messages. A busy receiver may get a system preview, handle related collaboration in an internal Turn, or leave the input for its own Turn. User and system controls retain their own delivery modes. The mailbox reconciler recovers pending deliveries after restart.
 
 Public work-subject state is `idle`, `working`, `attention_required`, `unavailable`, or `archived`. Waiting is a message state and count, never a Task state: the persisted internal `queued` value is exposed as `waiting`. Promoting a waiting message to the current Turn records `promotedAt` and changes its actual mode to steer on the same durable mailbox item.
 
@@ -230,8 +230,6 @@ pua task history --project=project1 --task=task2
 pua history turn show --ref=<opaque-turn-reference>
 pua history event show --ref=<opaque-event-reference>
 pua message send --to=project1.task2 "Please review the current API design."
-pua message send --to=project1.task2 --mode=enqueue "Handle this in a new Turn."
-pua message send --to=project1.task2 --mode=interrupt "Stop the current approach and investigate this instead."
 pua message show --id=msg-run-0123456789abcdef
 ```
 
@@ -413,7 +411,7 @@ pua task status [--project=<project>] [--task=<task>] [--server=<url>]
 pua task history [--project=<project>] [--task=<task>] [--cursor=<cursor>] [--limit=<n>] [--server=<url>] [--json]
 pua history turn show --ref=<reference> [--server=<url>] [--json]
 pua history event show --ref=<reference> [--server=<url>] [--json]
-pua message send --to=<resource> [--mode=steer|enqueue|interrupt] [--server=<url>] <message>
+pua message send --to=<resource> [--server=<url>] <message>
 pua message show --id=<message-id> [--server=<url>]
 pua task create [<title>] [--project=<project>] [--slug <slug>]
                   [--detail <detail>|--task-markdown <markdown>|--template=<name>]

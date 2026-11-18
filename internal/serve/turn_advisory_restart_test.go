@@ -58,7 +58,7 @@ func TestPiAdvisoryUnknownRecoversAfterManagerRestartWithoutResend(t *testing.T)
 	}
 	advisoryID := file.Advisories[0].ID
 	frozen := *file.Advisories[0].Input
-	if !strings.Contains(frozen.Text, "currentControl") {
+	if !strings.Contains(frozen.Text, "standalone advisory Turn, end it") {
 		t.Fatal("stale guidance did not retain self-contained control rules")
 	}
 	setAdvisoryTestLanguage(t, workspace.Path, "zh-CN")

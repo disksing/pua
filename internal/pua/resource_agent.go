@@ -34,7 +34,7 @@ const (
 	projectStatusUsage              = "usage: pua project status [--project=<project>] [--server=<url>]"
 	taskStatusUsage                 = "usage: pua task status [--project=<project>] [--task=<task>] [--server=<url>]"
 	taskStateUsage                  = "usage: pua task state [--project=<project>] [--task=<task>] [--server=<url>] | pua task state set <waiting|blocked|paused|completed> [--note=<text>] [--project=<project>] [--task=<task>] [--server=<url>]"
-	messageSendUsage                = "usage: pua message send --to=<resource|user> [--mode=steer|enqueue|interrupt] [--server=<url>] <message>"
+	messageSendUsage                = "usage: pua message send --to=<resource> [--server=<url>] <message>"
 	messageShowUsage                = "usage: pua message show --id=<message-id> [--server=<url>]"
 	messageListUsage                = "usage: pua message list [--from=<resource>] [--from-workspace=<instance-id>] [--limit=<1-100>] [--cursor=<cursor>] [--server=<url>]"
 	messageReadUsage                = "usage: pua message read [--ids=<id,id...>|--from=<resource> [--from-workspace=<instance-id>] [--limit=<1-100>]|--cursor=<cursor>] [--max-bytes=<n>] [--server=<url>]"
@@ -146,7 +146,7 @@ func parseMessageServerArgs(args []string, command string) (resourceServerOption
 			return resourceServerOptions{}, errors.New(usage)
 		}
 		if options.Mode == "" {
-			options.Mode = "steer"
+			options.Mode = "enqueue"
 		}
 		if options.Mode != "steer" && options.Mode != "enqueue" && options.Mode != "interrupt" {
 			return resourceServerOptions{}, errors.New("mode must be steer, enqueue, or interrupt")
@@ -507,7 +507,7 @@ func runMessageSend(args []string) error {
 		return runUserMessageSend(client, options, senderID, senderInstanceID)
 	}
 	body := map[string]any{
-		"text": options.Text, "mode": options.Mode, "role": "agent",
+		"text": options.Text, "mode": "enqueue", "role": "agent",
 		"sender":                    map[string]string{"id": senderID, "name": senderID},
 		"senderWorkspaceInstanceId": senderInstanceID,
 	}
@@ -777,21 +777,19 @@ func splitMessageIDs(value string) []string {
 
 func inferCurrentWorkID(client *resourceServerClient, resourceID string) (string, error) {
 	var response struct {
-		Works []struct {
-			ID    string `json:"id"`
-			State string `json:"state"`
-		} `json:"works"`
+		CurrentControl struct {
+			Kind   string `json:"kind"`
+			WorkID string `json:"workId"`
+		} `json:"currentControl"`
 	}
 	path := fmt.Sprintf("/api/workspaces/%s/resources/%s/turn-work", url.PathEscape(client.workspaceID), url.PathEscape(resourceID))
 	if err := client.request(context.Background(), http.MethodGet, path, nil, &response); err != nil {
 		return "", err
 	}
-	for index := len(response.Works) - 1; index >= 0; index-- {
-		if response.Works[index].State == "running" {
-			return response.Works[index].ID, nil
-		}
+	if control := response.CurrentControl; control.Kind == "work" && control.WorkID != "" {
+		return control.WorkID, nil
 	}
-	return "", errors.New("no running PUA work was found")
+	return "", errors.New("no verified active formal work; await formal input")
 }
 
 func runMessageList(args []string) error {

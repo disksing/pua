@@ -1,4 +1,4 @@
-Queue preview: {{.MessageID}}, from {{.Party}}; still queued, audience unchanged.
-{{.Queue}}{{if not .Compact}}Inspect `pua message list`; read complete bodies with `pua message read --from=<resource>` or `--ids=<id,id...>`. Ack only selected ordinary Agent inputs whose work is complete; never ack user, system, Scheduler, interrupt, continuation, in-delivery or unread messages. A preview does not consume the original message or authorize replying in this Turn.
-{{end}}{{.Hint}}
+{{.Count}} queued from {{.Party}}. Continue this work.{{if .Standalone}} Check `pua turn status`. If this is a standalone advisory Turn, end it and await formal input.{{end}}{{if .Read}}
+To handle related work now, run `pua message read --ids={{.IDs}}`. Confirm after completing it.{{end}}{{if .Yield}}
+To take this input first and return, reach a safe point, run `pua turn yield --work={{.WorkID}} --message={{.MessageID}} --checkpoint='completed work, next step, outstanding operations'`, then end this Turn once accepted.{{end}}
 {{.Body -}}

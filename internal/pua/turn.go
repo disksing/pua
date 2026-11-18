@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-const turnUsage = "usage: pua turn status | pua turn <yield|notify|finish|cancel-resume> --work=<opener-work-id> [--message=<queued-id>] [--checkpoint=<text>] [--text=<intent>] [--reason=completed|cancelled]"
+const turnUsage = "usage: pua turn status | pua turn <yield|notify|finish|cancel-resume> [--work=<opener-work-id>] [--message=<queued-id>] [--checkpoint=<text>] [--text=<intent>] [--reason=completed|cancelled]"
 
 func runTurn(args []string) error {
 	if len(args) == 0 || os.Getenv("PUA_CHANNEL") == "dialogue" {
@@ -45,7 +45,7 @@ func runTurn(args []string) error {
 	case "status", "chat":
 		method = http.MethodGet
 	case "yield", "notify", "finish", "cancel-resume":
-		if body["workId"] == "" {
+		if args[0] == "yield" && (body["messageId"] == "" || strings.TrimSpace(body["checkpoint"]) == "") {
 			return errors.New(turnUsage)
 		}
 	default:
@@ -56,6 +56,12 @@ func runTurn(args []string) error {
 		return err
 	}
 	path := fmt.Sprintf("/api/workspaces/%s/resources/%s/turn-work", url.PathEscape(client.workspaceID), url.PathEscape(resource))
+	if method == http.MethodPost && body["workId"] == "" {
+		body["workId"], err = inferCurrentWorkID(client, resource)
+		if err != nil {
+			return err
+		}
+	}
 	if args[0] == "chat" {
 		if body["workId"] == "" {
 			return errors.New("chat history requires --work=<opener-work-id>")

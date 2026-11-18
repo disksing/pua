@@ -325,12 +325,12 @@ func TestMailboxBatchFreezesOpenerAndPreviewCounts(t *testing.T) {
 	fake.mu.Lock()
 	wire := fake.messageInputs[opener.ID]
 	fake.mu.Unlock()
-	if !strings.Contains(wire.Text, "waiting=0") || !strings.Contains(wire.Text, "same_source_waiting=0") ||
-		!strings.Contains(wire.Text, "current_excluded=true") {
-		t.Fatalf("opener queue snapshot missing: %q", wire.Text)
+	if work.Context.Queue == nil || !work.Context.Queue.CurrentExcluded || work.Context.Queue.WaitingTotal != 0 ||
+		strings.Contains(wire.Text, "waiting=") || strings.Contains(wire.Text, "pua message list") {
+		t.Fatalf("incorrect empty queue presentation: %q", wire.Text)
 	}
-	_ = acceptBatchQueued(t, workspace, "project1.task1", "arrives after opener", "project1.task42", runtimeConfig.InstanceID)
-	_ = acceptBatchQueued(t, workspace, "project1.task1", "arrives before preview", "project1.task42", runtimeConfig.InstanceID)
+	first := acceptBatchQueued(t, workspace, "project1.task1", "arrives after opener", "project1.task42", runtimeConfig.InstanceID)
+	second := acceptBatchQueued(t, workspace, "project1.task1", "arrives before preview", "project1.task42", runtimeConfig.InstanceID)
 	reconcileWorkflow(t, manager, workspace, client)
 	fake.mu.Lock()
 	var previews []agentHubInboundMessage
@@ -340,16 +340,14 @@ func TestMailboxBatchFreezesOpenerAndPreviewCounts(t *testing.T) {
 		}
 	}
 	fake.mu.Unlock()
-	if len(previews) == 0 {
-		t.Fatal("queued inputs were not previewed")
+	if len(previews) != 1 {
+		t.Fatalf("expected one grouped preview, got %d", len(previews))
 	}
 	for _, preview := range previews {
-		if !strings.Contains(preview.Text, "waiting=2") || !strings.Contains(preview.Text, "same_source_waiting=2") ||
-			!strings.Contains(preview.Text, "including the previewed message") {
-			t.Fatalf("preview did not freeze queue snapshot: %#v", preview)
+		if !strings.Contains(preview.Text, "2 queued") || !strings.Contains(preview.Text, "pua message read --ids="+first.ID+","+second.ID) {
+			t.Fatalf("wrong grouped preview: %#v", preview)
 		}
 	}
-	_ = work
 }
 
 func TestMailboxBatchAccumulatesReadClaimsAcrossPagesAndRestart(t *testing.T) {

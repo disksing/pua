@@ -305,8 +305,8 @@ func TestResourceMailboxModesAndPriority(t *testing.T) {
 	sender := &agentHubMessageSender{ID: "project1.task2", Name: "project1.task2"}
 
 	first := acceptTestResourceMessage(t, manager, workspace, "project1.task1", "first", resourceMessageModeSteer, sender)
-	if first.Status != resourceMessageDelivered || first.RequestedMode != resourceMessageModeSteer ||
-		first.ActualMode != resourceMessageModeEnqueue || first.DowngradeReason != resourceMessageReasonNoActiveTurn {
+	if first.Status != resourceMessageDelivered || first.RequestedMode != resourceMessageModeEnqueue ||
+		first.ActualMode != resourceMessageModeEnqueue {
 		t.Fatalf("first message did not open a normal Turn: %#v", first)
 	}
 	record, found, err := currentResourceGeneration(workspace.Path, "project1.task1")
@@ -339,8 +339,8 @@ func TestResourceMailboxModesAndPriority(t *testing.T) {
 		t.Fatalf("enqueue entered the active Turn: %#v", enqueued)
 	}
 	steered := acceptTestResourceMessage(t, manager, workspace, "project1.task1", "urgent steer", resourceMessageModeSteer, sender)
-	if steered.Status != resourceMessageDelivered || steered.ActualMode != resourceMessageModeSteer {
-		t.Fatalf("steer did not bypass the queued enqueue: %#v", steered)
+	if steered.Status != resourceMessageQueued || steered.RequestedMode != resourceMessageModeEnqueue {
+		t.Fatalf("Agent steer bypassed the queue: %#v", steered)
 	}
 	promoted, err := manager.promoteWaitingMessage(context.Background(), workspace, enqueued.ID)
 	if err != nil {
@@ -352,7 +352,7 @@ func TestResourceMailboxModesAndPriority(t *testing.T) {
 	}
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
-	if len(fake.messageSteers) != 3 || fake.messageSteers[0] || !fake.messageSteers[1] || !fake.messageSteers[2] {
+	if len(fake.messageSteers) != 2 || fake.messageSteers[0] || !fake.messageSteers[1] {
 		t.Fatalf("AgentHub delivery order/modes mismatch: %#v", fake.messageSteers)
 	}
 	if fake.messageSenders[0] == nil || fake.messageSenders[0].ID != "project1.task2" || fake.messageRoles[0] != "agent" {
@@ -402,8 +402,8 @@ func TestResourceMailboxProviderEnvelopeUsesTurnOpenerAndFreezesLanguage(t *test
 	fake.mu.Unlock()
 
 	inserted, err := manager.acceptResourceMessage(context.Background(), workspace, "project1.task1", resourceMessageRequest{
-		Text: "check this", Mode: resourceMessageModeSteer, Role: "agent",
-		Sender: &agentHubMessageSender{ID: "project1.task347", Name: "project1.task347"}, SenderWorkspaceInstanceID: runtimeConfig.InstanceID,
+		Text: "check this", Mode: resourceMessageModeSteer, Role: "user",
+		Sender: &agentHubMessageSender{Name: "reader"}, SenderWorkspaceInstanceID: runtimeConfig.InstanceID,
 	})
 	if err != nil || inserted.Status != resourceMessageDelivering || inserted.ProviderContext == nil ||
 		inserted.ProviderContext.Language != "en" || inserted.ProviderContext.TurnID != "turn-opener" ||
@@ -411,7 +411,7 @@ func TestResourceMailboxProviderEnvelopeUsesTurnOpenerAndFreezesLanguage(t *test
 		inserted.ProviderContext.OpenerSender.Name != "disksing" || inserted.ProviderContext.OpenerResponse != providerResponseProgressFinal {
 		t.Fatalf("inserted message context = %#v, err=%v", inserted, err)
 	}
-	wantInserted := "Inserted message from agent \"project1.task347\" (Reply via `pua message send --to=project1.task347 '<reply>'`. Current conversation: user \"disksing\" [sender receives: progress + final reply]):\ncheck this"
+	wantInserted := "Inserted message from user \"reader\" (Reply via `pua message send --to=reader '<reply>'`. Current conversation: user \"disksing\" [sender receives: progress + final reply]):\ncheck this"
 	fake.mu.Lock()
 	insertedWire := fake.messageInputs[inserted.ID]
 	fake.mu.Unlock()
@@ -458,12 +458,18 @@ func TestResourceMailboxSteerDowngradeAndInterrupt(t *testing.T) {
 	fake.sessions[session.ID] = session
 	fake.mu.Unlock()
 
-	downgraded := acceptTestResourceMessage(t, manager, workspace, "project1.task1", "wait", resourceMessageModeSteer, sender)
+	downgraded, err := manager.acceptResourceMessage(context.Background(), workspace, "project1.task1", resourceMessageRequest{Text: "wait", Mode: resourceMessageModeSteer, Role: "user"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if downgraded.Status != resourceMessageQueued || downgraded.ActualMode != resourceMessageModeEnqueue ||
 		downgraded.DowngradeReason != resourceMessageReasonSteerUnsupported {
 		t.Fatalf("unsupported steer did not durably downgrade: %#v", downgraded)
 	}
-	interrupted := acceptTestResourceMessage(t, manager, workspace, "project1.task1", "replace current turn", resourceMessageModeInterrupt, sender)
+	interrupted, err := manager.acceptResourceMessage(context.Background(), workspace, "project1.task1", resourceMessageRequest{Text: "replace current turn", Mode: resourceMessageModeInterrupt, Role: "user"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if interrupted.Status != resourceMessageDelivered || interrupted.RequestedMode != resourceMessageModeInterrupt ||
 		interrupted.ActualMode != resourceMessageModeInterrupt || interrupted.InterruptTurnID != "turn-current" {
 		t.Fatalf("interrupt did not wait for termination and open a new Turn: %#v", interrupted)
@@ -517,7 +523,10 @@ func TestResourceMailboxInterruptRetiresReplacingGeneration(t *testing.T) {
 	fake.sessions[session.ID] = session
 	fake.mu.Unlock()
 
-	message := acceptTestResourceMessage(t, manager, workspace, "project1.task1", "interrupt and replace", resourceMessageModeInterrupt, nil)
+	message, err := manager.acceptResourceMessage(context.Background(), workspace, "project1.task1", resourceMessageRequest{Text: "interrupt and replace", Mode: resourceMessageModeInterrupt, Role: "user"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if message.Status != resourceMessageQueued || message.InterruptAt == "" {
 		t.Fatalf("interrupt did not stop at the replacement boundary: %#v", message)
 	}
@@ -731,8 +740,8 @@ func TestResourceServerAPIStatusSendAndMessageQuery(t *testing.T) {
 	if err := json.Unmarshal(sendRecorder.Body.Bytes(), &sent); err != nil {
 		t.Fatal(err)
 	}
-	if sent.MessageID == "" || sent.ResourceID != "project1.task1" || sent.RequestedMode != resourceMessageModeSteer ||
-		sent.ActualMode != resourceMessageModeSteer || sent.Status != "waiting" || !strings.Contains(sent.Reference, sent.MessageID) {
+	if sent.MessageID == "" || sent.ResourceID != "project1.task1" || sent.RequestedMode != resourceMessageModeEnqueue ||
+		sent.ActualMode != resourceMessageModeEnqueue || sent.Status != "waiting" || !strings.Contains(sent.Reference, sent.MessageID) {
 		t.Fatalf("send response mismatch: %#v", sent)
 	}
 

@@ -1,4 +1,1 @@
-Queue ({{if .CurrentExcluded}}excluding this Turn's input{{else}}no current-input exclusion{{end}}; {{if .IncludesPreviewMessage}}including{{else}}excluding{{end}} the previewed message) @{{.SampledAt}}: waiting={{.WaitingTotal}} same_source_waiting={{.SameSourceWaiting}} batch_eligible_from_source={{.BatchEligibleFromSource}} delivering={{.Delivering}} interrupting={{.Interrupting}} delivery_unknown={{.DeliveryUnknown}}
-{{if gt .BatchEligibleFromSource 0}}Batch candidates: inspect `pua message list`.
-{{end}}{{if or (gt .Interrupting 0) (gt .DeliveryUnknown 0)}}Check status/History for interrupting or uncertain delivery.
-{{end -}}
+{{.Count}} queued. Continue this work.{{if .Read}} To handle related Agent messages now, inspect `pua message list`.{{end -}}

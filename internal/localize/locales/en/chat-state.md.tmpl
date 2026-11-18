@@ -1,4 +1,2 @@
-Chat: open={{.Chat.Open}} epoch={{.Chat.Epoch}} revision={{.Chat.Revision}} @{{.Chat.ObservedAt}}; parent={{.Chat.ParentID}}.
-Origin work {{.OriginWorkID}} (audit only): visible={{.Visible}} epoch={{.Epoch}}; audience unchanged, publication rights not restored.
-{{if not .Compact}}For internal formal work, request a separate visible notification with `pua turn notify` when Chat is open; when closed, send necessary business progress to the stable parent. Delegation reports remain required. This snapshot grants no work control or publication eligibility; recheck status before notifying. Reopening never redirects old output.
-{{end}}{{.Hint -}}
+Shared Chat {{if .Chat.Open}}opened{{else}}closed{{end}}. Finish this work for its original audience.{{if not .Visible}}{{if .Chat.Open}} Use `pua turn notify` for necessary user updates.{{else}} Send necessary progress to {{.Chat.ParentID}}.{{end}}{{end}}
+{{.Hint -}}

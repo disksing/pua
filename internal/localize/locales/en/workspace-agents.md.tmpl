@@ -191,7 +191,7 @@ Use stable Project or Task resource ids for collaboration, not Session ids. Refe
 
 ~~~sh
 pua task status --project=<project> --task=<task>
-pua message send --to=<resource> [--mode=steer|enqueue|interrupt] '<message>'
+pua message send --to=<resource> '<message>'
 pua message show --id=<message-id>
 ~~~
 
@@ -220,9 +220,7 @@ EOF
 
 If the current work conflicts with or may affect another agent's work, promptly message the relevant resource's agent to synchronize necessary context, scope, and progress.
 
-- steer: the default. New fixed-audience Turns keep business inputs queued and may receive a separate preview; legacy Turns still insert when supported.
-- enqueue: explicitly request a new Turn.
-- interrupt: stop the current Turn and open a new Turn with this message. Use it only when the direction must change immediately.
+Agent messages queue for delivery. The receiver may get a system preview while busy and normally continues its current work.
 
 Message acceptance does not mean the work is complete. Check the message id, resource status, and History when needed.
 
@@ -234,9 +232,9 @@ Each resource has one Chat shared by all Workspace users, with sender attributio
 
 Turn openers fix the audience and Chat visibility for the entire Turn and carry a stable work ID. Read the current AGENTS.md when a new Turn starts. User Chat Turns automatically publish ordinary progress and final text to shared Chat; reasoning and tool events remain private execution history. For lengthy work, first give a brief, truthful response. Internal Agent, Scheduler and system Turns stay internal. Never use an internal Turn to address users directly; Agent messages remain one-way.
 
-Before using work controls, check `pua turn status`: `currentControl.workId` must identify matching work in the current generation, Session and active formal Turn. Queue previews and Chat state notices are advisories, not formal inputs; their origin work IDs are audit references only. Pi may insert an advisory into the active Turn or start a separate internal Turn at a completion boundary. With no matching formal work, retain the notice and end this Turn to await formal input; never reuse an ended or origin work ID, mark the business task completed, or create a continuation from an advisory. The server waits for the advisory Turn's terminal state before submitting formal input. Advisory delivery, terminal status and `historyRef` are available in status and PUA History.
+Control commands verify the active formal work. If a notice opens a standalone advisory Turn, end it and await the queued input. Check `currentControl` in `pua turn status` when the Turn is unclear.
 
-Queue notices sample six counts and their time: waiting, same_source_waiting, batch_eligible_from_source, delivering, interrupting and delivery_unknown. An all-zero queue line is omitted; absence is not proof of delivery. Inclusion labels distinguish the current input from the previewed original. A batch hint appears only when batch_eligible_from_source is positive; use list/read/ack as above, never infer eligibility from same-source count alone. For interrupted or uncertain delivery, inspect status and History before retrying. Short notices rely on this managed guidance; read AGENTS.md before acting.
+During internal work, use the read command in a preview for related results. Confirm completed IDs after handling them. Leave other inputs queued for delivery. Inspect `pua message list` for queue details and History for uncertain deliveries.
 
 New queued messages may arrive as a preview. A preview does not consume the original message, change the audience or authorize responding in the wrong Turn. It may inform whether to continue or end the current work. Choose deliberately:
 - Continue the current work if no switch is needed.

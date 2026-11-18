@@ -36,7 +36,7 @@ func TestMailboxAckCLIRecoversCommittedRequestAfterLostResponses(t *testing.T) {
 						if workQueries != 1 {
 							t.Error("retry inferred a new work instead of restoring the frozen request")
 						}
-						_, _ = fmt.Fprint(w, `{"works":[{"id":"work-original","state":"running"}]}`)
+						_, _ = fmt.Fprint(w, `{"currentControl":{"kind":"work","workId":"work-original"}}`)
 					case strings.HasSuffix(r.URL.Path, "/messages/ack"):
 						posts++
 						var body map[string]any
@@ -134,7 +134,7 @@ func TestMailboxReadCLISelectsWorkspaceMessagesAndHidesReceipts(t *testing.T) {
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					switch {
 					case strings.HasSuffix(r.URL.Path, "/resources/workspace/turn-work"):
-						_, _ = fmt.Fprint(w, `{"works":[{"id":"work-original","state":"running"}]}`)
+						_, _ = fmt.Fprint(w, `{"currentControl":{"kind":"work","workId":"work-original"}}`)
 					case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/resources/workspace/messages"):
 						query := r.URL.Query()
 						query.Del("status")

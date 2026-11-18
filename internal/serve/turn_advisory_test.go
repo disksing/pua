@@ -240,8 +240,8 @@ func TestChatStateIdleAndRapidChangesDoNotWakeOrReplay(t *testing.T) {
 	}
 	reconcileWorkflow(t, manager, workspace, client)
 	file := workFile(t, workspace)
-	if len(file.Advisories) != 1 || !strings.Contains(file.Advisories[0].Input.Text, "revision=7") ||
-		!strings.Contains(file.Advisories[0].Input.Text, "open=true") {
+	if len(file.Advisories) != 1 || file.Advisories[0].ID != "chat-state-"+chatID(work.ID, "7") ||
+		!strings.Contains(file.Advisories[0].Input.Text, "Shared Chat opened") {
 		t.Fatalf("rapid unsent changes did not coalesce: %+v", file.Advisories)
 	}
 }

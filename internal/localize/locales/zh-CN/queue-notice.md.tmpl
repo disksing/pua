@@ -1,4 +1,1 @@
-{{if .CurrentExcluded}}其余队列（不含本轮输入{{else}}队列（未排除本轮输入{{end}}；{{if .IncludesPreviewMessage}}含{{else}}不含{{end}}本预告原消息）@{{.SampledAt}}：waiting={{.WaitingTotal}} same_source_waiting={{.SameSourceWaiting}} batch_eligible_from_source={{.BatchEligibleFromSource}} delivering={{.Delivering}} interrupting={{.Interrupting}} delivery_unknown={{.DeliveryUnknown}}
-{{if gt .BatchEligibleFromSource 0}}批处理候选：查 `pua message list`。
-{{end}}{{if or (gt .Interrupting 0) (gt .DeliveryUnknown 0)}}中断或未知投递请核对 status / History。
-{{end -}}
+另有 {{.Count}} 条消息排队。继续当前工作即可。{{if .Read}}要顺手处理相关 Agent 消息，可查 `pua message list`。{{end -}}

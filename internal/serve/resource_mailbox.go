@@ -68,6 +68,7 @@ type resourceMailbox struct {
 // AgentHub persists that payload opaquely for history, while this context is
 // only PUA's deterministic retry input.
 type providerMessageContext struct {
+	Concise        bool                   `json:"concise,omitempty"`
 	ParentWork     string                 `json:"parentWork,omitempty"`
 	ParentHistory  string                 `json:"parentHistory,omitempty"`
 	PreviousResult string                 `json:"previousResult,omitempty"`
@@ -466,6 +467,9 @@ func acceptMailboxMessage(workspacePath, resourceID string, request resourceMess
 	role, err := normalizeResourceMessageRole(request.Role)
 	if err != nil {
 		return resourceMailboxMessage{}, err
+	}
+	if role == "agent" {
+		mode = resourceMessageModeEnqueue
 	}
 	text := strings.TrimSpace(request.Text)
 	if text == "" {

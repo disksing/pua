@@ -33,62 +33,27 @@ func setAdvisoryTestLanguage(t *testing.T, root, language string) {
 	}
 }
 
-func TestLocalizedQueueNoticeCountsAndInclusion(t *testing.T) {
+func TestOpenerShowsOnlyActionableQueueContext(t *testing.T) {
 	for _, language := range []string{"en", "zh-CN"} {
 		t.Run(language, func(t *testing.T) {
-			zero, err := localizedQueueSnapshot(language, &mailboxQueueSnapshot{SampledAt: "zero-time"})
-			if err != nil || zero != "" {
-				t.Fatalf("all-zero queue was not omitted: %q %v", zero, err)
+			context := &providerMessageContext{Protocol: 1, Language: language, Concise: true}
+			message := resourceMailboxMessage{ProviderContext: context, Text: "body"}
+			plain := providerMessageTextWithContext(message, false)
+			context.Queue = &mailboxQueueSnapshot{}
+			if providerMessageTextWithContext(message, false) != plain {
+				t.Fatal("empty queue added instructions")
 			}
-			counts := []mailboxQueueSnapshot{
-				{WaitingTotal: 1}, {SameSourceWaiting: 1}, {BatchEligibleFromSource: 1},
-				{Delivering: 1}, {Interrupting: 1}, {DeliveryUnknown: 1},
+			context.Concise = false
+			if !strings.Contains(providerMessageTextWithContext(message, false), "Queue snapshot at") {
+				t.Fatal("legacy retry lost its frozen presentation")
 			}
-			for _, snapshot := range counts {
-				snapshot.SampledAt = "2026-11-16T21:39:39.294572+08:00"
-				text, err := localizedQueueSnapshot(language, &snapshot)
-				if err != nil {
-					t.Fatal(err)
-				}
-				for _, fact := range []string{snapshot.SampledAt, "waiting=", "same_source_waiting=",
-					"batch_eligible_from_source=", "delivering=", "interrupting=", "delivery_unknown="} {
-					if !strings.Contains(text, fact) {
-						t.Fatalf("missing %q in %q", fact, text)
-					}
-				}
-				if strings.Contains(text, "pua message list") != (snapshot.BatchEligibleFromSource > 0) {
-					t.Fatalf("incorrect batch hint: %q", text)
-				}
-				if strings.Contains(text, "History") != (snapshot.Interrupting > 0 || snapshot.DeliveryUnknown > 0) {
-					t.Fatalf("incorrect uncertain-delivery hint: %q", text)
-				}
-			}
-			for _, excluded := range []bool{false, true} {
-				for _, included := range []bool{false, true} {
-					snapshot := &mailboxQueueSnapshot{WaitingTotal: 1, CurrentExcluded: excluded, IncludesPreviewMessage: included}
-					text, err := localizedQueueSnapshot(language, snapshot)
-					if err != nil {
-						t.Fatal(err)
-					}
-					exclusion, inclusion := "no current-input exclusion", "excluding the previewed message"
-					if excluded {
-						exclusion = "excluding this Turn's input"
-					}
-					if included {
-						inclusion = "including the previewed message"
-					}
-					if language == "zh-CN" {
-						exclusion, inclusion = "未排除本轮输入", "；不含本预告原消息"
-						if excluded {
-							exclusion = "不含本轮输入"
-						}
-						if included {
-							inclusion = "；含本预告原消息"
-						}
-					}
-					if !strings.Contains(text, exclusion) || !strings.Contains(text, inclusion) {
-						t.Fatalf("inclusion flags were misrepresented: %+v %q", snapshot, text)
-					}
+			context.Concise = true
+			context.Queue.WaitingTotal, context.Queue.BatchEligibleFromSource = 3, 1
+			for _, visible := range []bool{true, false} {
+				context.ChatVisible = visible
+				text := providerMessageTextWithContext(message, false)
+				if !strings.Contains(text, "3") || strings.Contains(text, "pua message list") == visible || strings.Contains(text, "waiting=") {
+					t.Fatalf("wrong opener for visible=%v: %s", visible, text)
 				}
 			}
 		})
@@ -124,12 +89,10 @@ func TestWorkspaceAdvisoryGuidanceGateAndIdentity(t *testing.T) {
 					ID: "chat-71800545c910e2efe3f4fd2faba371af", Type: "user_chat_input", Role: "agent",
 					Sender: &agentHubMessageSender{Name: "disksing"}, Text: "Keep the original business body.\n\n",
 				}
+				message.Causation = &resourceMessageCausation{AutomaticChat: true}
 				text, err := renderWorkspaceAdvisory(serveWorkspace{Path: root.Root()},
-					func(language string, compact bool) (string, error) {
-						return localizedQueuePreview(language, compact, message, &mailboxQueueSnapshot{
-							WaitingTotal: 1, IncludesPreviewMessage: true, SampledAt: "sample-time",
-						})
-					})
+					queuePreviewRenderer(&turnWorkFile{}, &turnWork{ID: "active", State: "running"},
+						agentHubSession{}, message, resourceMailbox{}))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -137,8 +100,7 @@ func TestWorkspaceAdvisoryGuidanceGateAndIdentity(t *testing.T) {
 				if language == "zh-CN" {
 					party = `用户 "disksing"`
 				}
-				for _, fact := range []string{message.ID, party, "sample-time", "same_source_waiting=0",
-					"batch_eligible_from_source=0", "pua turn status"} {
+				for _, fact := range []string{party, "pua turn yield --work=active --message=" + message.ID, "pua turn status"} {
 					if !strings.Contains(text, fact) {
 						t.Fatalf("missing fact %q in %q", fact, text)
 					}
@@ -146,8 +108,8 @@ func TestWorkspaceAdvisoryGuidanceGateAndIdentity(t *testing.T) {
 				if !strings.HasSuffix(text, message.Text) {
 					t.Fatalf("original body changed: %q", text)
 				}
-				if strings.Contains(text, "pua message read") != (guidance != "current") {
-					t.Fatalf("incorrect guidance fallback: %q", text)
+				if strings.Contains(text, "pua message read") {
+					t.Fatalf("unexpected read hint for user input: %q", text)
 				}
 				after, _ := os.ReadFile(path)
 				if !reflect.DeepEqual(before, after) {
@@ -258,12 +220,11 @@ func TestLocalizedChatAdvisoryAcrossProvidersAndGuidance(t *testing.T) {
 						t.Fatalf("missing Chat notice: %+v", file.Advisories)
 					}
 					advisory := file.Advisories[0]
-					audit, unchanged := "audit only", "audience unchanged"
+					state, audience := "Chat closed", "original audience"
 					if language == "zh-CN" {
-						audit, unchanged = "仅审计", "受众不变"
+						state, audience = "Chat 已关闭", "原受众"
 					}
-					for _, fact := range []string{"open=false", "revision=2", "epoch=1", "project1", work.ID,
-						"visible=false", "epoch=0", audit, unchanged, "pua turn status"} {
+					for _, fact := range []string{state, audience, "project1", "pua turn status"} {
 						if !strings.Contains(advisory.Input.Text, fact) {
 							t.Fatalf("missing %q in %q", fact, advisory.Input.Text)
 						}

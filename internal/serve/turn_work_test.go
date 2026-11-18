@@ -106,7 +106,7 @@ func TestTurnWorkYieldPreviewResumeAndReplay(t *testing.T) {
 	fake.mu.Lock()
 	preview := fake.messageInputs["preview-"+chatID(a.ID, user.ID)]
 	fake.mu.Unlock()
-	if preview.ExpectedTurnID != a.TurnID || !preview.Steer || !strings.Contains(preview.Text, "still queued") {
+	if preview.ExpectedTurnID != a.TurnID || !preview.Steer || !strings.Contains(preview.Text, "pua turn yield --work="+a.ID+" --message="+user.ID) {
 		t.Fatalf("preview not scoped: %+v", preview)
 	}
 	command := turnWorkCommand{Action: "yield", WorkID: a.ID, MessageID: user.ID, Checkpoint: "file changed; test next"}

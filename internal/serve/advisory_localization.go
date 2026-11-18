@@ -1,6 +1,8 @@
 package serve
 
 import (
+	"strings"
+
 	"github.com/disksing/pua/internal/app"
 	"github.com/disksing/pua/internal/localize"
 )
@@ -20,32 +22,49 @@ func renderWorkspaceAdvisory(workspace serveWorkspace, render advisoryRenderer) 
 	return render(language, compact && guidanceErr == nil)
 }
 
-func localizedQueuePreview(language string, compact bool, message resourceMailboxMessage, snapshot *mailboxQueueSnapshot) (string, error) {
+func queuePreviewRenderer(file *turnWorkFile, work *turnWork, session agentHubSession, message resourceMailboxMessage, mailbox resourceMailbox) advisoryRenderer {
+	readIDs := []string{}
+	if batchIneligibleReason(message, *file) == "" {
+		readIDs = append(readIDs, message.ID)
+		for _, other := range mailbox.Messages {
+			if len(readIDs) >= 8 {
+				break
+			}
+			if other.ID == message.ID || other.ResourceID != message.ResourceID || batchIneligibleReason(other, *file) != "" ||
+				other.Sender.ID != message.Sender.ID || other.SenderWorkspaceInstanceID != message.SenderWorkspaceInstanceID ||
+				!file.canPreview(work, other.ID) || work.PreviewAttempts[other.ID].MessageID != "" {
+				continue
+			}
+			readIDs = append(readIDs, other.ID)
+		}
+	}
 	role := message.Role
 	if message.Type == "user_chat_input" {
 		role = "user"
 	}
-	queue, err := localizedQueueSnapshot(language, snapshot)
-	if err != nil {
-		return "", err
+	return func(language string, _ bool) (string, error) {
+		if len(readIDs) > 1 {
+			if work.GroupedPreviews == nil {
+				work.GroupedPreviews = map[string]string{}
+			}
+			for _, id := range readIDs[1:] {
+				work.GroupedPreviews[id] = message.ID
+			}
+		}
+		canAct := work.State == "running" && work.Command == nil && len(session.PendingApprovalIDs) == 0
+		body := message.Text
+		if role != "user" {
+			if excerpt := []rune(body); len(excerpt) > 120 {
+				body = string(excerpt[:120]) + "…"
+			}
+		}
+		return localize.Render(language, "queue-preview.md", map[string]any{
+			"Party": providerMessageParty(role, message.Sender, language), "Count": max(1, len(readIDs)),
+			"Read": canAct && !work.Context.ChatVisible && len(readIDs) > 0, "IDs": strings.Join(readIDs, ","),
+			"Yield":  canAct && role == "user" && work.ParentID == "" && yieldInputSupported(message),
+			"WorkID": work.ID, "MessageID": message.ID, "Standalone": !session.InputCapabilities.TurnScopedSteer, "Body": body,
+		})
 	}
-	hint, err := localize.Render(language, "advisory-hint.md", map[string]any{"Compact": compact})
-	if err != nil {
-		return "", err
-	}
-	return localize.Render(language, "queue-preview.md", map[string]any{
-		"MessageID": message.ID, "Party": providerMessageParty(role, message.Sender, language),
-		"Body": message.Text, "Queue": queue, "Hint": hint, "Compact": compact,
-	})
-}
-
-func localizedQueueSnapshot(language string, snapshot *mailboxQueueSnapshot) (string, error) {
-	if snapshot == nil || snapshot.WaitingTotal == 0 && snapshot.SameSourceWaiting == 0 &&
-		snapshot.BatchEligibleFromSource == 0 && snapshot.Delivering == 0 &&
-		snapshot.Interrupting == 0 && snapshot.DeliveryUnknown == 0 {
-		return "", nil
-	}
-	return localize.Render(language, "queue-notice.md", snapshot)
 }
 
 func localizedChatState(language string, compact bool, snapshot turnChatSnapshot, work turnWork) (string, error) {
@@ -54,7 +73,6 @@ func localizedChatState(language string, compact bool, snapshot turnChatSnapshot
 		return "", err
 	}
 	return localize.Render(language, "chat-state.md", map[string]any{
-		"Chat": snapshot, "OriginWorkID": work.ID, "Visible": work.Context.ChatVisible,
-		"Epoch": work.Context.ChatEpoch, "Compact": compact, "Hint": hint,
+		"Chat": snapshot, "Visible": work.Context.ChatVisible, "Hint": hint,
 	})
 }

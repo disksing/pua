@@ -33,6 +33,12 @@ func TestTurnCLIControlsAndReadsCurrentWork(t *testing.T) {
 					body["messageId"] != "input-b" || body["checkpoint"] != "done\nnext" {
 					t.Errorf("unexpected command: %+v", body)
 				}
+			} else if requests == 4 {
+				_, _ = io.WriteString(w, `{"currentControl":{"kind":"work","workId":"work-a"}}`)
+				return
+			} else if requests == 6 {
+				_, _ = io.WriteString(w, `{"currentControl":{"kind":"advisory"},"works":[{"state":"running","id":"stale"}]}`)
+				return
 			} else if requests == 3 && (r.URL.Query().Get("work") != "work-a" || r.URL.Query().Get("chat") != "true") {
 				t.Error("missing work Chat scope")
 			}
@@ -47,6 +53,10 @@ func TestTurnCLIControlsAndReadsCurrentWork(t *testing.T) {
 		run(t, "turn", "yield", "--work=work-a", "--message=input-b", "--checkpoint=done\nnext")
 		run(t, "turn", "status")
 		run(t, "chat", "show", "--work=work-a")
+		run(t, "turn", "yield", "--message=input-b", "--checkpoint=done\nnext")
+		if _, err := runErr(t, "turn", "yield", "--message=input-b", "--checkpoint=done"); err == nil {
+			t.Fatal("advisory selected stale work")
+		}
 		for _, args := range [][]string{
 			{"turn", "yield"}, {"turn", "finish", "--work=a", "--work=b"},
 			{"turn", "finish", "--work=a", "--unknown=b"},
@@ -55,7 +65,7 @@ func TestTurnCLIControlsAndReadsCurrentWork(t *testing.T) {
 				t.Fatalf("accepted invalid command: %v", args)
 			}
 		}
-		if requests != 3 {
+		if requests != 6 {
 			t.Fatalf("unexpected request count %d", requests)
 		}
 	})

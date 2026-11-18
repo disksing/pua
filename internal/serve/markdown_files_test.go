@@ -198,7 +198,7 @@ func TestLegacyDocumentLinksReadMemoryAfterRetirement(t *testing.T) {
 		}
 	}
 	check("workspace", "workspace.md", "/workspace.md")
-	check("project1", "project1/project.md", "/project1/project.md")
+	check("project1", "project1-editable/project.md", "/project1/project.md")
 	task, err := fixture.workspace.Resource("project1.task1")
 	if err != nil {
 		t.Fatal(err)

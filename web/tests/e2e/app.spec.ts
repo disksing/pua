@@ -5,7 +5,6 @@ const now = "2026-08-10T12:00:00Z";
 interface Harness {
   inputBodies: Array<Record<string, unknown>>;
   taskBodies: Array<Record<string, unknown>>;
-  previewBodies: Array<Record<string, unknown>>;
   settingsBodies: Array<Record<string, unknown>>;
   uploadNames: string[];
   streamRequests: string[];
@@ -20,16 +19,6 @@ interface Harness {
   finishTurn: () => void;
 }
 
-const templates = [
-  {
-    name: "feature-a", title: "Feature A", description: "First template", valid: true, taskTitle: "{{ summary }}",
-    fields: [{ name: "summary", type: "text", label: "Summary", required: true, hasDefault: false }],
-  },
-  {
-    name: "feature-b", title: "Feature B", description: "Second template", valid: true, taskTitle: "{{ summary }}",
-    fields: [{ name: "summary", type: "text", label: "Summary", required: true, hasDefault: false }],
-  },
-];
 
 const longDetailBody = Array.from({ length: 60 }, (_, index) => `Stable detail paragraph ${index + 1}.`).join("\n\n");
 
@@ -80,7 +69,6 @@ function resourceDetail(resource: MockResource) {
     ],
     artifacts: [{ name: "notes.md", path: `${resource.path}/artifacts/notes.md`, type: "file", size: 24 }],
     repos: resource.type === "task" ? [{ name: "pua", worktreePath: `${resource.path}/worktree/pua`, branch: "topic", targetBranch: "master" }] : [],
-    templates: resource?.type === "project" ? templates : [],
   };
 }
 
@@ -174,7 +162,7 @@ function mockSystemInfo(workspaces: Array<{ name: string; path: string }>) {
 }
 
 async function installMockApi(page: Page, lastResourceId = "project1.task1", withWaitingMessage = false, initialTurnRunning = false, startWithoutRuntime = false, extraAgents: string[] = [], initialIdleStatus: "idle" | "idle-suspended" = "idle", settingsRefreshDelayMs = 0, conversationFixture: ConversationFixture = "default"): Promise<Harness> {
-  const harness: Harness = { inputBodies: [], taskBodies: [], previewBodies: [], settingsBodies: [], uploadNames: [], streamRequests: [], treeRequests: 0, agentsBodies: [], uiStateBodies: [], steeredMessageIds: [], schedulerBodies: [], bindingBodies: [], resourceStateBodies: [], markdownBodies: [], finishTurn: () => undefined };
+  const harness: Harness = { inputBodies: [], taskBodies: [], settingsBodies: [], uploadNames: [], streamRequests: [], treeRequests: 0, agentsBodies: [], uiStateBodies: [], steeredMessageIds: [], schedulerBodies: [], bindingBodies: [], resourceStateBodies: [], markdownBodies: [], finishTurn: () => undefined };
   let waitingMessages = withWaitingMessage ? [{ messageId: "msg-waiting", resourceId: "project1.task1", text: "Review the mailbox change now", status: "waiting", acceptedAt: now, requestedMode: "enqueue", actualMode: "enqueue" }] : [];
   const resourceStates: Record<string, { readTurnNumber?: number }> = {};
   let runtimeExists = !startWithoutRuntime;
@@ -534,14 +522,6 @@ async function installMockApi(page: Page, lastResourceId = "project1.task1", wit
       };
       return json(route, createdTask, 201);
     }
-    if (path === "/api/workspaces/ws-test/tasks/preview" && method === "POST") {
-      const body = request.postDataJSON();
-      harness.previewBodies.push(body);
-      const templateName = String(body.templateName || "");
-      await new Promise((resolve) => setTimeout(resolve, templateName === "feature-a" ? 350 : 20));
-      const summary = String((body.templateFields as Record<string, unknown>)?.summary || "Untitled");
-      return json(route, { title: `${templateName}:${summary}`, markdown: `# ${templateName}:${summary}\n`, slug: "", template: { digest: `digest-${templateName}` } });
-    }
     return json(route, { error: `Unhandled mock request: ${method} ${path}` }, 500);
   });
   return harness;
@@ -625,7 +605,7 @@ async function installShellMockApi(page: Page): Promise<ShellHarness> {
       return json(route, {
         ...resource,
         files: [{ name: "spec.md", path: `${resource.path}/spec.md`, content: `# ${resource.title}`, contentHash: `${id}-v1` }],
-        artifacts: [], repos: [], templates: [],
+        artifacts: [], repos: [],
       });
     }
     if (/^\/api\/workspaces\/ws-[ab]\/files$/.test(path)) {
@@ -666,7 +646,6 @@ test("navigates resources and creates a task through the canonical application f
   await page.locator("#projectTree > .resource-row").first().hover();
   await page.getByRole("button", { name: /^New Task in / }).click();
   const createDialog = page.getByRole("dialog", { name: "Create task" });
-  await createDialog.getByRole("button", { name: "Next", exact: true }).click();
   await createDialog.locator('input[name="title"]').fill("Created from baseline");
   await createDialog.getByRole("button", { name: "Next", exact: true }).click();
   await createDialog.locator('textarea[name="detail"]').fill("Playwright isolated task body");
@@ -1782,53 +1761,6 @@ test("keeps resource chat free of AgentHub Session lifecycle controls", async ({
   await expect(page.locator("#agentCloseSessionButton")).toHaveCount(0);
 });
 
-test("switches wizard templates and ignores an older preview response", async ({ page }) => {
-  const harness = await installMockApi(page, "project1");
-  await page.goto("/w/ws-test/r/project1");
-  await page.locator("#projectTree > .resource-row").first().hover();
-  await page.getByRole("button", { name: /^New Task in / }).click();
-
-  const dialog = page.getByRole("dialog", { name: "Create task" });
-  await dialog.getByRole("option", { name: /Feature A/ }).click();
-  await dialog.getByRole("button", { name: "Next", exact: true }).click();
-  // The template generates the title, so the wizard shows the generated value
-  // instead of a title input.
-  await expect(dialog.locator("[data-generated-title]")).toBeVisible();
-  await expect(dialog.locator('input[name="title"]')).toHaveCount(0);
-  await dialog.getByRole("button", { name: "Next", exact: true }).click();
-  await dialog.getByLabel("Summary *").fill("older");
-  await expect.poll(() => harness.previewBodies.filter((body) => body.templateName === "feature-a" && (body.templateFields as Record<string, unknown>)?.summary === "older").length).toBe(1);
-
-  await dialog.getByRole("button", { name: "Back", exact: true }).click();
-  await dialog.getByRole("button", { name: "Back", exact: true }).click();
-  await dialog.getByRole("option", { name: /Feature B/ }).click();
-  await page.getByRole("alertdialog", { name: "Switch template" }).getByRole("button", { name: "Discard" }).click();
-  await dialog.getByRole("button", { name: "Next", exact: true }).click();
-  await dialog.getByRole("button", { name: "Next", exact: true }).click();
-  await dialog.getByLabel("Summary *").fill("newer");
-  await expect.poll(() => harness.previewBodies.filter((body) => body.templateName === "feature-b" && (body.templateFields as Record<string, unknown>)?.summary === "newer").length).toBe(1);
-
-  // The slower feature-a preview response must not overwrite the newer title.
-  await dialog.getByRole("button", { name: "Back", exact: true }).click();
-  await expect(dialog.locator("[data-generated-title]")).toContainText("feature-b:newer");
-  await page.waitForTimeout(450);
-  await expect(dialog.locator("[data-generated-title]")).toContainText("feature-b:newer");
-
-  await dialog.getByRole("button", { name: "Next", exact: true }).click();
-  await dialog.getByRole("button", { name: "Next", exact: true }).click();
-  await expect(dialog.locator("[data-summary]")).toContainText("feature-b:newer");
-  await dialog.getByRole("button", { name: "Create task", exact: true }).click();
-  await expect.poll(() => harness.taskBodies.length).toBe(1);
-  expect(harness.previewBodies.map((body) => body.templateName)).toEqual(expect.arrayContaining(["feature-a", "feature-b"]));
-  expect(harness.taskBodies[0]).toMatchObject({
-    project: "project1",
-    title: "",
-    templateName: "feature-b",
-    templateFields: { summary: "newer" },
-    expectedTemplateDigest: "digest-feature-b",
-  });
-});
-
 test("creates and starts a task with a chosen agent from the wizard", async ({ page }) => {
   const harness = await installMockApi(page, "project1");
   const chatMutations: string[] = [];
@@ -1850,7 +1782,6 @@ test("creates and starts a task with a chosen agent from the wizard", async ({ p
   await page.getByRole("button", { name: /^New Task in / }).click();
 
   const dialog = page.getByRole("dialog", { name: "Create task" });
-  await dialog.getByRole("button", { name: "Next", exact: true }).click();
   await dialog.locator('input[name="title"]').fill("Auto started task");
   await dialog.getByRole("button", { name: "Next", exact: true }).click();
   await dialog.locator('textarea[name="detail"]').fill("Body");
@@ -1889,7 +1820,6 @@ test("anchors the wizard binding menu to its trigger under the Riso theme", asyn
   await page.getByRole("button", { name: /^New Task in / }).click();
 
   const dialog = page.getByRole("dialog", { name: "Create task" });
-  await dialog.getByRole("button", { name: "Next", exact: true }).click();
   await dialog.locator('input[name="title"]').fill("Riso binding anchor");
   await dialog.getByRole("button", { name: "Next", exact: true }).click();
   await dialog.getByRole("button", { name: "Next", exact: true }).click();
@@ -1922,13 +1852,12 @@ test("keeps the Create task wizard usable across desktop and mobile layouts", as
   const dialog = page.getByRole("dialog", { name: "Create task" });
   const wizard = dialog.locator('[data-component-owner="task-wizard"]');
   await expect(wizard).toBeVisible();
-  await expect(dialog.locator(".wizard-steps li")).toHaveCount(4);
+  await expect(dialog.locator(".wizard-steps li")).toHaveCount(3);
   const desktop = await wizard.evaluate((node) => ({
     bodyOverflow: getComputedStyle(node.querySelector(".wizard-body")!).overflowY,
   }));
   expect(desktop).toEqual({ bodyOverflow: "auto" });
 
-  await dialog.getByRole("button", { name: "Next", exact: true }).click();
   const title = dialog.locator('input[name="title"]');
   await title.fill("Responsive local draft");
   await page.setViewportSize({ width: 390, height: 844 });

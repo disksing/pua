@@ -4,7 +4,6 @@
   import { ApiClient } from "../api/client";
   import { puaRoutePath } from "../controllers/route-controller";
   import { RESOURCE_DOCUMENTS, resourceDocumentSavePath } from "../controllers/resource-documents";
-  import type { TaskTemplate } from "./models";
   import FilePreviewModal from "./FilePreviewModal.svelte";
   import Icon from "./Icon.svelte";
   import { clearFilePreviewHandoff, markdownEditorSessions, readFilePreviewHandoff } from "./markdown-editor-session";
@@ -79,14 +78,6 @@
         method: "PUT",
         body: JSON.stringify({ content, expectedContentHash }),
       });
-    }
-    if (nextPath.includes("/templates/")) {
-      const name = nextPath.split("/").pop()?.replace(/\.(md|markdown|mdown|mkdn)$/i, "") || "template";
-      const validation = await client.request<TaskTemplate>(`/api/workspaces/${encodeURIComponent(workspaceId)}/templates/validate`, {
-        method: "POST",
-        body: JSON.stringify({ name, content }),
-      });
-      if (!validation.valid) throw new Error(validation.errors?.[0]?.message || "The task template is invalid.");
     }
     return client.request<FilePreviewModel>(resourceDocumentSavePath(workspaceId, resourceId, nextPath), {
       method: "PUT",

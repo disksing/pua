@@ -1,6 +1,6 @@
 import type { AgentEvent, AgentPanelHeaderModel, ComposerContext, ComposerModel, EventTimelineModel, ResourceMessageStatus, TimelineItem, UploadDialogModel } from "./models/chat";
 import type { ToastModel } from "./models/common";
-import type { CreateDialogModel, TaskTemplate } from "./models/create";
+import type { CreateDialogModel } from "./models/create";
 import type { DetailPanelModel } from "./models/detail";
 import type { SettingsModel } from "./models/settings";
 import type { AppShellModel, DoctorSnapshotModel, ShellDragTarget, ShellResourceItem, ShellStatusPresentation, ShellTreeFilter } from "./models/shell";
@@ -221,7 +221,6 @@ const resourceDetailController = createResourceDetailController({
 });
 const createDialogController = createCreateDialogController({
 	workspaceId: () => controllerState.activeWorkspaceId,
-	templates: (projectId) => controllerState.details[projectId]?.templates || [],
 	request: (path, init) => api(path, init),
 	publish: (model) => publisher.renderCreateDialog(model),
 	toast,
@@ -230,7 +229,6 @@ const createDialogController = createCreateDialogController({
 	onOpen: () => {
 		controllerState.modalEnter = "create";
 	},
-	confirmTemplateSwitch: () => confirmDialog({ title: "Switch template", message: "Discard edited template fields and switch templates?", confirmLabel: "Discard", danger: true }),
 	agents: () => svelteAgentOptions(),
 	agentProfiles: () => (controllerState.config?.agentProfiles || []).map((profile) => ({ key: profile.key, description: profile.description, agentName: profile.agentName })),
 	defaultTaskBinding: (projectId) => {
@@ -1458,14 +1456,6 @@ async function saveMarkdownFileFromDetail(path: string, content: string, expecte
 	const resourceId = controllerState.selectedId;
 	if (!workspaceId || !resourceId || resourceId === "scheduler" || (resourceId === "workspace" && !RESOURCE_DOCUMENTS.some((document) => document.name === path))) throw new Error("No editable resource is selected.");
 	const navigationVersion = controllerState.navigationVersion;
-	if (path.includes("/templates/")) {
-		const name = path.split("/").pop()?.replace(/\.(md|markdown|mdown|mkdn)$/i, "") || "template";
-		const validation = await api<TaskTemplate>(`/api/workspaces/${encodeURIComponent(workspaceId)}/templates/validate`, {
-			method: "POST",
-			body: JSON.stringify({ name, content })
-		});
-		if (!validation.valid) throw new Error(validation.errors?.[0]?.message || "The task template is invalid.");
-	}
 	const saved = await api<WorkspaceFileRecord>(resourceDocumentSavePath(workspaceId, resourceId, path), {
 		method: "PUT",
 		body: JSON.stringify({ content, expectedContentHash })
@@ -2240,7 +2230,6 @@ export function stopPUAApp(): void {
 	userSettingsController = null;
 	agentOperations.reset();
 	clearAgentRenderTimer();
-	createDialogController.dispose();
 	lifecycle?.dispose();
 	lifecycle = null;
 	controllerState.autoRefreshTimer = null;

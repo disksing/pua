@@ -143,8 +143,6 @@ func editableResourceMarkdownPath(workspaceRoot string, resource app.ResourceRes
 		allowed = resourceRel == "." || resource.Project != nil || resource.Task != nil
 	case resourceRel == ".":
 		allowed = false
-	case resource.Project != nil && strings.HasPrefix(pathSlash, "templates/") && !strings.Contains(strings.TrimPrefix(pathSlash, "templates/"), "/"):
-		allowed = true
 	case strings.HasPrefix(pathSlash, "artifacts/"):
 		allowed = true
 	}

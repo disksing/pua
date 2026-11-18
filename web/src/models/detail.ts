@@ -1,4 +1,3 @@
-import type { TaskTemplate } from "./create";
 import type { AgentOption } from "./common";
 import type { GenerationPolicyRecord, SchedulerConfigRecord, StallWatchdogPolicyRecord, WorkspaceUser } from "./workspace";
 
@@ -49,8 +48,6 @@ export interface ResourceDetailModel {
   files?: ResourceFileModel[];
   artifacts?: FileTreeModel[];
   repos?: ResourceRepoModel[];
-  templates?: TaskTemplate[];
-  template?: { name: string; schemaVersion?: number; digest?: string } | null;
   scheduler?: SchedulerConfigRecord;
 }
 

@@ -362,28 +362,23 @@ type CreateProjectInput struct {
 
 // CreateTaskInput contains all typed inputs needed to create a task.
 type CreateTaskInput struct {
-	ProjectID              string
-	Title                  string
-	Detail                 string
-	CompleteMarkdown       string
-	CompleteMarkdownSet    bool
-	TemplateName           string
-	TemplateFields         map[string]any
-	ExpectedTemplateDigest string
-	Slug                   string
-	AgentBinding           AgentBinding
+	ProjectID           string
+	Title               string
+	Detail              string
+	CompleteMarkdown    string
+	CompleteMarkdownSet bool
+	Slug                string
+	AgentBinding        AgentBinding
 }
 
 // TaskPreview is the side-effect-free result of resolving task content and
 // execution settings. It is also the contract shown by web and CLI previews.
 type TaskPreview struct {
-	ProjectID    string              `json:"project"`
-	Title        string              `json:"title"`
-	Slug         string              `json:"slug,omitempty"`
-	Markdown     string              `json:"markdown"`
-	AgentBinding AgentBinding        `json:"agentBinding"`
-	Template     *TaskTemplateSource `json:"template,omitempty"`
-	Warnings     []TemplateIssue     `json:"warnings,omitempty"`
+	ProjectID    string       `json:"project"`
+	Title        string       `json:"title"`
+	Slug         string       `json:"slug,omitempty"`
+	Markdown     string       `json:"markdown"`
+	AgentBinding AgentBinding `json:"agentBinding"`
 }
 
 // ArchiveResult describes an archive operation without relying on printed
@@ -614,46 +609,29 @@ func (w *Workspace) PreviewTask(input CreateTaskInput) (TaskPreview, error) {
 	if err != nil {
 		return TaskPreview{}, &APIError{Operation: "preview task", Kind: "task", Workspace: w.root, ResourceID: parentID, Err: err}
 	}
-	title, markdown, source, warnings, err := w.resolveTaskContent(input)
+	title, markdown, err := w.resolveTaskContent(input)
 	if err != nil {
 		return TaskPreview{}, err
 	}
-	return TaskPreview{ProjectID: parentID, Title: title, Slug: slug, Markdown: markdown, AgentBinding: binding, Template: source, Warnings: warnings}, nil
+	return TaskPreview{ProjectID: parentID, Title: title, Slug: slug, Markdown: markdown, AgentBinding: binding}, nil
 }
 
-func (w *Workspace) resolveTaskContent(input CreateTaskInput) (string, string, *TaskTemplateSource, []TemplateIssue, error) {
-	language, err := workspaceLanguage(w.root)
-	if err != nil {
-		return "", "", nil, nil, err
-	}
-	templateName := strings.TrimSpace(input.TemplateName)
-	if templateName != "" {
-		if strings.TrimSpace(input.Detail) != "" || input.CompleteMarkdownSet {
-			return "", "", nil, nil, &APIError{Operation: "render task template", Kind: "template", Workspace: w.root, ResourceID: input.ProjectID, Err: errors.New("template is mutually exclusive with detail and taskMarkdown")}
-		}
-		result, err := w.RenderTemplate(TemplateRenderInput{ProjectID: input.ProjectID, Name: templateName, Fields: input.TemplateFields, Title: input.Title})
-		if err != nil {
-			return "", "", nil, nil, err
-		}
-		if expected := strings.TrimSpace(input.ExpectedTemplateDigest); expected != "" && expected != result.Digest {
-			issue := templateProblem("template_digest_conflict", fmt.Sprintf("template digest changed: expected %s, got %s", expected, result.Digest), "expectedTemplateDigest", nil)
-			return "", "", nil, nil, &APIError{Operation: "render task template", Kind: "template_conflict", Workspace: w.root, ResourceID: input.ProjectID, Err: &TemplateValidationError{Template: templateName, Issues: []TemplateIssue{issue}}}
-		}
-		source := &TaskTemplateSource{Name: result.TemplateName, SchemaVersion: result.SchemaVersion, Digest: result.Digest}
-		return result.Title, result.Markdown, source, result.Warnings, nil
-	}
-	if len(input.TemplateFields) > 0 || strings.TrimSpace(input.ExpectedTemplateDigest) != "" {
-		return "", "", nil, nil, &APIError{Operation: "create task", Kind: "template", Workspace: w.root, ResourceID: input.ProjectID, Err: errors.New("templateFields and expectedTemplateDigest require templateName")}
-	}
+func (w *Workspace) resolveTaskContent(input CreateTaskInput) (string, string, error) {
 	title := strings.TrimSpace(input.Title)
 	if title == "" {
-		return "", "", nil, nil, &APIError{Operation: "create task", Kind: "task", Workspace: w.root, ResourceID: input.ProjectID, Err: errors.New("title cannot be empty")}
+		return "", "", &APIError{Operation: "create task", Kind: "task", Workspace: w.root, ResourceID: input.ProjectID, Err: errors.New("title cannot be empty")}
 	}
-	markdown := taskMarkdown(title, strings.TrimSpace(input.Detail), language)
 	if input.CompleteMarkdownSet {
-		markdown = input.CompleteMarkdown
+		if strings.TrimSpace(input.Detail) != "" {
+			return "", "", &APIError{Operation: "create task", Kind: "task", Workspace: w.root, ResourceID: input.ProjectID, Err: errors.New("detail and taskMarkdown are mutually exclusive")}
+		}
+		return title, input.CompleteMarkdown, nil
 	}
-	return title, markdown, nil, nil, nil
+	language, err := workspaceLanguage(w.root)
+	if err != nil {
+		return "", "", err
+	}
+	return title, taskMarkdown(title, input.Detail, language), nil
 }
 
 func (w *Workspace) resolveTaskAgentBinding(parent Project, explicit AgentBinding) (AgentBinding, error) {
@@ -694,7 +672,7 @@ func (w *Workspace) createTask(input CreateTaskInput) (Task, error) {
 	if err := readProjectAtDir(parentPath, &parent); err != nil {
 		return Task{}, &APIError{Operation: "create task", Kind: "task", Workspace: w.root, ResourceID: parentID, Err: err}
 	}
-	title, markdown, templateSource, _, err := w.resolveTaskContent(input)
+	title, markdown, err := w.resolveTaskContent(input)
 	if err != nil {
 		return Task{}, err
 	}
@@ -710,7 +688,6 @@ func (w *Workspace) createTask(input CreateTaskInput) (Task, error) {
 	if err != nil {
 		return Task{}, &APIError{Operation: "create task", Kind: "binding", Workspace: w.root, ResourceID: id, Err: err}
 	}
-	task.Template = templateSource
 	language, err := workspaceLanguage(w.root)
 	if err != nil {
 		return Task{}, &APIError{Operation: "create task", Kind: "task", Workspace: w.root, ResourceID: id, Err: err}

@@ -556,7 +556,7 @@ func TestWorkspaceFileLinkAbsolutePathCannotEscapeWorkspace(t *testing.T) {
 	}
 }
 
-func TestCreateTaskMapsTemplateBodyAsCompleteMarkdown(t *testing.T) {
+func TestCreateTaskWritesCompleteMarkdown(t *testing.T) {
 	workspace := t.TempDir()
 	puaWorkspace, err := app.Initialize(workspace, "en")
 	if err != nil {
@@ -571,7 +571,7 @@ func TestCreateTaskMapsTemplateBodyAsCompleteMarkdown(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	body := `{"project":"project1","title":"Template task","taskMarkdown":"# Template task"}`
+	body := `{"project":"project1","title":"Complete task","taskMarkdown":"# Complete task"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/workspaces/workspace-one/tasks", bytes.NewBufferString(body))
 	rec := httptest.NewRecorder()
 	s.createTask(rec, req, "workspace-one")
@@ -583,8 +583,8 @@ func TestCreateTaskMapsTemplateBodyAsCompleteMarkdown(t *testing.T) {
 		t.Fatal(err)
 	}
 	markdown, err := os.ReadFile(filepath.Join(workspace, filepath.FromSlash(resource.Path), app.SpecMarkdownFile))
-	if err != nil || string(markdown) != "# Template task" {
-		t.Fatalf("template body was not written as complete markdown: err=%v content=%q", err, markdown)
+	if err != nil || string(markdown) != "# Complete task" {
+		t.Fatalf("task body was not written as complete markdown: err=%v content=%q", err, markdown)
 	}
 	memory, err := os.ReadFile(filepath.Join(workspace, filepath.FromSlash(resource.Path), app.MemoryMarkdownFile))
 	if err != nil || !strings.Contains(string(memory), "## Chat follow-ups") {

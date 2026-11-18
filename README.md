@@ -8,7 +8,7 @@ The workspace is the source of truth. Contracts are Markdown, structured state i
 
 ## Highlights
 
-- **Transparent local state.** Projects, tasks, resource History, artifacts, templates, and Wiki pages remain inspectable workspace data that can be backed up or repaired without the web UI.
+- **Transparent local state.** Projects, tasks, resource History, artifacts, and Wiki pages remain inspectable workspace data that can be backed up or repaired without the web UI.
 - **Purpose-built agent context.** Durable scope and acceptance criteria are paired with bounded resource History so a new agent can resume without reconstructing the task from an obsolete manual timeline.
 - **Isolated code changes.** Repositories under `repos/` are shared source caches; each coding task records its own branch and worktree under `task.../worktree/`.
 - **Explicit file ownership.** Generated agent instructions allow writes only in the starting resource and its task worktrees, while keeping other Workspace resources read-only.
@@ -268,49 +268,13 @@ Use an absolute destination with `git worktree add`, especially when combining i
 
 Interactive agents are launched through the PUA web UI and AgentHub. A resource-managed conversation has one current generation, addressed by the resource ID and generation ID. AgentHub Session IDs are retained only as provider-correlation facts in durable generation records and history; they are not PUA resource addresses or lifecycle controls. Archiving a resource reconciles its generation with AgentHub and preserves the durable history.
 
-## Task Templates
+## 创建任务
 
-Project-local content templates live in `templates/*.md`. Schema V2 declares a dynamic input form and deterministic title/Markdown rendering; it never chooses whether or how the task runs:
+在 Project 的 `spec.md` 中记录该项目的任务类型、创建时机和正文格式。CLI 创建任务时提供标题，使用 `--detail` 填写简述，或使用 `--task-markdown` 写入完整规格。`--dry-run` 预览规格、slug 和 Agent 绑定。Web 新建任务依次填写标题、详情和启动选项。
 
-When creating a task, prefer an existing suitable project template whenever one is available. When creating a task from a template, preserve all existing template rules by default: do not delete, weaken, bypass, or accidentally override them. Override a particular rule only when the user explicitly asks for that override.
+### 从任务模板升级
 
-```markdown
----
-schema-version: 2
-title: Request or bug
-description: Capture a concrete change.
-task-title: "{{ summary }}"
-fields:
-  - name: summary
-    type: text
-    label: Summary
-    required: true
-  - name: behavior
-    type: textarea
-    label: Expected behavior
-    required: true
-  - name: priority
-    type: select
-    label: Priority
-    options: [low, medium, high]
-  - name: reproduced
-    type: boolean
-    label: Reproduced
-    default: false
----
-# {{ summary }}
-
-{{ behavior }}
-
-Priority: {{ priority }}
-Reproduced: {{ reproduced }}
-```
-
-Field types are `text`, `textarea`, `select`, and `boolean`. Placeholders may only reference declared fields and are replaced once, so template-like text inside a field value stays literal. Unknown properties, fields, placeholders, type mismatches, and missing required values produce stable structured errors. The normalized template bytes have a SHA-256 digest; previewed creates can submit that digest to detect template changes.
-
-Use `pua template list/show/validate/render/create` to inspect and manage templates. `pua template show <name>` defaults to human-readable metadata, every field requirement, diagnostics, and the complete Markdown body. Use `--raw` for the original template file, `--json` for structured template data, or `--schema` for schema metadata and diagnostics; these output modes are mutually exclusive. `pua task create --template=<name> --field name=value` creates from one, while `--dry-run` previews without filesystem side effects. `--fields` accepts a YAML or JSON object and repeated `--field` values override the file. Execution settings are not part of V2 content templates.
-
-Templates without `schema-version` are invalid. Created tasks store only the template name, schema version, and digest in `task.json`; later template edits do not modify them.
+升级前，把仍需使用的任务类型、创建时机和正文格式从旧模板同步到各 Project 的 `spec.md`。新版 Server 启动并取得 Workspace 所有权后，会删除开放和归档 Project 的 `templates/`，清除 Task `task.json` 的 `template` 字段，并更新 Workspace 的托管 `AGENTS.md`。已有任务的 `spec.md` 保留。回退程序版本后，如需恢复旧模板功能的数据，须从升级前备份恢复模板文件和来源字段。
 
 ## Workspace Layout
 
@@ -341,7 +305,6 @@ AgentWorkspace/
     project.json              structured project metadata
     spec.md                   durable project contract
     memory.md                 Agent context and follow-ups
-    templates/                reusable task templates
     artifacts/                project outputs
     task1-first-change/
       AGENTS.md               generated task launch card
@@ -389,7 +352,6 @@ pua project list [--all]
 pua project show [--project=<project>]
 pua project archive [--project=<project>]
 pua project binding set [--project=<project>] (--profile=<name>|--agent=<name>) [--server=<url>]
-pua template list|show|validate|render|create|migrate ...
 
 pua scheduler list [--json]
 pua scheduler show --id=<schedule>
@@ -413,9 +375,8 @@ pua history turn show --ref=<reference> [--server=<url>] [--json]
 pua history event show --ref=<reference> [--server=<url>] [--json]
 pua message send --to=<resource> [--server=<url>] <message>
 pua message show --id=<message-id> [--server=<url>]
-pua task create [<title>] [--project=<project>] [--slug <slug>]
-                  [--detail <detail>|--task-markdown <markdown>|--template=<name>]
-                  [--field <name>=<value>...] [--fields <file>]
+pua task create (<title>|--title <title>) [--project=<project>] [--slug <slug>]
+                  [--detail <detail>|--task-markdown <markdown>]
                   [--profile=<name>|--agent=<name>] [--dry-run] [--json]
 pua task list [--project=<project>] [--all]
 pua task show [--project=<project>] [--task=<task>]
@@ -433,7 +394,7 @@ pua serve [--addr=<address>] [--workspace=<path>]
 
 `pua init` and `pua migrate` accept `--language=en` or `--language=zh-CN`.
 The selected language is stored in `workspace.json` and controls generated Markdown
-templates and PUA-managed `AGENTS.md` prompts. Existing workspaces without a
+scaffolds and PUA-managed `AGENTS.md` prompts. Existing workspaces without a
 language setting default to English. Use `pua migrate --language=zh-CN` (or
 `--language=en`) to switch languages.
 

@@ -13,7 +13,7 @@ import (
 
 const (
 	projectCreateUsage = "usage: pua project create [--slug <slug>] <description>"
-	taskCreateUsage    = "usage: pua task create [<title>] [--project=<project>] [--slug <slug>] [--detail <detail>|--task-markdown <markdown>|--template=<name> [--field <name>=<value>...] [--fields <file>]] [--title <title>] [--profile=<name>|--agent=<name>] [--dry-run] [--json]"
+	taskCreateUsage    = "usage: pua task create (<title>|--title <title>) [--project=<project>] [--slug <slug>] [--detail <detail>|--task-markdown <markdown>] [--profile=<name>|--agent=<name>] [--dry-run] [--json]"
 	taskListUsage      = "usage: pua task list [--project=<project>] [--all]"
 	taskShowUsage      = "usage: pua task show [--project=<project>] [--task=<task>]"
 	taskArchiveUsage   = "usage: pua task archive [--project=<project>] [--task=<task>]"
@@ -65,8 +65,6 @@ func Run(args []string) error {
 		return runTask(args[1:])
 	case "scheduler":
 		return runScheduler(args[1:])
-	case "template":
-		return runTemplate(args[1:])
 	case "agent":
 		return runAgent(args[1:])
 	case "user":
@@ -223,21 +221,13 @@ func runTask(args []string) error {
 				return errors.New("could not infer current project; use pua task create --project=<project> <title>")
 			}
 		}
-		workspace, err := openApplicationWorkspace()
-		if err != nil {
-			return err
-		}
-		var fields map[string]any
-		if options.TemplateName != "" {
-			fields, err = templateFieldValues(workspace, parentID, options.TemplateName, options.FieldsFile, options.Fields)
+		input := appCreateTaskInput(parentID, options.Title, options.Detail, options.TaskMarkdown, options.TaskMarkdownSet, options.Slug)
+		input.AgentBinding = options.Binding
+		if options.DryRun {
+			workspace, err := openApplicationWorkspace()
 			if err != nil {
 				return err
 			}
-		}
-		input := appCreateTaskInput(parentID, options.Title, options.Detail, options.TaskMarkdown, options.TaskMarkdownSet, options.Slug)
-		input.AgentBinding = options.Binding
-		input.TemplateName, input.TemplateFields = options.TemplateName, fields
-		if options.DryRun {
 			preview, err := workspace.PreviewTask(input)
 			if err != nil {
 				return err
@@ -298,7 +288,6 @@ Usage:
   pua project <command>
   pua task <command>
   pua scheduler <command>
-  pua template <command>
   pua agent <command>
   pua user <command>
   pua workspace <command>
@@ -339,10 +328,6 @@ Commands:
   pua scheduler <command>
     Manage time and condition schedules. Subcommands: list, show, add, update,
     remove.
-
-  pua template <command>
-    Manage project-local content templates. Subcommands: list, show, validate,
-    render, create.
 
   pua agent <command>
     Query the AgentHub agent catalog through the owning pua serve process.
@@ -393,8 +378,6 @@ func runHelp(args []string) error {
 		printTaskHelp()
 	case "scheduler":
 		printSchedulerHelp()
-	case "template":
-		printTemplateHelp()
 	case "agent":
 		printAgentHelp()
 	case "user":
@@ -473,7 +456,7 @@ func printProjectHelp() {
 Commands:
   pua project create [--slug <slug>] <description>
     Create the next top-level project directory, including project.json,
-    spec.md, memory.md, artifacts/, templates/, and project-local AGENTS.md. Conversation
+    spec.md, memory.md, artifacts/, and project-local AGENTS.md. Conversation
     history is created lazily through resource History.
     Use --slug <slug> to append a human-readable suffix to the directory name.
     Creation is local and does not create a generation or send a message.
@@ -514,7 +497,7 @@ Commands:
 
 func printTaskHelp() {
 	fmt.Print(`Usage:
-  pua task create [<title>] [--project=<project>] [--slug <slug>] [--detail <detail>|--task-markdown <markdown>|--template=<name> [--field <name>=<value>...] [--fields <file>]] [--title <title>] [--profile=<name>|--agent=<name>] [--dry-run] [--json]
+  pua task create (<title>|--title <title>) [--project=<project>] [--slug <slug>] [--detail <detail>|--task-markdown <markdown>] [--profile=<name>|--agent=<name>] [--dry-run] [--json]
   pua task list [--project=<project>] [--all]
   pua task show [--project=<project>] [--task=<task>]
   pua task archive [--project=<project>] [--task=<task>]
@@ -525,14 +508,15 @@ func printTaskHelp() {
   pua task history [--project=<project>] [--task=<task>] [--cursor=<cursor>] [--limit=<n>] [--server=<url>] [--json]
 
 Commands:
-  pua task create [<title>] [--project=<project>] [--slug <slug>] [--detail <detail>|--task-markdown <markdown>|--template=<name>] [--field <name>=<value>...] [--fields <file>] [--title <title>] [--profile=<name>|--agent=<name>] [--dry-run]
+  pua task create (<title>|--title <title>) [--project=<project>] [--slug <slug>] [--detail <detail>|--task-markdown <markdown>] [--profile=<name>|--agent=<name>] [--dry-run]
     Create the next task under the project in a short taskN/ or taskN-<slug>/
     directory, including task.json, spec.md, memory.md, artifacts/, worktree/,
     and task-local AGENTS.md. Conversation history is created lazily through
     resource History. <title> is written to task.json and shown by task list.
     --detail initializes the Background section in the default spec.md scaffold.
     --task-markdown writes the complete spec.md file and is mutually exclusive
-    with --detail. <project> may be a full id such as project22 or just a number
+    with --detail. --dry-run previews the resolved task as JSON without creating it.
+    <project> may be a full id such as project22 or just a number
     such as 22. When omitted, PUA uses the project containing the current
     working directory. Send the first message separately with pua message
     send; that delivery creates a generation lazily. If CLI output is ambiguous,
@@ -610,25 +594,6 @@ Commands:
 
   pua scheduler remove --id=<schedule>
     Remove a schedule.
-`)
-}
-
-func printTemplateHelp() {
-	fmt.Print(`Usage:
-  pua template list [--project=<project>] [--json]
-  pua template show [--project=<project>] [--json|--raw|--schema] <name>
-  pua template validate [--project=<project>] [<name>|--all] [--json]
-  pua template render [--project=<project>] [--field <name>=<value>...] [--fields <file>] [--title <title>] [--json] <name>
-  pua template create [--project=<project>] [--title=<title>] <name>
-
-Commands:
-  pua template list|show|validate|render|create ...
-    Manage project-local schema V2 content templates. Templates declare typed
-    fields and deterministic title/Markdown rendering. list and validate
-    include invalid templates. show defaults to metadata, field requirements,
-    diagnostics, and the complete Markdown body; use --raw for the original
-    file, --json for structured template data, or --schema for schema metadata
-    and diagnostics. render and task create --dry-run have no side effects.
 `)
 }
 
@@ -788,9 +753,6 @@ type taskCreateOptions struct {
 	TaskMarkdown    string
 	TaskMarkdownSet bool
 	Slug            string
-	TemplateName    string
-	FieldsFile      string
-	Fields          []string
 	DryRun          bool
 	TitleSet        bool
 	JSON            bool
@@ -878,54 +840,6 @@ func parseTaskCreateArgs(args []string) (taskCreateOptions, error) {
 			options.TaskMarkdownSet = true
 			continue
 		}
-		if strings.HasPrefix(arg, "--template=") {
-			if options.TemplateName != "" {
-				return taskCreateOptions{}, errors.New(taskCreateUsage)
-			}
-			options.TemplateName = strings.TrimSpace(strings.TrimPrefix(arg, "--template="))
-			if options.TemplateName == "" {
-				return taskCreateOptions{}, errors.New(taskCreateUsage)
-			}
-			continue
-		}
-		if arg == "--template" {
-			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "--") || options.TemplateName != "" {
-				return taskCreateOptions{}, errors.New(taskCreateUsage)
-			}
-			options.TemplateName = strings.TrimSpace(args[i+1])
-			i++
-			continue
-		}
-		if strings.HasPrefix(arg, "--fields=") {
-			if options.FieldsFile != "" {
-				return taskCreateOptions{}, errors.New(taskCreateUsage)
-			}
-			options.FieldsFile = strings.TrimPrefix(arg, "--fields=")
-			if options.FieldsFile == "" {
-				return taskCreateOptions{}, errors.New(taskCreateUsage)
-			}
-			continue
-		}
-		if arg == "--fields" {
-			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "--") || options.FieldsFile != "" {
-				return taskCreateOptions{}, errors.New(taskCreateUsage)
-			}
-			options.FieldsFile = args[i+1]
-			i++
-			continue
-		}
-		if strings.HasPrefix(arg, "--field=") {
-			options.Fields = append(options.Fields, strings.TrimPrefix(arg, "--field="))
-			continue
-		}
-		if arg == "--field" {
-			if i+1 >= len(args) || strings.HasPrefix(args[i+1], "--") {
-				return taskCreateOptions{}, errors.New(taskCreateUsage)
-			}
-			options.Fields = append(options.Fields, args[i+1])
-			i++
-			continue
-		}
 		if strings.HasPrefix(arg, "--title=") {
 			if options.TitleSet {
 				return taskCreateOptions{}, errors.New(taskCreateUsage)
@@ -969,7 +883,7 @@ func parseTaskCreateArgs(args []string) (taskCreateOptions, error) {
 		}
 		title = append(title, arg)
 	}
-	if len(title) == 0 && options.TemplateName == "" {
+	if len(title) == 0 && !options.TitleSet {
 		return taskCreateOptions{}, errors.New(taskCreateUsage)
 	}
 	if len(title) > 0 && options.TitleSet {
@@ -978,15 +892,8 @@ func parseTaskCreateArgs(args []string) (taskCreateOptions, error) {
 	if !options.TitleSet {
 		options.Title = strings.Join(title, " ")
 	}
-	contentSources := boolCount(options.DetailSet, options.TaskMarkdownSet, options.TemplateName != "")
-	if contentSources > 1 {
-		return taskCreateOptions{}, errors.New("--template, --detail, and --task-markdown are mutually exclusive")
-	}
-	if (options.FieldsFile != "" || len(options.Fields) > 0) && options.TemplateName == "" {
-		return taskCreateOptions{}, errors.New("--field and --fields require --template")
-	}
-	if options.DryRun && options.TemplateName == "" {
-		return taskCreateOptions{}, errors.New("--dry-run currently requires --template")
+	if options.DetailSet && options.TaskMarkdownSet {
+		return taskCreateOptions{}, errors.New("--detail and --task-markdown are mutually exclusive")
 	}
 	return options, nil
 }

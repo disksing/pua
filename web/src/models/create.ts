@@ -8,43 +8,9 @@ export function isValidResourceSlug(value: string): boolean {
   return slug === "" || resourceSlugPattern.test(slug);
 }
 
-export interface TemplateField {
-  name: string;
-  type: "text" | "textarea" | "select" | "boolean";
-  label: string;
-  description?: string;
-  placeholder?: string;
-  required?: boolean;
-  options?: string[];
-  hasDefault?: boolean;
-  default?: string | boolean;
-}
-
-export interface TaskTemplate {
-  name: string;
-  path?: string;
-  title?: string;
-  description?: string;
-  valid: boolean;
-  taskTitle?: string;
-  schemaVersion?: number;
-  digest?: string;
-  errors?: Array<{ message?: string }>;
-  fields?: TemplateField[];
-}
-
-export interface TaskPreview {
-  title: string;
-  markdown: string;
-  slug?: string;
-  template?: { digest?: string };
-}
-
 export interface CreateDraft {
   type: "project" | "task";
   projectId: string;
-  templateName: string;
-  templateFields: Record<string, string | boolean>;
   title: string;
   description: string;
   detail: string;
@@ -62,12 +28,6 @@ export interface CreateDialogModel {
   identity: string;
   workspaceId: string;
   draft: CreateDraft;
-  templates: TaskTemplate[];
-  preview: TaskPreview | null;
-  previewKey: string;
-  previewing: boolean;
-  previewError: string;
-  templateDigest: string;
   submitting: boolean;
   agents: AgentOption[];
   agentProfiles: ResourceAgentProfileModel[];
@@ -76,8 +36,5 @@ export interface CreateDialogModel {
   // only rebinds the created task when the user picks something else.
   defaultTaskBinding: ResourceAgentBindingModel;
   onClose: () => void;
-  onPreview: (draft: CreateDraft) => Promise<void>;
   onSubmit: (draft: CreateDraft) => Promise<void>;
-  previewRequestKey: (draft: CreateDraft) => string;
-  onConfirmTemplateSwitch: () => Promise<boolean>;
 }

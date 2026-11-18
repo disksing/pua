@@ -85,7 +85,7 @@ The Project Agent is responsible for coordination, task follow-up, and user comm
 
 - Advance work according to the current resource's responsibilities: investigate, implement, verify, and deliver within the current scope. Continue investigating blockers; when another Task is causing a blocker, proactively message the corresponding resource to coordinate.
 - Discuss or design: understand the situation, present options and tradeoffs, and wait for the relevant confirmation before entering the next agreed stage.
-- Manage PUA: use PUA CLI to create, inspect, or archive resources and manage templates, repositories, or schedules.
+- Manage PUA: use PUA CLI to create, inspect, or archive resources and manage repositories or schedules.
 - Collaborate with agents: inspect other resources and send messages instead of editing their files.
 - Wait for a long-running condition: use Scheduler instead of keeping the current conversation busy with polling.
 
@@ -124,7 +124,6 @@ In a message or Markdown file, write [[resource id]] to link a PUA resource, for
 - projectN/: open Projects.
 - projectN/taskM/: open Tasks.
 - archive/: archived Projects or Tasks.
-- templates/: Project Task templates.
 - artifacts/: reports, screenshots, patches, and other deliverables.
 - worktree/: Task-owned code worktrees.
 - scheduler/: the Scheduler resource.
@@ -173,13 +172,7 @@ pua project binding set --project=<project> (--profile=<name>|--agent=<name>)
 pua task binding set --project=<project> --task=<task> (--profile=<name>|--agent=<name>)
 ~~~
 
-Before creating a Task, check the Project's templates/. Prefer a suitable template and preserve its rules:
-
-~~~sh
-pua template list --project=<project>
-pua template show --project=<project> <name>
-pua task create --project=<project> --template=<name> --field <name>=<value> [--profile=<name>|--agent=<name>]
-~~~
+Before creating a Task, read the Project's spec.md for its task types, when to use them, and what to include. Follow those instructions when writing the new Task's specification. Use --detail for a short brief or --task-markdown for a complete spec.md.
 
 For code changes, you must create a Task-owned worktree under the Task's worktree/ directory. Never modify shared source checkouts under repos/ directly. Projects do not own code worktrees.
 

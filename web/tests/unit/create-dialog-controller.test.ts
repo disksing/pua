@@ -1,22 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { CreateDialogModel, CreateDraft, TaskPreview, TaskTemplate } from "../../src/components/models";
+import type { CreateDialogModel, CreateDraft } from "../../src/components/models";
 import { createCreateDialogController, DEFAULT_TASK_START_PROMPT } from "../../src/controllers/create-dialog-controller";
-
-const template: TaskTemplate = {
-	name: "feature",
-	title: "Feature",
-	valid: true,
-	taskTitle: "{{ summary }}",
-	fields: [{ name: "summary", label: "Summary", type: "text", required: true }],
-};
 
 interface RequestRecord {
 	path: string;
 	init?: RequestInit;
 }
 
-function harness(responder: (path: string, init?: RequestInit) => unknown | Promise<unknown> = (path) => path.endsWith("/projects") ? { id: "project2" } : { id: "project1.task1" }, templateList: TaskTemplate[] = [template]) {
+function harness(responder: (path: string, init?: RequestInit) => unknown | Promise<unknown> = (path) => path.endsWith("/projects") ? { id: "project2" } : { id: "project1.task1" }) {
 	let published: CreateDialogModel | undefined;
 	const requests: RequestRecord[] = [];
 	const reloadTree = vi.fn().mockResolvedValue(undefined);
@@ -24,7 +16,6 @@ function harness(responder: (path: string, init?: RequestInit) => unknown | Prom
 	const toast = vi.fn();
 	const controller = createCreateDialogController({
 		workspaceId: () => "workspace-a",
-		templates: () => templateList,
 		request: async <T>(path: string, init?: RequestInit): Promise<T> => {
 			requests.push({ path, init });
 			return await responder(path, init) as T;
@@ -34,7 +25,6 @@ function harness(responder: (path: string, init?: RequestInit) => unknown | Prom
 		reloadTree,
 		selectResource,
 		onOpen: vi.fn(),
-		confirmTemplateSwitch: async () => true,
 		agents: () => [{ id: "agent-b", label: "Agent B", summary: "" }],
 		agentProfiles: () => [{ key: "default", agentName: "agent-a" }, { key: "review", agentName: "agent-b" }],
 		defaultTaskBinding: () => ({ kind: "profile", name: "default" }),
@@ -90,67 +80,15 @@ describe("CreateDialogController", () => {
 		expect(test.current().open).toBe(true);
 	});
 
-	it("renders a template before submit and sends the complete Task payload", async () => {
-		const preview: TaskPreview = { title: "Generated title", markdown: "# Generated title\n", template: { digest: "sha256:template" } };
-		const test = harness((path) => path.endsWith("/preview") ? preview : { id: "project1.task1" });
+	it("submits an ordinary task with its title and detail", async () => {
+		const test = harness();
 		test.controller.open("task", "project1");
-		const next: CreateDraft = {
-			...test.current().draft,
-			templateName: "feature",
-			templateFields: { summary: "Generated title" },
-			slug: "generated-title",
-		};
+		await test.current().onSubmit({ ...test.current().draft, title: "Review", detail: "Read the plan", slug: "review" });
 
-		await test.current().onSubmit(next);
-
-		expect(test.requests.map((record) => record.path)).toEqual([
-			"/api/workspaces/workspace-a/tasks/preview",
-			"/api/workspaces/workspace-a/tasks",
-		]);
-		expect(body(test.requests[1])).toEqual({
-			project: "project1",
-			title: "",
-			templateName: "feature",
-			templateFields: { summary: "Generated title" },
-			expectedTemplateDigest: "sha256:template",
-			slug: "generated-title",
-		});
+		expect(test.requests).toHaveLength(1);
+		expect(test.requests[0].path).toBe("/api/workspaces/workspace-a/tasks");
+		expect(body(test.requests[0])).toEqual({ project: "project1", title: "Review", detail: "Read the plan", slug: "review" });
 		expect(test.selectResource).toHaveBeenCalledWith("project1.task1");
-	});
-
-	it("sends the manual title when the template does not generate one", async () => {
-		const plainTemplate: TaskTemplate = {
-			name: "plain",
-			title: "Plain",
-			valid: true,
-			fields: [{ name: "summary", label: "Summary", type: "text", required: true }],
-		};
-		const preview: TaskPreview = { title: "Manual title", markdown: "# Manual title\n", template: { digest: "sha256:plain" } };
-		const test = harness((path) => path.endsWith("/preview") ? preview : { id: "project1.task2" }, [plainTemplate]);
-		test.controller.open("task", "project1");
-		const next: CreateDraft = {
-			...test.current().draft,
-			templateName: "plain",
-			templateFields: { summary: "Some detail" },
-			title: "Manual title",
-		};
-
-		await test.current().onSubmit(next);
-
-		expect(test.requests.map((record) => record.path)).toEqual([
-			"/api/workspaces/workspace-a/tasks/preview",
-			"/api/workspaces/workspace-a/tasks",
-		]);
-		expect(body(test.requests[0]).title).toBe("Manual title");
-		expect(body(test.requests[1])).toEqual({
-			project: "project1",
-			title: "Manual title",
-			templateName: "plain",
-			templateFields: { summary: "Some detail" },
-			expectedTemplateDigest: "sha256:plain",
-			slug: "",
-		});
-		expect(test.selectResource).toHaveBeenCalledWith("project1.task2");
 	});
 
 	it("publishes the agent options and resolved default binding for the start step", () => {
@@ -250,71 +188,5 @@ describe("CreateDialogController", () => {
 		resolveRequest?.({ id: "project1.task1" });
 		await Promise.all([first, second]);
 		expect(test.requests).toHaveLength(1);
-	});
-
-	it("skips the preview request while required template fields are blank", async () => {
-		const test = harness();
-		test.controller.open("task", "project1");
-
-		await test.current().onPreview({ ...test.current().draft, templateName: "feature", templateFields: { summary: "" } });
-
-		expect(test.requests).toHaveLength(0);
-		expect(test.current().previewing).toBe(false);
-		expect(test.current().previewError).toBe("");
-	});
-
-	it("waits for an in-flight preview with the same request before submitting", async () => {
-		const pending: Array<{ resolve: (preview: TaskPreview) => void }> = [];
-		const test = harness((path) => {
-			if (!path.endsWith("/preview")) return { id: "project1.task1" };
-			return new Promise<TaskPreview>((resolve) => pending.push({ resolve }));
-		});
-		test.controller.open("task", "project1");
-		const next: CreateDraft = { ...test.current().draft, templateName: "feature", templateFields: { summary: "Ship it" } };
-
-		const previewPromise = test.current().onPreview(next);
-		await Promise.resolve();
-		expect(test.requests.map((record) => record.path)).toEqual(["/api/workspaces/workspace-a/tasks/preview"]);
-
-		// Submit while the identical preview is still in flight: the submission
-		// must wait for that preview instead of failing on a missing digest.
-		const submitPromise = test.current().onSubmit(next);
-		await Promise.resolve();
-		await Promise.resolve();
-		expect(test.requests).toHaveLength(1);
-
-		pending[0].resolve({ title: "Ship it", markdown: "# Ship it\n", template: { digest: "sha256:template" } });
-		await Promise.all([previewPromise, submitPromise]);
-
-		expect(test.requests.map((record) => record.path)).toEqual([
-			"/api/workspaces/workspace-a/tasks/preview",
-			"/api/workspaces/workspace-a/tasks",
-		]);
-		expect(body(test.requests[1])).toMatchObject({ templateName: "feature", expectedTemplateDigest: "sha256:template" });
-		expect(test.toast).toHaveBeenCalledWith("Task created.");
-	});
-
-	it("aborts superseded preview work and rejects its late response", async () => {
-		const pending: Array<{ resolve: (preview: TaskPreview) => void }> = [];
-		const test = harness((path) => {
-			if (!path.endsWith("/preview")) return {};
-			return new Promise<TaskPreview>((resolve) => pending.push({ resolve }));
-		});
-		test.controller.open("task", "project1");
-		const firstDraft = { ...test.current().draft, templateName: "feature", templateFields: { summary: "older" } };
-		const first = test.current().onPreview(firstDraft);
-		await Promise.resolve();
-		const firstSignal = test.requests[0].init?.signal;
-		const secondDraft = { ...firstDraft, templateFields: { summary: "newer" } };
-		const second = test.current().onPreview(secondDraft);
-		await Promise.resolve();
-
-		expect(firstSignal?.aborted).toBe(true);
-		pending[1].resolve({ title: "Newer", markdown: "# Newer\n" });
-		await second;
-		expect(test.current().preview?.title).toBe("Newer");
-		pending[0].resolve({ title: "Older", markdown: "# Older\n" });
-		await first;
-		expect(test.current().preview?.title).toBe("Newer");
 	});
 });

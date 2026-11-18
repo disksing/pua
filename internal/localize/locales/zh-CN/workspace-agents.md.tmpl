@@ -85,7 +85,7 @@ Project Agent 负责本项目的统筹、任务跟进和用户沟通：
 
 - 按照当前资源的职责分工推进工作：在当前范围内调查、实现、验证并交付；遇到阻塞事项时继续排查，如果阻塞由其他 Task 导致，主动给对应资源发消息协调。
 - 讨论或制定方案：先了解情况，给出方案和取舍，等相关方确认后再进入约定中的下一阶段。
-- PUA 管理工作：使用 PUA CLI 创建、查询或归档资源，管理模板、仓库或调度项。
+- PUA 管理工作：使用 PUA CLI 创建、查询或归档资源，管理仓库或调度项。
 - Agent 协作：查看其他资源并发送消息，不直接修改对方文件。
 - 长时间等待：使用 Scheduler，避免一直占用当前会话轮询。
 
@@ -124,7 +124,6 @@ pua task history --project=<project> --task=<task> --limit=20
 - projectN/：开放 Project；
 - projectN/taskM/：开放 Task；
 - archive/：归档的 Project 或 Task；
-- templates/：Project 的 Task 模板；
 - artifacts/：报告、截图、补丁等交付物；
 - worktree/：Task 专用代码 worktree；
 - scheduler/：Scheduler 资源。
@@ -173,13 +172,7 @@ pua project binding set --project=<project> (--profile=<name>|--agent=<name>)
 pua task binding set --project=<project> --task=<task> (--profile=<name>|--agent=<name>)
 ~~~
 
-创建 Task 前先查看 Project 的 templates/。有合适模板时优先使用，并保留模板中的规则：
-
-~~~sh
-pua template list --project=<project>
-pua template show --project=<project> <name>
-pua task create --project=<project> --template=<name> --field <name>=<value> [--profile=<name>|--agent=<name>]
-~~~
+创建 Task 前阅读 Project 的 spec.md，了解任务类型、创建时机和内容格式，按其中约定编写新 Task 的规格。使用 --detail 提交简述，或使用 --task-markdown 写入完整的 spec.md。
 
 需要修改代码时，必须在 Task 的 worktree/ 目录下创建专用 worktree。不得直接修改 repos/ 中的共享源码目录。Project 本身不管理代码 worktree。
 

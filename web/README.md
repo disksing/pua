@@ -26,18 +26,7 @@ When adding or changing styles, prefer the nearest component module. Promote a r
 
 ### Create dialog composition
 
-The Create dialog keeps one identity-scoped `CreateDraft` while delegating each stable view responsibility to a directly testable component. The split reduced `CreateDialog.svelte` from 263 to 84 lines and its root-owned CSS from 456 to 93 lines.
-
-```text
-CreateDialog (channel subscription, modal lifecycle, draft identity, focus trap, submit orchestration)
-├── ProjectCreateForm (Project description and slug)
-└── TaskCreateForm (Task coordination and preview debounce)
-    ├── TemplatePicker (blank/template selection)
-    ├── TemplateFieldGroup × required/optional (schema field rendering)
-    └── TaskPreview (blank/rendered preview, edit protection, reset and refresh)
-```
-
-Children edit the shared identity-scoped draft through typed props and callbacks; the parent does not mirror their form state. `TaskCreateForm` owns template defaults, switch confirmation, generated-title overrides, and preview scheduling. `TaskPreview` advances unedited Markdown when a newer preview arrives but preserves an actual local edit. HTTP cancellation, stale-response rejection, request payload conversion, and pending-submit deduplication remain in `controllers/create-dialog-controller.ts`.
+创建对话框按当前对话框标识保存一份 `CreateDraft`。`ProjectCreateForm` 编辑 Project 说明和 slug。`TaskWizard` 依次编辑标题与 slug、详情和启动选项。`controllers/create-dialog-controller.ts` 转换请求、去重提交，并在明确选择启动时发送任务的首条消息。
 
 Application state is never rendered by assembling HTML strings or mutating component-owned DOM. `DiffModal.svelte` is the single explicit rich-HTML boundary: Diff2Html converts a backend diff string to its vendor-defined presentation inside a dedicated viewer element. Markdown passes through Marked and DOMPurify before Svelte inserts the sanitized output.
 
@@ -56,7 +45,7 @@ Each panel receives typed `SettingsModel` callbacks and the smallest relevant sh
 | `agent-draft-controller.ts` | Resource-scoped draft restore/persist/prune coordination | Created once over the application draft runtime |
 | `resource-detail-controller.ts` | Resource detail fetch identity and stale-result rejection | Created once over the canonical detail records; requests are accepted only for the captured Workspace, Resource, and generation |
 | `chat-state.ts` and `agent-operation-controller.ts` | Resource history/stream and Turn mutations with keyed pending state; stale operation leases cannot clear newer state | Created once; pending leases are reset during selection changes and application stop |
-| `create-dialog-controller.ts` | Create Project/Task draft conversion, template preview cancellation, submission, and dialog identity | Created once; pending preview is aborted on close and application stop |
+| `create-dialog-controller.ts` | 转换 Project 和 Task 创建请求，管理提交和对话框标识 | 初始化一次 |
 | `settings-controller.ts` and `user-settings-controller.ts` | Settings loading/mutation plus browser-local User identity persistence | Settings state is application-scoped; the User controller and its storage listener are recreated with each application lifecycle |
 | `route-controller.ts` and `pane-layout-controller.ts` | Typed URL projection and persisted desktop/mobile layout state plus per-column text scales | Created once; browser state is applied during startup and callbacks publish immutable snapshots |
 | `shell-projection.ts` | Pure ordering, lock, status, and Project/Task/resource-runtime presentation | Created once with Tree/resource lookup dependencies and a replaceable clock |
@@ -104,7 +93,7 @@ The extraction reduced the stateful roots while retaining the complete behavior 
 
 - One Svelte application root owns every component subtree and therefore one teardown path.
 - `pagehide` stops the controller and unmounts the application root; `pageshow` mounts and starts a fresh application instance.
-- `ResourceScope` owns controller DOM listeners, intervals, animation frames, and custom cleanup. Controller shutdown also closes EventSource, `BroadcastChannel`, and `AudioContext` instances, clears delayed renders and operation leases, aborts pending preview work, and flushes the active draft.
+- `ResourceScope` owns controller DOM listeners, intervals, animation frames, and custom cleanup. Controller shutdown also closes EventSource, `BroadcastChannel`, and `AudioContext` instances, clears delayed renders and operation leases, and flushes the active draft.
 - Components release subscriptions, viewport timers, request controllers, streams, and upload XHRs from their Svelte teardown paths.
 - Late HTTP responses, stream events, and send acknowledgements are rejected after their identity or generation changes.
 

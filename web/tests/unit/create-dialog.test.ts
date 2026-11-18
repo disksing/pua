@@ -3,26 +3,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import CreateDialog from "../../src/components/CreateDialog.svelte";
 import { createModelChannel } from "../../src/components/model-channel";
-import type { CreateDialogModel, TaskTemplate } from "../../src/components/models";
+import type { CreateDialogModel } from "../../src/components/models";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
   while (cleanups.length) await cleanups.pop()?.();
   document.body.replaceChildren();
-  vi.useRealTimers();
 });
-
-const featureTemplate: TaskTemplate = {
-  name: "feature-a",
-  title: "Feature A",
-  description: "First template",
-  valid: true,
-  taskTitle: "{{ summary }}",
-  fields: [
-    { name: "summary", label: "Summary", type: "text", required: true },
-    { name: "notes", label: "Notes", type: "textarea", required: false },
-  ],
-};
 
 function model(overrides: Partial<CreateDialogModel> = {}): CreateDialogModel {
   return {
@@ -30,15 +17,13 @@ function model(overrides: Partial<CreateDialogModel> = {}): CreateDialogModel {
     identity: "dialog-1:task:project1",
     workspaceId: "workspace-a",
     draft: {
-      type: "task", projectId: "project1", templateName: "", templateFields: {}, title: "",
+      type: "task", projectId: "project1", title: "",
       description: "", detail: "", slug: "",
       startAfterCreate: false, startBinding: { kind: "profile", name: "" }, startPrompt: "Default prompt.",
     },
-    templates: [], preview: null, previewKey: "", previewing: false,
-    previewError: "", templateDigest: "", submitting: false,
+    submitting: false,
     agents: [], agentProfiles: [], defaultTaskBinding: { kind: "profile", name: "default" },
-    onClose: vi.fn(), onPreview: vi.fn(), onSubmit: vi.fn(),
-    previewRequestKey: (draft) => JSON.stringify(draft), onConfirmTemplateSwitch: async () => true,
+    onClose: vi.fn(), onSubmit: vi.fn(),
     ...overrides,
   };
 }
@@ -61,15 +46,14 @@ async function advance(target: HTMLElement): Promise<void> {
 }
 
 describe("CreateDialog task wizard", () => {
-  it("walks a blank task through the steps and submits the complete draft", async () => {
+  it("walks a task through the steps and submits the complete draft", async () => {
     const onSubmit = vi.fn().mockResolvedValue(undefined);
-    const { target } = mountDialog(model({ onSubmit, templates: [featureTemplate] }));
+    const { target } = mountDialog(model({ onSubmit }));
     await tick();
 
-    expect(target.querySelectorAll(".wizard-steps li")).toHaveLength(4);
-    expect(target.querySelector(".wizard-steps li.active")?.textContent).toContain("Template");
+    expect(target.querySelectorAll(".wizard-steps li")).toHaveLength(3);
+    expect(target.querySelector(".wizard-steps li.active")?.textContent).toContain("Title & slug");
 
-    await advance(target); // template (blank) -> title & slug
     const title = target.querySelector<HTMLInputElement>('input[name="title"]')!;
     expect(nextButton(target).disabled).toBe(true);
     title.value = "Write launch notes";
@@ -97,46 +81,6 @@ describe("CreateDialog task wizard", () => {
     });
   });
 
-  it("hides the manual title input when the template generates the title", async () => {
-    const { target } = mountDialog(model({
-      templates: [featureTemplate],
-      preview: { title: "feature-a:Ship it", markdown: "# feature-a:Ship it\n" },
-      previewKey: "key",
-      previewRequestKey: () => "key",
-    }));
-    await tick();
-
-    target.querySelectorAll<HTMLButtonElement>('.template-cards [role="option"]')[1].click();
-    await tick();
-    await advance(target); // -> title & slug
-
-    expect(target.querySelector('input[name="title"]')).toBeNull();
-    expect(target.querySelector("[data-generated-title]")?.textContent).toContain("feature-a:Ship it");
-    expect(nextButton(target).disabled).toBe(false);
-  });
-
-  it("gates the fields step on required template fields", async () => {
-    const { target } = mountDialog(model({ templates: [featureTemplate] }));
-    await tick();
-
-    target.querySelectorAll<HTMLButtonElement>('.template-cards [role="option"]')[1].click();
-    await tick();
-    await advance(target); // -> title & slug (generated)
-    await advance(target); // -> template fields
-
-    expect(target.querySelector('[aria-label="Required template fields"] input')).toBeTruthy();
-    expect(target.querySelector('[aria-label="Optional template fields"] textarea')).toBeTruthy();
-    expect(nextButton(target).disabled).toBe(true);
-    expect(target.querySelector("[data-missing-required]")?.textContent).toContain("Summary");
-
-    const summary = target.querySelector<HTMLInputElement>('[aria-label="Required template fields"] input')!;
-    summary.value = "Ship it";
-    summary.dispatchEvent(new InputEvent("input", { bubbles: true }));
-    await tick();
-    expect(nextButton(target).disabled).toBe(false);
-    expect(target.querySelector("[data-missing-required]")).toBeNull();
-  });
-
   it("preselects the default binding and requires a prompt for create-and-start", async () => {
     const { target } = mountDialog(model({
       defaultTaskBinding: { kind: "profile", name: "default" },
@@ -145,7 +89,6 @@ describe("CreateDialog task wizard", () => {
     }));
     await tick();
 
-    await advance(target); // -> title
     const title = target.querySelector<HTMLInputElement>('input[name="title"]')!;
     title.value = "Auto start";
     title.dispatchEvent(new InputEvent("input", { bubbles: true }));
@@ -178,7 +121,6 @@ describe("CreateDialog task wizard", () => {
     const first = model();
     const { channel, target } = mountDialog(first);
     await tick();
-    await advance(target); // -> title & slug
 
     const input = target.querySelector<HTMLInputElement>('input[name="title"]')!;
     input.value = "Local task draft";
@@ -200,7 +142,6 @@ describe("CreateDialog task wizard", () => {
     const first = model();
     const { channel, target } = mountDialog(first);
     await tick();
-    await advance(target);
     const input = target.querySelector<HTMLInputElement>('input[name="title"]')!;
     input.value = "Unsaved local draft";
     input.dispatchEvent(new InputEvent("input", { bubbles: true }));
@@ -218,7 +159,6 @@ describe("CreateDialog task wizard", () => {
   it("navigates backwards without losing entered values", async () => {
     const { target } = mountDialog(model());
     await tick();
-    await advance(target);
     const title = target.querySelector<HTMLInputElement>('input[name="title"]')!;
     title.value = "Remember me";
     title.dispatchEvent(new InputEvent("input", { bubbles: true }));

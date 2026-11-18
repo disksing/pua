@@ -62,7 +62,7 @@
   });
 
   function cloneDraft(value: CreateDraft): CreateDraft {
-    return { ...value, templateFields: { ...value.templateFields }, startBinding: { ...value.startBinding } };
+    return { ...value, startBinding: { ...value.startBinding } };
   }
 
   async function submit(event: SubmitEvent): Promise<void> {

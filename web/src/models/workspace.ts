@@ -1,4 +1,3 @@
-import type { TaskTemplate } from "./create";
 import type { FileTreeModel, ResourceFileModel, ResourceRepoModel } from "./detail";
 
 export interface ResourceRecord {
@@ -18,8 +17,6 @@ export interface ResourceRecord {
   files?: ResourceFileModel[];
   artifacts?: FileTreeModel[];
   repos?: ResourceRepoModel[];
-  templates?: TaskTemplate[];
-  template?: { name: string; schemaVersion?: number; digest?: string } | null;
   wiki?: { exists?: boolean; error?: string; entries?: FileTreeModel[] };
   scheduler?: SchedulerConfigRecord;
   runtime?: ResourceRuntime;

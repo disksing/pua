@@ -342,9 +342,6 @@ func Main(args []string) error {
 	if err := s.acquireConfiguredWorkspaceLocks(); err != nil {
 		return err
 	}
-	if err := s.ensureConfiguredResourceRuntimes(); err != nil {
-		return err
-	}
 	puaHandler, err := s.httpHandler()
 	if err != nil {
 		return err
@@ -386,6 +383,10 @@ func Main(args []string) error {
 	if !agentHubSettings.Connected || !agentHubSettings.Compatible {
 		_ = httpServer.Close()
 		return fmt.Errorf("validate AgentHub configuration: %s", agentHubSettings.Error)
+	}
+	if err := s.ensureConfiguredResourceRuntimes(); err != nil {
+		_ = httpServer.Close()
+		return err
 	}
 	lifecycleContext, cancelLifecycle := context.WithCancel(signalContext)
 	defer func() {
@@ -789,8 +790,6 @@ func (s *server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.createTask(w, r, id)
-	case "templates":
-		s.handleTemplates(w, r, id, parts[2:])
 	case "archive":
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -1148,15 +1147,12 @@ func (s *server) createProject(w http.ResponseWriter, r *http.Request, id string
 }
 
 type createTaskRequest struct {
-	Project                string         `json:"project"`
-	Title                  string         `json:"title"`
-	Detail                 string         `json:"detail"`
-	TaskMarkdown           *string        `json:"taskMarkdown"`
-	Description            string         `json:"description"`
-	TemplateName           string         `json:"templateName"`
-	TemplateFields         map[string]any `json:"templateFields"`
-	ExpectedTemplateDigest string         `json:"expectedTemplateDigest"`
-	Slug                   string         `json:"slug"`
+	Project      string  `json:"project"`
+	Title        string  `json:"title"`
+	Detail       string  `json:"detail"`
+	TaskMarkdown *string `json:"taskMarkdown"`
+	Description  string  `json:"description"`
+	Slug         string  `json:"slug"`
 }
 
 func decodeCreateTaskRequest(r *http.Request) (createTaskRequest, error) {
@@ -1172,16 +1168,12 @@ func decodeCreateTaskRequest(r *http.Request) (createTaskRequest, error) {
 	if body.TaskMarkdown != nil && strings.TrimSpace(body.Detail) != "" {
 		return body, errors.New("detail and taskMarkdown are mutually exclusive")
 	}
-	if strings.TrimSpace(body.TemplateName) != "" && (body.TaskMarkdown != nil || strings.TrimSpace(body.Detail) != "") {
-		return body, errors.New("templateName is mutually exclusive with detail and taskMarkdown")
-	}
 	return body, nil
 }
 
 func createTaskInputFromRequest(body createTaskRequest) app.CreateTaskInput {
 	input := app.CreateTaskInput{
 		ProjectID: body.Project, Title: body.Title, Detail: body.Detail, Slug: body.Slug,
-		TemplateName: body.TemplateName, TemplateFields: body.TemplateFields, ExpectedTemplateDigest: body.ExpectedTemplateDigest,
 	}
 	if body.TaskMarkdown != nil {
 		input.CompleteMarkdown, input.CompleteMarkdownSet = *body.TaskMarkdown, true
@@ -1207,11 +1199,7 @@ func (s *server) createTask(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	result, err := puaWorkspace.CreateTask(createTaskInputFromRequest(body))
 	if err != nil {
-		status := http.StatusBadRequest
-		if app.IsKind(err, "template_conflict") {
-			status = http.StatusConflict
-		}
-		writeError(w, err, status)
+		writeError(w, err, http.StatusBadRequest)
 		return
 	}
 	writeJSON(w, result)
@@ -1239,89 +1227,6 @@ func (s *server) previewTask(w http.ResponseWriter, r *http.Request, id string) 
 		return
 	}
 	writeJSON(w, result)
-}
-
-func (s *server) handleTemplates(w http.ResponseWriter, r *http.Request, id string, parts []string) {
-	workspace, err := s.workspace(id)
-	if err != nil {
-		writeError(w, err, http.StatusBadRequest)
-		return
-	}
-	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
-	if err != nil {
-		writeError(w, err, http.StatusBadRequest)
-		return
-	}
-	projectID := strings.TrimSpace(r.URL.Query().Get("project"))
-	if len(parts) == 0 {
-		if r.Method != http.MethodGet {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		result, err := puaWorkspace.Templates(projectID)
-		if err != nil {
-			writeError(w, err, http.StatusBadRequest)
-			return
-		}
-		writeJSON(w, map[string]any{"templates": result})
-		return
-	}
-	if len(parts) == 1 && parts[0] == "validate" {
-		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		var body struct {
-			Name    string `json:"name"`
-			Content string `json:"content"`
-		}
-		decoder := json.NewDecoder(r.Body)
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&body); err != nil {
-			writeError(w, err, http.StatusBadRequest)
-			return
-		}
-		writeJSON(w, puaWorkspace.ValidateTemplateContent(body.Name, body.Content))
-		return
-	}
-	name := parts[0]
-	if len(parts) == 1 {
-		if r.Method != http.MethodGet {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		result, err := puaWorkspace.Template(projectID, name)
-		if err != nil {
-			writeError(w, err, http.StatusNotFound)
-			return
-		}
-		writeJSON(w, result)
-		return
-	}
-	if len(parts) == 2 && parts[1] == "render" {
-		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-		var body struct {
-			Fields map[string]any `json:"fields"`
-			Title  string         `json:"title"`
-		}
-		decoder := json.NewDecoder(r.Body)
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&body); err != nil {
-			writeError(w, err, http.StatusBadRequest)
-			return
-		}
-		result, err := puaWorkspace.RenderTemplate(app.TemplateRenderInput{ProjectID: projectID, Name: name, Fields: body.Fields, Title: body.Title})
-		if err != nil {
-			writeError(w, err, http.StatusBadRequest)
-			return
-		}
-		writeJSON(w, result)
-		return
-	}
-	http.NotFound(w, r)
 }
 
 func (s *server) archiveResource(w http.ResponseWriter, r *http.Request, id string) {
@@ -1798,6 +1703,9 @@ func (s *server) ensureConfiguredResourceRuntimes() error {
 		puaWorkspace, err := app.OpenWorkspace(workspace.Path)
 		if err != nil {
 			return fmt.Errorf("open Workspace %s for resource runtime: %w", workspace.ID, err)
+		}
+		if err := puaWorkspace.RemoveLegacyTaskTemplates(); err != nil {
+			return fmt.Errorf("clean up legacy task templates in Workspace %s: %w", workspace.ID, err)
 		}
 		if _, err := puaWorkspace.EnsureResourceRuntime(); err != nil {
 			return fmt.Errorf("initialize Workspace %s resource runtime: %w", workspace.ID, err)
@@ -2549,15 +2457,6 @@ func writeError(w http.ResponseWriter, err error, status int) {
 	var resourceErr *resourceAPIError
 	if errors.As(err, &resourceErr) {
 		payload["code"] = resourceErr.Code
-	}
-	var validation *app.TemplateValidationError
-	if errors.As(err, &validation) {
-		payload["code"] = "template_validation"
-		payload["template"] = validation.Template
-		payload["issues"] = validation.Issues
-	}
-	if app.IsKind(err, "template_conflict") {
-		payload["code"] = "template_digest_conflict"
 	}
 	_ = json.NewEncoder(w).Encode(payload)
 }

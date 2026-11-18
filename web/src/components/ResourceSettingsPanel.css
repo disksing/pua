@@ -294,33 +294,6 @@
   width: 100%;
 }
 
-/* Template rows merge into the grouped list: the container owns the border
-   and radius, rows are separated by hairlines like other settings rows. */
-.resource-settings-template-list {
-  display: grid;
-}
-
-.resource-settings-template-list .template-row {
-  background: transparent;
-  border: 0;
-  border-radius: 0;
-}
-
-.resource-settings-template-list .template-row + .template-row {
-  border-top: 1px solid var(--line-soft, var(--line-soft));
-}
-
-.resource-settings-template-list .template-row:hover {
-  background: var(--bg, var(--bg));
-}
-
-.resource-settings-template-list .template-row.invalid {
-  color: var(--red, var(--accent));
-}
-
-.resource-settings-template-list .empty-list-row {
-  padding: 12px 14px;
-}
 /* Workspace user controls inherit the semantic theme tokens used by the rest
    of this settings surface. */
 :where([data-component-owner="resource-settings-panel"]) .resource-settings-user-controls select,

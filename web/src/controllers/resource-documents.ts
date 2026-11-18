@@ -5,6 +5,6 @@ export const RESOURCE_DOCUMENTS = [
 
 export function resourceDocumentSavePath(workspaceId: string, resourceId: string, path: string): string {
   const segments = path.split("/");
-  const spec = segments.at(-1) === "spec.md" && !segments.includes("artifacts") && !segments.includes("templates");
+  const spec = segments.at(-1) === "spec.md" && !segments.includes("artifacts");
   return `/api/workspaces/${encodeURIComponent(workspaceId)}/resources/${encodeURIComponent(resourceId)}/${spec ? "spec" : "documents"}?path=${encodeURIComponent(path)}`;
 }

@@ -31,9 +31,11 @@ PUA_SERVE_CONFIG    serve configuration file path
 
 每个被管理的 Workspace 同时只能由一个 `pua serve` 进程持有。服务启动时为配置中的每个 Workspace 获取 `<workspace>/.pua/serve.lock` 的 OS advisory 独占锁，并在整个生命周期内保持文件描述符打开。锁冲突会让启动整体失败并释放本轮已取得的锁。
 
-## Workspace 与模板 API
+## Workspace API
 
-项目、任务、日志、归档、文件预览、Wiki、diff 和模板路由都以显式 Workspace ID 为作用域。结构化模板由 `internal/app` 校验和渲染；`POST .../tasks/preview` 返回最终标题、Markdown 和模板来源/digest，创建时可提交 `expectedTemplateDigest` 防止预览后模板发生变化。
+项目、任务、日志、归档、文件预览、Wiki 和 diff 路由都以显式 Workspace ID 为作用域。`POST .../tasks` 创建普通任务，接受标题和可选简述或完整 Markdown。`POST .../tasks/preview` 返回最终标题、Markdown、slug 和 Agent 绑定。
+
+Server 确认 AgentHub 连接和 Workspace 所有权后，在对外就绪前清理旧任务模板。清理删除开放及归档 Project 的 `templates/` 及 Task 元数据的 `template` 字段，保留已有规格和其他数据。清理可重复运行。升级前由各 Project 将任务类型、创建时机和格式同步至 `spec.md`。
 
 Scheduler API 同样委托 `internal/app`，提供 `GET/POST .../scheduler`、`PUT/DELETE .../scheduler/{scheduleId}` 与 `PUT .../scheduler/settings`。Server 不解析自然语言 condition；Web 界面使用这些接口维护调度项、独立绑定和唤醒间隔。
 

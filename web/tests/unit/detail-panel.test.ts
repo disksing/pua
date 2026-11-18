@@ -640,7 +640,6 @@ describe("DetailPanel", () => {
         title: "Project Alpha",
         path: "project1",
         files: [{ name: "spec.md", path: "project1/spec.md", content: "# Project Alpha", contentHash: "doc-p" }],
-        templates: [{ name: "feature-a", title: "Feature A", path: "project1/templates/feature-a.md", valid: true, schemaVersion: 2, fields: [] }],
       },
       ...overrides,
     });
@@ -753,21 +752,5 @@ describe("DetailPanel", () => {
     expect(row.querySelector(".resource-settings-value-empty")?.textContent).toBe("No description");
   });
 
-  it("moves the Project template list into settings without a Template tab", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
-      path: "project1/templates/feature-a.md", name: "feature-a.md", content: "# Feature A", contentHash: "tpl-a",
-    }), { headers: { "content-type": "application/json" } })));
-    const { target } = mountModel(projectModel());
-    await tick();
-
-    const tabs = Array.from(target.querySelectorAll<HTMLButtonElement>("[role=tab]"));
-    expect(tabs.find((tab) => tab.textContent?.trim() === "Template")).toBeUndefined();
-
-    await openSettingsTab(target);
-    const row = target.querySelector<HTMLButtonElement>(".template-row")!;
-    expect(row.textContent).toContain("Feature A");
-    row.click();
-    await vi.waitFor(() => expect(target.querySelector<HTMLElement>('[role="dialog"]')).not.toBeNull());
-  });
 
 });

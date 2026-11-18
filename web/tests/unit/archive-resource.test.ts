@@ -140,7 +140,6 @@ describe("Archive resource flow", () => {
         state.fetchedDetailIds.push(id);
         if (id === "project2") return json({
           ...resourceDetail(id, id),
-          templates: [{ name: "project-two-template", valid: true }],
           taskDefault: { kind: "agent", name: "project-two-agent" },
         });
         return json(resourceDetail(id, id));
@@ -293,7 +292,7 @@ describe("Archive resource flow", () => {
     expect(appShellModels.at(-1)?.projects.map((project) => project.id)).toEqual(["project2"]);
   });
 
-  it("loads wizard templates and default binding for an unselected project's row", async () => {
+  it("loads the default binding for an unselected project's task wizard", async () => {
     const { state, appShellModels, detailModels, createModels, selectResource } = await startApp();
     await selectResource("project1.task2");
     const pathname = window.location.pathname;
@@ -305,7 +304,6 @@ describe("Archive resource flow", () => {
     expect(wizard).toMatchObject({
       open: true,
       draft: { projectId: "project2" },
-      templates: [{ name: "project-two-template" }],
       defaultTaskBinding: { kind: "agent", name: "project-two-agent" },
     });
     expect(state.fetchedDetailIds).toContain("project2");

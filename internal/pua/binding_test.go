@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -120,21 +119,8 @@ func TestTaskCreateBindingFlagsAndDryRun(t *testing.T) {
 			t.Fatalf("expected profile/agent conflict, got %v", err)
 		}
 
-		template := "---\n" +
-			"schema-version: 2\n" +
-			"title: Brief\n" +
-			"task-title: \"{{ summary }}\"\n" +
-			"fields:\n" +
-			"  - name: summary\n" +
-			"    type: text\n" +
-			"    label: Summary\n" +
-			"    required: true\n" +
-			"---\n" +
-			"# {{ summary }}\n"
-		if err := os.WriteFile(filepath.Join(root, "project1", "templates", "brief.md"), []byte(template), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		preview := run(t, "task", "create", "--project=project1", "--template=brief", "--field", "summary=Preview", "--profile=FAST", "--dry-run")
+		preview := run(t, "task", "create", "--project=project1", "--title=Preview", "--detail=Brief", "--profile=FAST", "--dry-run")
+		assertMissing(t, filepath.Join(root, "project1", "task3"))
 		var taskPreview app.TaskPreview
 		if err := json.Unmarshal([]byte(preview), &taskPreview); err != nil {
 			t.Fatal(err)

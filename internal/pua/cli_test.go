@@ -493,7 +493,7 @@ func TestSimplifiedChineseInitAndLanguageMigration(t *testing.T) {
 			t.Fatalf("unexpected Chinese Wiki index:\n%s", got)
 		}
 		rootAgentsPath := filepath.Join(root, "AGENTS.md")
-		for _, want := range []string{"# AgentWorkspace Agent 工作指引", "## 5. PUA 资源管理", "有合适模板时优先使用，并保留模板中的规则"} {
+		for _, want := range []string{"# AgentWorkspace Agent 工作指引", "## 5. PUA 资源管理", "创建 Task 前阅读 Project 的 spec.md"} {
 			if got := readFile(t, rootAgentsPath); !strings.Contains(got, want) {
 				t.Fatalf("Chinese Workspace prompt is missing %q:\n%s", want, got)
 			}
@@ -707,7 +707,7 @@ func TestTaskLifecycle(t *testing.T) {
 		assertMissing(t, filepath.Join(root, "project1", "task.md"))
 		assertMissing(t, filepath.Join(root, "project1", "work.md"))
 		assertDir(t, filepath.Join(root, "project1", "artifacts"))
-		assertDir(t, filepath.Join(root, "project1", "templates"))
+		assertMissing(t, filepath.Join(root, "project1", "templates"))
 		assertMissing(t, filepath.Join(root, "project1", "worktree"))
 		projectAgents := readFile(t, filepath.Join(root, "project1", "AGENTS.md"))
 		for _, want := range []string{"# Project Agent Instructions", "AgentWorkspace Project directory", "Resource ID: project1", "../AGENTS.md", "spec.md", "memory.md"} {
@@ -735,10 +735,6 @@ func TestTaskLifecycle(t *testing.T) {
 			t.Fatalf("expected project.md to contain durable brief context only, got:\n%s", projectMD)
 		}
 		assertNoHan(t, projectMDPath)
-		templateContent := "---\nschema-version: 2\ntitle: Daily inspection\nfields: []\n---\n# Daily inspection\n\nCheck current state.\n"
-		if err := os.WriteFile(filepath.Join(root, "project1", "templates", "daily.md"), []byte(templateContent), 0o644); err != nil {
-			t.Fatal(err)
-		}
 		if err := os.RemoveAll(filepath.Join(root, "project1", "artifacts")); err != nil {
 			t.Fatal(err)
 		}
@@ -750,14 +746,6 @@ func TestTaskLifecycle(t *testing.T) {
 		if projectDetail.Artifacts == nil || len(projectDetail.Artifacts) != 0 {
 			t.Fatalf("expected missing project artifacts directory to return an empty list, got: %+v", projectDetail.Artifacts)
 		}
-		if len(projectDetail.Templates) != 1 {
-			t.Fatalf("expected one task template, got: %+v", projectDetail.Templates)
-		}
-		template := projectDetail.Templates[0]
-		if template.Name != "daily" || template.Title != "Daily inspection" || !strings.Contains(template.Detail, "Check current state.") {
-			t.Fatalf("unexpected parsed task template: %+v", template)
-		}
-
 		listed := run(t, "project", "list")
 		if !strings.Contains(listed, "project1\tImplement the pua MVP") {
 			t.Fatalf("expected task list to include project1, got:\n%s", listed)
@@ -930,7 +918,6 @@ func TestHelpGroupsCommandSections(t *testing.T) {
 		"  pua project <command>",
 		"  pua task <command>",
 		"  pua scheduler <command>",
-		"  pua template <command>",
 		"  pua workspace <command>",
 		"  pua message <command>",
 		"  pua history <command>",
@@ -952,8 +939,7 @@ func TestHelpGroupsCommandSections(t *testing.T) {
 	for _, expanded := range []string{
 		"pua repo add [--bare]",
 		"pua project create [--slug <slug>] <description>",
-		"pua task create [<title>]",
-		"pua template list [--project=<project>]",
+		"pua task create (<title>|--title <title>)",
 		"pua scheduler add",
 		"pua workspace tree --json",
 		"pua message send",
@@ -963,8 +949,10 @@ func TestHelpGroupsCommandSections(t *testing.T) {
 			t.Fatalf("top-level help expands second-level command %q:\n%s", expanded, help)
 		}
 	}
-	if strings.Contains(help, "pua session") {
-		t.Fatalf("removed pua session command remains in help:\n%s", help)
+	for _, removed := range []string{"pua session", "pua template"} {
+		if strings.Contains(help, removed) {
+			t.Fatalf("removed command %s remains in help:\n%s", removed, help)
+		}
 	}
 	messageHelp := run(t, "help", "message")
 	if !strings.Contains(messageHelp, "Agent messages are one-way") || strings.Contains(messageHelp, "--subscribe-result") {
@@ -986,7 +974,7 @@ func TestTaskHelpVariants(t *testing.T) {
 	} {
 		out := run(t, args...)
 		for _, marker := range []string{
-			"pua task create [<title>]",
+			"pua task create (<title>|--title <title>)",
 			"pua task list [--project=<project>] [--all]",
 			"pua task show [--project=<project>] [--task=<task>]",
 			"pua task archive [--project=<project>] [--task=<task>]",
@@ -1987,178 +1975,6 @@ func TestMigrateRefreshesOpenTaskAgentsAndPreservesManualContent(t *testing.T) {
 			t.Fatalf("expected archived subtask AGENTS.md not to change\nbefore:\n%s\nafter:\n%s", archivedBefore, archivedAfter)
 		}
 	})
-}
-
-func TestStructuredTemplateCommandsAndTaskCreate(t *testing.T) {
-	withTempCwd(t, func(root string) {
-		run(t, "init")
-		run(t, "project", "create", "Template project")
-		template := `---
-schema-version: 2
-title: Request
-task-title: "{{ summary }}"
-fields:
-  - name: summary
-    type: text
-    label: Summary
-    required: true
-  - name: body
-    type: textarea
-    label: Body
-    required: true
-  - name: enabled
-    type: boolean
-    label: Enabled
-    default: false
----
-# {{ summary }}
-
-{{ body }}
-
-Enabled: {{ enabled }}
-`
-		templatePath := filepath.Join(root, "project1", "templates", "request.md")
-		if err := os.WriteFile(templatePath, []byte(template), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		listed := run(t, "template", "list", "--project=project1")
-		if !strings.Contains(listed, "request\tRequest\tv2\t3 fields\tvalid") {
-			t.Fatalf("unexpected template list:\n%s", listed)
-		}
-		shown := run(t, "template", "show", "--project=project1", "--schema", "request")
-		if !strings.Contains(shown, `"name": "summary"`) || !strings.Contains(shown, `"digest": "sha256:`) {
-			t.Fatalf("unexpected template schema:\n%s", shown)
-		}
-		rendered := run(t, "template", "render", "--project=project1", "--field", "summary=CLI task", "--field", "body=Created from CLI", "--field", "enabled=true", "request")
-		if !strings.Contains(rendered, "# CLI task") || !strings.Contains(rendered, "Enabled: true") {
-			t.Fatalf("unexpected rendered template:\n%s", rendered)
-		}
-		preview := run(t, "task", "create", "--project=project1", "--template=request", "--field", "summary=CLI task", "--field", "body=Created from CLI", "--dry-run")
-		if !strings.Contains(preview, `"title": "CLI task"`) || strings.Contains(preview, `"selfDriving"`) {
-			t.Fatalf("unexpected dry-run preview:\n%s", preview)
-		}
-		if matches, _ := filepath.Glob(filepath.Join(root, "project1", "task*")); len(matches) != 0 {
-			t.Fatalf("dry-run created task directories: %#v", matches)
-		}
-		created := run(t, "task", "create", "--project=project1", "--template=request", "--field", "summary=CLI task", "--field", "body=Created from CLI")
-		if !strings.Contains(created, `"template"`) || strings.Contains(created, `"selfDriving"`) {
-			t.Fatalf("content template exposed removed execution metadata: %s", created)
-		}
-		var createdTask app.Task
-		if err := json.Unmarshal([]byte(created), &createdTask); err != nil {
-			t.Fatal(err)
-		}
-		var detail app.ResourceDetailView
-		if err := json.Unmarshal([]byte(run(t, "workspace", "resource", "--id=project1.task1", "--json")), &detail); err != nil {
-			t.Fatal(err)
-		}
-		if detail.Template == nil || createdTask.Template == nil || detail.Template.Digest != createdTask.Template.Digest {
-			t.Fatalf("workspace resource omitted template source: %#v", detail)
-		}
-		if _, err := runErr(t, "task", "create", "Bad", "--project=project1", "--template=request", "--detail=conflict"); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
-			t.Fatalf("expected mutually exclusive template inputs, got %v", err)
-		}
-	})
-}
-
-func TestTemplateValidateCLI(t *testing.T) {
-	withTempCwd(t, func(root string) {
-		run(t, "init")
-		run(t, "project", "create", "Migration project")
-		dir := filepath.Join(root, "project1", "templates")
-		legacy := "---\ntitle: Legacy\n---\n# Legacy\n"
-		if err := os.WriteFile(filepath.Join(dir, "legacy.md"), []byte(legacy), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := runErr(t, "template", "validate", "--project=project1", "--all"); err == nil {
-			t.Fatal("template without schema-version should be invalid")
-		}
-		if _, err := runErr(t, "template", "migrate", "--project=project1", "legacy"); err == nil || !strings.Contains(err.Error(), "unknown template subcommand") {
-			t.Fatalf("expected template migrate to be removed, got %v", err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "broken.md"), []byte("---\nschema-version: 2\ntitle: Broken\nautorun: true\nfields: []\n---\nBody\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		output, err := runErr(t, "template", "validate", "--project=project1", "--all", "--json")
-		if err == nil || !strings.Contains(output, "unknown_property") {
-			t.Fatalf("expected invalid template and non-zero exit: err=%v output=%s", err, output)
-		}
-	})
-}
-
-func TestTemplateShowIncludesBodyAndPreservesOutputModes(t *testing.T) {
-	withTempCwd(t, func(root string) {
-		run(t, "init")
-		run(t, "project", "create", "Template project")
-		body := "# {{ summary }}\n\nExecution rule: inspect every configured input.\n" + strings.Repeat("Long rule text must remain visible.\n", 128) + "\nAcceptance: preserve every line.\n"
-		source := "---\nschema-version: 2\ntitle: Request\ndescription: Capture a concrete change.\ntask-title: \"{{ summary }}\"\nfields:\n  - name: summary\n    type: text\n    label: Summary\n    description: The short task summary.\n    placeholder: e.g. fix template output\n    required: true\n  - name: priority\n    type: select\n    label: Priority\n    default: medium\n    options: [low, medium, high]\n---\n" + body
-		path := filepath.Join(root, "project1", "templates", "request.md")
-		if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
-			t.Fatal(err)
-		}
-
-		shown := run(t, "template", "show", "--project=project1", "request")
-		for _, marker := range []string{
-			"Name: request",
-			"Description: Capture a concrete change.",
-			"Fields:\n",
-			"  - summary (text, required): Summary",
-			"    Description: The short task summary.",
-			"    Placeholder: e.g. fix template output",
-			"  - priority (select, optional): Priority",
-			"    Default: medium",
-			"    Options: low, medium, high",
-			"Markdown body:\n" + body,
-		} {
-			if !strings.Contains(shown, marker) {
-				t.Fatalf("default template show output is missing %q:\n%s", marker, shown)
-			}
-		}
-
-		if raw := run(t, "template", "show", "--project=project1", "--raw", "request"); raw != source {
-			t.Fatalf("--raw changed the original template source:\nwant:\n%s\ngot:\n%s", source, raw)
-		}
-		var structured map[string]any
-		if err := json.Unmarshal([]byte(run(t, "template", "show", "--project=project1", "--json", "request")), &structured); err != nil {
-			t.Fatal(err)
-		}
-		if structured["content"] != source || structured["body"] != body || structured["valid"] != true {
-			t.Fatalf("--json lost template content: %#v", structured)
-		}
-		var schema map[string]any
-		if err := json.Unmarshal([]byte(run(t, "template", "show", "--project=project1", "--schema", "request")), &schema); err != nil {
-			t.Fatal(err)
-		}
-		if schema["name"] != "request" || schema["schemaVersion"] != float64(2) || schema["digest"] == "" || schema["fields"] == nil {
-			t.Fatalf("--schema changed schema output contract: %#v", schema)
-		}
-		if _, err := runErr(t, "template", "show", "--project=project1", "--json", "--schema", "request"); err == nil || !strings.Contains(err.Error(), "usage: pua template show") {
-			t.Fatalf("expected mutually exclusive template show modes to return usage, got %v", err)
-		}
-
-		brokenBody := "# Broken rules\n\nThis body must remain inspectable even when the schema is invalid.\n"
-		broken := "---\nschema-version: 2\ntitle: Broken\nautorun: true\nfields: []\n---\n" + brokenBody
-		if err := os.WriteFile(filepath.Join(root, "project1", "templates", "broken.md"), []byte(broken), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		invalid := run(t, "template", "show", "--project=project1", "broken")
-		for _, marker := range []string{"Status: invalid", "unknown_property", "Markdown body:\n" + brokenBody} {
-			if !strings.Contains(invalid, marker) {
-				t.Fatalf("invalid template show output is missing %q:\n%s", marker, invalid)
-			}
-		}
-	})
-
-	help := strings.Join(strings.Fields(run(t, "help", "template")), " ")
-	for _, marker := range []string{
-		"show defaults to metadata, field requirements, diagnostics, and the complete Markdown body",
-		"--raw for the original file, --json for structured template data,",
-		"or --schema for schema metadata and diagnostics",
-	} {
-		if !strings.Contains(help, marker) {
-			t.Fatalf("template show help is missing %q:\n%s", marker, help)
-		}
-	}
 }
 
 func withTempCwd(t *testing.T, fn func(root string)) {

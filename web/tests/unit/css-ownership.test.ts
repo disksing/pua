@@ -16,8 +16,6 @@ const components = [
   "CreateDialog",
   "ProjectCreateForm",
   "TaskWizard",
-  "TemplateFieldGroup",
-  "TemplatePicker",
   "DetailPanel",
   "DiffModal",
   "DoctorDialog",
@@ -61,8 +59,6 @@ const owners: Record<(typeof components)[number], string> = {
   CreateDialog: "create-dialog",
   ProjectCreateForm: "project-create-form",
   TaskWizard: "task-wizard",
-  TemplateFieldGroup: "template-field-group",
-  TemplatePicker: "template-picker",
   DetailPanel: "detail-panel",
   DiffModal: "diff-modal",
   DoctorDialog: "doctor-dialog",
@@ -704,7 +700,7 @@ describe("CSS ownership", () => {
   });
 
   it("marks nested component roots with the same owner used by their CSS", () => {
-	    for (const component of ["AgentPanelHeader", "ActivityGroup", "AppearanceSettingsPanel", "AgentHubSettingsPanel", "ApprovalCard", "DiffModal", "DoctorDialog", "FileBrowser", "FilePreviewModal", "HistoryTimeline", "LifecycleNotice", "MarkdownDocument", "MobileToolbar", "NotificationSettingsPanel", "PaneResizeHandle", "ProfilesSettingsPanel", "ProjectCreateForm", "ProjectTree", "SettingsNavigation", "StatusPresentation", "TaskWizard", "TemplateFieldGroup", "TemplatePicker", "ThinkingBlock", "TimelineMessage", "TimelineNotice", "ToolGroup", "ToolItem", "UnknownEvent", "WorkspaceSettingsPanel", "WorkspaceSwitcher"] as const) {
+	    for (const component of ["AgentPanelHeader", "ActivityGroup", "AppearanceSettingsPanel", "AgentHubSettingsPanel", "ApprovalCard", "DiffModal", "DoctorDialog", "FileBrowser", "FilePreviewModal", "HistoryTimeline", "LifecycleNotice", "MarkdownDocument", "MobileToolbar", "NotificationSettingsPanel", "PaneResizeHandle", "ProfilesSettingsPanel", "ProjectCreateForm", "ProjectTree", "SettingsNavigation", "StatusPresentation", "TaskWizard", "ThinkingBlock", "TimelineMessage", "TimelineNotice", "ToolGroup", "ToolItem", "UnknownEvent", "WorkspaceSettingsPanel", "WorkspaceSwitcher"] as const) {
       expect(read(`src/components/${component}.svelte`)).toContain(`data-component-owner="${owners[component]}"`);
     }
   });

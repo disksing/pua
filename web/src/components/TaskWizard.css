@@ -142,51 +142,6 @@
   padding: 8px 10px 8px 4px;
 }
 
-:where([data-component-owner="task-wizard"]) .wizard-generated-title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  border: 1px dashed var(--line);
-  border-radius: 6px;
-  background: var(--bg);
-  font-size: 13px;
-}
-
-:where([data-component-owner="task-wizard"]) .wizard-generated-title-tag {
-  flex-shrink: 0;
-  color: var(--blue);
-  font-size: 11px;
-  font-weight: 700;
-}
-
-:where([data-component-owner="task-wizard"]) .wizard-generated-title-value {
-  overflow: hidden;
-  color: var(--text);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-:where([data-component-owner="task-wizard"]) .wizard-generated-title-value.empty {
-  color: var(--faint);
-}
-
-:where([data-component-owner="task-wizard"]) .wizard-hint {
-  margin: 0;
-  color: var(--muted);
-  font-size: 12.5px;
-}
-
-:where([data-component-owner="task-wizard"]) .wizard-field-error {
-  margin: 0;
-  padding: 8px 10px;
-  border: 1px solid var(--accent-line);
-  border-radius: 6px;
-  background: var(--accent-soft);
-  color: var(--accent-deep);
-  font-size: 12.5px;
-}
-
 :where([data-component-owner="task-wizard"]) .create-task-slug-field {
   max-width: 240px;
 }

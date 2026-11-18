@@ -1,7 +1,6 @@
 /* DetailPanel styles. Keep selectors within the documented ownership boundary. */
 
-:where([data-component-owner="detail-panel"]) .worktree-row,
-:where([data-component-owner="detail-panel"]) .template-row {
+:where([data-component-owner="detail-panel"]) .worktree-row {
   transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease;
 }
 
@@ -122,10 +121,6 @@
   gap: 8px;
 }
 
-
-:where([data-component-owner="detail-panel"]) .template-row.invalid {
-  border-color: var(--red);
-}
 
 :where([data-component-owner="detail-panel"]) .details-tabs {
   flex: 0 0 auto;
@@ -339,29 +334,6 @@
 :where([data-component-owner="detail-panel"]) .template-list {
   display: grid;
   gap: 8px;
-}
-
-:where([data-component-owner="detail-panel"]) .template-row {
-  width: 100%;
-  display: grid;
-  grid-template-columns: auto 1fr auto;
-  align-items: center;
-  gap: 10px;
-  padding: 11px 12px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--panel);
-  color: inherit;
-  text-align: left;
-}
-
-:where([data-component-owner="detail-panel"]) .template-row span {
-  display: grid;
-  gap: 2px;
-}
-
-:where([data-component-owner="detail-panel"]) .template-row small {
-  color: var(--muted);
 }
 
 :where([data-component-owner="detail-panel"]) .details-content.details-events {

@@ -76,9 +76,7 @@ func createResourceFilesWithMarkdown(dir string, resource Resource, markdown, la
 		return fmt.Errorf("task directory already exists: %s", dir)
 	}
 	subdirs := []string{"artifacts"}
-	if isProject(resource) {
-		subdirs = append(subdirs, "templates")
-	} else {
+	if !isProject(resource) {
 		subdirs = append(subdirs, "worktree")
 	}
 	for _, subdir := range subdirs {

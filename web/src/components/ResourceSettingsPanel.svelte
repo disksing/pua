@@ -10,7 +10,7 @@
   import type { DetailPanelModel } from "./models";
   import { sanitizeUserNameInput, validateUserName } from "../controllers/user-settings-controller";
 
-  let { model, onOpenTemplate }: { model: DetailPanelModel; onOpenTemplate?: (path: string) => void } = $props();
+  let { model }: { model: DetailPanelModel } = $props();
 
   const client = new ApiClient();
 
@@ -483,21 +483,6 @@
           <div class="resource-settings-row-label"><strong>New Task default</strong><span>Applied once when a Task is created in this Project. Inherit uses the Workspace default.</span></div>
           <AgentBindingSelector value={taskDefault} profiles={model.agentProfiles} agents={model.agents} disabled={Boolean(pending)} openUp={false} allowInherit={true} inheritLabel="Inherit (Workspace default)" ariaLabel="New Task default binding" onSelect={saveTaskDefault} />
         </div>
-      </div>
-    </section>
-    <section class="resource-settings-section">
-      <div class="resource-settings-section-head">
-        <strong>Task Templates</strong>
-        <span>Templates from templates/*.md, offered when creating a Task in this Project.</span>
-      </div>
-      <div class="resource-settings-list resource-settings-template-list">
-        {#if model.detail?.templates?.length}
-          {#each model.detail.templates as template (template.name)}
-            <button type="button" class:invalid={!template.valid} class="resource-settings-row template-row" onclick={() => template.path && onOpenTemplate?.(template.path)}><Icon name="file-text" /><span><strong>{template.title || template.name}</strong><small>{template.name} · v{template.schemaVersion || "?"} · {template.valid ? `${(template.fields || []).length} fields` : `invalid${template.errors?.[0]?.message ? `: ${template.errors[0].message}` : ""}`}</small></span><Icon name="chevron-right" /></button>
-          {/each}
-        {:else}
-          <div class="empty-list-row"><Icon name="layout-template" /><span>No task templates in templates/*.md.</span></div>
-        {/if}
       </div>
     </section>
   {:else if model.resourceType === "task"}

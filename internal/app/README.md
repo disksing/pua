@@ -22,14 +22,14 @@ project, err := workspace.CreateProjectWithInput(app.CreateProjectInput{
 - `NormalizeProjectID`、`NormalizeTaskName`、`NormalizeTaskID`、`InferProjectID`、`InferTaskID`：集中实现 CLI 使用的资源选择规则；
 - `Tree`、`Resource`、`Projects`、`Tasks`：读取 Workspace 资源视图；
 - `EnsureScheduler`、`Scheduler`、`AddSchedule`、`UpdateSchedule`、`RemoveSchedule`、`SetSchedulerSettings`：创建、读取和原子修改特殊 Scheduler 资源；
-- `Templates`、`Template`、`RenderTemplate`、`ValidateTemplateContent`、`CreateTemplate`、`MigrateTemplates`：模板发现、结构化校验、确定性渲染、脚手架和 V1 内容迁移；
-- `PreviewTask`：无副作用地计算最终标题、Markdown、最终 Agent binding 与模板 digest；
+- `PreviewTask`：无副作用地计算标题、Markdown、slug 和 Agent 绑定；
+- `RemoveLegacyTaskTemplates`：新版 Server 清理受管 Workspace 中开放及归档资源的旧模板目录和任务来源字段，并刷新 Workspace 托管指引；
 - `CreateProject`、`CreateProjectWithInput`、`CreateTask`、`ArchiveResource`：资源生命周期。`ArchiveResource` 以可恢复目录移动为唯一提交点；Project 归档级联移动完整子树，Git 预检、开放子任务和移动后 worktree 修复问题通过 `ArchiveResult.Warnings` 返回，不会修改源码或阻断移动；
 - `ResourceAgentBinding`、`SetResourceAgentBinding`、`SetResourceAgentDefaults`、`SetProjectTaskDefault`：读取或修改 Workspace、Project、Task 的 Agent/Profile binding，并保持新建 Task 的显式值、Project 默认值和 Workspace 默认值的继承顺序；
 - `GenerationDiagnostics`、`GenerationDiagnostic`：从 `<control-dir>/runtime/resources/<resource-key>/` 的 resource-scoped generation store 派生只读 generation 诊断；不创建、修改或访问 AgentHub Session；
 - `Repositories`、`CloneRepository` 及 Task repository 方法：仓库数据。资源对话历史由 `pua serve` 的 Resource History API 提供；旧资源的 `log.jsonl` 仅由 `pua migrate` 迁移为 `artifacts/legacy-log.md`。
 
-跨进程写入使用 Workspace mutation lock。模板任务在同一 mutation lock 中重新读取并渲染；可选 digest 不匹配会在分配任务编号和创建 staging 目录前失败。CLI、HTTP handler 和 Web 界面只负责适配输入输出，不解析 YAML、替换占位符或自行读写资源 schema。
+跨进程写入使用 Workspace mutation lock。CLI 和 HTTP handler 将普通任务创建或预览的输入交给应用层，使用简述生成规格骨架，或保存调用者传入的完整 Markdown。
 
 Workspace、Project 和 Task 的新建接口把 ID 分配、全部资源文件一起放在 mutation lock 的同一提交边界内。Project/Task 先写同文件系统 staging 目录，再原子 rename；Workspace 初始化使用 `.pua/initializing.json` 作为可恢复标记。旧 resource JSON 中的 creator/createdBy 字段只由一次性迁移清理，正常 API 不读取或写入这些字段。
 

@@ -137,12 +137,11 @@ type Project struct {
 
 type Task struct {
 	ResourceMeta
-	Parent         string              `json:"parent"`
-	Description    string              `json:"description,omitempty"`
-	Template       *TaskTemplateSource `json:"template,omitempty"`
-	State          TaskState           `json:"state,omitempty"`
-	StateNote      string              `json:"stateNote,omitempty"`
-	StateUpdatedAt string              `json:"stateUpdatedAt,omitempty"`
+	Parent         string    `json:"parent"`
+	Description    string    `json:"description,omitempty"`
+	State          TaskState `json:"state,omitempty"`
+	StateNote      string    `json:"stateNote,omitempty"`
+	StateUpdatedAt string    `json:"stateUpdatedAt,omitempty"`
 	// Path is populated on create responses but is not persisted in task.json.
 	Path string `json:"path,omitempty"`
 }
@@ -175,12 +174,6 @@ func IsAgentTaskState(value TaskState) bool {
 	default:
 		return false
 	}
-}
-
-type TaskTemplateSource struct {
-	Name          string `json:"name"`
-	SchemaVersion int    `json:"schemaVersion"`
-	Digest        string `json:"digest"`
 }
 
 type Resource interface {

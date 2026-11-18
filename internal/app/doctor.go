@@ -83,10 +83,6 @@ type doctorResourceBinding struct {
 	binding    AgentBinding
 }
 
-type doctorTemplate struct {
-	valid bool
-}
-
 // CheckWorkspace performs a read-only inspection of one explicit Workspace.
 // It deliberately scans canonical open-resource directory positions instead
 // of using Tree, whose ordinary read path skips malformed resources.
@@ -134,11 +130,7 @@ func (s *doctorScanner) finish() {
 	s.report.Language = s.language
 	for i := range s.report.Issues {
 		issue := &s.report.Issues[i]
-		kind := ""
-		if strings.HasPrefix(issue.Code, "template_") {
-			kind = "template_validation"
-		}
-		data := map[string]string{"Code": issue.Code, "Kind": kind, "Original": issue.Message}
+		data := map[string]string{"Code": issue.Code, "Original": issue.Message}
 		issue.Message = strings.TrimSpace(localize.MustRender(s.language, "doctor-message.txt", data))
 		if issue.Suggestion != "" {
 			data["Original"] = issue.Suggestion
@@ -298,11 +290,10 @@ func (s *doctorScanner) scanProject(path, name string) {
 	s.checkResourceTimestamps(project.CreatedAt, project.UpdatedAt, filepath.Join(rel, projectJSONFile), resourceID)
 	s.checkSplitDocuments(path, rel, resourceID, projectMDFile)
 	s.checkManagedFile(filepath.Join(path, "AGENTS.md"), filepath.Join(rel, "AGENTS.md"), resourceID, taskAgentsBlock(&project, s.language))
-	templates := s.scanTemplates(path, project)
-	s.scanTasks(path, project, templates)
+	s.scanTasks(path, project)
 }
 
-func (s *doctorScanner) scanTasks(projectPath string, project Project, templates map[string]doctorTemplate) {
+func (s *doctorScanner) scanTasks(projectPath string, project Project) {
 	entries, err := os.ReadDir(projectPath)
 	if err != nil {
 		s.issue(DoctorSeverityError, "project_unreadable", relPath(s.root, projectPath), project.ID, err.Error(), "Restore read access to the Project directory.")
@@ -326,11 +317,11 @@ func (s *doctorScanner) scanTasks(projectPath string, project Project, templates
 			s.issue(DoctorSeverityError, "task_path_invalid", rel, "", "task path must be a real directory", "Replace the path with a regular directory after reviewing its contents.")
 			continue
 		}
-		s.scanTask(path, entry.Name(), project, templates)
+		s.scanTask(path, entry.Name(), project)
 	}
 }
 
-func (s *doctorScanner) scanTask(path, name string, project Project, templates map[string]doctorTemplate) {
+func (s *doctorScanner) scanTask(path, name string, project Project) {
 	rel := relPath(s.root, path)
 	metadata := filepath.Join(path, taskJSONFile)
 	if !pathExists(metadata) {
@@ -365,74 +356,8 @@ func (s *doctorScanner) scanTask(path, name string, project Project, templates m
 	s.checkSplitDocuments(path, rel, resourceID, taskMDFile)
 	s.checkManagedFile(filepath.Join(path, "AGENTS.md"), filepath.Join(rel, "AGENTS.md"), resourceID, taskAgentsBlock(&task, s.language))
 	s.scanTaskRepos(task, path, rel)
-	if task.Template != nil {
-		template, ok := templates[task.Template.Name]
-		switch {
-		case !ok:
-			s.issue(DoctorSeverityWarning, "task_template_missing", filepath.Join(rel, taskJSONFile), resourceID,
-				fmt.Sprintf("recorded template %q no longer exists", task.Template.Name), "Restore the template if future reproducibility matters.")
-		case !template.valid:
-			s.issue(DoctorSeverityWarning, "task_template_invalid", filepath.Join(rel, taskJSONFile), resourceID,
-				fmt.Sprintf("recorded template %q is invalid", task.Template.Name), "Repair the Project template.")
-		}
-	}
 }
 
-func (s *doctorScanner) scanTemplates(projectPath string, project Project) map[string]doctorTemplate {
-	result := make(map[string]doctorTemplate)
-	dir := filepath.Join(projectPath, "templates")
-	relDir := relPath(s.root, dir)
-	if !s.requireDirectory(dir, relDir, project.ID, DoctorSeverityWarning) {
-		return result
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		s.issue(DoctorSeverityWarning, "templates_unreadable", relDir, project.ID, err.Error(), "Restore read access to the templates directory.")
-		return result
-	}
-	for _, entry := range entries {
-		if strings.ToLower(filepath.Ext(entry.Name())) != ".md" {
-			continue
-		}
-		name := strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name()))
-		path := filepath.Join(dir, entry.Name())
-		rel := relPath(s.root, path)
-		if !safeTemplateName(name) {
-			s.issue(DoctorSeverityError, "template_name_invalid", rel, project.ID, "template filename is not safe", "Rename the template using letters, digits, dots, underscores, or hyphens.")
-			result[name] = doctorTemplate{}
-			continue
-		}
-		if !s.requireRegularFile(path, rel, project.ID, DoctorSeverityError) {
-			result[name] = doctorTemplate{}
-			continue
-		}
-		data, readErr := os.ReadFile(path)
-		if readErr != nil {
-			s.issue(DoctorSeverityError, "template_unreadable", rel, project.ID, readErr.Error(), "Restore read access to the template.")
-			result[name] = doctorTemplate{}
-			continue
-		}
-		template := parseTaskTemplate(name, rel, string(data))
-		valid := len(template.Errors) == 0
-		result[name] = doctorTemplate{valid: valid}
-		for _, issue := range append(template.Errors, template.Warnings...) {
-			severity := DoctorSeverityWarning
-			if issue.Severity == "error" {
-				severity = DoctorSeverityError
-			}
-			message := issue.Message
-			if issue.Path != "" {
-				message = issue.Path + ": " + message
-			}
-			s.issue(severity, "template_"+issue.Code, rel, project.ID, message, "Repair the template before using it to create another Task.")
-		}
-	}
-	return result
-}
-
-// scanTaskRepos checks the worktrees discovered under a Task's worktree/
-// directory. Worktree metadata is derived from Git, so the checks focus on
-// whether the source repository still exists inside the Workspace.
 func (s *doctorScanner) scanTaskRepos(task Task, taskPath, taskRel string) {
 	for _, repo := range discoverTaskRepos(s.root, taskPath) {
 		storage := strings.TrimSpace(taskRepoStoragePath(repo))

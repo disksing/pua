@@ -230,7 +230,6 @@ func TestResourceMarkdownSaveAllowsOnlyOwnedOpenMarkdown(t *testing.T) {
 		{name: "workspace memory", resourceID: "workspace", path: "memory.md", abs: filepath.Join(fixture.root, "memory.md")},
 		{name: "project memory", resourceID: "project1", path: project.Path + "/memory.md", abs: filepath.Join(fixture.projectPath, "memory.md")},
 		{name: "task memory", resourceID: "project1.task1", path: task.Path + "/memory.md", abs: filepath.Join(fixture.taskPath, "memory.md")},
-		{name: "project template", resourceID: "project1", path: project.Path + "/templates/review.md", abs: filepath.Join(fixture.projectPath, "templates", "review.md")},
 		{name: "project artifact", resourceID: "project1", path: project.Path + "/artifacts/notes.md", abs: filepath.Join(fixture.projectPath, "artifacts", "notes.md")},
 		{name: "nested task artifact", resourceID: "project1.task1", path: task.Path + "/artifacts/nested/review.markdown", abs: filepath.Join(fixture.taskPath, "artifacts", "nested", "review.markdown")},
 	}
@@ -307,6 +306,7 @@ func TestResourceMarkdownSaveRejectsConflictsAndUnownedPaths(t *testing.T) {
 		{name: "workspace artifact", resourceID: "workspace", path: project.Path + "/artifacts/notes.md", abs: filepath.Join(fixture.projectPath, "artifacts", "notes.md")},
 		{name: "other resource memory", resourceID: "project1", path: task.Path + "/memory.md", abs: taskBrief},
 		{name: "text artifact", resourceID: "project1.task1", path: task.Path + "/artifacts/nested/not-markdown.txt", abs: filepath.Join(fixture.taskPath, "artifacts", "nested", "not-markdown.txt")},
+		{name: "retired Project template", resourceID: "project1", path: project.Path + "/templates/review.md", abs: filepath.Join(fixture.projectPath, "templates", "review.md")},
 		{name: "nested template", resourceID: "project1", path: project.Path + "/templates/nested/unsupported.md", abs: filepath.Join(fixture.projectPath, "templates", "nested", "unsupported.md")},
 		{name: "resource metadata", resourceID: "project1.task1", path: task.Path + "/task.json", abs: filepath.Join(fixture.taskPath, "task.json")},
 	}

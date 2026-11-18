@@ -22,6 +22,57 @@ func magpieSettings(serverURL string) config.Magpie {
 	return settings
 }
 
+func TestMagpieWindowCountdown(t *testing.T) {
+	const payload = `{"object":"list","data":[{"provider":"claude","name":"Claude","kind":"subscription","readAt":"2026-01-01T12:00:00Z","windows":[
+		{"name":"5 hours","used":20,"remaining":80,"resetsAt":"2026-01-01T14:30:00Z"},
+		{"name":"7 days","used":40,"remaining":60,"resetsAt":"2026-01-05T12:00:00Z"},
+		{"name":"7 days · Sonnet","used":0,"remaining":100,"resetsAt":"2026-01-09T12:00:00Z"},
+		{"name":"25 hours","used":30,"remaining":70,"resetsAt":"2026-01-01T14:00:00Z"},
+		{"name":"7 days · Opus","used":0,"remaining":100},
+		{"name":"5 hours · expired","used":90,"remaining":10,"resetsAt":"2026-01-01T12:00:00Z"},
+		{"name":"5 hours · invalid reset","used":20,"remaining":80,"resetsAt":"unknown"},
+		{"name":"5 hours · unlimited","unlimited":true,"used":0,"remaining":100,"resetsAt":"2026-01-01T14:00:00Z"},
+		{"name":"7 days · wallet","balance":0,"unit":"USD","used":0,"remaining":0,"resetsAt":"2026-01-03T12:00:00Z"},
+		{"name":"7 days · text","text":true,"display":"Pending","used":0,"remaining":0,"resetsAt":"2026-01-03T12:00:00Z"},
+		{"name":"7 days · no reading","resetsAt":"2026-01-03T12:00:00Z"}
+	]}]}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(writer, payload)
+	}))
+	defer upstream.Close()
+	service := NewService(nil)
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+	service.Configure(magpieSettings(upstream.URL))
+
+	windows := service.Snapshot(t.Context()).Providers[0].Quotas
+	for index, want := range []float64{50, 100.0 * 4 / 7, 100} {
+		window := windows[index]
+		if window.WindowPositionPercent == nil || *window.WindowPositionPercent != want {
+			t.Errorf("%s: cursor = %v, want %g%%", window.Label, window.WindowPositionPercent, want)
+		}
+	}
+	for _, window := range windows[3:] {
+		if window.WindowPositionPercent != nil {
+			t.Errorf("%s: unexpected cursor %g%%", window.Label, *window.WindowPositionPercent)
+		}
+	}
+	if windows[3].ResetInSeconds == nil || !windows[5].Expired || windows[5].ResetInSeconds != nil {
+		t.Errorf("unexpected reset metadata: unknown=%+v expired=%+v", windows[3], windows[5])
+	}
+
+	now = now.Add(30 * time.Second)
+	first := service.Snapshot(t.Context()).Providers[0].Quotas[0]
+	if first.WindowPositionPercent == nil || *first.WindowPositionPercent >= 50 || first.ResetInSeconds == nil || *first.ResetInSeconds != 8970 {
+		t.Errorf("cursor should move left as reset approaches: %+v", first)
+	}
+	now = now.Add(8970 * time.Second)
+	first = service.Snapshot(t.Context()).Providers[0].Quotas[0]
+	if !first.Expired || first.ResetInSeconds != nil || first.WindowPositionPercent != nil {
+		t.Errorf("cursor should disappear at reset: %+v", first)
+	}
+}
+
 func TestMagpieNormalizesAccountsAndWindows(t *testing.T) {
 	const payload = `{"data":[
 		{"provider":"codex","kind":"subscription","user":"alice@example.test","name":"Codex","plan":"Plus","readAt":"2026-01-01T12:00:00.123456+00:00","windows":[

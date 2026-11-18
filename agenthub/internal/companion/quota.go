@@ -385,7 +385,9 @@ func (snapshot QuotaSnapshot) at(now time.Time) QuotaSnapshot {
 				window.Expired = !reset.After(now) && (captured.IsZero() || !captured.After(reset))
 				if !window.Expired && reset.After(now) {
 					window.ResetInSeconds = &seconds
-					window.WindowPositionPercent = windowPosition(window.Kind, seconds)
+					if window.RemainingPercent != nil {
+						window.WindowPositionPercent = windowPosition(window.Kind, seconds)
+					}
 				}
 			}
 			window.Stale = markCardStale || window.Expired
@@ -437,10 +439,11 @@ func readingTime(values ...string) time.Time {
 
 func quotaKind(name string) string {
 	value := strings.ToLower(name)
+	period, _, _ := strings.Cut(value, " · ")
 	switch {
-	case strings.Contains(value, "five") || strings.Contains(value, "5h") || strings.Contains(value, "5-hour"):
+	case period == "5 hours" || strings.Contains(value, "five") || strings.Contains(value, "5h") || strings.Contains(value, "5-hour"):
 		return "5h"
-	case strings.Contains(value, "seven") || strings.Contains(value, "weekly") || strings.Contains(value, "7-day") || strings.Contains(value, "7d"):
+	case period == "7 days" || strings.Contains(value, "seven") || strings.Contains(value, "weekly") || strings.Contains(value, "7-day") || strings.Contains(value, "7d"):
 		return "7d"
 	case strings.Contains(value, "month"):
 		return "monthly"

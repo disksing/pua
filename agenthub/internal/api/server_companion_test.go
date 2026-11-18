@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -108,6 +109,7 @@ func TestConfigAPIDropsLegacyCompanionAndOnWatchCredentials(t *testing.T) {
 }
 
 func TestQuotaAndMagpieTestRoutes(t *testing.T) {
+	now := time.Now().UTC()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.RequestURI() != "/v1/magpie/quotas?kept=1" {
 			t.Errorf("unexpected Magpie request: %s %s", r.Method, r.URL)
@@ -115,7 +117,8 @@ func TestQuotaAndMagpieTestRoutes(t *testing.T) {
 		if r.Header.Get("Authorization") != "" || r.Header.Get("X-Forwarded-User") != "" {
 			t.Error("received unexpected credentials")
 		}
-		_, _ = w.Write([]byte(`{"object":"list","data":[{"provider":"kimi","name":"Kimi Code","kind":"subscription","user":"account@example.test","windows":[{"name":"5h","used":12,"remaining":88}]}]}`))
+		fmt.Fprintf(w, `{"object":"list","data":[{"provider":"kimi","name":"Kimi Code","kind":"subscription","user":"account@example.test","readAt":%q,"windows":[{"name":"5 hours","used":12,"remaining":88,"resetsAt":%q},{"name":"7 days","used":20,"remaining":80,"resetsAt":%q}]}]}`,
+			now.Format(time.RFC3339Nano), now.Add(3*time.Hour).Format(time.RFC3339Nano), now.Add(2*24*time.Hour).Format(time.RFC3339Nano))
 	}))
 	defer upstream.Close()
 	cfg := config.Defaults()
@@ -171,8 +174,18 @@ func TestQuotaAndMagpieTestRoutes(t *testing.T) {
 		t.Fatalf("enable Magpie status = %s", response.Status)
 	}
 	quota := readQuota()
-	if !quota.Connected || len(quota.Providers) != 1 || quota.Providers[0].Provider != "kimi" || *quota.Providers[0].Quotas[0].RemainingPercent != 88 {
+	if !quota.Connected || len(quota.Providers) != 1 || quota.Providers[0].Provider != "kimi" || len(quota.Providers[0].Quotas) != 2 {
 		t.Fatalf("enabled quota = %+v", quota)
+	}
+	windows := quota.Providers[0].Quotas
+	if windows[0].RemainingPercent == nil || *windows[0].RemainingPercent != 88 {
+		t.Errorf("remaining quota = %+v", windows[0])
+	}
+	for index, want := range []float64{60, 200.0 / 7} {
+		window := windows[index]
+		if window.WindowPositionPercent == nil || *window.WindowPositionPercent > want || *window.WindowPositionPercent < want-0.1 || window.ResetInSeconds == nil {
+			t.Errorf("%s: missing or incorrect reset metadata: %+v", window.Label, window)
+		}
 	}
 }
 

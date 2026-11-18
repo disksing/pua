@@ -58,3 +58,23 @@ func TestDeliveredMailboxTurnIDScansFromPreDeliveryCursor(t *testing.T) {
 		t.Fatalf("test setup drifted: canonical event %d does not follow the pre-delivery cursor %d", canonical.ID, before.LastEventID)
 	}
 }
+
+func TestRetriedEnqueueBindsOriginalTurnAfterItClosed(t *testing.T) {
+	_, workspace, fake, client := workflowFixture(t)
+	message := resourceMailboxMessage{ID: "original-input", ActualMode: resourceMessageModeEnqueue, AttemptCount: 2}
+	session := agentHubSession{ID: workspace.ID, CurrentTurnID: "unrelated-turn"}
+	fake.mu.Lock()
+	fake.sessions[session.ID] = session
+	fake.turns[session.ID] = map[string]agentHubTurn{
+		"closed-turn":    {TurnID: "closed-turn", TriggerMessageID: message.ID, Closed: true},
+		"unrelated-turn": {TurnID: "unrelated-turn", TriggerMessageID: "other-input"},
+	}
+	fake.mu.Unlock()
+	if got := deliveredMailboxTurnID(context.Background(), client, session.ID, message, session, session); got != "closed-turn" {
+		t.Fatalf("retry bound to %q, want the original closed Turn", got)
+	}
+	message.ID = "missing-input"
+	if got := deliveredMailboxTurnID(context.Background(), client, session.ID, message, session, session); got != "" {
+		t.Fatalf("retry without matching input bound to %q", got)
+	}
+}

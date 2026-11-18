@@ -255,6 +255,23 @@ func (w *turnWork) recordExpiredInput(err error) {
 	w.LastError = err.Error()
 }
 
+func recoverDeliveredWorkTurn(ctx context.Context, root string, client *agentHubClient, work *turnWork, message resourceMailboxMessage) (string, error) {
+	if message.AgentHubSessionID != "" && message.AgentHubSessionID != work.SessionID {
+		return "", fmt.Errorf("delivery belongs to another AgentHub session: %s", message.AgentHubSessionID)
+	}
+	if message.TurnID != "" {
+		return message.TurnID, nil
+	}
+	turnID, err := findMailboxOpenerTurn(ctx, client, work.SessionID, work.ID)
+	if err != nil || turnID == "" {
+		return "", err
+	}
+	_, err = updateMailboxMessage(root, work.ID, func(current *resourceMailboxMessage) {
+		current.TurnID = turnID
+	})
+	return turnID, err
+}
+
 func (m *agentManager) reconcileTurnWorkLocked(ctx context.Context, workspace serveWorkspace, resource string, client *agentHubClient) error {
 	file, err := loadTurnWork(workspace.Path, resource)
 	if err != nil {
@@ -308,7 +325,14 @@ func (m *agentManager) reconcileTurnWorkLocked(ctx context.Context, workspace se
 				return e
 			}
 			if found {
-				work.TurnID = message.TurnID
+				if message.Status == resourceMessageDelivered {
+					turnID, err := recoverDeliveredWorkTurn(ctx, workspace.Path, client, work, message)
+					if err != nil {
+						work.LastError = err.Error()
+						continue
+					}
+					work.TurnID = turnID
+				}
 				if work.TurnID == "" && (message.Status == resourceMessageCancelled ||
 					message.Status == resourceMessageUndeliverable || message.Status == resourceMessageDeliveryUnknown) {
 					work.OutputDone, work.State, work.LastError = true, "blocked", "input ended without a confirmed Turn: "+message.Status

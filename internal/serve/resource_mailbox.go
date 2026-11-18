@@ -824,13 +824,15 @@ func findCanonicalAgentHubMessage(ctx context.Context, client *agentHubClient, s
 // exact response remains unsubscribed until a later canonical observation.
 func deliveredMailboxTurnID(ctx context.Context, client *agentHubClient, sessionID string, message resourceMailboxMessage, delivered, before agentHubSession) string {
 	if client != nil && strings.TrimSpace(sessionID) != "" {
-		// The canonical message.input event was appended by the delivery that
-		// just returned, so it must sit after the pre-delivery cursor.
 		if canonical, found, err := findCanonicalAgentHubMessage(ctx, client, sessionID, message, before.LastEventID); err == nil && found {
 			if turnID := strings.TrimSpace(canonical.TurnID); turnID != "" {
 				return turnID
 			}
 		}
+	}
+	if message.AttemptCount > 1 && message.ActualMode != resourceMessageModeSteer {
+		turnID, _ := findMailboxOpenerTurn(ctx, client, sessionID, message.ID)
+		return turnID
 	}
 	if turnID := strings.TrimSpace(delivered.CurrentTurnID); turnID != "" {
 		return turnID
@@ -839,6 +841,32 @@ func deliveredMailboxTurnID(ctx context.Context, client *agentHubClient, session
 		return turnID
 	}
 	return ""
+}
+
+func findMailboxOpenerTurn(ctx context.Context, client *agentHubClient, sessionID, messageID string) (string, error) {
+	if client == nil || sessionID == "" || messageID == "" {
+		return "", errors.New("Turn lookup requires an AgentHub session and message ID")
+	}
+	var before int64
+	for {
+		page, err := client.SessionTurns(ctx, sessionID, before, before == 0, 50)
+		if err != nil {
+			return "", err
+		}
+		for _, turn := range page.Turns {
+			if turn.TriggerMessageID == messageID {
+				return firstNonEmpty(turn.TurnID, turn.ID), nil
+			}
+		}
+		if !page.Page.HasMoreBefore {
+			return "", nil
+		}
+		next := page.Page.NextBefore
+		if next <= 0 || (before > 0 && next >= before) {
+			return "", errors.New("AgentHub Turn pagination did not advance")
+		}
+		before = next
+	}
 }
 
 func selectPendingMailboxMessage(mailbox resourceMailbox, resourceID string) (resourceMailboxMessage, bool) {
@@ -1555,7 +1583,10 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 			current.Status = resourceMessageDelivering
 			current.GenerationID = record.GenerationID
 			current.AgentHubSessionID = session.ID
-			current.TurnID = session.CurrentTurnID
+			current.TurnID = ""
+			if current.ActualMode == resourceMessageModeSteer {
+				current.TurnID = session.CurrentTurnID
+			}
 			current.AttemptCount++
 			current.LastAttemptAt = time.Now().Format(time.RFC3339Nano)
 			current.LastError = ""
@@ -1612,7 +1643,7 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 						}
 					}
 					turnID := strings.TrimSpace(canonical.TurnID)
-					if turnID == "" {
+					if turnID == "" && canonical.Steer {
 						turnID = strings.TrimSpace(current.TurnID)
 					}
 					if turnID == "" && canonical.Steer {

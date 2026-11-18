@@ -285,6 +285,40 @@ func TestTurnWorkExpiredContinuationReferencesSettle(t *testing.T) {
 	}
 }
 
+func TestTurnWorkRecoversDeliveredChatWithoutTurnID(t *testing.T) {
+	manager, workspace, fake, client := workflowFixture(t)
+	const resource = "project1.task1"
+	input := queueWorkflowUser(t, manager, workspace, "lost-binding", "What is K?")
+	reconcileWorkflow(t, manager, workspace, client)
+	manager.waitBackground()
+	file := workFile(t, workspace)
+	work := file.find(input.ID)
+	turnID := work.TurnID
+	closeWorkflowTurn(fake, *work, "completed", "Answer about K")
+	work.TurnID = ""
+	if err := saveTurnWork(workspace.Path, resource, file); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := updateMailboxMessage(workspace.Path, input.ID, func(message *resourceMailboxMessage) {
+		message.TurnID = ""
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	for range 2 {
+		reconcileWorkflow(t, manager, workspace, client)
+	}
+	recovered := workFile(t, workspace).find(input.ID)
+	receipt, _, err := mailboxMessageByID(workspace.Path, input.ID)
+	if err != nil || receipt.TurnID != turnID || recovered.TurnID != turnID || recovered.State != "completed" {
+		t.Fatalf("failed to restore delivery: work=%+v receipt=%+v err=%v", recovered, receipt, err)
+	}
+	chat, err := loadDialogue(workspace.Path, dialoguePrefix+sharedChatID(resource))
+	if err != nil || len(chat.Messages) != 2 || chat.Messages[1].Text != "Answer about K" {
+		t.Fatalf("expected exactly one published answer: %+v, %v", chat.Messages, err)
+	}
+}
+
 func TestTurnWorkInputLookupRetriesAndKeepsBoundTurn(t *testing.T) {
 	manager, workspace, fake, client := workflowFixture(t)
 	ctx := context.Background()

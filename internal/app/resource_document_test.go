@@ -28,12 +28,19 @@ func TestResourceDocumentsCreateAndMigrate(t *testing.T) {
 			pd, _ := ws.Resource(project.ID)
 			td, _ := ws.Resource(task.ID)
 			for _, document := range []string{workspaceMarkdownFile, filepath.Join(pd.Path, projectMDFile), filepath.Join(td.Path, taskMDFile)} {
-				data, err := os.ReadFile(filepath.Join(root, document))
+				dir := filepath.Join(root, filepath.Dir(document))
+				data, err := os.ReadFile(filepath.Join(dir, MemoryMarkdownFile))
 				if err != nil || !bytes.Contains(data, []byte(followupMarkdown(language))) {
 					t.Fatalf("missing follow-ups in %s: %v", document, err)
 				}
-				if _, err := os.Lstat(filepath.Join(root, filepath.Dir(document), legacyChatMarkdownFile)); !os.IsNotExist(err) {
-					t.Fatalf("new resource created a legacy document: %s: %v", document, err)
+				spec, err := os.ReadFile(filepath.Join(dir, SpecMarkdownFile))
+				if err != nil || bytes.Contains(spec, data) {
+					t.Fatalf("Spec missing or contains generated Memory: %s: %v", dir, err)
+				}
+				for _, name := range []string{filepath.Base(document), legacyChatMarkdownFile} {
+					if _, err := os.Lstat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+						t.Fatalf("new resource created a legacy document: %s: %v", name, err)
+					}
 				}
 			}
 			if _, err := ws.ArchiveResource(task.ID); err != nil {
@@ -47,6 +54,11 @@ func TestResourceDocumentsCreateAndMigrate(t *testing.T) {
 			documents := []string{workspaceMarkdownFile, filepath.Join(pd.Path, projectMDFile), filepath.Join(td.Path, taskMDFile), filepath.Join(schedulerDir, schedulerMarkdownFile)}
 			for _, document := range documents {
 				path := filepath.Join(root, document)
+				if filepath.Base(document) != schedulerMarkdownFile {
+					if err := os.Remove(filepath.Join(filepath.Dir(path), SpecMarkdownFile)); err != nil {
+						t.Fatal(err)
+					}
+				}
 				if err := os.WriteFile(path, []byte("Keep background exactly.\n"), 0o644); err != nil {
 					t.Fatal(err)
 				}
@@ -61,8 +73,19 @@ func TestResourceDocumentsCreateAndMigrate(t *testing.T) {
 			}
 			for _, document := range documents {
 				path := filepath.Join(root, document)
-				data, err := os.ReadFile(path)
-				if err != nil || !bytes.HasPrefix(data, []byte("Keep background exactly.\n")) ||
+				target, guidance := path, schedulerMarkdownFile
+				if filepath.Base(document) != schedulerMarkdownFile {
+					target, guidance = filepath.Join(filepath.Dir(path), MemoryMarkdownFile), MemoryMarkdownFile
+					if _, err := os.Lstat(path); !os.IsNotExist(err) {
+						t.Fatalf("legacy source remains: %v", err)
+					}
+					spec, err := os.ReadFile(filepath.Join(filepath.Dir(path), SpecMarkdownFile))
+					if err != nil || !bytes.Contains(spec, []byte("(memory.md)")) || bytes.Contains(spec, []byte("Keep background exactly.")) {
+						t.Fatalf("invalid migrated Spec: %q %v", spec, err)
+					}
+				}
+				data, err := os.ReadFile(target)
+				if err != nil || bytes.Count(data, []byte("Keep background exactly.\n")) != 1 ||
 					bytes.Count(data, []byte("Pending reply\nHistory: source-42\nPublished: no\n")) != 1 {
 					t.Fatalf("lost or duplicated content in %s: %q %v", path, data, err)
 				}
@@ -70,13 +93,14 @@ func TestResourceDocumentsCreateAndMigrate(t *testing.T) {
 					t.Fatalf("legacy document remains: %s: %v", path, err)
 				}
 				agents, err := os.ReadFile(filepath.Join(filepath.Dir(path), "AGENTS.md"))
-				if err != nil || !bytes.Contains(agents, []byte(filepath.Base(document))) {
+				if err != nil || !bytes.Contains(agents, []byte(guidance)) {
 					t.Fatalf("guidance not migrated: %s: %v", document, err)
 				}
 			}
 			for _, id := range []string{project.ID, task.ID} {
 				detail, err := ws.Resource(id)
-				if err != nil || len(detail.Files) != 2 || detail.Files[1].Name != "AGENTS.md" {
+				if err != nil || len(detail.Files) != 3 || detail.Files[0].Name != SpecMarkdownFile ||
+					detail.Files[1].Name != MemoryMarkdownFile || detail.Files[2].Name != "AGENTS.md" {
 					t.Fatalf("unexpected resource files: %#v %v", detail, err)
 				}
 			}
@@ -192,7 +216,7 @@ func TestRefreshGuidanceMigratesDocumentsAndNeverRecreatesChat(t *testing.T) {
 			}
 		}
 	}
-	data, _ := os.ReadFile(filepath.Join(path, taskMDFile))
+	data, _ := os.ReadFile(filepath.Join(path, MemoryMarkdownFile))
 	if strings.Count(string(data), "Late pending") != 1 {
 		t.Fatal("late legacy write was not migrated")
 	}

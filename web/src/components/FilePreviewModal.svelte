@@ -11,8 +11,9 @@
   import type { FilePreviewModel } from "./models";
   import LazyMarkdownEditor from "./LazyMarkdownEditor.svelte";
 
-  let { client, workspaceId, resourceId, selection, editable, fullscreen = false, resolveResourceTitle, onNavigate, onOpenFile, onSaveMarkdown, onClose, onError }: { client: ApiClient; workspaceId: string; resourceId: string; selection: { section: string; path: string; mode?: "edit" | "annotate" } | null; editable: boolean; fullscreen?: boolean; resolveResourceTitle: ResourceTitleResolver; onNavigate: (resourceId: string) => void; onOpenFile?: (path: string) => void; onSaveMarkdown: (path: string, content: string, expectedContentHash: string) => Promise<FilePreviewModel>; onClose: () => void; onError: (message: string) => void } = $props();
+  let { client, workspaceId, resourceId, userName = "", selection, editable: allowEditing, fullscreen = false, resolveResourceTitle, onNavigate, onOpenFile, onSaveMarkdown, onClose, onError }: { client: ApiClient; workspaceId: string; resourceId: string; userName?: string; selection: { section: string; path: string; mode?: "edit" | "annotate" } | null; editable: boolean; fullscreen?: boolean; resolveResourceTitle: ResourceTitleResolver; onNavigate: (resourceId: string) => void; onOpenFile?: (path: string) => void; onSaveMarkdown: (path: string, content: string, expectedContentHash: string) => Promise<FilePreviewModel>; onClose: () => void; onError: (message: string) => void } = $props();
   let preview = $state<FilePreviewModel | null>(null);
+  const editable = $derived(allowEditing && !preview?.readOnly);
   let loading = $state(false);
   let error = $state("");
   let mode = $state<"preview" | "edit" | "annotate">("preview");
@@ -29,11 +30,15 @@
     activeSelectionKey = currentSelectionKey;
     preview = null;
     error = "";
-    mode = editable && current?.mode === "annotate" ? "annotate" : editable && current?.mode === "edit" ? "edit" : "preview";
+    mode = allowEditing && current?.mode === "annotate" ? "annotate" : allowEditing && current?.mode === "edit" ? "edit" : "preview";
     if (!current) { client.requests.abort(requestScope); return; }
     loading = true;
     void client.latest<FilePreviewModel>(`/api/workspaces/${encodeURIComponent(workspaceId)}/files?path=${encodeURIComponent(current.path)}`, { scope: requestScope })
-      .then((value) => { if (selection?.section === current.section && selection.path === current.path) preview = value; })
+      .then((value) => {
+        if (selection?.section !== current.section || selection.path !== current.path) return;
+        preview = value;
+        if (value.readOnly) mode = "preview";
+      })
       .catch((reason) => {
         if (selection?.section !== current.section || selection.path !== current.path || reason?.name === "StaleResponseError") return;
         error = reason instanceof Error ? reason.message : String(reason);
@@ -72,6 +77,7 @@
       // The full-screen page still works without the handoff; it reloads the file.
     }
     const params = new URLSearchParams({ workspaceId, resourceId, section: selection.section, path: selection.path, mode: currentMode, editable: editable ? "1" : "0" });
+    if (userName && (preview?.path || selection.path).endsWith("spec.md")) params.set("user", userName);
     window.open(`/file?${params.toString()}`, "_blank", "noopener,noreferrer");
   }
 </script>
@@ -87,7 +93,7 @@
       {:else if preview && mode === "annotate"}<div class="modal-markdown-editor"><LazyMarkdownEditor identity={`${workspaceId}:${resourceId}:${selection.path}:annotate`} file={preview} mode="annotate" onSave={saveMarkdown} onToast={onError} /></div>
       {:else if preview?.image}<div class="image-preview" data-preview-scroll><img src={rawURL} alt={preview.name || selection.path} /></div>
       {:else if preview?.binary}<div class="file-modal-empty"><Icon name="file-warning" /><strong>Preview unavailable</strong><span>{preview.name || selection.path} · Binary file, {formatBytes(preview.size || 0)}.</span></div>
-      {:else if isMarkdownFile(preview?.path || selection.path)}<div class="modal-markdown markdown-rendered" data-preview-scroll use:markdownResourceNavigation={{ resolveResourceTitle, onNavigate, onOpenFile }}>{@html markdownHTML(preview?.content || "", { workspaceId, resolveResourceTitle })}</div>
+      {:else if isMarkdownFile(preview?.path || selection.path)}<div class="modal-markdown markdown-rendered" data-preview-scroll use:markdownResourceNavigation={{ resolveResourceTitle, onNavigate, onOpenFile, documentPath: preview?.path || selection.path }}>{@html markdownHTML(preview?.content || "", { workspaceId, resolveResourceTitle })}</div>
       {:else}<pre class="modal-preview-content" data-preview-scroll>{preview?.content || ""}</pre>{/if}
     </div>
   </div>

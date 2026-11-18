@@ -52,12 +52,15 @@ afterEach(async () => {
 });
 
 describe("FilePreviewFullscreen", () => {
-  it("saves workspace.md through the scoped documents endpoint", async () => {
-    setURL({ workspaceId: "ws", resourceId: "workspace", path: "workspace.md", mode: "edit" });
+  it.each([["memory.md", "documents"], ["spec.md", "spec"]])("saves %s through its own endpoint", async (path, endpoint) => {
+    setURL({ workspaceId: "ws", resourceId: "workspace", path, mode: "edit", user: "selected-user" });
     const requests: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      if (init?.method === "PUT") requests.push(String(input));
-      return new Response(JSON.stringify({ path: "workspace.md", name: "workspace.md", content: "# Pending", contentHash: "document-hash" }), { headers: { "content-type": "application/json" } });
+      if (init?.method === "PUT") {
+        requests.push(String(input));
+        expect(new Headers(init.headers).get("X-PUA-User")).toBe("selected-user");
+      }
+      return new Response(JSON.stringify({ path, name: path, content: "# Pending", contentHash: "document-hash" }), { headers: { "content-type": "application/json" } });
     }));
     const target = mountFullscreen();
     await vi.waitFor(() => expect(target.querySelector(".cm-editor")).not.toBeNull());
@@ -65,7 +68,7 @@ describe("FilePreviewFullscreen", () => {
     view.dispatch({ changes: { from: view.state.doc.length, insert: "\nResult" } });
     await tick();
     Array.from(target.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.trim() === "Save")!.click();
-    await vi.waitFor(() => expect(requests).toEqual(["/api/workspaces/ws/resources/workspace/documents?path=workspace.md"]));
+    await vi.waitFor(() => expect(requests).toEqual([`/api/workspaces/ws/resources/workspace/${endpoint}?path=${path}`]));
   });
   it("renders the file full screen from URL parameters without a modal backdrop", async () => {
     setURL({ workspaceId: "ws", resourceId: "project1.task1", section: "Files", path: "project1/task1/task.md", mode: "edit" });

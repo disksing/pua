@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,7 +19,7 @@ const markdownSaveRequestMaxBytes = previewMaxBytes + 64*1024
 
 var errMarkdownContentConflict = errors.New("Markdown file changed on disk")
 
-func (s *server) saveResourceMarkdownFile(w http.ResponseWriter, r *http.Request, workspaceID, resourceID string) {
+func (s *server) saveResourceMarkdownFile(w http.ResponseWriter, r *http.Request, workspaceID, resourceID string, spec bool) {
 	if r.Method != http.MethodPut {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
@@ -33,17 +34,18 @@ func (s *server) saveResourceMarkdownFile(w http.ResponseWriter, r *http.Request
 		writeError(w, err, http.StatusBadRequest)
 		return
 	}
-	resource := app.ResourceResult{Path: "."}
-	if resourceID != "workspace" {
-		resource, err = puaWorkspace.ResourceValue(resourceID)
-		if err != nil {
-			writeError(w, err, http.StatusNotFound)
+	if spec {
+		origin, originErr := url.Parse(r.Header.Get("Origin"))
+		site := r.Header.Get("Sec-Fetch-Site")
+		if originErr != nil || origin.Host != r.Host || (origin.Scheme != "http" && origin.Scheme != "https") ||
+			(site != "" && site != "same-origin") || r.Header.Get("X-PUA-Chat-Token") != "" {
+			writeError(w, errors.New("Spec saving requires the same-origin editor"), http.StatusForbidden)
 			return
 		}
-	}
-	if resource.Archived {
-		writeError(w, errors.New("archived resources cannot be edited"), http.StatusBadRequest)
-		return
+		if _, err := s.workspaceUserName(r, workspace.Path); err != nil {
+			writeError(w, err, http.StatusForbidden)
+			return
+		}
 	}
 
 	relPath := filepath.ToSlash(filepath.Clean(strings.TrimSpace(r.URL.Query().Get("path"))))
@@ -51,12 +53,6 @@ func (s *server) saveResourceMarkdownFile(w http.ResponseWriter, r *http.Request
 		writeError(w, errors.New("path is required"), http.StatusBadRequest)
 		return
 	}
-	abs, err := editableResourceMarkdownPath(workspace.Path, resource, relPath)
-	if err != nil {
-		writeError(w, err, http.StatusBadRequest)
-		return
-	}
-
 	var body struct {
 		Content             string `json:"content"`
 		ExpectedContentHash string `json:"expectedContentHash"`
@@ -86,12 +82,34 @@ func (s *server) saveResourceMarkdownFile(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if err := replaceMarkdownFile(abs, content, body.ExpectedContentHash); err != nil {
+	status := http.StatusInternalServerError
+	var abs string
+	err = puaWorkspace.WithResourceDocumentMutation(func() error {
+		resource := app.ResourceResult{Path: "."}
+		if resourceID != "workspace" {
+			resource, err = puaWorkspace.ResourceValue(resourceID)
+			if err != nil {
+				status = http.StatusNotFound
+				return err
+			}
+		}
+		if resource.Archived {
+			status = http.StatusBadRequest
+			return errors.New("archived resources cannot be edited")
+		}
+		abs, err = editableResourceMarkdownPath(workspace.Path, resource, relPath, spec)
+		if err != nil {
+			status = http.StatusBadRequest
+			return err
+		}
+		return replaceMarkdownFile(abs, content, body.ExpectedContentHash)
+	})
+	if err != nil {
 		if errors.Is(err, errMarkdownContentConflict) {
 			writeError(w, errors.New("Markdown file changed on disk; reconcile the preserved browser draft before saving"), http.StatusConflict)
 			return
 		}
-		writeError(w, err, http.StatusInternalServerError)
+		writeError(w, err, status)
 		return
 	}
 	previewPath(w, relPath, abs)
@@ -107,7 +125,7 @@ func ensureJSONEOF(decoder *json.Decoder) error {
 	return errors.New("request body must contain exactly one JSON value")
 }
 
-func editableResourceMarkdownPath(workspaceRoot string, resource app.ResourceResult, relPath string) (string, error) {
+func editableResourceMarkdownPath(workspaceRoot string, resource app.ResourceResult, relPath string, spec bool) (string, error) {
 	if !isMarkdownFilePath(relPath) {
 		return "", errors.New("only Markdown files can be edited")
 	}
@@ -119,14 +137,12 @@ func editableResourceMarkdownPath(workspaceRoot string, resource app.ResourceRes
 	pathSlash := filepath.ToSlash(pathRel)
 	allowed := false
 	switch {
-	case resourceRel == "." && pathSlash == "workspace.md":
-		allowed = true
+	case spec:
+		allowed = pathSlash == app.SpecMarkdownFile && (resourceRel == "." || resource.Project != nil || resource.Task != nil)
+	case pathSlash == app.MemoryMarkdownFile:
+		allowed = resourceRel == "." || resource.Project != nil || resource.Task != nil
 	case resourceRel == ".":
 		allowed = false
-	case resource.Project != nil && pathSlash == "project.md":
-		allowed = true
-	case resource.Task != nil && pathSlash == "task.md":
-		allowed = true
 	case resource.Project != nil && strings.HasPrefix(pathSlash, "templates/") && !strings.Contains(strings.TrimPrefix(pathSlash, "templates/"), "/"):
 		allowed = true
 	case strings.HasPrefix(pathSlash, "artifacts/"):
@@ -155,8 +171,8 @@ func editableResourceMarkdownPath(workspaceRoot string, resource app.ResourceRes
 		}
 		return "", err
 	}
-	if err := ensurePathInside(resourceEval, targetEval); err != nil {
-		return "", errors.New("file symlink escapes the selected resource")
+	if targetEval != filepath.Join(resourceEval, filepath.FromSlash(pathSlash)) {
+		return "", errors.New("editable Markdown path must not resolve through symbolic links")
 	}
 	info, err := os.Lstat(abs)
 	if err != nil {

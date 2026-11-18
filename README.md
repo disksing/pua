@@ -180,7 +180,7 @@ do not expose it to an untrusted network.
 The main UI is split into navigation, resource details, and agent chat:
 
 - **Navigation:** switch workspaces, open the fixed Scheduler entry, expand the project/task tree, and monitor each resource's current runtime state.
-- **Details:** render Scheduler context, schedules, `project.md`, `task.md`, and resource History; browse templates and artifacts; preview the workspace Wiki; inspect repository/worktree metadata; and render tracked plus untracked Git diffs.
+- **Details:** render separate Spec and Memory documents for Workspaces, Projects and Tasks, plus Scheduler context, schedules and resource History. Browse templates, artifacts, Wiki files and worktree diffs.
 - **Chat:** select a Workspace, Scheduler, Project, or Task and send a message directly; PUA lazily creates or reuses that work subject's current generation. The resource timeline continues across generation boundaries, shows explicit history gaps, and pages older Turns without exposing Session lifecycle controls. At an idle Turn boundary, the composer can explicitly end the current generation; PUA safely stops and archives its AgentHub Session, retires the generation, and waits for the next message to create a successor. A new generation recovers from the brief, bounded recent resource history, task-worktree Git state, and artifacts rather than a second permanent progress file. Waiting mailbox messages appear above the composer and can be inserted into the active Turn without changing message ID when steer is supported.
 - **Settings:** add or remove workspaces, choose one of the bundled workspace icons, edit the user-owned portion of workspace `AGENTS.md`, manage Workspace-local users and preferences, configure independent usage-based and inactivity-based automatic Generation rotation, inspect the read-only AgentHub catalog, map Profiles to catalog agents, and choose the one-time Profile defaults for newly created Workspaces, Projects, and Tasks. Each browser selects an existing user independently for each Workspace; creating a Workspace requires an initial user name, which is prefilled from the Server account when that name is valid.
 
@@ -341,13 +341,15 @@ AgentWorkspace/
   project1-pua-dev/
     AGENTS.md                 generated project launch card
     project.json              structured project metadata
-    project.md                durable project contract
+    spec.md                   durable project contract
+    memory.md                 Agent context and follow-ups
     templates/                reusable task templates
     artifacts/                project outputs
     task1-first-change/
       AGENTS.md               generated task launch card
       task.json               task and repository metadata
-      task.md                 durable task contract
+      spec.md                 durable task contract
+      memory.md               Agent context and follow-ups
       artifacts/              reports, screenshots, uploads, patches
       worktree/               task-owned Git worktrees
     archive/                  archived tasks
@@ -364,7 +366,8 @@ Archive is a reversible, non-destructive directory move. Archiving a Project mov
 
 | File | Role |
 | --- | --- |
-| `project.md`, `task.md` | Durable contracts: background, scope, acceptance criteria, stable constraints, decisions, and contract-changing questions. |
+| `spec.md` | Background, scope, acceptance criteria and workflow. User edits use the Spec editor. Agent changes require a verifiable user instruction or approval for the specific change. |
+| `memory.md` | Agent context and Chat follow-ups for the Workspace, Project or Task. |
 | Resource History | Bounded generation/Turn conversation history, exposed by the History API and CLI. |
 | `project.json`, `task.json` | Versioned structured facts PUA understands. Arbitrary notes belong in Markdown. |
 | `AGENTS.md` | Workspace operating rules plus generated project/task launch cards. PUA rewrites only its marked managed block. |
@@ -447,13 +450,11 @@ Workspace、Project 和 Task 通过 `internal/app` 在本地创建，不保存�
 
 `pua migrate` upgrades supported resource metadata, generation/mailbox stores,
 legacy task history, Scheduler resources, and PUA-managed `AGENTS.md` blocks.
-It also merges legacy `chat.md` into `workspace.md`, `project.md`, `task.md`,
-or `scheduler.md`, including archived resources. Existing document content is
-preserved; the source is retired only after an atomic write and verification.
-Repeated migration, including a retry after an interrupted source removal, is safe.
-New resources keep their background and Chat follow-ups in the same document.
-The Workspace page supports viewing, editing, and saving `workspace.md` with
-the same Markdown editor and conflict checks as Project and Task documents.
+It moves legacy `workspace.md`, `project.md`, `task.md` and `chat.md` content to
+`memory.md`, including archived resources. If missing, `spec.md` receives a
+migration notice pointing to Memory. Old resource document URLs remain readable
+in the Web UI. Scheduler retains `scheduler.md`. See the
+[迁移预检与回退说明](docs/resource-documents-migration.md).
 
 ```markdown
 <!-- managed by pua cli -->

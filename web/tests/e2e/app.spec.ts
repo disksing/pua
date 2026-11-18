@@ -76,7 +76,7 @@ function resourceDetail(resource: MockResource) {
   return {
     ...resource,
     files: [
-      { name: resource.type === "project" ? "project.md" : "task.md", path: `${resource.path}/${resource.type === "project" ? "project.md" : "task.md"}`, content: `# ${resource.title}\n\nBaseline content with a stable selection target.${resourceReference}\n\n${longDetailBody}`, contentHash: `${resource.id}-brief-v1` },
+      { name: "spec.md", path: `${resource.path}/spec.md`, content: `# ${resource.title}\n\nBaseline content with a stable selection target.${resourceReference}\n\n${longDetailBody}`, contentHash: `${resource.id}-brief-v1` },
     ],
     artifacts: [{ name: "notes.md", path: `${resource.path}/artifacts/notes.md`, type: "file", size: 24 }],
     repos: resource.type === "task" ? [{ name: "pua", worktreePath: `${resource.path}/worktree/pua`, branch: "topic", targetBranch: "master" }] : [],
@@ -447,7 +447,7 @@ async function installMockApi(page: Page, lastResourceId = "project1.task1", wit
       harness.bindingBodies.push(request.postDataJSON());
       return json(route, { agentBinding: request.postDataJSON() });
     }
-    const markdownSaveMatch = path.match(/^\/api\/workspaces\/ws-test\/resources\/(.+)\/documents$/);
+    const markdownSaveMatch = path.match(/^\/api\/workspaces\/ws-test\/resources\/(.+)\/spec$/);
     if (markdownSaveMatch && method === "PUT") {
       const resourceId = decodeURIComponent(markdownSaveMatch[1]);
       const body = request.postDataJSON() as { content: string; expectedContentHash: string };
@@ -455,7 +455,7 @@ async function installMockApi(page: Page, lastResourceId = "project1.task1", wit
       harness.markdownBodies.push({ path: filePath, content: body.content, expectedContentHash: body.expectedContentHash });
       if (resourceId !== "project1.task1" || body.expectedContentHash !== (savedTaskBrief?.contentHash || "project1.task1-brief-v1")) return json(route, { error: "Markdown file changed on disk" }, 409);
       savedTaskBrief = { content: body.content, contentHash: `task-brief-saved-${harness.markdownBodies.length}` };
-      return json(route, { path: filePath, name: "task.md", content: savedTaskBrief.content, contentHash: savedTaskBrief.contentHash, size: savedTaskBrief.content.length });
+      return json(route, { path: filePath, name: "spec.md", content: savedTaskBrief.content, contentHash: savedTaskBrief.contentHash, size: savedTaskBrief.content.length });
     }
     const resourceMatch = path.match(/^\/api\/workspaces\/ws-test\/resources\/(.+)$/);
     if (resourceMatch) {
@@ -499,9 +499,9 @@ async function installMockApi(page: Page, lastResourceId = "project1.task1", wit
       if (createdTask) documentCandidates.push(createdTask);
       const documentFile = documentCandidates
         .map((resource) => ({ resource, file: resourceDetail(resource).files[0] }))
-        .find(({ resource }) => `${resource.path}/${resource.type === "project" ? "project.md" : "task.md"}` === filePath)?.file;
+        .find(({ file }) => file.path === filePath)?.file;
       if (documentFile) {
-        const file = documentFile.path === "project1-migration/task1-infrastructure/task.md" && savedTaskBrief
+        const file = documentFile.path === "project1-migration/task1-infrastructure/spec.md" && savedTaskBrief
           ? { ...documentFile, content: savedTaskBrief.content, contentHash: savedTaskBrief.contentHash }
           : documentFile;
         return json(route, file);
@@ -624,7 +624,7 @@ async function installShellMockApi(page: Page): Promise<ShellHarness> {
       if (!resource) return json(route, { error: "not found" }, 404);
       return json(route, {
         ...resource,
-        files: [{ name: resource.type === "project" ? "project.md" : "task.md", path: `${resource.path}/${resource.type === "project" ? "project.md" : "task.md"}`, content: `# ${resource.title}`, contentHash: `${id}-v1` }],
+        files: [{ name: "spec.md", path: `${resource.path}/spec.md`, content: `# ${resource.title}`, contentHash: `${id}-v1` }],
         artifacts: [], repos: [], templates: [],
       });
     }
@@ -790,11 +790,11 @@ test("edits Markdown source through the dialog and saves with a content hash", a
   await editor.getByRole("button", { name: "Save", exact: true }).click();
   await expect.poll(() => harness.markdownBodies.length).toBe(1);
   expect(harness.markdownBodies[0]).toMatchObject({
-    path: "project1-migration/task1-infrastructure/task.md",
+    path: "project1-migration/task1-infrastructure/spec.md",
     expectedContentHash: "project1.task1-brief-v1",
   });
   expect(harness.markdownBodies[0].content).toContain("Saved from Playwright.");
-  await expect(panel.locator('[data-doc-file="task.md"] .markdown-view')).toContainText("Saved from Playwright.");
+  await expect(panel.locator('[data-doc-file="spec.md"] .markdown-view')).toContainText("Saved from Playwright.");
   await dialog.getByRole("button", { name: "Close" }).click();
 });
 
@@ -818,7 +818,7 @@ test("annotates read-only Markdown through the dialog and copies the review", as
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: new URL(page.url()).origin });
   await editor.getByRole("button", { name: "Copy annotations" }).click();
   const copied = await page.evaluate(() => navigator.clipboard.readText());
-  expect(copied).toContain("文件：project1-migration/task1-infrastructure/task.md");
+  expect(copied).toContain("文件：project1-migration/task1-infrastructure/spec.md");
   expect(copied).toContain("批注：Clarify the expected outcome.");
   expect(copied).not.toContain("请处理");
   expect(copied).not.toContain("以下批注");
@@ -1500,7 +1500,7 @@ test("keeps Svelte Detail documents, History, previews, diffs, and edits stable 
   const content = panel.locator("#detailsContent");
   await expect(panel).toHaveAttribute("data-component-owner", "detail-panel");
   await expect(panel.locator(".resource-ref-badge")).toHaveText("#1");
-  await expect(panel.getByRole("tab", { name: "Task" })).toHaveAttribute("aria-selected", "true");
+  await expect(panel.getByRole("tab", { name: "Spec" })).toHaveAttribute("aria-selected", "true");
   await expect.poll(() => page.evaluate(() => ({
     root: getComputedStyle(document.documentElement).overscrollBehavior,
     body: getComputedStyle(document.body).overscrollBehavior,
@@ -1508,7 +1508,7 @@ test("keeps Svelte Detail documents, History, previews, diffs, and edits stable 
   }))).toEqual({ root: "none", body: "none", content: "contain" });
   const headerTop = await panel.locator(".details-header").evaluate((node) => node.getBoundingClientRect().top);
   const tabsTop = await panel.locator(".details-tabs").evaluate((node) => node.getBoundingClientRect().top);
-  const documentView = panel.locator('[data-doc-file="task.md"] .markdown-view');
+  const documentView = panel.locator('[data-doc-file="spec.md"] .markdown-view');
   await documentView.evaluate((node) => {
     node.setAttribute("data-identity-probe", "stable-document");
     const text = node.querySelector("p")?.firstChild;
@@ -1585,7 +1585,7 @@ test("resolves Markdown resource references and navigates through the SPA", asyn
   await installMockApi(page, "project1.task1");
   await page.goto("/w/ws-test/r/project1.task1");
 
-  const reference = page.locator('[data-doc-file="task.md"] a[data-pua-resource-id="project1.task2"]');
+  const reference = page.locator('[data-doc-file="spec.md"] a[data-pua-resource-id="project1.task2"]');
   await expect(reference).toHaveText("Follow-up task");
   await expect(reference).toHaveAttribute("href", "/w/ws-test/r/project1.task2");
   await reference.click();

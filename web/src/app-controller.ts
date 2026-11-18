@@ -15,6 +15,7 @@ import { createNotificationController, type NotificationSource } from "./control
 import { createPaneLayoutController } from "./controllers/pane-layout-controller";
 import { createThemeController } from "./controllers/theme-controller";
 import { createResourceDetailController } from "./controllers/resource-detail-controller";
+import { RESOURCE_DOCUMENTS, resourceDocumentSavePath } from "./controllers/resource-documents";
 import { createRouteController } from "./controllers/route-controller";
 import { createSettingsController, type AgentHubData } from "./controllers/settings-controller";
 import { createShellProjection, filterProjectTree } from "./controllers/shell-projection";
@@ -58,7 +59,7 @@ interface ControllerState {
 	tree: WorkspaceTree | null;
 	details: Record<string, ResourceRecord>;
 	workspaceAgents: WorkspaceFileRecord | null;
-	workspaceDocument: WorkspaceFileRecord | null;
+	workspaceDocuments: Record<string, WorkspaceFileRecord>;
 	workspaceUsers: WorkspaceUser[];
 	currentUserName: string;
 	userGate: { mode: "" | "create" | "select" | "loading"; suggestedUserName: string; missingUserName: string };
@@ -122,7 +123,7 @@ const controllerState: ControllerState = {
 	tree: null,
 	details: {},
 	workspaceAgents: null,
-	workspaceDocument: null,
+	workspaceDocuments: {},
 	workspaceUsers: [],
 	currentUserName: "",
 	userGate: { mode: "", suggestedUserName: "", missingUserName: "" },
@@ -595,7 +596,7 @@ async function load() {
 		controllerState.tree = null;
 		clearResourceDetailState();
 		controllerState.workspaceAgents = null;
-		controllerState.workspaceDocument = null;
+		controllerState.workspaceDocuments = {};
 		controllerState.workspaceUsers = [];
 		controllerState.diff = null;
 		resetAgentState();
@@ -632,7 +633,7 @@ async function loadTree(options: LoadTreeOptions = {}) {
 	controllerState.tree = tree;
 	clearResourceDetailState();
 	controllerState.workspaceAgents = null;
-	controllerState.workspaceDocument = null;
+	controllerState.workspaceDocuments = {};
 	controllerState.diff = null;
 	ensureValidSelection();
 	ensureSelectedProjectExpanded(false);
@@ -674,7 +675,8 @@ async function loadWorkspaceAgents(options: WorkspaceAgentsOptions = {}) {
 	const workspaceId = controllerState.activeWorkspaceId;
 	const navigationVersion = controllerState.navigationVersion;
 	const requestVersion = ++controllerState.workspaceAgentsRequestVersion;
-	const results = await Promise.allSettled(["AGENTS.md", "workspace.md"].map((path) =>
+	const paths = ["AGENTS.md", ...RESOURCE_DOCUMENTS.map((document) => document.name)];
+	const results = await Promise.allSettled(paths.map((path) =>
 		api<WorkspaceFileRecord>(`/api/workspaces/${workspaceId}/files?path=${encodeURIComponent(path)}`)));
 	if (!isCurrentWorkspaceView(workspaceId, navigationVersion) || requestVersion !== controllerState.workspaceAgentsRequestVersion) return null;
 	const document = (index: number, path: string): WorkspaceFileRecord => {
@@ -682,7 +684,7 @@ async function loadWorkspaceAgents(options: WorkspaceAgentsOptions = {}) {
 		return result.status === "fulfilled" ? result.value : { path, name: path, error: errorMessage(result.reason) };
 	};
 	controllerState.workspaceAgents = document(0, "AGENTS.md");
-	controllerState.workspaceDocument = document(1, "workspace.md");
+	controllerState.workspaceDocuments = Object.fromEntries(paths.slice(1).map((path, index) => [path, document(index + 1, path)]));
 	return controllerState.workspaceAgents;
 }
 async function loadUIState(workspaceId = controllerState.activeWorkspaceId, navigationVersion = controllerState.navigationVersion) {
@@ -769,10 +771,10 @@ async function autoRefresh() {
 		}
 		if (controllerState.selectedId === "workspace") {
 			const previousAgents = controllerState.workspaceAgents;
-			const previousDocument = controllerState.workspaceDocument;
+			const previousDocuments = controllerState.workspaceDocuments;
 			await loadWorkspaceAgents({ force: true });
 			if (!isCurrentAutoRefresh(workspaceId, navigationVersion, refreshVersion)) return;
-			if (!sameJSON(previousAgents, controllerState.workspaceAgents) || !sameJSON(previousDocument, controllerState.workspaceDocument)) changed = true;
+			if (!sameJSON(previousAgents, controllerState.workspaceAgents) || !sameJSON(previousDocuments, controllerState.workspaceDocuments)) changed = true;
 		} else if (selectedId) {
 			const detailRequestVersion = ++controllerState.detailRequestVersion;
 			const detail = await fetchDetail(selectedId, workspaceId);
@@ -1267,7 +1269,7 @@ function detailPanelModel(): DetailPanelModel {
 		detail: null,
 		wiki: controllerState.tree?.wiki || null,
 		workspaceAgents: controllerState.workspaceAgents,
-		workspaceDocument: controllerState.workspaceDocument,
+		workspaceDocuments: controllerState.workspaceDocuments,
 		workspaceDefaults: {
 			project: controllerState.tree?.resourceDefaults?.project || { kind: "profile", name: "default" },
 			task: controllerState.tree?.resourceDefaults?.task || { kind: "profile", name: "default" }
@@ -1454,7 +1456,7 @@ async function saveWorkspaceAgentsFromDetail(content: string, expectedContentHas
 async function saveMarkdownFileFromDetail(path: string, content: string, expectedContentHash: string): Promise<WorkspaceFileRecord> {
 	const workspaceId = controllerState.activeWorkspaceId;
 	const resourceId = controllerState.selectedId;
-	if (!workspaceId || !resourceId || resourceId === "scheduler" || (resourceId === "workspace" && path !== "workspace.md")) throw new Error("No editable resource is selected.");
+	if (!workspaceId || !resourceId || resourceId === "scheduler" || (resourceId === "workspace" && !RESOURCE_DOCUMENTS.some((document) => document.name === path))) throw new Error("No editable resource is selected.");
 	const navigationVersion = controllerState.navigationVersion;
 	if (path.includes("/templates/")) {
 		const name = path.split("/").pop()?.replace(/\.(md|markdown|mdown|mkdn)$/i, "") || "template";
@@ -1464,12 +1466,12 @@ async function saveMarkdownFileFromDetail(path: string, content: string, expecte
 		});
 		if (!validation.valid) throw new Error(validation.errors?.[0]?.message || "The task template is invalid.");
 	}
-	const saved = await api<WorkspaceFileRecord>(`/api/workspaces/${encodeURIComponent(workspaceId)}/resources/${encodeURIComponent(resourceId)}/documents?path=${encodeURIComponent(path)}`, {
+	const saved = await api<WorkspaceFileRecord>(resourceDocumentSavePath(workspaceId, resourceId, path), {
 		method: "PUT",
 		body: JSON.stringify({ content, expectedContentHash })
 	});
 	if (!isCurrentWorkspaceView(workspaceId, navigationVersion) || controllerState.selectedId !== resourceId) throw new Error("The resource changed before the Markdown file finished saving.");
-	if (resourceId === "workspace") controllerState.workspaceDocument = saved;
+	if (resourceId === "workspace") controllerState.workspaceDocuments = { ...controllerState.workspaceDocuments, [path]: saved };
 	else await loadDetail(resourceId, { force: true });
 	publishViewModels();
 	return saved;

@@ -99,7 +99,7 @@ func TestTemplateHTTPListRenderPreviewAndCreate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	markdown, err := os.ReadFile(filepath.Join(workspace.Root(), filepath.FromSlash(resource.Path), "task.md"))
+	markdown, err := os.ReadFile(filepath.Join(workspace.Root(), filepath.FromSlash(resource.Path), app.SpecMarkdownFile))
 	if err != nil || !strings.Contains(string(markdown), "# Created") {
 		t.Fatalf("created task does not match preview: %v %q", err, markdown)
 	}

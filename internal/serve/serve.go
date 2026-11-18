@@ -152,6 +152,7 @@ type filePreview struct {
 	MimeType    string `json:"mimeType,omitempty"`
 	Content     string `json:"content,omitempty"`
 	ContentHash string `json:"contentHash,omitempty"`
+	ReadOnly    bool   `json:"readOnly,omitempty"`
 }
 
 type diffResponse struct {
@@ -615,8 +616,8 @@ func (s *server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 			s.agents.handleChat(w, r, id, parts[2], parts[4:])
 			return
 		}
-		if len(parts) == 4 && parts[3] == "documents" {
-			s.saveResourceMarkdownFile(w, r, id, parts[2])
+		if len(parts) == 4 && (parts[3] == "documents" || parts[3] == "spec") {
+			s.saveResourceMarkdownFile(w, r, id, parts[2], parts[3] == "spec")
 			return
 		}
 		if len(parts) == 4 && parts[3] == "artifacts" {
@@ -1519,13 +1520,14 @@ func previewPath(w http.ResponseWriter, relPath, abs string) {
 	image := isPreviewableImage(relPath)
 	preview := filePreview{
 		Path:        filepath.ToSlash(filepath.Clean(relPath)),
-		Name:        info.Name(),
+		Name:        filepath.Base(relPath),
 		Size:        info.Size(),
 		Truncated:   truncated,
 		Binary:      binary,
 		Image:       image,
 		MimeType:    mimeType,
 		ContentHash: previewContentHash(data),
+		ReadOnly:    filepath.Base(abs) != filepath.Base(relPath),
 	}
 	if !binary && !image {
 		preview.Content = string(data)
@@ -2352,6 +2354,9 @@ func resolveWorkspaceFileLink(root, target string) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
+	if memory := legacyDocumentReadPath(root, abs); memory != "" {
+		return memory, filepath.ToSlash(resolvedRel), nil
+	}
 	if info, statErr := os.Stat(abs); statErr == nil && !info.IsDir() {
 		return abs, filepath.ToSlash(resolvedRel), nil
 	}
@@ -2359,12 +2364,26 @@ func resolveWorkspaceFileLink(root, target string) (string, string, error) {
 		baseRel := filepath.FromSlash(base)
 		baseAbs, baseErr := safeWorkspacePath(root, baseRel)
 		if baseErr == nil {
+			if memory := legacyDocumentReadPath(root, baseAbs); memory != "" {
+				return memory, filepath.ToSlash(baseRel), nil
+			}
 			if info, statErr := os.Stat(baseAbs); statErr == nil && !info.IsDir() {
 				return baseAbs, filepath.ToSlash(baseRel), nil
 			}
 		}
 	}
 	return abs, filepath.ToSlash(resolvedRel), nil
+}
+
+func legacyDocumentReadPath(root, path string) string {
+	if !app.LegacyResourceDocument(root, path) {
+		return ""
+	}
+	memory := filepath.Join(filepath.Dir(path), app.MemoryMarkdownFile)
+	if info, err := os.Lstat(memory); err == nil && info.Mode().IsRegular() {
+		return memory
+	}
+	return ""
 }
 
 func workspaceRelativeFileLinkTarget(root, target string) (string, error) {

@@ -26,8 +26,7 @@ const (
 	testArchiveDir       = "archive"
 	testWikiDir          = "wiki"
 	testProjectJSONFile  = "project.json"
-	testProjectMDFile    = "project.md"
-	testTaskMDFile       = "task.md"
+	testSpecMDFile       = "spec.md"
 	testDefaultLanguage  = "en"
 	testChineseLanguage  = "zh-CN"
 	testDefaultWikiIndex = "# Workspace Wiki\n\n此索引是 workspace 长期知识的入口。随着 Wiki 内容增长，请在这里添加主题页面链接及简短摘要。\n"
@@ -505,7 +504,7 @@ func TestSimplifiedChineseInitAndLanguageMigration(t *testing.T) {
 		projectAgentsPath := filepath.Join(root, "project1", "AGENTS.md")
 		taskAgentsPath := filepath.Join(root, "project1", "task1", "AGENTS.md")
 		appendFile(t, projectAgentsPath, "\n# 团队说明\n\n保留这行。\n")
-		chineseTaskMD := readFile(t, filepath.Join(root, "project1", "task1", testTaskMDFile))
+		chineseTaskMD := readFile(t, filepath.Join(root, "project1", "task1", testSpecMDFile))
 
 		if err := os.Chdir(filepath.Join(root, "project1", "task1")); err != nil {
 			t.Fatal(err)
@@ -526,8 +525,8 @@ func TestSimplifiedChineseInitAndLanguageMigration(t *testing.T) {
 		if got := readFile(t, taskAgentsPath); !strings.Contains(got, "# Task Agent Instructions") || !strings.Contains(got, "Resource ID: project1.task1") {
 			t.Fatalf("expected English Task card after migration, got:\n%s", got)
 		}
-		if got := readFile(t, filepath.Join(root, "project1", "task1", testTaskMDFile)); got != chineseTaskMD {
-			t.Fatalf("migration should not translate existing task.md\nbefore:\n%s\nafter:\n%s", chineseTaskMD, got)
+		if got := readFile(t, filepath.Join(root, "project1", "task1", testSpecMDFile)); got != chineseTaskMD {
+			t.Fatalf("migration should not translate existing spec.md\nbefore:\n%s\nafter:\n%s", chineseTaskMD, got)
 		}
 
 		run(t, "migrate", "--language=zh-CN")
@@ -702,7 +701,8 @@ func TestTaskLifecycle(t *testing.T) {
 			t.Fatalf("expected project JSON not to include repos, got:\n%s", created)
 		}
 		assertFile(t, filepath.Join(root, "project1", "project.json"))
-		assertFile(t, filepath.Join(root, "project1", "project.md"))
+		assertFile(t, filepath.Join(root, "project1", testSpecMDFile))
+		assertFile(t, filepath.Join(root, "project1", "memory.md"))
 		assertMissing(t, filepath.Join(root, "project1", "task.json"))
 		assertMissing(t, filepath.Join(root, "project1", "task.md"))
 		assertMissing(t, filepath.Join(root, "project1", "work.md"))
@@ -710,7 +710,7 @@ func TestTaskLifecycle(t *testing.T) {
 		assertDir(t, filepath.Join(root, "project1", "templates"))
 		assertMissing(t, filepath.Join(root, "project1", "worktree"))
 		projectAgents := readFile(t, filepath.Join(root, "project1", "AGENTS.md"))
-		for _, want := range []string{"# Project Agent Instructions", "AgentWorkspace Project directory", "Resource ID: project1", "../AGENTS.md", "project.md"} {
+		for _, want := range []string{"# Project Agent Instructions", "AgentWorkspace Project directory", "Resource ID: project1", "../AGENTS.md", "spec.md", "memory.md"} {
 			if !strings.Contains(projectAgents, want) {
 				t.Fatalf("Project AGENTS.md is missing %q:\n%s", want, projectAgents)
 			}
@@ -723,7 +723,7 @@ func TestTaskLifecycle(t *testing.T) {
 				t.Fatalf("Project AGENTS.md copied Workspace guidance %q:\n%s", copied, projectAgents)
 			}
 		}
-		projectMDPath := filepath.Join(root, "project1", "project.md")
+		projectMDPath := filepath.Join(root, "project1", testSpecMDFile)
 		projectMD := readFile(t, projectMDPath)
 		if !strings.Contains(projectMD, "# Implement the pua MVP") || !strings.Contains(projectMD, "Implement the pua MVP") {
 			t.Fatalf("expected project.md to contain project background, got:\n%s", projectMD)
@@ -768,15 +768,16 @@ func TestTaskLifecycle(t *testing.T) {
 			t.Fatalf("expected project1.task1 JSON, got:\n%s", child)
 		}
 		assertFile(t, filepath.Join(root, "project1", "task1", "task.json"))
-		assertFile(t, filepath.Join(root, "project1", "task1", "task.md"))
-		taskMD := readFile(t, filepath.Join(root, "project1", "task1", "task.md"))
+		assertFile(t, filepath.Join(root, "project1", "task1", testSpecMDFile))
+		assertFile(t, filepath.Join(root, "project1", "task1", "memory.md"))
+		taskMD := readFile(t, filepath.Join(root, "project1", "task1", testSpecMDFile))
 		assertMissing(t, filepath.Join(root, "project1", "task1", "work.md"))
 		if !strings.Contains(taskMD, "Keep the durable task contract here") || !strings.Contains(taskMD, "when they affect the task contract") {
 			t.Fatalf("expected task.md template to define the durable contract, got:\n%s", taskMD)
 		}
 		assertDir(t, filepath.Join(root, "project1", "task1", "worktree"))
 		subtaskAgents := readFile(t, filepath.Join(root, "project1", "task1", "AGENTS.md"))
-		for _, want := range []string{"# Task Agent Instructions", "Resource ID: project1.task1", "../AGENTS.md", "../../AGENTS.md", "task.md"} {
+		for _, want := range []string{"# Task Agent Instructions", "Resource ID: project1.task1", "../AGENTS.md", "../../AGENTS.md", "spec.md", "memory.md"} {
 			if !strings.Contains(subtaskAgents, want) {
 				t.Fatalf("Task AGENTS.md is missing %q:\n%s", want, subtaskAgents)
 			}
@@ -844,7 +845,7 @@ func TestTaskLifecycle(t *testing.T) {
 		if detail.ID != "project1.task1" || detail.Path != "project1/task1" || len(detail.Files) == 0 {
 			t.Fatalf("unexpected task detail: %+v", detail)
 		}
-		if detail.Files[0].Name != "task.md" || detail.Files[0].Path != "project1/task1/task.md" {
+		if detail.Files[0].Name != testSpecMDFile || detail.Files[0].Path != "project1/task1/spec.md" {
 			t.Fatalf("expected task file path in detail, got: %+v", detail.Files[0])
 		}
 		if detail.Files[0].ContentHash == "" {
@@ -1018,7 +1019,7 @@ func TestTaskCreateUsesTitleAndDetail(t *testing.T) {
 			t.Fatalf("new task JSON should not include description, got:\n%s", created)
 		}
 
-		taskMD := readFile(t, filepath.Join(root, "project1", "task1-task-title", "task.md"))
+		taskMD := readFile(t, filepath.Join(root, "project1", "task1-task-title", testSpecMDFile))
 		expectedTaskMD := `# Task title
 
 ## Background
@@ -1068,7 +1069,7 @@ Template background.
 `
 		run(t, "task", "create", "Template task", "--project=project1", "--slug=template-task", "--task-markdown", templateMarkdown)
 
-		taskMD := readFile(t, filepath.Join(root, "project1", "task1-template-task", "task.md"))
+		taskMD := readFile(t, filepath.Join(root, "project1", "task1-template-task", testSpecMDFile))
 		if taskMD != templateMarkdown+"\n"+localize.MustRender("en", "followups.md", nil) {
 			t.Fatalf("expected template markdown followed by unified follow-ups, got:\n%s", taskMD)
 		}
@@ -1927,7 +1928,7 @@ func TestMigrateRefreshesOpenTaskAgentsAndPreservesManualContent(t *testing.T) {
 		assertFile(t, legacyProjectWork)
 		assertFile(t, filepath.Join(root, "project1", "task1", "work.md"))
 		assertFile(t, filepath.Join(root, "project1", testArchiveDir, "task2", "work.md"))
-		for _, path := range []string{filepath.Join(root, "project1", "task1", "task.md"), filepath.Join(root, "project1", testArchiveDir, "task2", "task.md")} {
+		for _, path := range []string{filepath.Join(root, "project1", "task1", "memory.md"), filepath.Join(root, "project1", testArchiveDir, "task2", "memory.md")} {
 			if got := readFile(t, path); strings.Contains(got, "source=work.md") {
 				t.Fatalf("migrate should no longer fold work.md into %s, got:\n%s", path, got)
 			}

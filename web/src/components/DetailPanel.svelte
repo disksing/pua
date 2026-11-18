@@ -5,6 +5,7 @@
 
   import { ApiClient } from "../api/client";
   import { confirmDialog } from "../controllers/confirm-dialog-controller";
+  import { RESOURCE_DOCUMENTS } from "../controllers/resource-documents";
   import type { ModelChannel } from "./model-channel";
   import DiffModal from "./DiffModal.svelte";
   import FileBrowser from "./FileBrowser.svelte";
@@ -38,12 +39,11 @@
     content: model.workspaceAgents.content || "",
     contentHash: model.workspaceAgents.contentHash,
   } as ResourceFileModel : null);
-  const workspaceFile = $derived(model.workspaceDocument && !model.workspaceDocument.error ? {
-    name: "workspace.md", path: "workspace.md", content: model.workspaceDocument.content || "", contentHash: model.workspaceDocument.contentHash,
-  } as ResourceFileModel : null);
   const tabs = $derived(resourceTabs());
   const activePreviewPath = $derived(preview ? `${preview.section}:${preview.path}` : "");
-  const filePreviewEditable = $derived(model.resourceType === "workspace" ? Boolean(preview && (preview.path === "AGENTS.md" || preview.path === "workspace.md" || preview.path === "")) : !model.detail?.archived && (model.resourceType === "project" || model.resourceType === "task"));
+  const filePreviewEditable = $derived(model.resourceType === "workspace"
+    ? Boolean(preview && (preview.path === "AGENTS.md" || RESOURCE_DOCUMENTS.some((document) => document.name === preview?.path.replace(/^\//, "")) || preview.path === ""))
+    : !model.detail?.archived && (model.resourceType === "project" || model.resourceType === "task"));
 
   onMount(() => channel.subscribe((next) => {
     const previewScrollState = capturePreviewScrollState();
@@ -80,19 +80,14 @@
   onDestroy(() => client.dispose());
 
   function initialTab(value: DetailPanelModel): string {
-    const detailFiles = (value.detail?.files || []).filter((file) => file.name !== "AGENTS.md");
-    if (value.resourceType === "workspace") return "workspace";
     if (value.resourceType === "scheduler") return "schedules";
-    if (value.resourceType === "project" && detailFiles.some((file) => file.name === "project.md")) return "project";
-    if (detailFiles.some((file) => file.name === "task.md")) return "task";
-    if (value.resourceType === "project") return "project";
-    if (value.resourceType === "task") return "task";
+    if (value.resourceType === "workspace" || value.resourceType === "project" || value.resourceType === "task") return "spec";
     return "execution-events";
   }
 
   function resourceTabs(): Array<{ id: string; label: string; icon: string }> {
     if (model.resourceType === "workspace") return [
-      { id: "workspace", label: "Workspace", icon: "file-text" },
+      ...RESOURCE_DOCUMENTS,
 	  { id: "agents", label: "AGENTS.md", icon: "file-text" },
 	  { id: "wiki", label: "Wiki", icon: "book-open" },
 	  { id: "execution-events", label: "Execution events", icon: "history" },
@@ -105,9 +100,7 @@
 	  { id: "execution-events", label: "Execution events", icon: "history" },
       { id: "settings", label: "Settings", icon: "settings" }
 	];
-    const result: Array<{ id: string; label: string; icon: string }> = [];
-    if (model.resourceType === "project") result.push({ id: "project", label: "Project", icon: "file-text" });
-    if (model.resourceType === "task") result.push({ id: "task", label: "Task", icon: "file-text" });
+    const result: Array<{ id: string; label: string; icon: string }> = [...RESOURCE_DOCUMENTS];
     result.push({ id: "execution-events", label: "Execution events", icon: "history" }, { id: "artifacts", label: "Artifacts", icon: "paperclip" });
     if (model.resourceType === "task") result.push({ id: "worktrees", label: "Worktrees", icon: "folder-git-2" });
     result.push({ id: "settings", label: "Settings", icon: "settings" });
@@ -116,9 +109,7 @@
 
   function documentTab(file: ResourceFileModel): string {
 	if (file.name === "scheduler.md") return "context";
-    if (file.name === "project.md") return "project";
-    if (file.name === "task.md") return "task";
-    return tabs.find((tab) => ["project", "task"].includes(tab.id))?.id || "";
+    return RESOURCE_DOCUMENTS.find((document) => document.name === file.name)?.id || "";
   }
 
   function selectTab(tab: string): void {
@@ -220,11 +211,18 @@
       {:else if model.workspaceAgents?.error}<div class="content-section"><div class="file-modal-empty error-preview wiki-status"><Icon name="triangle-alert" /><strong>AGENTS.md unavailable</strong><span>{model.workspaceAgents.error}</span></div></div>
       {:else}<div class="content-section"><div class="file-modal-empty wiki-status"><Icon name="loader-circle" /><strong>Loading AGENTS.md...</strong></div></div>{/if}
     </div>
-    <div hidden={activeTab !== "workspace"}>
-      {#if workspaceFile}<MarkdownDocument file={workspaceFile} workspaceId={model.workspaceId} editable={true} resolveResourceTitle={model.resolveResourceTitle} onNavigate={model.onNavigate} onOpenFile={openLinkedFile} onEdit={openEditor} onAnnotate={openAnnotator} />
-      {:else if model.workspaceDocument?.error}<div class="content-section"><div class="file-modal-empty error-preview"><Icon name="triangle-alert" /><strong>Workspace document unavailable</strong><span>{model.workspaceDocument.error}</span></div></div>
-      {:else}<div class="content-section"><div class="file-modal-empty"><Icon name="loader-circle" /><strong>Loading workspace.md...</strong></div></div>{/if}
-    </div>
+    {#each RESOURCE_DOCUMENTS as document (document.id)}
+      {@const file = model.workspaceDocuments?.[document.name]}
+      <div hidden={activeTab !== document.id}>
+        {#if file && !file.error}
+          <MarkdownDocument file={{ ...file, name: document.name, content: file.content || "" }} workspaceId={model.workspaceId} editable={true} resolveResourceTitle={model.resolveResourceTitle} onNavigate={model.onNavigate} onOpenFile={openLinkedFile} onEdit={openEditor} onAnnotate={openAnnotator} />
+        {:else if file?.error}
+          <div class="content-section"><div class="file-modal-empty error-preview"><Icon name="triangle-alert" /><strong>{document.label} unavailable</strong><span>{file.error}</span></div></div>
+        {:else}
+          <div class="content-section"><div class="file-modal-empty"><Icon name="loader-circle" /><strong>Loading {document.name}…</strong></div></div>
+        {/if}
+      </div>
+    {/each}
     <div hidden={activeTab !== "wiki"}>
       {#if model.wiki?.error}<div class="content-section"><div class="file-modal-empty error-preview wiki-status"><Icon name="triangle-alert" /><strong>Wiki unavailable</strong><span>{model.wiki.error}</span></div></div>
       {:else if !model.wiki?.exists}<div class="content-section"><div class="file-modal-empty wiki-status"><Icon name="book-open" /><strong>Wiki not initialized</strong><span>Run pua migrate to create wiki/index.md.</span></div></div>
@@ -248,8 +246,11 @@
     </div>
     <div id="detailsContent" class="details-content" class:details-events={activeTab === "execution-events"}>
       {#each files as file (file.path || file.name)}<div hidden={activeTab !== documentTab(file)}><MarkdownDocument {file} workspaceId={model.workspaceId} editable={!model.detail.archived && (model.resourceType === "project" || model.resourceType === "task")} resolveResourceTitle={model.resolveResourceTitle} onNavigate={model.onNavigate} onOpenFile={openLinkedFile} onEdit={openEditor} onAnnotate={openAnnotator} /></div>{/each}
-      {#if model.resourceType === "project" && !fileNames.has("project.md")}<div class="content-section" hidden={activeTab !== "project"}><div class="file-modal-empty detail-missing"><Icon name="file-text" /><strong>Project brief is missing</strong><span>project.md was not found in this project directory.</span></div></div>{/if}
-      {#if model.resourceType === "task" && !fileNames.has("task.md")}<div class="content-section" hidden={activeTab !== "task"}><div class="file-modal-empty detail-missing"><Icon name="file-text" /><strong>Task brief is missing</strong><span>task.md was not found in this task directory.</span></div></div>{/if}
+      {#if model.resourceType !== "scheduler"}
+        {#each RESOURCE_DOCUMENTS as document (document.id)}
+          {#if !fileNames.has(document.name)}<div class="content-section" hidden={activeTab !== document.id}><div class="file-modal-empty detail-missing"><Icon name="file-text" /><strong>{document.label} is missing</strong><span>Run pua migrate to initialize {document.name}.</span></div></div>{/if}
+        {/each}
+      {/if}
       {#if model.resourceType === "scheduler" && model.detail.scheduler}<div hidden={activeTab !== "schedules"}><SchedulerPanel workspaceId={model.workspaceId} config={model.detail.scheduler} resolveResourceTitle={model.resolveResourceTitle} onChanged={model.onRefreshScheduler || (async () => undefined)} onToast={model.onToast} /></div>{/if}
       <div hidden={activeTab !== "settings"}><ResourceSettingsPanel {model} onOpenTemplate={(path) => openPreview("Templates", path)} /></div>
       {#if activeTab === "execution-events"}{#key `${model.identity}:${model.currentUserName}:${activeTab}`}<ChannelEvents {model} onOpenFile={openLinkedFile} onOpenLegacy={(path) => openPreview("Artifacts", path)} />{/key}{/if}
@@ -259,5 +260,5 @@
   {/if}
 {/if}
 
-<FilePreviewModal {client} workspaceId={model.workspaceId} resourceId={model.resourceId} selection={preview} editable={filePreviewEditable} resolveResourceTitle={model.resolveResourceTitle} onNavigate={model.onNavigate} onOpenFile={openLinkedFile} onSaveMarkdown={saveMarkdownViaModal} onClose={() => preview = null} onError={toastError} />
+<FilePreviewModal {client} workspaceId={model.workspaceId} resourceId={model.resourceId} userName={model.currentUserName} selection={preview} editable={filePreviewEditable} resolveResourceTitle={model.resolveResourceTitle} onNavigate={model.onNavigate} onOpenFile={openLinkedFile} onSaveMarkdown={saveMarkdownViaModal} onClose={() => preview = null} onError={toastError} />
 <DiffModal {client} workspaceId={model.workspaceId} resourceId={model.resourceId} repo={diffRepo} onClose={() => diffRepo = null} onError={toastError} />

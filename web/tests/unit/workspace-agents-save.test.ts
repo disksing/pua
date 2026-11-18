@@ -35,7 +35,7 @@ describe("Workspace AGENTS save flow", () => {
     vi.unstubAllGlobals();
   });
 
-  it.each(["AGENTS.md", "workspace.md"])("renders and saves the full %s through the controller", async (documentName) => {
+  it.each(["AGENTS.md", "spec.md", "memory.md"])("renders and saves the full %s through the controller", async (documentName) => {
     vi.stubGlobal("matchMedia", (query: string) => ({
       matches: false,
       media: query,
@@ -69,9 +69,9 @@ describe("Workspace AGENTS save flow", () => {
       if (url.pathname === "/api/workspaces/ws-test/tree" && method === "GET") {
 		return json({ agentBinding: { kind: "profile", name: "default" }, projects: [], activity: { running: [], unread: [], problems: [] }, wiki: { exists: false } });
       }
-      if ((url.pathname === "/api/workspaces/ws-test/files" || url.pathname === "/api/workspaces/ws-test/resources/workspace/documents") && url.searchParams.get("path") === documentName) {
+      if ((url.pathname === "/api/workspaces/ws-test/files" || url.pathname.startsWith("/api/workspaces/ws-test/resources/workspace/")) && url.searchParams.get("path") === documentName) {
         if (method === "PUT") {
-          expect(url.pathname).toBe(documentName === "AGENTS.md" ? "/api/workspaces/ws-test/files" : "/api/workspaces/ws-test/resources/workspace/documents");
+          expect(url.pathname).toBe(documentName === "AGENTS.md" ? "/api/workspaces/ws-test/files" : `/api/workspaces/ws-test/resources/workspace/${documentName === "spec.md" ? "spec" : "documents"}`);
           const body = JSON.parse(String(init?.body || "{}")) as { content?: string; expectedContentHash?: string };
           saveBodies.push({ content: String(body.content || ""), expectedContentHash: String(body.expectedContentHash || "") });
           if (body.expectedContentHash !== contentHash()) return json({ error: "stale AGENTS.md" }, 409);
@@ -103,15 +103,16 @@ describe("Workspace AGENTS save flow", () => {
     stopPUAApp = controller.stopPUAApp;
     controller.startPUAApp(publisher);
 
-    await vi.waitFor(() => expect((documentName === "AGENTS.md" ? channels.detail.current().workspaceAgents : channels.detail.current().workspaceDocument)?.content).toContain("managed by pua cli"));
+    await vi.waitFor(() => expect((documentName === "AGENTS.md" ? channels.detail.current().workspaceAgents : channels.detail.current().workspaceDocuments?.[documentName])?.content).toContain("managed by pua cli"));
     const target = document.createElement("section");
     target.id = "detailsPanel";
     document.body.append(target);
     mounted.push(mount(DetailPanel, { target, props: { channel: channels.detail } }));
     await tick();
 
-    if (documentName === "AGENTS.md") {
-      Array.from(target.querySelectorAll<HTMLButtonElement>('[role="tab"]')).find((tab) => tab.textContent?.trim() === "AGENTS.md")!.click();
+    if (documentName !== "spec.md") {
+      const label = documentName === "AGENTS.md" ? "AGENTS.md" : "Memory";
+      Array.from(target.querySelectorAll<HTMLButtonElement>('[role="tab"]')).find((tab) => tab.textContent?.trim() === label)!.click();
       await tick();
     }
     expect(target.querySelector(`[data-doc-file="${documentName}"]`)).not.toBeNull();

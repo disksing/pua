@@ -232,6 +232,7 @@ func (s *doctorScanner) scanWorkspaceConfig() {
 func (s *doctorScanner) scanWorkspaceFiles() {
 	s.checkManagedFile(filepath.Join(s.root, "AGENTS.md"), "AGENTS.md", "workspace", puaPromptBlock(s.language))
 	s.checkOptionalMarkdown(filepath.Join(s.root, wikiDir, "index.md"), filepath.Join(wikiDir, "index.md"), "workspace")
+	s.checkSplitDocuments(s.root, ".", "workspace", workspaceMarkdownFile)
 	for _, dir := range []string{reposDir, wikiDir} {
 		s.requireDirectory(filepath.Join(s.root, dir), dir, "workspace", DoctorSeverityWarning)
 	}
@@ -295,7 +296,7 @@ func (s *doctorScanner) scanProject(path, name string) {
 		s.resourceBindings = append(s.resourceBindings, doctorResourceBinding{resourceID: "default:" + resourceID + ".task", path: filepath.Join(rel, projectJSONFile), binding: project.TaskDefault})
 	}
 	s.checkResourceTimestamps(project.CreatedAt, project.UpdatedAt, filepath.Join(rel, projectJSONFile), resourceID)
-	s.checkOptionalMarkdown(filepath.Join(path, projectMDFile), filepath.Join(rel, projectMDFile), resourceID)
+	s.checkSplitDocuments(path, rel, resourceID, projectMDFile)
 	s.checkManagedFile(filepath.Join(path, "AGENTS.md"), filepath.Join(rel, "AGENTS.md"), resourceID, taskAgentsBlock(&project, s.language))
 	templates := s.scanTemplates(path, project)
 	s.scanTasks(path, project, templates)
@@ -361,7 +362,7 @@ func (s *doctorScanner) scanTask(path, name string, project Project, templates m
 	s.openResources[resourceID] = rel
 	s.resourceBindings = append(s.resourceBindings, doctorResourceBinding{resourceID: resourceID, path: filepath.Join(rel, taskJSONFile), binding: task.AgentBinding})
 	s.checkResourceTimestamps(task.CreatedAt, task.UpdatedAt, filepath.Join(rel, taskJSONFile), resourceID)
-	s.checkOptionalMarkdown(filepath.Join(path, taskMDFile), filepath.Join(rel, taskMDFile), resourceID)
+	s.checkSplitDocuments(path, rel, resourceID, taskMDFile)
 	s.checkManagedFile(filepath.Join(path, "AGENTS.md"), filepath.Join(rel, "AGENTS.md"), resourceID, taskAgentsBlock(&task, s.language))
 	s.scanTaskRepos(task, path, rel)
 	if task.Template != nil {
@@ -556,6 +557,17 @@ func (s *doctorScanner) checkManagedFile(path, rel, resourceID, expected string)
 	}
 	if content[start:end] != expected {
 		s.issue(DoctorSeverityError, "agents_managed_section_modified", rel, resourceID, "PUA managed AGENTS.md section is missing current content or has been modified", "Run pua migrate after reviewing local instructions outside the managed section.")
+	}
+}
+
+func (s *doctorScanner) checkSplitDocuments(path, rel, resourceID, legacyName string) {
+	for _, name := range []string{SpecMarkdownFile, MemoryMarkdownFile} {
+		s.checkOptionalMarkdown(filepath.Join(path, name), filepath.Join(rel, name), resourceID)
+	}
+	for _, name := range []string{legacyName, legacyChatMarkdownFile, legacyDocumentStage} {
+		if _, err := os.Lstat(filepath.Join(path, name)); err == nil {
+			s.issue(DoctorSeverityWarning, "legacy_document_pending", filepath.Join(rel, name), resourceID, "Legacy document migration is pending", "Stop legacy writers and run pua migrate.")
+		}
 	}
 }
 

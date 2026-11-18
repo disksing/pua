@@ -93,8 +93,8 @@ func deletableResourceArtifactPath(workspaceRoot string, resource app.ResourceRe
 	if err != nil {
 		return "", err
 	}
-	if err := ensurePathInside(resourceEval, targetEval); err != nil {
-		return "", errors.New("file symlink escapes the selected resource")
+	if targetEval != filepath.Join(resourceEval, filepath.FromSlash(pathSlash)) {
+		return "", errors.New("deletable artifact path must not resolve through symbolic links")
 	}
 	info, err := os.Lstat(abs)
 	if err != nil {

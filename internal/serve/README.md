@@ -97,9 +97,9 @@ DELETE /api/workspaces/{workspaceId}/users/{name}
 
 读取旧数据时按资源合并原用户 Chat，保留各旧 Chat 内的顺序并按消息时间合并，碰撞的消息 ID 确定性改名；旧用户输入标注原发送者。原始文件保留在原位置，并在写入共享记录前复制到 `<control-dir>/chats-legacy-backup/`。历史消息对所有 Workspace 用户可见；原用户未读状态保留，新增用户从头计算未读。旧周期尚未确认的执行输入继续按原 mailbox ID 去重；关闭或周期失效的输入不重投。原笔记、旧 outbox 和历史事件可从备份和旧身份审计。旧版 Server 不支持共享记录或新版 Telegram 状态；旧文件与共享记录不会双向同步，旧版回退期间的新写入不会自动再次合并，回退需先保存新数据并制定恢复方案。
 
-Workspace 的 `workspace.md`、Project 的 `project.md` 和 Task 的 `task.md` 统一保存资源说明与对话事项，由所属执行 Agent 维护。事项记录工作状态和通知状态、来源消息与 History 引用、下一步与通知条件、最近成功发布记录。程序为新资源附加事项模板，不解释正文或自动补发；旧 notes 不双写。Workspace 详情默认展示 Workspace 文档，复用 Project/Task 的 Markdown 查看、编辑与保存。`PUT .../resources/{id}/documents?path=...` 仅允许编辑该资源的文件；Workspace 在此接口仅开放根目录 `workspace.md`，保留内容哈希冲突、普通文件与路径校验。AGENTS.md 继续使用独立的指引编辑接口。Agent 每轮开始和恢复后读取资源说明，收到用户插入、协作或调度消息时更新，结束前检查未回复事项。只有自动同步或旧 publish 成功才记已发布，进度不解除最终通知义务。文件不存回复凭据，恢复时通过源输入 History 引用读取合法指令并接受有效性校验；失败保留事项，不改投或无限重试。
+Workspace、Project、Task 的详情页提供独立的 Spec 和 Memory 页签。`PUT .../resources/{id}/spec?path=...` 只保存该资源的 `spec.md`，要求同源编辑请求和已选择的 Workspace 用户。`PUT .../resources/{id}/documents?path=...` 保存 `memory.md` 及该资源允许的模板和产物。两个入口分别校验内容哈希、资源归属和普通文件路径。归档资源只读。用户名选择属于本地产品上下文，认证和同 UID 文件权限的边界见迁移说明。
 
-`pua migrate` 将旧 `chat.md` 逐字合入对应资源说明，涵盖开放和归档的 Project/Task；Scheduler 的旧文件合入 `scheduler.md`。迁移通过临时文件、同步和原子替换提交目标，读回核对目标及源内容后删除旧文件；带内容摘要的完整迁移块使写入后中断可以重试而不重复追加。目标已有正文及权限保留，非普通文件拒绝迁移且保留源。新 Turn 的指引刷新也迁移当前资源的晚到旧文件。升级前应让旧 Agent 完成当前 Turn，避免其继续按旧指引写入；不要用旧二进制重新维护迁移后的 Workspace。手写 AGENTS.md 托管块外的旧指引由维护者核对，迁移只更新托管块。
+对话事项在 Memory 中维护，保留来源消息和 History 引用。工作状态和通知状态分别记录，自动同步或旧 publish 成功后才标记已发布。预览和原文接口将已迁移的旧资源说明路径映射到 Memory，旧路径只读。[迁移预检与回退](../../docs/resource-documents-migration.md)
 
 资源说明本身不触发工作，长时间等待使用 Scheduler 的真实条件。旧聊天 timer 在迁移和 reconcile 中清零，不恢复旧自动轮询。浏览器 SSE 与状态读取只刷新展示，不驱动模型。
 

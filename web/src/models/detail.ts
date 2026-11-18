@@ -64,6 +64,7 @@ export interface FilePreviewModel {
   binary?: boolean;
   image?: boolean;
   mimeType?: string;
+  readOnly?: boolean;
 }
 
 export interface DiffPreviewModel {
@@ -93,7 +94,7 @@ export interface DetailPanelModel {
   detail: ResourceDetailModel | null;
   wiki: { exists?: boolean; error?: string; entries?: FileTreeModel[] } | null;
   workspaceAgents: WorkspaceAgentsModel | null;
-  workspaceDocument?: WorkspaceAgentsModel | null;
+  workspaceDocuments?: Record<string, WorkspaceAgentsModel>;
   workspaceDefaults: { project: ResourceAgentBindingModel; task: ResourceAgentBindingModel };
   workspaceUsers: WorkspaceUser[];
   currentUserName: string;

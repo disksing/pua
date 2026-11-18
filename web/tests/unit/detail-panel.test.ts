@@ -24,7 +24,7 @@ function resourceModel(overrides: Partial<DetailPanelModel> = {}): DetailPanelMo
     loading: false,
     detail: {
       id: "project1.task1", type: "task", title: "Stable detail", path: "project1/task1",
-      files: [{ name: "task.md", path: "project1/task1/task.md", content: "# Stable detail\n\nSelected text.", contentHash: "doc-a" }],
+      files: [{ name: "spec.md", path: "project1/task1/spec.md", content: "# Stable detail\n\nSelected text.", contentHash: "doc-a" }],
       artifacts: [{ name: "folder", path: "project1/task1/artifacts/folder", type: "directory", children: [{ name: "nested.txt", path: "project1/task1/artifacts/folder/nested.txt", type: "file", size: 4 }] }, { name: "a.txt", path: "project1/task1/artifacts/a.txt", type: "file", size: 3 }, { name: "b.txt", path: "project1/task1/artifacts/b.txt", type: "file", size: 3 }],
       repos: [{ name: "pua", worktreePath: "project1/task1/worktree/pua", branch: "topic", targetBranch: "master" }, { name: "docs", worktreePath: "project1/task1/worktree/docs", branch: "docs-topic", targetBranch: "master" }],
     },
@@ -80,19 +80,23 @@ afterEach(async () => {
 beforeEach(() => vi.stubGlobal("localStorage", new MemoryStorage()));
 
 describe("DetailPanel", () => {
-  it.each(["workspace", "project", "task"] as const)("edits the unified %s document", async (kind) => {
+  it.each(["workspace", "project", "task"] as const)("edits Memory independently on %s", async (kind) => {
     const resourceId = kind === "workspace" ? "workspace" : kind === "project" ? "project1" : "project1.task1";
-    const name = `${kind}.md`;
+    const name = "memory.md";
     const path = kind === "workspace" ? name : kind === "project" ? `project1/${name}` : `project1/task1/${name}`;
     const file = { name, path, content: "# Background\n\n## Chat follow-ups\nPending reply", contentHash: "document-hash" };
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(file), { headers: { "content-type": "application/json" } })));
     const base = resourceModel();
-    const model = resourceModel({ resourceId, resourceType: kind, workspaceDocument: kind === "workspace" ? file : null,
-      detail: kind === "workspace" ? null : { ...base.detail!, files: [file] } });
+    const spec = { name: "spec.md", path: path.replace(name, "spec.md"), content: "# Spec only", contentHash: "spec-hash" };
+    const model = resourceModel({ resourceId, resourceType: kind, workspaceDocuments: { [name]: file, [spec.name]: spec },
+      detail: kind === "workspace" ? null : { ...base.detail!, files: [spec, file] } });
     const { target } = mountModel(model);
     await tick();
     expect(Array.from(target.querySelectorAll('[role="tab"]')).some((tab) => tab.textContent === "Chat follow-ups")).toBe(false);
     const doc = target.querySelector<HTMLElement>(`[data-doc-file="${name}"]`)!;
+    expect(doc.closest("[hidden]")).not.toBeNull();
+    Array.from(target.querySelectorAll<HTMLButtonElement>('[role="tab"]')).find((tab) => tab.textContent?.trim() === "Memory")!.click();
+    await tick();
     expect(doc.closest("[hidden]")).toBeNull();
     Array.from(doc.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.trim() === "Edit")!.click();
     await vi.waitFor(() => expect(target.querySelector('[role="dialog"] .cm-editor')).not.toBeNull(), { timeout: 5000 });
@@ -102,6 +106,7 @@ describe("DetailPanel", () => {
     await tick();
     Array.from(dialog.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.trim() === "Save")!.click();
     await vi.waitFor(() => expect(model.onSaveMarkdownFile).toHaveBeenCalledWith(path, `${file.content}\nResult pending`, "document-hash"));
+    expect(target.querySelector('[data-doc-file="spec.md"]')?.textContent).toContain("Spec only");
     expect(model.onSaveWorkspaceAgents).not.toHaveBeenCalled();
   });
 
@@ -110,15 +115,15 @@ describe("DetailPanel", () => {
     const model = resourceModel({ detail: { ...base.detail!, files: [] } });
     const { target, channel } = mountModel(model);
     await tick();
-    expect(target.textContent).toContain("Task brief is missing");
-    channel.publish({ ...model, detail: { ...model.detail!, archived: true, files: [{ name: "task.md", path: "project1/task1/task.md", content: "# Completed" }] } });
+    expect(target.textContent).toContain("Spec is missing");
+    channel.publish({ ...model, detail: { ...model.detail!, archived: true, files: [{ name: "spec.md", path: "project1/task1/spec.md", content: "# Completed" }] } });
     await tick();
-    expect(target.querySelector('[data-doc-file="task.md"]')?.textContent).not.toContain("Edit");
+    expect(target.querySelector('[data-doc-file="spec.md"]')?.textContent).not.toContain("Edit");
   });
   it("opens the Markdown editor dialog and saves through the resource callback", async () => {
-    const save = vi.fn(async (path: string, content: string) => ({ path, name: "task.md", content, contentHash: "saved-hash" }));
+    const save = vi.fn(async (path: string, content: string) => ({ path, name: "spec.md", content, contentHash: "saved-hash" }));
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
-      path: "project1/task1/task.md", name: "task.md", content: "# Stable detail\n\nSelected text.", contentHash: "doc-a",
+      path: "project1/task1/spec.md", name: "spec.md", content: "# Stable detail\n\nSelected text.", contentHash: "doc-a",
     }), { headers: { "content-type": "application/json" } })));
     const { target } = mountModel(resourceModel({ onSaveMarkdownFile: save }));
     await tick();
@@ -132,7 +137,7 @@ describe("DetailPanel", () => {
     const saveButton = Array.from(dialog.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.trim() === "Save")!;
     saveButton.click();
     await vi.waitFor(() => expect(save).toHaveBeenCalledOnce());
-    expect(save).toHaveBeenCalledWith("project1/task1/task.md", "# Stable detail\n\nSelected text.\nAdded in browser.\n", "doc-a");
+    expect(save).toHaveBeenCalledWith("project1/task1/spec.md", "# Stable detail\n\nSelected text.\nAdded in browser.\n", "doc-a");
   });
 
   it("opens the file in a full-screen window without download controls", async () => {
@@ -140,7 +145,7 @@ describe("DetailPanel", () => {
     const open = vi.fn();
     vi.stubGlobal("open", open);
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
-      path: "project1/task1/task.md", name: "task.md", content: "# Stable detail\n\nSelected text.", contentHash: "doc-a",
+      path: "project1/task1/spec.md", name: "spec.md", content: "# Stable detail\n\nSelected text.", contentHash: "doc-a",
     }), { headers: { "content-type": "application/json" } })));
     const { target } = mountModel(resourceModel());
     await tick();
@@ -159,12 +164,12 @@ describe("DetailPanel", () => {
     expect(url.searchParams.get("workspaceId")).toBe("ws");
     expect(url.searchParams.get("resourceId")).toBe("project1.task1");
     expect(url.searchParams.get("section")).toBe("Files");
-    expect(url.searchParams.get("path")).toBe("project1/task1/task.md");
+    expect(url.searchParams.get("path")).toBe("project1/task1/spec.md");
     expect(url.searchParams.get("mode")).toBe("edit");
     expect(url.searchParams.get("editable")).toBe("1");
     const handoff = JSON.parse(localStorage.getItem("pua:file-preview-handoff") || "{}");
     expect(handoff.mode).toBe("edit");
-    expect(handoff.path).toBe("project1/task1/task.md");
+    expect(handoff.path).toBe("project1/task1/spec.md");
   });
 
   it("renders the compact resource number inside an independently scrollable body", async () => {
@@ -177,7 +182,7 @@ describe("DetailPanel", () => {
     expect(target.querySelector(".resource-ref-badge")?.textContent).toBe("#1");
     expect(header.contains(content)).toBe(false);
     expect(tabs.contains(content)).toBe(false);
-    expect(content.querySelector('[data-doc-file="task.md"]')).not.toBeNull();
+    expect(content.querySelector('[data-doc-file="spec.md"]')).not.toBeNull();
   });
 
   it("moves body headings into tab icons instead of repeating titles", async () => {
@@ -187,10 +192,10 @@ describe("DetailPanel", () => {
     const tabs = Array.from(target.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
     expect(tabs.length).toBeGreaterThan(0);
     for (const tab of tabs) expect(tab.querySelector("[data-lucide]")).not.toBeNull();
-    const taskTab = tabs.find((tab) => tab.textContent?.includes("Task"))!;
+    const taskTab = tabs.find((tab) => tab.textContent?.includes("Spec"))!;
     expect(taskTab.querySelector('[data-lucide="file-text"]')).not.toBeNull();
 
-    const documentSection = target.querySelector('[data-doc-file="task.md"]')!;
+    const documentSection = target.querySelector('[data-doc-file="spec.md"]')!;
     expect(documentSection.querySelector("h3")).toBeNull();
     expect(documentSection.querySelector(".markdown-document-actions button")).not.toBeNull();
 
@@ -202,7 +207,7 @@ describe("DetailPanel", () => {
 
   it("uses the Project number for a Project detail reference", async () => {
     const initial = resourceModel();
-    const projectFile = { ...initial.detail!.files![0], name: "project.md", path: "project12/project.md" };
+    const projectFile = { ...initial.detail!.files![0], name: "spec.md", path: "project12/spec.md" };
     const { target } = mountModel(resourceModel({
       identity: "ws:project12:project",
       resourceId: "project12",
@@ -235,7 +240,7 @@ describe("DetailPanel", () => {
     channel.publish(loaded);
     await tick();
     const selected = target.querySelector('[role="tab"][aria-selected="true"]');
-    expect(selected?.textContent).toContain("Task");
+    expect(selected?.textContent).toContain("Spec");
   });
 
   it("does not expose a retired Work tab for legacy detail data", async () => {
@@ -246,27 +251,27 @@ describe("DetailPanel", () => {
 
     const tabs = Array.from(target.querySelectorAll<HTMLButtonElement>("[role=tab]"));
     expect(tabs.find((tab) => tab.textContent?.trim() === "Work")).toBeUndefined();
-    expect(target.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain("Task");
+    expect(target.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain("Spec");
 
     channel.publish({ ...initial, detail: { ...initial.detail!, files: initial.detail!.files } });
     await tick();
-    expect(target.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain("Task");
+    expect(target.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain("Spec");
   });
 
-  it("keeps the Task tab visible with a missing-file notice when task.md is deleted", async () => {
+  it("keeps the Task Spec tab visible with a missing-file notice", async () => {
     const initial = resourceModel();
     const { target } = mountModel(resourceModel({ detail: { ...initial.detail!, files: [] } }));
     await tick();
 
     const tabs = Array.from(target.querySelectorAll<HTMLButtonElement>("[role=tab]"));
-    const taskTab = tabs.find((tab) => tab.textContent?.includes("Task"));
+    const taskTab = tabs.find((tab) => tab.textContent?.includes("Spec"));
     expect(taskTab).toBeDefined();
     expect(taskTab!.getAttribute("aria-selected")).toBe("true");
-    expect(target.textContent).toContain("Task brief is missing");
-    expect(target.querySelector('[data-doc-file="task.md"]')).toBeNull();
+    expect(target.textContent).toContain("Spec is missing");
+    expect(target.querySelector('[data-doc-file="spec.md"]')).toBeNull();
   });
 
-  it("keeps the Project tab visible with a missing-file notice when project.md is deleted", async () => {
+  it("keeps the Project Spec tab visible with a missing-file notice", async () => {
     const initial = resourceModel();
     const projectDetail = { ...initial.detail!, id: "project12", type: "project" as const, files: [] };
     const { target } = mountModel(resourceModel({
@@ -279,10 +284,10 @@ describe("DetailPanel", () => {
     await tick();
 
     const tabs = Array.from(target.querySelectorAll<HTMLButtonElement>("[role=tab]"));
-    const projectTab = tabs.find((tab) => tab.textContent?.includes("Project"));
+    const projectTab = tabs.find((tab) => tab.textContent?.includes("Spec"));
     expect(projectTab).toBeDefined();
     expect(projectTab!.getAttribute("aria-selected")).toBe("true");
-    expect(target.textContent).toContain("Project brief is missing");
+    expect(target.textContent).toContain("Spec is missing");
   });
 
   it("keeps document and artifact DOM identity across unrelated refreshes", async () => {
@@ -425,8 +430,8 @@ describe("DetailPanel", () => {
     await tick();
 
     const tabs = Array.from(target.querySelectorAll<HTMLButtonElement>("[role=tab]"));
-    expect(tabs.map((tab) => tab.textContent?.trim())).toEqual(["Workspace", "AGENTS.md", "Wiki", "Execution events", "Settings"]);
-    expect(target.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain("Workspace");
+    expect(tabs.map((tab) => tab.textContent?.trim())).toEqual(["Spec", "Memory", "AGENTS.md", "Wiki", "Execution events", "Settings"]);
+    expect(target.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain("Spec");
     tabs.find((tab) => tab.textContent?.trim() === "AGENTS.md")!.click();
     await tick();
     expect(target.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain("AGENTS.md");
@@ -634,7 +639,7 @@ describe("DetailPanel", () => {
         type: "project",
         title: "Project Alpha",
         path: "project1",
-        files: [{ name: "project.md", path: "project1/project.md", content: "# Project Alpha", contentHash: "doc-p" }],
+        files: [{ name: "spec.md", path: "project1/spec.md", content: "# Project Alpha", contentHash: "doc-p" }],
         templates: [{ name: "feature-a", title: "Feature A", path: "project1/templates/feature-a.md", valid: true, schemaVersion: 2, fields: [] }],
       },
       ...overrides,

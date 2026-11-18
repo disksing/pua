@@ -368,7 +368,7 @@ func TestResourceDetailToleratesDeletedMarkdownAndDirectories(t *testing.T) {
 		t.Fatalf("resource value = %#v, %v", taskValue, err)
 	}
 	taskPath := filepath.Join(root, filepath.FromSlash(taskValue.Path))
-	if err := os.Remove(filepath.Join(taskPath, "task.md")); err != nil {
+	if err := os.Remove(filepath.Join(taskPath, app.SpecMarkdownFile)); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.RemoveAll(filepath.Join(taskPath, "artifacts")); err != nil {
@@ -382,8 +382,8 @@ func TestResourceDetailToleratesDeletedMarkdownAndDirectories(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resource detail = %#v, %v", detail, err)
 	}
-	if len(detail.Files) != 1 || detail.Files[0].Name != "AGENTS.md" {
-		t.Fatalf("expected AGENTS.md after deleting task.md, got %#v", detail.Files)
+	if len(detail.Files) != 2 || detail.Files[0].Name != app.MemoryMarkdownFile || detail.Files[1].Name != "AGENTS.md" {
+		t.Fatalf("expected memory.md and AGENTS.md after deleting spec.md, got %#v", detail.Files)
 	}
 	if detail.Artifacts == nil || len(detail.Artifacts) != 0 {
 		t.Fatalf("expected empty artifacts slice after deleting artifacts dir, got %#v", detail.Artifacts)
@@ -397,14 +397,14 @@ func TestResourceDetailToleratesDeletedMarkdownAndDirectories(t *testing.T) {
 		t.Fatalf("resource value = %#v, %v", projectValue, err)
 	}
 	projectPath := filepath.Join(root, filepath.FromSlash(projectValue.Path))
-	if err := os.Remove(filepath.Join(projectPath, "project.md")); err != nil {
+	if err := os.Remove(filepath.Join(projectPath, app.MemoryMarkdownFile)); err != nil {
 		t.Fatal(err)
 	}
 	projectDetail, err := workspace.Resource(project.ID)
 	if err != nil {
 		t.Fatalf("project detail = %#v, %v", projectDetail, err)
 	}
-	if len(projectDetail.Files) != 1 || projectDetail.Files[0].Name != "AGENTS.md" {
-		t.Fatalf("expected AGENTS.md after deleting project.md, got %#v", projectDetail.Files)
+	if len(projectDetail.Files) != 2 || projectDetail.Files[0].Name != app.SpecMarkdownFile || projectDetail.Files[1].Name != "AGENTS.md" {
+		t.Fatalf("expected spec.md and AGENTS.md after deleting memory.md, got %#v", projectDetail.Files)
 	}
 }

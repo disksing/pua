@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/disksing/pua/internal/localize"
 )
@@ -30,6 +29,10 @@ func readRegularDocument(path string) ([]byte, os.FileMode, error) {
 }
 
 func writeDocumentAtomic(path string, content []byte, mode os.FileMode) error {
+	return writeDocumentAtomicChecked(path, content, mode, nil)
+}
+
+func writeDocumentAtomicChecked(path string, content []byte, mode os.FileMode, check func() error) error {
 	temp, err := os.CreateTemp(filepath.Dir(path), ".pua-document-*.tmp")
 	if err != nil {
 		return err
@@ -47,6 +50,11 @@ func writeDocumentAtomic(path string, content []byte, mode os.FileMode) error {
 	}
 	if err := temp.Close(); err != nil {
 		return err
+	}
+	if check != nil {
+		if err := check(); err != nil {
+			return err
+		}
 	}
 	if err := os.Rename(temp.Name(), path); err != nil {
 		return err
@@ -75,7 +83,7 @@ func ensureResourceDocument(dir, name, initial string) error {
 	if err != nil {
 		return err
 	}
-	block := []byte(fmt.Sprintf("<!-- pua:merged-chat:%s -->\n%s\n<!-- pua:merged-chat:end -->", markdownContentHash(legacy), legacy))
+	block := mergedChatBlock(legacy)
 	if !bytes.Contains(content, block) {
 		content = append(content, []byte("\n\n")...)
 		content = append(content, block...)
@@ -104,9 +112,12 @@ func ensureResourceDocument(dir, name, initial string) error {
 	return syncDirectory(dir)
 }
 
+func mergedChatBlock(legacy []byte) []byte {
+	return []byte(fmt.Sprintf("<!-- pua:merged-chat:%s -->\n%s\n<!-- pua:merged-chat:end -->", markdownContentHash(legacy), legacy))
+}
+
 func ensureWorkspaceDocument(root, language string) error {
-	initial := localize.MustRender(language, workspaceMarkdownFile, nil) + "\n" + followupMarkdown(language)
-	return ensureResourceDocument(root, workspaceMarkdownFile, initial)
+	return ensureSplitDocuments(root, workspaceMarkdownFile, localize.MustRender(language, workspaceMarkdownFile, nil), language)
 }
 
 func migrateResourceDocuments(root, language string) error {
@@ -122,7 +133,7 @@ func migrateResourceDocuments(root, language string) error {
 		}
 		if path != root {
 			switch entry.Name() {
-			case ".git", ".pua", ".forge", reposDir, "worktree", "artifacts", "wiki", "templates":
+			case ".git", ".pua", ".forge", reposDir, "worktree", "artifacts", "wiki", "templates", legacyDocumentStage:
 				return filepath.SkipDir
 			}
 		}
@@ -141,21 +152,4 @@ func migrateResourceDocuments(root, language string) error {
 		}
 		return nil
 	})
-}
-
-func resourceInitialMarkdown(resource Resource, language string) string {
-	return withFollowupMarkdown(defaultTaskMD(resource, language), language)
-}
-
-func withFollowupMarkdown(markdown, language string) string {
-	for _, heading := range []string{"## Chat follow-ups\n", "## 对话事项\n"} {
-		if strings.Contains("\n"+markdown+"\n", "\n"+heading) {
-			return markdown
-		}
-	}
-	separator := "\n\n"
-	if strings.HasSuffix(markdown, "\n") {
-		separator = "\n"
-	}
-	return markdown + separator + followupMarkdown(language)
 }

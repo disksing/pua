@@ -89,6 +89,128 @@ func fileHash(t *testing.T, path string) string {
 	return previewContentHash(data)
 }
 
+func TestSpecSaveRequiresExplicitRouteAndEditorContext(t *testing.T) {
+	fixture := newMarkdownFileTestFixture(t)
+	if _, err := fixture.workspace.RegisterUser("editor"); err != nil {
+		t.Fatal(err)
+	}
+	task, err := fixture.workspace.Resource("project1.task1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := filepath.Join(fixture.taskPath, "spec.md")
+	memory := filepath.Join(fixture.taskPath, "memory.md")
+	specPath, memoryPath := task.Path+"/spec.md", task.Path+"/memory.md"
+	specHash, memoryHash := fileHash(t, spec), fileHash(t, memory)
+	saveSpec := func(path, hash, origin, user, token string) *httptest.ResponseRecorder {
+		t.Helper()
+		body, err := json.Marshal(map[string]string{"content": "# Approved update\n", "expectedContentHash": hash})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPut, "/api/workspaces/workspace-one/resources/project1.task1/spec?path="+url.QueryEscape(path), bytes.NewReader(body))
+		req.Header.Set("Origin", origin)
+		req.Header.Set(workspaceUserHeader, user)
+		req.Header.Set("X-PUA-Chat-Token", token)
+		recorder := httptest.NewRecorder()
+		fixture.server.handleWorkspace(recorder, req)
+		return recorder
+	}
+	if response := markdownSaveRequest(t, fixture, task.ID, specPath, "Generic write", specHash); response.Code != http.StatusBadRequest {
+		t.Fatalf("ordinary Markdown endpoint accepted Spec: %d", response.Code)
+	}
+	const origin = "http://example.com"
+	for _, test := range []struct{ origin, user, token string }{
+		{"", "editor", ""},
+		{"http://outside.invalid", "editor", ""},
+		{origin, "", ""},
+		{origin, "unknown", ""},
+		{origin, "editor", "agent-chat-token"},
+	} {
+		if response := saveSpec(specPath, specHash, test.origin, test.user, test.token); response.Code != http.StatusForbidden {
+			t.Fatalf("unexpected editor context result: %d %s", response.Code, response.Body)
+		}
+	}
+	if response := saveSpec(memoryPath, memoryHash, origin, "editor", ""); response.Code != http.StatusBadRequest {
+		t.Fatalf("Spec endpoint accepted Memory: %d", response.Code)
+	}
+	if response := saveSpec(specPath, specHash, origin, "editor", ""); response.Code != http.StatusOK {
+		t.Fatalf("Spec save failed: %d %s", response.Code, response.Body)
+	}
+	newSpecHash := fileHash(t, spec)
+	if newSpecHash == specHash || fileHash(t, memory) != memoryHash {
+		t.Fatal("Spec save changed the wrong file")
+	}
+	if response := saveSpec(specPath, specHash, origin, "editor", ""); response.Code != http.StatusConflict {
+		t.Fatalf("stale Spec save returned %d", response.Code)
+	}
+	if response := markdownSaveRequest(t, fixture, task.ID, memoryPath, "Memory update", memoryHash); response.Code != http.StatusOK || fileHash(t, spec) != newSpecHash {
+		t.Fatalf("Memory save affected Spec or failed: %d %s", response.Code, response.Body)
+	}
+	if err := os.Symlink(fixture.taskPath, filepath.Join(fixture.taskPath, "artifacts", "redirected")); err != nil {
+		t.Fatal(err)
+	}
+	if response := markdownSaveRequest(t, fixture, task.ID, task.Path+"/artifacts/redirected/spec.md", "Aliased write", newSpecHash); response.Code != http.StatusBadRequest {
+		t.Fatalf("aliased ordinary write accepted: %d", response.Code)
+	}
+	archived, err := fixture.workspace.ArchiveResource(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response := saveSpec(archived.Path+"/spec.md", newSpecHash, origin, "editor", ""); response.Code != http.StatusBadRequest {
+		t.Fatalf("archived Spec save returned %d", response.Code)
+	}
+}
+
+func TestLegacyDocumentLinksReadMemoryAfterRetirement(t *testing.T) {
+	fixture := newMarkdownFileTestFixture(t)
+	body := "Historical brief\n\nHistory: source-123"
+	for dir, name := range map[string]string{fixture.root: "workspace.md", fixture.projectPath: "project.md", fixture.taskPath: "task.md"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := fixture.workspace.Migrate("en"); err != nil {
+		t.Fatal(err)
+	}
+	check := func(id, path, alias string) {
+		t.Helper()
+		for _, endpoint := range []string{"files", "files/raw"} {
+			recorder := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/api/workspaces/workspace-one/"+endpoint+"?path="+url.QueryEscape(alias), nil)
+			fixture.server.handleWorkspace(recorder, req)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("legacy link unavailable: %s %d %s", alias, recorder.Code, recorder.Body)
+			}
+			if endpoint == "files/raw" {
+				if !strings.Contains(recorder.Body.String(), body) {
+					t.Fatalf("raw link lost old content: %s", recorder.Body)
+				}
+				continue
+			}
+			var preview filePreview
+			if err := json.Unmarshal(recorder.Body.Bytes(), &preview); err != nil || !preview.ReadOnly || preview.Path != path || !strings.Contains(preview.Content, body) {
+				t.Fatalf("legacy preview did not resolve read-only: %+v, %v", preview, err)
+			}
+			if result := markdownSaveRequest(t, fixture, id, path, "Legacy edit", preview.ContentHash); result.Code != http.StatusBadRequest {
+				t.Fatalf("legacy file is editable: %d", result.Code)
+			}
+		}
+	}
+	check("workspace", "workspace.md", "/workspace.md")
+	check("project1", "project1/project.md", "/project1/project.md")
+	task, err := fixture.workspace.Resource("project1.task1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	check(task.ID, task.Path+"/task.md", "/project1/task1/task.md:7:2")
+	archived, err := fixture.workspace.ArchiveResource(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check(task.ID, archived.Path+"/task.md", "/"+archived.Path+"/task.md")
+}
+
 func TestResourceMarkdownSaveAllowsOnlyOwnedOpenMarkdown(t *testing.T) {
 	fixture := newMarkdownFileTestFixture(t)
 	project, err := fixture.workspace.Resource("project1")
@@ -105,9 +227,9 @@ func TestResourceMarkdownSaveAllowsOnlyOwnedOpenMarkdown(t *testing.T) {
 		path       string
 		abs        string
 	}{
-		{name: "workspace brief", resourceID: "workspace", path: "workspace.md", abs: filepath.Join(fixture.root, "workspace.md")},
-		{name: "project brief", resourceID: "project1", path: project.Path + "/project.md", abs: filepath.Join(fixture.projectPath, "project.md")},
-		{name: "task brief", resourceID: "project1.task1", path: task.Path + "/task.md", abs: filepath.Join(fixture.taskPath, "task.md")},
+		{name: "workspace memory", resourceID: "workspace", path: "memory.md", abs: filepath.Join(fixture.root, "memory.md")},
+		{name: "project memory", resourceID: "project1", path: project.Path + "/memory.md", abs: filepath.Join(fixture.projectPath, "memory.md")},
+		{name: "task memory", resourceID: "project1.task1", path: task.Path + "/memory.md", abs: filepath.Join(fixture.taskPath, "memory.md")},
 		{name: "project template", resourceID: "project1", path: project.Path + "/templates/review.md", abs: filepath.Join(fixture.projectPath, "templates", "review.md")},
 		{name: "project artifact", resourceID: "project1", path: project.Path + "/artifacts/notes.md", abs: filepath.Join(fixture.projectPath, "artifacts", "notes.md")},
 		{name: "nested task artifact", resourceID: "project1.task1", path: task.Path + "/artifacts/nested/review.markdown", abs: filepath.Join(fixture.taskPath, "artifacts", "nested", "review.markdown")},
@@ -152,7 +274,7 @@ func TestResourceMarkdownSaveRejectsConflictsAndUnownedPaths(t *testing.T) {
 	fixture := newMarkdownFileTestFixture(t)
 	project, _ := fixture.workspace.Resource("project1")
 	task, _ := fixture.workspace.Resource("project1.task1")
-	taskBrief := filepath.Join(fixture.taskPath, "task.md")
+	taskBrief := filepath.Join(fixture.taskPath, "memory.md")
 	for _, path := range []string{"chat.md", project.Path + "/chat.md", task.Path + "/chat.md"} {
 		absolute := filepath.Join(fixture.root, path)
 		if err := os.WriteFile(absolute, []byte("Late legacy write"), 0o644); err != nil {
@@ -168,7 +290,7 @@ func TestResourceMarkdownSaveRejectsConflictsAndUnownedPaths(t *testing.T) {
 	if err := os.WriteFile(taskBrief, []byte("# External change\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	recorder := markdownSaveRequest(t, fixture, "project1.task1", task.Path+"/task.md", "# Browser draft\n", originalHash)
+	recorder := markdownSaveRequest(t, fixture, "project1.task1", task.Path+"/memory.md", "# Browser draft\n", originalHash)
 	if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), "changed on disk") {
 		t.Fatalf("conflicting save returned %d: %s", recorder.Code, recorder.Body.String())
 	}
@@ -179,11 +301,11 @@ func TestResourceMarkdownSaveRejectsConflictsAndUnownedPaths(t *testing.T) {
 		path       string
 		abs        string
 	}{
-		{name: "workspace child brief", resourceID: "workspace", path: task.Path + "/task.md", abs: filepath.Join(fixture.taskPath, "task.md")},
-		{name: "project child brief", resourceID: "project1", path: task.Path + "/task.md", abs: filepath.Join(fixture.taskPath, "task.md")},
-		{name: "task parent brief", resourceID: "project1.task1", path: "workspace.md", abs: filepath.Join(fixture.root, "workspace.md")},
+		{name: "workspace child memory", resourceID: "workspace", path: task.Path + "/memory.md", abs: filepath.Join(fixture.taskPath, "memory.md")},
+		{name: "project child memory", resourceID: "project1", path: task.Path + "/memory.md", abs: filepath.Join(fixture.taskPath, "memory.md")},
+		{name: "task parent memory", resourceID: "project1.task1", path: "memory.md", abs: filepath.Join(fixture.root, "memory.md")},
 		{name: "workspace artifact", resourceID: "workspace", path: project.Path + "/artifacts/notes.md", abs: filepath.Join(fixture.projectPath, "artifacts", "notes.md")},
-		{name: "other resource brief", resourceID: "project1", path: task.Path + "/task.md", abs: taskBrief},
+		{name: "other resource memory", resourceID: "project1", path: task.Path + "/memory.md", abs: taskBrief},
 		{name: "text artifact", resourceID: "project1.task1", path: task.Path + "/artifacts/nested/not-markdown.txt", abs: filepath.Join(fixture.taskPath, "artifacts", "nested", "not-markdown.txt")},
 		{name: "nested template", resourceID: "project1", path: project.Path + "/templates/nested/unsupported.md", abs: filepath.Join(fixture.projectPath, "templates", "nested", "unsupported.md")},
 		{name: "resource metadata", resourceID: "project1.task1", path: task.Path + "/task.json", abs: filepath.Join(fixture.taskPath, "task.json")},
@@ -233,8 +355,8 @@ func TestResourceMarkdownSaveRejectsArchivedMissingAndOversizedFiles(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	archivedBrief := filepath.Join(fixture.root, filepath.FromSlash(archived.Path), "task.md")
-	recorder = markdownSaveRequest(t, fixture, "project1.task1", archived.Path+"/task.md", "# Archived edit\n", fileHash(t, archivedBrief))
+	archivedBrief := filepath.Join(fixture.root, filepath.FromSlash(archived.Path), "memory.md")
+	recorder = markdownSaveRequest(t, fixture, "project1.task1", archived.Path+"/memory.md", "# Archived edit\n", fileHash(t, archivedBrief))
 	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "archived") {
 		t.Fatalf("archived save returned %d: %s", recorder.Code, recorder.Body.String())
 	}

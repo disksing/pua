@@ -582,7 +582,7 @@ func TestCreateTaskMapsTemplateBodyAsCompleteMarkdown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	markdown, err := os.ReadFile(filepath.Join(workspace, filepath.FromSlash(resource.Path), "task.md"))
+	markdown, err := os.ReadFile(filepath.Join(workspace, filepath.FromSlash(resource.Path), app.SpecMarkdownFile))
 	if err != nil || !strings.HasPrefix(string(markdown), "# Template task\n\n## Chat follow-ups\n") {
 		t.Fatalf("template body was not written as complete markdown: err=%v content=%q", err, markdown)
 	}

@@ -225,7 +225,7 @@ func TestCreateTaskFromTemplateRecordsSource(t *testing.T) {
 	if detail.Template == nil || detail.Template.Digest != preview.Template.Digest || task.Path == "" {
 		t.Fatalf("template source or create response path missing: %#v %#v", detail.Template, task)
 	}
-	markdown, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(detail.Path), "task.md"))
+	markdown, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(detail.Path), app.SpecMarkdownFile))
 	if err != nil || string(markdown) != preview.Markdown {
 		t.Fatalf("preview and created markdown differ: %v %q %q", err, markdown, preview.Markdown)
 	}

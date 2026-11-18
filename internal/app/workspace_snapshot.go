@@ -191,7 +191,7 @@ func buildResourceDetailAt(root string, entry resourceEntry) (ResourceDetailView
 		Path:         relPath(root, entry.Path),
 		Archived:     isArchivedPath(root, entry.Path),
 		AgentBinding: meta.AgentBinding,
-		Files:        readResourceFiles(root, entry.Path, entry.Resource),
+		Files:        readResourceFiles(root, entry.Path),
 		Artifacts:    readFileTree(root, filepath.Join(entry.Path, "artifacts")),
 		Worktrees:    []FileTreeEntry{},
 	}
@@ -246,12 +246,11 @@ func projectChildTreeItems(root string, entry resourceEntry, includeArchived boo
 	return children, nil
 }
 
-func readResourceFiles(root, dir string, resource Resource) []ResourceFile {
-	names := []string{markdownFileName(resource)}
-	names = append(names, "AGENTS.md")
+func readResourceFiles(root, dir string) []ResourceFile {
+	names := []string{SpecMarkdownFile, MemoryMarkdownFile, "AGENTS.md"}
 	files := make([]ResourceFile, 0, len(names))
 	for _, name := range names {
-		data, err := os.ReadFile(filepath.Join(dir, name))
+		data, _, err := readRegularDocument(filepath.Join(dir, name))
 		if err != nil {
 			continue
 		}

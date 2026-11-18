@@ -36,7 +36,7 @@ interface CreatedResource {
 	id?: unknown;
 }
 
-export const DEFAULT_TASK_START_PROMPT = "请阅读 task.md 和 AGENTS.md，了解任务背景后开始工作。";
+export const DEFAULT_TASK_START_PROMPT = "请阅读 AGENTS.md、spec.md 和 memory.md，了解任务背景后开始工作。";
 
 function createdResourceId(result: CreatedResource): string {
 	const id = String(result?.id || "").trim();

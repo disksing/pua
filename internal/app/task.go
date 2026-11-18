@@ -68,7 +68,7 @@ func createResourceFiles(dir string, resource Resource, languages ...string) err
 	if len(languages) > 0 {
 		language = languages[0]
 	}
-	return createResourceFilesWithMarkdown(dir, resource, resourceInitialMarkdown(resource, language), language)
+	return createResourceFilesWithMarkdown(dir, resource, defaultTaskMD(resource, language), language)
 }
 
 func createResourceFilesWithMarkdown(dir string, resource Resource, markdown, language string) error {
@@ -89,7 +89,10 @@ func createResourceFilesWithMarkdown(dir string, resource Resource, markdown, la
 	if err := writeResourceMetadata(dir, resource); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(dir, markdownFileName(resource)), []byte(markdown), 0o644); err != nil {
+	if err := createDocumentIfMissing(filepath.Join(dir, SpecMarkdownFile), markdown); err != nil {
+		return err
+	}
+	if err := createDocumentIfMissing(filepath.Join(dir, MemoryMarkdownFile), followupMarkdown(language)); err != nil {
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte(taskAgentsBlock(resource, language)+"\n"), 0o644)
@@ -371,7 +374,7 @@ func isArchivedPath(root, path string) bool {
 }
 
 func updateTaskAgentsMD(root, dir string, resource Resource, language string) error {
-	if err := ensureResourceDocument(dir, markdownFileName(resource), resourceInitialMarkdown(resource, language)); err != nil {
+	if err := ensureSplitDocuments(dir, markdownFileName(resource), defaultTaskMD(resource, language), language); err != nil {
 		return err
 	}
 	path := filepath.Join(dir, "AGENTS.md")

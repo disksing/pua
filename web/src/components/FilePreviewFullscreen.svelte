@@ -3,6 +3,7 @@
 
   import { ApiClient } from "../api/client";
   import { puaRoutePath } from "../controllers/route-controller";
+  import { RESOURCE_DOCUMENTS, resourceDocumentSavePath } from "../controllers/resource-documents";
   import type { TaskTemplate } from "./models";
   import FilePreviewModal from "./FilePreviewModal.svelte";
   import Icon from "./Icon.svelte";
@@ -14,6 +15,7 @@
   const params = new URLSearchParams(window.location.search);
   const workspaceId = params.get("workspaceId") || "";
   const resourceId = params.get("resourceId") || "";
+  const userName = params.get("user") || "";
   const section = params.get("section") || "Files";
   const path = params.get("path") || "";
   const urlMode = params.get("mode") as "preview" | "edit" | "annotate" | null;
@@ -21,7 +23,7 @@
   const editable = urlEditable != null
     ? urlEditable === "1"
     : resourceId === "workspace"
-      ? path === "AGENTS.md" || path === "workspace.md" || path === ""
+      ? path === "AGENTS.md" || RESOURCE_DOCUMENTS.some((document) => document.name === path.replace(/^\//, "")) || path === ""
       : resourceId !== "scheduler";
 
   const handoff = readFilePreviewHandoff();
@@ -57,6 +59,7 @@
   function fullscreenURL(): string {
     const next = selection;
     const params = new URLSearchParams({ workspaceId, resourceId, section: next?.section || "Files", path: next?.path || "", mode: "preview" });
+    if (userName) params.set("user", userName);
     return `/file?${params.toString()}`;
   }
 
@@ -85,8 +88,9 @@
       });
       if (!validation.valid) throw new Error(validation.errors?.[0]?.message || "The task template is invalid.");
     }
-    return client.request<FilePreviewModel>(`/api/workspaces/${encodeURIComponent(workspaceId)}/resources/${encodeURIComponent(resourceId)}/documents?path=${encodeURIComponent(nextPath)}`, {
+    return client.request<FilePreviewModel>(resourceDocumentSavePath(workspaceId, resourceId, nextPath), {
       method: "PUT",
+      headers: { "X-PUA-User": userName },
       body: JSON.stringify({ content, expectedContentHash }),
     });
   }

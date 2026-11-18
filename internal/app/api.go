@@ -640,7 +640,7 @@ func (w *Workspace) resolveTaskContent(input CreateTaskInput) (string, string, *
 			return "", "", nil, nil, &APIError{Operation: "render task template", Kind: "template_conflict", Workspace: w.root, ResourceID: input.ProjectID, Err: &TemplateValidationError{Template: templateName, Issues: []TemplateIssue{issue}}}
 		}
 		source := &TaskTemplateSource{Name: result.TemplateName, SchemaVersion: result.SchemaVersion, Digest: result.Digest}
-		return result.Title, withFollowupMarkdown(result.Markdown, language), source, result.Warnings, nil
+		return result.Title, result.Markdown, source, result.Warnings, nil
 	}
 	if len(input.TemplateFields) > 0 || strings.TrimSpace(input.ExpectedTemplateDigest) != "" {
 		return "", "", nil, nil, &APIError{Operation: "create task", Kind: "template", Workspace: w.root, ResourceID: input.ProjectID, Err: errors.New("templateFields and expectedTemplateDigest require templateName")}
@@ -653,7 +653,7 @@ func (w *Workspace) resolveTaskContent(input CreateTaskInput) (string, string, *
 	if input.CompleteMarkdownSet {
 		markdown = input.CompleteMarkdown
 	}
-	return title, withFollowupMarkdown(markdown, language), nil, nil, nil
+	return title, markdown, nil, nil, nil
 }
 
 func (w *Workspace) resolveTaskAgentBinding(parent Project, explicit AgentBinding) (AgentBinding, error) {

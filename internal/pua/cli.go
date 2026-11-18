@@ -473,7 +473,7 @@ func printProjectHelp() {
 Commands:
   pua project create [--slug <slug>] <description>
     Create the next top-level project directory, including project.json,
-    project.md, artifacts/, templates/, and project-local AGENTS.md. Conversation
+    spec.md, memory.md, artifacts/, templates/, and project-local AGENTS.md. Conversation
     history is created lazily through resource History.
     Use --slug <slug> to append a human-readable suffix to the directory name.
     Creation is local and does not create a generation or send a message.
@@ -527,11 +527,11 @@ func printTaskHelp() {
 Commands:
   pua task create [<title>] [--project=<project>] [--slug <slug>] [--detail <detail>|--task-markdown <markdown>|--template=<name>] [--field <name>=<value>...] [--fields <file>] [--title <title>] [--profile=<name>|--agent=<name>] [--dry-run]
     Create the next task under the project in a short taskN/ or taskN-<slug>/
-    directory, including task.json, task.md, artifacts/, worktree/,
+    directory, including task.json, spec.md, memory.md, artifacts/, worktree/,
     and task-local AGENTS.md. Conversation history is created lazily through
     resource History. <title> is written to task.json and shown by task list.
-    --detail initializes the Background section in the default task.md scaffold.
-    --task-markdown writes the complete task.md file and is mutually exclusive
+    --detail initializes the Background section in the default spec.md scaffold.
+    --task-markdown writes the complete spec.md file and is mutually exclusive
     with --detail. <project> may be a full id such as project22 or just a number
     such as 22. When omitted, PUA uses the project containing the current
     working directory. Send the first message separately with pua message

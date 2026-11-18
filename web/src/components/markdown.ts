@@ -61,6 +61,7 @@ interface MarkdownNavigationContext {
   resolveResourceTitle: ResourceTitleResolver;
   onNavigate: (resourceId: string) => void;
   onOpenFile?: (path: string) => void;
+  documentPath?: string;
 }
 
 export function handleMarkdownResourceClick(event: MouseEvent, context: MarkdownNavigationContext): void {
@@ -80,10 +81,13 @@ export function handleMarkdownResourceClick(event: MouseEvent, context: Markdown
   }
 
   if (!context.onOpenFile) return;
-  const fileAnchor = event.target.closest<HTMLAnchorElement>("a[href^='/']");
+  const fileAnchor = event.target.closest<HTMLAnchorElement>("a[href]");
   if (!fileAnchor || !root.contains(fileAnchor) || (fileAnchor.target && fileAnchor.target !== "_self")) return;
   const href = fileAnchor.getAttribute("href") || "";
-  const path = workspaceFileLinkPath(href);
+  const documentPath = context.documentPath;
+  const path = href === "memory.md" && documentPath?.split("/").pop() === "spec.md"
+    ? documentPath.replace(/spec\.md$/, "memory.md")
+    : workspaceFileLinkPath(href);
   if (path == null) return;
   event.preventDefault();
   context.onOpenFile(path);

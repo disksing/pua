@@ -129,7 +129,7 @@ In a message or Markdown file, write [[resource id]] to link a PUA resource, for
 - worktree/: Task-owned code worktrees.
 - scheduler/: the Scheduler resource.
 
-project.json and task.json contain structured information understood by PUA. The resource contract (background, scope, acceptance criteria, workflow) is in spec.md. Maintain context and decisions in memory.md. Recover transient progress from History, Git, and artifacts.
+project.json and task.json contain structured information understood by PUA. The resource contract (background, scope, acceptance criteria, workflow) is in spec.md. Maintain context and decisions in memory.md. Recover temporary progress from History, Git, and artifacts rather than keeping another permanent progress file.
 
 ## 4. Permissions and PUA CLI
 
@@ -264,7 +264,7 @@ Match collaboration results and scheduled messages to existing items. Before end
 
 Notify when a question has an answer, a commitment is completed, a user decision is needed, or the expected time or plan changes materially; honor explicit timing. Do not repeat reminders without new information. The file cannot wake an Agent: register actual Scheduler conditions for long waits. Use legitimate reply instructions supplied with the input; after recovery, retrieve them through the source-input History reference and accept server validation. Never extract Tokens from raw Chat storage or put capabilities in resource documents or schedule conditions. If closure or reopening invalidates eligibility, retain the result and mark publication blocked; do not redirect to another user/resource or retry indefinitely.
 
-Keep necessary summaries and references. Retain all open items and the latest 20 closed summaries. Move older summaries into this resource's artifacts when needed. Close items only when both work and notification obligations end.
+Keep necessary summaries and references, not full conversations or another user's private messages. Retain all open items and the latest 20 closed summaries; move older summaries into this resource's artifacts when needed. Close items only when both work and notification obligations end.
 
 ## 7. Scheduler
 

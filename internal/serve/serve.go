@@ -2418,6 +2418,12 @@ func workspaceRelativeFileLinkTarget(root, target string) (string, error) {
 	// belongs to another location.
 	workspaceTarget := strings.TrimPrefix(native, string(filepath.Separator))
 	cleanWorkspaceTarget := filepath.Clean(workspaceTarget)
+	if base, found := fileLinkBaseWithoutPosition(cleanWorkspaceTarget); found {
+		cleanWorkspaceTarget = base
+	}
+	if cleanWorkspaceTarget == "workspace.md" && legacyDocumentReadPath(rootAbs, filepath.Join(rootAbs, cleanWorkspaceTarget)) != "" {
+		return workspaceTarget, nil
+	}
 	parts := strings.Split(filepath.ToSlash(cleanWorkspaceTarget), "/")
 	if len(parts) > 0 && linkProjectSegment.MatchString(parts[0]) {
 		return workspaceTarget, nil

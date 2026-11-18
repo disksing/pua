@@ -1036,9 +1036,11 @@ Line two
 
 <!-- List observable results that mean this is done. -->
 - TBD
+
+## Workflow
 `
-		if taskMD != expectedTaskMD+"\n"+localize.MustRender("en", "followups.md", nil) {
-			t.Fatalf("expected detail to initialize task.md, got:\n%s", taskMD)
+		if taskMD != expectedTaskMD {
+			t.Fatalf("expected detail to initialize spec.md, got:\n%s", taskMD)
 		}
 
 		listed := run(t, "task", "list", "--project=project1")
@@ -1070,8 +1072,11 @@ Template background.
 		run(t, "task", "create", "Template task", "--project=project1", "--slug=template-task", "--task-markdown", templateMarkdown)
 
 		taskMD := readFile(t, filepath.Join(root, "project1", "task1-template-task", testSpecMDFile))
-		if taskMD != templateMarkdown+"\n"+localize.MustRender("en", "followups.md", nil) {
-			t.Fatalf("expected template markdown followed by unified follow-ups, got:\n%s", taskMD)
+		if taskMD != templateMarkdown {
+			t.Fatalf("expected the complete template in Spec, got:\n%s", taskMD)
+		}
+		if memory := readFile(t, filepath.Join(root, "project1", "task1-template-task", "memory.md")); memory != localize.MustRender("en", "followups.md", nil) {
+			t.Fatalf("expected independent follow-ups in Memory, got:\n%s", memory)
 		}
 		for _, heading := range []string{"# Template task", "## Background", "## Scope", "## Acceptance Criteria"} {
 			if count := strings.Count(taskMD, heading); count != 1 {

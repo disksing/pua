@@ -135,7 +135,7 @@ func TestResourceArtifactDeleteRejectsUnownedAndUnsafePaths(t *testing.T) {
 	}
 
 	link := filepath.Join(fixture.taskPath, "artifacts", "linked.txt")
-	if err := os.Symlink(filepath.Join(fixture.taskPath, "task.md"), link); err != nil {
+	if err := os.Symlink(filepath.Join(fixture.taskPath, "spec.md"), link); err != nil {
 		t.Fatal(err)
 	}
 	recorder := artifactDeleteRequest(t, fixture, http.MethodDelete, "project1.task1", task.Path+"/artifacts/linked.txt")

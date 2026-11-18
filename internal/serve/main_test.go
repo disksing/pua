@@ -583,8 +583,12 @@ func TestCreateTaskMapsTemplateBodyAsCompleteMarkdown(t *testing.T) {
 		t.Fatal(err)
 	}
 	markdown, err := os.ReadFile(filepath.Join(workspace, filepath.FromSlash(resource.Path), app.SpecMarkdownFile))
-	if err != nil || !strings.HasPrefix(string(markdown), "# Template task\n\n## Chat follow-ups\n") {
+	if err != nil || string(markdown) != "# Template task" {
 		t.Fatalf("template body was not written as complete markdown: err=%v content=%q", err, markdown)
+	}
+	memory, err := os.ReadFile(filepath.Join(workspace, filepath.FromSlash(resource.Path), app.MemoryMarkdownFile))
+	if err != nil || !strings.Contains(string(memory), "## Chat follow-ups") {
+		t.Fatalf("missing independent Memory: err=%v content=%q", err, memory)
 	}
 }
 

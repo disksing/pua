@@ -3,12 +3,14 @@ package serve
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/disksing/pua/internal/app"
 )
@@ -142,6 +144,220 @@ func TestTurnWorkYieldPreviewResumeAndReplay(t *testing.T) {
 	replayed, _ := loadDialogue(w.Path, dialoguePrefix+sharedChatID("project1.task1"))
 	if len(replayed.Messages) != len(chat.Messages) || len(workFile(t, w).Works) != 3 {
 		t.Fatal("replay duplicated output or resume")
+	}
+}
+
+func TestTurnWorkExpiredCancelledResumeUnblocksMailbox(t *testing.T) {
+	manager, workspace, fake, _ := workflowFixture(t)
+	ctx := context.Background()
+	const resource = "project1.task1"
+	const parentID = "old-parent"
+	resumeID := "resume-" + chatID(parentID, "old-child")
+	record := idleTestGeneration(workspace, resource, "gen-old-resume", "ses-old-resume", manager.resourceNow())
+	record.Status, record.IdleSinceAt, record.IdleDeadlineAt = "stopped", "", ""
+	record.AgentHubStoppedObserved = true
+	seedIdleTestGeneration(t, fake, workspace, record, "stopped")
+
+	file := workFile(t, workspace)
+	file.Works = append(file.Works, turnWork{
+		ID: parentID, State: "resuming", OutputDone: true, ResumeID: resumeID,
+	})
+	if err := saveTurnWork(workspace.Path, resource, file); err != nil {
+		t.Fatal(err)
+	}
+	resume, err := acceptGeneratedMailboxMessage(workspace.Path, resourceMailboxMessage{
+		ID: resumeID, ResourceID: resource, Type: "turn_resume", Text: "Resume old work",
+		RequestedMode:   resourceMessageModeEnqueue,
+		ProviderContext: &providerMessageContext{Protocol: 1, WorkID: resumeID, OpenerRole: "agent"},
+		Causation:       &resourceMessageCausation{Type: "turn_resume", SourceResourceID: resource, MessageID: parentID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareTurnWork(workspace.Path, resource, record.GenerationID, record.AgentHubSessionID, resume); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pauseTaskAfterManualTurnStop(workspace, resource); err != nil {
+		t.Fatal(err)
+	}
+	expireTurnWorkReceipt(t, workspace, resumeID)
+	first := queueWorkflowUser(t, manager, workspace, "first-waiting", "First waiting input")
+	second := queueWorkflowUser(t, manager, workspace, "second-waiting", "Second waiting input")
+	if first.Status != resourceMessageQueued || second.Status != resourceMessageQueued {
+		t.Fatalf("fixture needs two waiting inputs: first=%+v second=%+v", first, second)
+	}
+	stale := workFile(t, workspace).find(resumeID)
+	if stale.State != "running" || stale.TurnID != "" || stale.OutputDone {
+		t.Fatalf("fixture needs unresolved resume work: %+v", stale)
+	}
+
+	manager.waitBackground()
+	manager = newAgentManager(manager.server)
+	manager.server.agents = manager
+	if err := manager.reconcileWorkspaceMailboxes(ctx, workspace); err != nil {
+		t.Fatal(err)
+	}
+	file = workFile(t, workspace)
+	parent, stale := file.find(parentID), file.find(resumeID)
+	if parent.State != "cancelled" || parent.Outcome != "manual stop" || !stale.OutputDone || stale.State != "blocked" ||
+		stale.TurnID != "" || !strings.Contains(stale.LastError, "receipt expired") {
+		t.Fatalf("old work did not settle: parent=%+v resume=%+v", parent, stale)
+	}
+	assertDelivered := func(id string) turnWork {
+		t.Helper()
+		work := workFile(t, workspace).find(id)
+		delivery, found, err := mailboxMessageByID(workspace.Path, id)
+		if err != nil || !found || delivery.Status != resourceMessageDelivered || delivery.DeliveredAt == "" ||
+			work == nil || work.TurnID == "" || delivery.TurnID != work.TurnID || work.SessionID != record.AgentHubSessionID ||
+			!work.Context.ChatVisible || work.Context.OpenerRole != "user" {
+			t.Fatalf("waiting input did not open a formal Chat Turn: work=%+v receipt=%+v found=%v err=%v", work, delivery, found, err)
+		}
+		return *work
+	}
+	firstWork := assertDelivered(first.ID)
+	if err := manager.reconcileWorkspaceMailboxes(ctx, workspace); err != nil {
+		t.Fatal(err)
+	}
+	waiting, found, err := mailboxMessageByID(workspace.Path, second.ID)
+	if err != nil || !found || waiting.Status != resourceMessageQueued || workFile(t, workspace).find(second.ID) != nil {
+		t.Fatalf("second input did not wait for first Turn: %+v, found=%v, err=%v", waiting, found, err)
+	}
+	closeWorkflowTurn(fake, firstWork, "completed", "First input handled")
+	manager.waitBackground()
+	manager = newAgentManager(manager.server)
+	manager.server.agents = manager
+	if err := manager.reconcileWorkspaceMailboxes(ctx, workspace); err != nil {
+		t.Fatal(err)
+	}
+	secondWork := assertDelivered(second.ID)
+	if secondWork.TurnID == firstWork.TurnID || len(workFile(t, workspace).Works) != 4 {
+		t.Fatalf("mailbox did not advance to a distinct Turn: %+v", workFile(t, workspace))
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	_, replayed := fake.messageInputs[resumeID]
+	if replayed || len(fake.resumeEnvironments) != 1 || len(fake.turns[record.AgentHubSessionID]) != 2 {
+		t.Fatalf("unexpected resume or Turn replay: old input sent=%v actions=%v turns=%d", replayed, fake.actions, len(fake.turns[record.AgentHubSessionID]))
+	}
+}
+
+func TestTurnWorkExpiredContinuationReferencesSettle(t *testing.T) {
+	for _, state := range []string{"suspended", "resuming", "cancelled"} {
+		t.Run(state, func(t *testing.T) {
+			manager, workspace, _, client := workflowFixture(t)
+			const resource = "project1.task1"
+			input, err := acceptMailboxMessage(workspace.Path, resource, resourceMessageRequest{Text: "Old continuation input"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := updateMailboxMessage(workspace.Path, input.ID, func(message *resourceMailboxMessage) {
+				message.Status = resourceMessageCancelled
+			}); err != nil {
+				t.Fatal(err)
+			}
+			expireTurnWorkReceipt(t, workspace, input.ID)
+			file := workFile(t, workspace)
+			parent := turnWork{ID: "parent", OutputDone: true, State: "resuming"}
+			if state == "suspended" {
+				parent.State, parent.TargetID = state, input.ID
+			} else {
+				parent.ResumeID = input.ID
+			}
+			file.Works = append(file.Works, parent)
+			if err := saveTurnWork(workspace.Path, resource, file); err != nil {
+				t.Fatal(err)
+			}
+			wantState, wantOutcome := "blocked", "mailbox receipt expired"
+			if state == "cancelled" {
+				if err := cancelSuspendedTurnWork(workspace.Path, resource, "manual stop"); err != nil {
+					t.Fatal(err)
+				}
+				wantState, wantOutcome = state, "manual stop"
+			}
+			if err := manager.reconcileWorkspaceTurnWork(context.Background(), workspace, client); err != nil {
+				t.Fatal(err)
+			}
+			file = workFile(t, workspace)
+			if got := file.find(parent.ID); len(file.Works) != 1 || got.State != wantState || got.Outcome != wantOutcome {
+				t.Fatalf("continuation did not settle: %+v", file.Works)
+			}
+		})
+	}
+}
+
+func TestTurnWorkInputLookupRetriesAndKeepsBoundTurn(t *testing.T) {
+	manager, workspace, fake, client := workflowFixture(t)
+	ctx := context.Background()
+	const resource = "project1.task1"
+	input := queueWorkflowUser(t, manager, workspace, "recoverable", "Recover my Turn")
+	reconcileWorkflow(t, manager, workspace, client)
+	next := queueWorkflowUser(t, manager, workspace, "after-recovery", "Handle this after recovery")
+	manager.waitBackground()
+	file := workFile(t, workspace)
+	work := file.find(input.ID)
+	turnID := work.TurnID
+	work.TurnID = "" // Simulate a crash after persisting the receipt, before binding the Turn.
+	file.Works = append([]turnWork{{ID: "parent", State: "resuming", OutputDone: true, ResumeID: input.ID}}, file.Works...)
+	if err := saveTurnWork(workspace.Path, resource, file); err != nil {
+		t.Fatal(err)
+	}
+	directory, _, _, err := resourceMailboxDirectory(workspace.Path, resource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := resourceMailboxReceiptPath(directory)
+	receipts, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.reconcileWorkspaceMailboxes(ctx, workspace); err == nil || !strings.Contains(err.Error(), "receipts.json") {
+		t.Fatalf("temporary receipt lookup failure not reported: %v", err)
+	}
+	if got := workFile(t, workspace).find(input.ID); got.State != "running" || got.OutputDone || got.TurnID != "" {
+		t.Fatalf("temporary lookup failure settled recoverable work: %+v", got)
+	}
+	if err := os.WriteFile(path, receipts, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.reconcileWorkspaceMailboxes(ctx, workspace); err != nil {
+		t.Fatal(err)
+	}
+	if got := workFile(t, workspace).find(input.ID); got.TurnID != turnID || got.OutputDone {
+		t.Fatalf("successful retry did not bind the original Turn: %+v", got)
+	}
+	expireTurnWorkReceipt(t, workspace, input.ID)
+	if err := manager.reconcileWorkspaceMailboxes(ctx, workspace); err != nil {
+		t.Fatal(err)
+	}
+	file = workFile(t, workspace)
+	if got := file.find(input.ID); got.OutputDone || got.State != "running" || file.find("parent").State != "resuming" {
+		t.Fatalf("expiry settled work whose Turn is still available: %+v", file.Works)
+	}
+	closeWorkflowTurn(fake, *file.find(input.ID), "completed", "Recovered")
+	if err := manager.reconcileWorkspaceMailboxes(ctx, workspace); err != nil {
+		t.Fatal(err)
+	}
+	file = workFile(t, workspace)
+	following := file.find(next.ID)
+	if file.find(input.ID).State != "completed" || file.find("parent").State != "completed" || following == nil || following.TurnID == "" {
+		t.Fatalf("recovered Turn did not complete and advance the mailbox: %+v", file.Works)
+	}
+}
+
+func expireTurnWorkReceipt(t *testing.T, workspace serveWorkspace, id string) {
+	t.Helper()
+	if _, err := updateMailboxMessage(workspace.Path, id, func(message *resourceMailboxMessage) {
+		message.TerminalAt = time.Now().Add(-resourceMailboxReceiptRetentionWindow - time.Hour).Format(time.RFC3339Nano)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, found, err := mailboxMessageByID(workspace.Path, id)
+	var apiErr *resourceAPIError
+	if found || !errors.As(err, &apiErr) || apiErr.Code != "message_receipt_expired" {
+		t.Fatalf("fixture receipt did not expire: found=%v, err=%v", found, err)
 	}
 }
 

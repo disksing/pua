@@ -243,6 +243,18 @@ func turnWorkReference(root, resource string, work turnWork) (string, error) {
 	})
 }
 
+func isMailboxReceiptExpired(err error) bool {
+	var apiErr *resourceAPIError
+	return errors.As(err, &apiErr) && apiErr.Code == "message_receipt_expired"
+}
+
+func (w *turnWork) recordExpiredInput(err error) {
+	if w.State != "cancelled" {
+		w.State, w.Outcome = "blocked", "mailbox receipt expired"
+	}
+	w.LastError = err.Error()
+}
+
 func (m *agentManager) reconcileTurnWorkLocked(ctx context.Context, workspace serveWorkspace, resource string, client *agentHubClient) error {
 	file, err := loadTurnWork(workspace.Path, resource)
 	if err != nil {
@@ -285,6 +297,13 @@ func (m *agentManager) reconcileTurnWorkLocked(ctx context.Context, workspace se
 		}
 		if work.TurnID == "" {
 			message, found, e := mailboxMessageByID(workspace.Path, work.ID)
+			if isMailboxReceiptExpired(e) {
+				// Only terminal receipts expire. With no recorded Turn ID,
+				// this work has no output to reconcile through the mailbox.
+				work.recordExpiredInput(e)
+				work.OutputDone = true
+				continue
+			}
 			if e != nil {
 				return e
 			}
@@ -366,8 +385,15 @@ func (m *agentManager) reconcileTurnWorkLocked(ctx context.Context, workspace se
 	for i := range file.Works {
 		parent := &file.Works[i]
 		if parent.State == "resuming" {
-			if resumed := file.find(parent.ResumeID); resumed != nil && resumed.OutputDone &&
-				(resumed.State == "completed" || resumed.State == "cancelled" || resumed.State == "blocked") {
+			resumed := file.find(parent.ResumeID)
+			if resumed == nil {
+				_, _, e := mailboxMessageByID(workspace.Path, parent.ResumeID)
+				if isMailboxReceiptExpired(e) {
+					parent.recordExpiredInput(e)
+				} else if e != nil {
+					return e
+				}
+			} else if resumed.OutputDone && (resumed.State == "completed" || resumed.State == "cancelled" || resumed.State == "blocked") {
 				parent.State, parent.Outcome = resumed.State, resumed.Outcome
 			}
 		}
@@ -387,6 +413,10 @@ func (m *agentManager) reconcileTurnWorkLocked(ctx context.Context, workspace se
 		child := file.find(parent.TargetID)
 		if child == nil {
 			message, found, e := mailboxMessageByID(workspace.Path, parent.TargetID)
+			if isMailboxReceiptExpired(e) {
+				parent.recordExpiredInput(e)
+				continue
+			}
 			if e != nil {
 				return e
 			}
@@ -424,7 +454,7 @@ func (m *agentManager) reconcileTurnWorkLocked(ctx context.Context, workspace se
 	return settleTurnTaskState(workspace.Path, resource, file)
 }
 
-func selectedTurnWorkInput(root, resource string) (string, error) {
+func selectedTurnWorkInput(root, resource string, mailbox resourceMailbox) (string, error) {
 	file, err := loadTurnWork(root, resource)
 	if err != nil {
 		return "", err
@@ -435,12 +465,10 @@ func selectedTurnWorkInput(root, resource string) (string, error) {
 			return work.TargetID, nil
 		}
 		if work.State == "resuming" {
-			message, found, e := mailboxMessageByID(root, work.ResumeID)
-			if e != nil {
-				return "", e
-			}
-			if found && message.Status == resourceMessageQueued {
-				return work.ResumeID, nil
+			for _, message := range mailbox.Messages {
+				if message.ID == work.ResumeID && message.Status == resourceMessageQueued {
+					return work.ResumeID, nil
+				}
 			}
 		}
 	}
@@ -780,7 +808,7 @@ func cancelSuspendedTurnWork(root, resource, reason string) error {
 					if message.Status == resourceMessageQueued {
 						message.Status, message.TerminalAt = resourceMessageCancelled, time.Now().Format(time.RFC3339Nano)
 					}
-				}); err != nil {
+				}); err != nil && !isMailboxReceiptExpired(err) {
 					return err
 				}
 			}

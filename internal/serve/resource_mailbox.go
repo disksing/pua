@@ -1165,7 +1165,7 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 			return err
 		}
 		message, found := selectPendingMailboxMessage(mailbox, resourceID)
-		selectedID, selectErr := selectedTurnWorkInput(workspace.Path, resourceID)
+		selectedID, selectErr := selectedTurnWorkInput(workspace.Path, resourceID, mailbox)
 		if selectErr != nil {
 			return selectErr
 		}

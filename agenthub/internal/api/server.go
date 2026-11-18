@@ -1159,6 +1159,10 @@ func containsString(values []string, target string) bool {
 }
 
 func (s *Server) writeRuntimeError(w http.ResponseWriter, err error) {
+	if errors.Is(err, provider.ErrProviderBusy) {
+		writeAPIError(w, http.StatusConflict, "provider_busy", err.Error(), nil)
+		return
+	}
 	if errors.Is(err, session.ErrNotFound) {
 		s.writeStoreError(w, err)
 		return
@@ -1917,6 +1921,7 @@ func writeAPIError(w http.ResponseWriter, status int, code, message string, deta
 func retryableAPIError(code string) bool {
 	switch code {
 	case "runtime_unavailable",
+		"provider_busy",
 		"provider_unavailable",
 		"provider_timeout",
 		"provider_error",

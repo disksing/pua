@@ -16,15 +16,17 @@ import (
 )
 
 type piSession struct {
-	options Options
-	command string
-	cmd     *exec.Cmd
-	pgid    int
-	stdin   io.WriteCloser
-	mu      sync.Mutex
-	writeMu sync.Mutex
-	nextID  int64
-	waiting map[string]chan piResponse
+	options             Options
+	command             string
+	cmd                 *exec.Cmd
+	pgid                int
+	stdin               io.WriteCloser
+	mu                  sync.Mutex
+	writeMu             sync.Mutex
+	nextID              int64
+	waiting             map[string]chan piResponse
+	pendingSteers       int
+	checkIdleAfterSteer bool
 	// messageStreams records whether a content block emitted a real delta;
 	// snapshot-only providers need one normalized fallback at *_end, while a
 	// normal delta stream must not append its full end snapshot again.
@@ -172,6 +174,36 @@ func (p *piSession) Prompt(text string, steer bool) error {
 	return p.prompt(text, steer)
 }
 
+func (p *piSession) CheckNewTurnReady() error {
+	p.mu.Lock()
+	check, pending := p.checkIdleAfterSteer, p.pendingSteers
+	p.mu.Unlock()
+	if !check {
+		return nil
+	}
+	if pending > 0 {
+		return ErrProviderBusy
+	}
+	response, err := p.request("get_state", nil)
+	if err != nil {
+		return err
+	}
+	var state struct {
+		Streaming  bool `json:"isStreaming"`
+		Compacting bool `json:"isCompacting"`
+	}
+	if err := json.Unmarshal(response.Data, &state); err != nil {
+		return err
+	}
+	if state.Streaming || state.Compacting {
+		return ErrProviderBusy
+	}
+	p.mu.Lock()
+	p.checkIdleAfterSteer = false
+	p.mu.Unlock()
+	return nil
+}
+
 func (p *piSession) prompt(text string, steer bool) error {
 	fields := map[string]any{"message": text}
 	if steer {
@@ -183,8 +215,21 @@ func (p *piSession) prompt(text string, steer bool) error {
 	if !p.prompts.begin() {
 		return errors.New("Pi provider process is stopping")
 	}
+	if steer {
+		p.mu.Lock()
+		p.pendingSteers++
+		p.checkIdleAfterSteer = true
+		p.mu.Unlock()
+	}
 	go func() {
 		defer p.prompts.done()
+		if steer {
+			defer func() {
+				p.mu.Lock()
+				p.pendingSteers--
+				p.mu.Unlock()
+			}()
+		}
 		if _, err := p.requestLongRunning("prompt", fields); err != nil && p.options.Hooks.Event != nil {
 			p.options.Hooks.Event(Event{Type: "provider.error", Data: map[string]any{"message": err.Error()}, TurnDone: true, TurnFailed: true})
 		}

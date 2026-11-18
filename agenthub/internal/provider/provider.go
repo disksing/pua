@@ -96,6 +96,12 @@ type TurnScopedSteerer interface {
 	SteerActive(text string) error
 }
 
+var ErrProviderBusy = errors.New("provider is still processing the previous input")
+
+type NewTurnReadiness interface {
+	CheckNewTurnReady() error
+}
+
 // PromptText resolves the provider-facing text of a canonical input. Schema
 // v2 is returned byte-for-byte unchanged. Header construction exists only for
 // durable schema-v1 inputs and old clients.

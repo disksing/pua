@@ -252,6 +252,16 @@ func (m *Manager) SendMessage(id string, input session.MessageInput) (session.Se
 	}
 	turnID := current
 	if turnID == "" {
+		m.mu.Lock()
+		run := m.running[id]
+		m.mu.Unlock()
+		if run != nil {
+			if checker, ok := run.adapter.(provider.NewTurnReadiness); ok {
+				if err := checker.CheckNewTurnReady(); err != nil {
+					return session.Session{}, err
+				}
+			}
+		}
 		turnID, err = session.NewID("turn")
 		if err != nil {
 			return session.Session{}, err

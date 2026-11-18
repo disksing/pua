@@ -156,9 +156,24 @@ func TestPiAdvisoryUnknownReceiptRecoversWithoutResend(t *testing.T) {
 		t.Fatal("recovery resent or lost the canonical advisory")
 	}
 	closeWorkflowTurn(fake, original, "completed", "")
+	fake.mu.Lock()
+	fake.providerBusy = true
+	fake.mu.Unlock()
 	reconcileWorkflow(t, manager, workspace, client)
 	if workFile(t, workspace).Advisories[0].State != "completed" {
 		t.Fatal("terminal advisory did not settle")
+	}
+	waiting, _, err := mailboxMessageByID(workspace.Path, formal.ID)
+	if err != nil || waiting.Status != resourceMessageQueued || waiting.TurnID != "" || waiting.LastError != "" {
+		t.Fatalf("formal input while Pi still processes the preview: %+v, %v", waiting, err)
+	}
+	fake.mu.Lock()
+	fake.providerBusy = false
+	fake.mu.Unlock()
+	reconcileWorkflow(t, manager, workspace, client)
+	child := workFile(t, workspace).find(formal.ID)
+	if child == nil || child.TurnID == "" || child.TurnID == original.TurnID || !child.Context.ChatVisible {
+		t.Fatalf("formal input did not open its own visible Turn after Pi became idle: %+v", child)
 	}
 }
 

@@ -1056,7 +1056,9 @@ trust semantics from that payload.
   `400 invalid_message_sender`, `400 invalid_message_reference`,
   `404 session_not_found`, `409 session_archived`,
   `409 session_stopping`, `409 turn_active` (an active turn exists without
-  `steer=true`), `409 runtime_operation_failed` (the provider rejected the
+  `steer=true`), `409 provider_busy` (retry the same message ID once Pi
+  finishes processing the previous input),
+  `409 runtime_operation_failed` (the provider rejected the
   prompt),
   `503 runtime_unavailable`.
 

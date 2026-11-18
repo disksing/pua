@@ -1609,6 +1609,12 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 				return nil
 			}
 			var deliveryAPIError *agentHubAPIError
+			if errors.As(deliveryErr, &deliveryAPIError) && deliveryAPIError.StatusCode == http.StatusConflict && deliveryAPIError.Code == "provider_busy" {
+				_, err := updateMailboxMessage(workspace.Path, message.ID, func(current *resourceMailboxMessage) {
+					current.Status = resourceMessageQueued
+				})
+				return err
+			}
 			conflict := errors.As(deliveryErr, &deliveryAPIError) && deliveryAPIError.StatusCode == http.StatusConflict &&
 				strings.Contains(deliveryAPIError.Message, "message id conflicts with an existing input")
 			var canonical agentHubInboundMessage

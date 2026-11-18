@@ -68,6 +68,55 @@ func (f *fakeSession) Prompt(text string, _ bool) error {
 	return nil
 }
 
+type busyAfterPreviewSession struct {
+	fakeSession
+	busy bool
+}
+
+func (s *busyAfterPreviewSession) CheckNewTurnReady() error {
+	if s.busy {
+		return provider.ErrProviderBusy
+	}
+	return nil
+}
+
+func TestNewTurnWaitsForProviderAfterPreview(t *testing.T) {
+	store, err := session.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := store.Create(session.CreateInput{Cwd: t.TempDir(), AgentName: "Fast Agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := New(store, testConfig())
+	adapter := &busyAfterPreviewSession{}
+	manager.factory = func(options provider.Options) (provider.Session, error) {
+		adapter.hooks = options.Hooks
+		return adapter, nil
+	}
+	if _, err := manager.Send(value.ID, "preview", true); err != nil {
+		t.Fatal(err)
+	}
+	adapter.busy = true
+	input := session.MessageInput{Text: "formal input", MessageID: "formal-id", Role: session.MessageRoleUser}
+	if _, err := manager.SendMessage(value.ID, input); !errors.Is(err, provider.ErrProviderBusy) {
+		t.Fatalf("formal input during preview: %v", err)
+	}
+	if _, found, err := store.DurableMessageByID(value.ID, input.MessageID); err != nil || found {
+		t.Fatalf("busy provider accepted formal input: found=%v err=%v", found, err)
+	}
+	adapter.busy = false
+	for range 2 {
+		if _, err := manager.SendMessage(value.ID, input); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(adapter.prompts) != 2 {
+		t.Fatalf("wanted one preview and one formal prompt, got %v", adapter.prompts)
+	}
+}
+
 func TestStableMessageRetryContinuesUntilProviderAccepts(t *testing.T) {
 	store, err := session.Open(t.TempDir())
 	if err != nil {

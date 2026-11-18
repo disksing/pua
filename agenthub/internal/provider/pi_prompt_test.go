@@ -3,6 +3,7 @@ package provider
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -25,7 +26,7 @@ func runPiSteerBoundaryHelper(scanner *bufio.Scanner) {
 		disposition := ""
 		switch request.Type {
 		case "get_state":
-			fmt.Printf(`{"id":%s,"type":"response","command":"get_state","success":true,"data":{"sessionId":"boundary"}}`+"\n", request.ID)
+			fmt.Printf(`{"id":%s,"type":"response","command":"get_state","success":true,"data":{"sessionId":"boundary","isStreaming":%t}}`+"\n", request.ID, active)
 			continue
 		case "steer":
 			disposition = "queued-only"
@@ -47,6 +48,8 @@ func runPiSteerBoundaryHelper(scanner *bufio.Scanner) {
 		}
 		if request.Message == "finish" {
 			active = false
+		}
+		if request.Message == "finish" || request.Message == "boundary-preview" {
 			fmt.Println(`{"type":"agent_settled"}`)
 		}
 	}
@@ -67,11 +70,17 @@ func TestPiSteerStartsIdleRunAndSteersActiveRun(t *testing.T) {
 		steer      bool
 	}{
 		{"first", "started:first", true},
+		{"boundary-preview", "steered:boundary-preview", true},
 		{"finish", "steered:finish", true},
 		{"after-settled", "started:after-settled", true},
 		{"finish", "steered:finish", true},
 		{"ordinary", "started:ordinary", false},
 	} {
+		if !step.steer {
+			if err := value.CheckNewTurnReady(); err != nil {
+				t.Fatalf("Pi did not become ready for the formal input: %v", err)
+			}
+		}
 		if err := value.Prompt(step.text, step.steer); err != nil {
 			t.Fatal(err)
 		}
@@ -88,7 +97,7 @@ func TestPiSteerStartsIdleRunAndSteersActiveRun(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatalf("%s was not consumed", step.text)
 		}
-		if step.text == "finish" {
+		if step.text == "finish" || step.text == "boundary-preview" {
 			select {
 			case event := <-events:
 				if !event.TurnDone || event.TurnFailed {
@@ -96,6 +105,12 @@ func TestPiSteerStartsIdleRunAndSteersActiveRun(t *testing.T) {
 				}
 			case <-time.After(5 * time.Second):
 				t.Fatal("run did not settle")
+			}
+			value.prompts.pending.Wait()
+			if step.text == "boundary-preview" {
+				if err := value.CheckNewTurnReady(); !errors.Is(err, ErrProviderBusy) {
+					t.Fatalf("old Turn settled while Pi was busy: %v", err)
+				}
 			}
 		}
 	}

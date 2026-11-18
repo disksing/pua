@@ -45,6 +45,7 @@ type runtimeFakeAgentHub struct {
 	resumeFailureReason  string
 	resumeUpdatesAt      bool
 	failNextMessage      bool
+	providerBusy         bool
 	enforceMessageIDs    bool
 	rejectAgentName      string
 	extraAgents          []string
@@ -215,6 +216,12 @@ func (f *runtimeFakeAgentHub) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		if f.materializeTurns && body.ExpectedTurnID != "" && f.sessions[id].CurrentTurnID != body.ExpectedTurnID {
 			f.mu.Unlock()
 			w.WriteHeader(http.StatusConflict)
+			return
+		}
+		if f.providerBusy && !body.Steer {
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusConflict)
+			writeRuntimeFakeJSON(w, map[string]any{"error": map[string]any{"code": "provider_busy", "retryable": true}})
 			return
 		}
 		f.messageSteers = append(f.messageSteers, body.Steer)

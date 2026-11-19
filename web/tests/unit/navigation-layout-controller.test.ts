@@ -60,66 +60,33 @@ describe("route and pane layout controllers", () => {
 		});
 	}
 
-	it("resolves the effective layout from the preference and viewport, and persists the choice", () => {
+	it("uses viewport layout without accessing legacy appearance preferences", () => {
+		const layoutKey = "pua.web.layoutPreference";
+		const fontKey = "pua.web.fontScales";
+		storage.setItem(layoutKey, "split");
+		storage.setItem(fontKey, JSON.stringify({ sidebar: 1.25, details: 0.8, chat: 1.4 }));
+		const read = vi.spyOn(storage, "getItem");
+		const write = vi.spyOn(storage, "setItem");
+		const remove = vi.spyOn(storage, "removeItem");
+
 		delete document.body.dataset.layout;
 		mockMatchMedia({});
 		let layout = createPaneLayoutController(() => undefined, storage);
 		layout.initialize();
 		expect(document.body.dataset.layout).toBe("three");
-		expect(layout.snapshot().layout).toEqual({ preference: "auto", effective: "three" });
 
 		mockMatchMedia({ "(max-width: 1440px)": true });
 		layout = createPaneLayoutController(() => undefined, storage);
 		layout.initialize();
 		expect(document.body.dataset.layout).toBe("two");
 
-		layout.setLayoutPreference("split");
-		expect(document.body.dataset.layout).toBe("split");
-		expect(layout.snapshot().layout).toEqual({ preference: "split", effective: "split" });
-		expect(storage.getItem("pua.web.layoutPreference")).toBe("split");
-
-		mockMatchMedia({});
-		layout = createPaneLayoutController(() => undefined, storage);
-		layout.initialize();
-		expect(document.body.dataset.layout).toBe("split");
-
 		mockMatchMedia({ "(max-width: 980px)": true, "(max-width: 1440px)": true });
 		layout = createPaneLayoutController(() => undefined, storage);
 		layout.initialize();
 		expect(document.body.dataset.layout).toBe("single");
-	});
 
-	it("applies, clamps, and persists per-column font scales", () => {
-		mockMatchMedia({});
-		const changed = vi.fn();
-		let layout = createPaneLayoutController(changed, storage);
-		layout.initialize();
-		expect(layout.snapshot().fontScales).toEqual({ sidebar: 1, details: 1, chat: 1 });
-		expect(document.documentElement.style.getPropertyValue("--sidebar-font-scale")).toBe("1");
-
-		layout.setFontScale("sidebar", 1.25);
-		layout.setFontScale("details", 0.5);
-		layout.setFontScale("chat", 2);
-		expect(layout.snapshot().fontScales).toEqual({ sidebar: 1.25, details: 0.8, chat: 1.4 });
-		expect(document.documentElement.style.getPropertyValue("--sidebar-font-scale")).toBe("1.25");
-		expect(document.documentElement.style.getPropertyValue("--details-font-scale")).toBe("0.8");
-		expect(document.documentElement.style.getPropertyValue("--chat-font-scale")).toBe("1.4");
-		expect(JSON.parse(storage.getItem("pua.web.fontScales") || "{}")).toEqual({ sidebar: 1.25, details: 0.8, chat: 1.4 });
-		expect(changed).toHaveBeenCalledTimes(3);
-
-		layout = createPaneLayoutController(() => undefined, storage);
-		layout.initialize();
-		expect(layout.snapshot().fontScales).toEqual({ sidebar: 1.25, details: 0.8, chat: 1.4 });
-
-		layout.resetFontScales();
-		expect(layout.snapshot().fontScales).toEqual({ sidebar: 1, details: 1, chat: 1 });
-		expect(storage.getItem("pua.web.fontScales")).toBeNull();
-	});
-
-	it("ignores malformed stored font scales", () => {
-		storage.setItem("pua.web.fontScales", JSON.stringify({ sidebar: "wide", details: 3, chat: 1.1 }));
-		const layout = createPaneLayoutController(() => undefined, storage);
-		layout.initialize();
-		expect(layout.snapshot().fontScales).toEqual({ sidebar: 1, details: 1.4, chat: 1.1 });
+		expect(read.mock.calls).toEqual([["pua.web.paneSizes"], ["pua.web.paneSizes"], ["pua.web.paneSizes"]]);
+		expect(write).not.toHaveBeenCalled();
+		expect(remove).not.toHaveBeenCalled();
 	});
 });

@@ -7,20 +7,6 @@
   display: none;
 }
 
-/* Split layout reuses the same drawer and backdrop above the mobile breakpoint. */
-body[data-layout="split"] :where([data-component-owner="mobile-toolbar"]).mobile-sidebar-backdrop {
-  position: fixed;
-  z-index: 55;
-  /* Keep the backdrop's hit area outside the drawer. Otherwise an accessible
-     click on its full-viewport button can land on the drawer content above it. */
-  inset: 0 0 0 min(86vw, 340px);
-  background: var(--backdrop);
-}
-
-body[data-layout="split"].mobile-sidebar-open :where([data-component-owner="mobile-toolbar"]).mobile-sidebar-backdrop {
-  display: block;
-}
-
 @media (max-width:980px) {
 
   :where([data-component-owner="mobile-toolbar"]).mobile-toolbar {

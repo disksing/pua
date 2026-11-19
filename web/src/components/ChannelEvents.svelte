@@ -25,4 +25,4 @@
   <ResourceEventTimeline {model} {dialogue} />
  {/key}
 </div>
-<style>.channel-controls { display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding:12px; } small { opacity:.65; } .channel-timeline { flex:1; min-height:0; overflow:auto; padding:0 20px 16px; overflow-anchor:none; font-size:calc(13px * var(--chat-font-scale, 1)); line-height:1.6; }</style>
+<style>.channel-controls { display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding:12px; } small { opacity:.65; } .channel-timeline { flex:1; min-height:0; overflow:auto; padding:0 20px 16px; overflow-anchor:none; font-size:13px; line-height:1.6; }</style>

@@ -61,7 +61,6 @@ function model(overrides: Partial<AppShellModel> = {}): AppShellModel {
     doctor: { checking: false, complete: true, summary: { errors: 0, warnings: 0 }, workspaces: [] },
     paneSizes: { sidebarWidth: 280, chatWidth: 420, chatHeight: 320 },
     mobile: { sidebarOpen: false },
-    layout: { preference: "auto", effective: "three" },
     route: { path: "", revision: 0, replace: true },
     onSwitchWorkspace: vi.fn(async () => undefined), onResolveWorkspaceUser: vi.fn(async () => undefined), onAddWorkspace: vi.fn(), onCreateProject: vi.fn(), onCreateTask: vi.fn(async () => undefined), onArchive: vi.fn(async () => undefined), onOpenSettings: vi.fn(), onRefreshDoctor: vi.fn(async () => undefined),
     onToggleProject: vi.fn(async () => undefined), onSelectResource: vi.fn(async () => undefined), onReorder: vi.fn(async () => undefined),

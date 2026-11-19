@@ -9,7 +9,7 @@
   border: 0;
   padding: 0;
   color: var(--muted);
-  font-size: calc(11.5px * var(--chat-font-scale, 1));
+  font-size: 11.5px;
 }
 
 :where([data-component-owner="event-timeline"]) .agent-activity-group > summary {

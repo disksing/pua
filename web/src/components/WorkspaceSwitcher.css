@@ -57,7 +57,7 @@
   border-radius: 6px;
   background: transparent;
   color: var(--sidebar-text);
-  font-size: calc(14px * var(--sidebar-font-scale, 1));
+  font-size: 14px;
   font-weight: 600;
   text-align: left;
 }
@@ -135,7 +135,7 @@
   border-radius: 4px;
   background: transparent;
   color: var(--panel);
-  font-size: calc(10px * var(--sidebar-font-scale, 1));
+  font-size: 10px;
   font-weight: 700;
   flex: 0 0 auto;
   overflow: hidden;
@@ -170,7 +170,7 @@
 :where([data-component-owner="workspace-switcher"]) .workspace-menu-title {
   padding: 7px 9px 5px;
   color: var(--muted);
-  font-size: calc(11px * var(--sidebar-font-scale, 1));
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -214,13 +214,13 @@
 }
 
 :where([data-component-owner="workspace-switcher"]) .workspace-menu-main strong {
-  font-size: calc(13px * var(--sidebar-font-scale, 1));
+  font-size: 13px;
   font-weight: 600;
 }
 
 :where([data-component-owner="workspace-switcher"]) .workspace-menu-main small {
   color: var(--faint);
-  font-size: calc(11px * var(--sidebar-font-scale, 1));
+  font-size: 11px;
   font-weight: 600;
 }
 
@@ -245,7 +245,7 @@
   border-radius: 4px;
   background: transparent;
   color: var(--muted-strong);
-  font-size: calc(13px * var(--sidebar-font-scale, 1));
+  font-size: 13px;
   font-weight: 600;
 }
 

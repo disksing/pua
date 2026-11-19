@@ -3,8 +3,7 @@
 /* ---- shared button hierarchy (strongest to lightest) ----
    .primary-button  the single dominant action of a view or dialog
    .secondary-button neutral actions (cancel, dismiss, secondary tools)
-   .danger-button   destructive actions; distinct by style, not only hue,
-                    so it stays recognizable in themes where accent == red
+   .danger-button   destructive actions
    .ghost-button    inline emphasis actions (e.g. the chat send button)
    .icon-button     icon-only affordances; add .danger for destructive ones */
 .primary-button {

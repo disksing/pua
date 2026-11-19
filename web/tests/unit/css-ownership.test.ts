@@ -7,7 +7,6 @@ const root = resolve(import.meta.dirname, "../..");
 const components = [
   "AgentPanelHeader",
   "ActivityGroup",
-  "AppearanceSettingsPanel",
   "ApprovalCard",
   "AppShell",
   "AgentHubSettingsPanel",
@@ -50,7 +49,6 @@ const components = [
 const owners: Record<(typeof components)[number], string> = {
   AgentPanelHeader: "agent-panel-header",
   ActivityGroup: "event-timeline",
-  AppearanceSettingsPanel: "appearance-settings-panel",
   ApprovalCard: "event-timeline",
   AppShell: "app-shell",
   AgentHubSettingsPanel: "agenthub-settings-panel",
@@ -124,22 +122,17 @@ function selectorHeaders(css: string): string[] {
 
 describe("CSS ownership", () => {
   it("defines every design token referenced by the stylesheets", () => {
-    const defined = new Set<string>();
-    for (const file of ["src/styles/tokens.css", "src/styles/themes-slate.css", "src/styles/themes-riso.css"]) {
-      for (const match of read(file).matchAll(/(--[a-z0-9-]+)\s*:/gi)) defined.add(match[1]);
-    }
-    // Tokens applied at runtime by controllers (pane sizes, font scales,
-    // mobile viewport metrics) rather than by stylesheets.
+    const defined = new Set(Array.from(read("src/styles/tokens.css").matchAll(/(--[a-z0-9-]+)\s*:/gi), (match) => match[1]));
+    // Tokens applied at runtime by controllers rather than by stylesheets.
     const runtimeTokens = new Set([
       "--sidebar-width", "--chat-width",
-      "--sidebar-font-scale", "--details-font-scale", "--chat-font-scale",
       "--app-viewport-height", "--app-viewport-offset-top", "--app-viewport-offset-left",
       // Component-local variables set inline by FileBrowser rows.
       "--depth"
     ]);
     const sources = [
       ...components.map((name) => `src/components/${name}.css`),
-      "src/styles/base.css", "src/styles/primitives.css", "src/styles/rich-content.css", "src/styles/themes-riso.css"
+      "src/styles/base.css", "src/styles/primitives.css", "src/styles/rich-content.css"
     ];
     const missing = new Map<string, string[]>();
     for (const file of sources) {
@@ -160,8 +153,6 @@ describe("CSS ownership", () => {
       '@import "./styles/base.css";',
       '@import "./styles/primitives.css";',
       '@import "./styles/rich-content.css";',
-      '@import "./styles/themes-slate.css";',
-      '@import "./styles/themes-riso.css";',
     ].join("\n"));
     expect(selectorHeaders(read("src/styles/base.css"))).not.toEqual(expect.arrayContaining([expect.stringMatching(/\.[a-z]/)]));
   });
@@ -691,8 +682,7 @@ describe("CSS ownership", () => {
     const schedulerSmall = body("src/components/SchedulerNav.css", '[data-component-owner="scheduler-nav"] small {');
     expect(schedulerSmall).toContain("color: var(--sidebar-muted);");
 
-    // Tree state markers use the sidebar status accents so dark sidebars
-    // can raise them without touching the light themes.
+    // Tree state markers use the sidebar status accents.
     const blocked = body("src/components/StatusPresentation.css", ':where([data-component-owner="status-presentation"]) .task-state-blocked {');
     expect(blocked).toContain("color: var(--sidebar-attention);");
     const waiting = body("src/components/StatusPresentation.css", ':where([data-component-owner="status-presentation"]) .task-state-waiting,');
@@ -700,7 +690,7 @@ describe("CSS ownership", () => {
   });
 
   it("marks nested component roots with the same owner used by their CSS", () => {
-	    for (const component of ["AgentPanelHeader", "ActivityGroup", "AppearanceSettingsPanel", "AgentHubSettingsPanel", "ApprovalCard", "DiffModal", "DoctorDialog", "FileBrowser", "FilePreviewModal", "HistoryTimeline", "LifecycleNotice", "MarkdownDocument", "MobileToolbar", "NotificationSettingsPanel", "PaneResizeHandle", "ProfilesSettingsPanel", "ProjectCreateForm", "ProjectTree", "SettingsNavigation", "StatusPresentation", "TaskWizard", "ThinkingBlock", "TimelineMessage", "TimelineNotice", "ToolGroup", "ToolItem", "UnknownEvent", "WorkspaceSettingsPanel", "WorkspaceSwitcher"] as const) {
+	    for (const component of ["AgentPanelHeader", "ActivityGroup", "AgentHubSettingsPanel", "ApprovalCard", "DiffModal", "DoctorDialog", "FileBrowser", "FilePreviewModal", "HistoryTimeline", "LifecycleNotice", "MarkdownDocument", "MobileToolbar", "NotificationSettingsPanel", "PaneResizeHandle", "ProfilesSettingsPanel", "ProjectCreateForm", "ProjectTree", "SettingsNavigation", "StatusPresentation", "TaskWizard", "ThinkingBlock", "TimelineMessage", "TimelineNotice", "ToolGroup", "ToolItem", "UnknownEvent", "WorkspaceSettingsPanel", "WorkspaceSwitcher"] as const) {
       expect(read(`src/components/${component}.svelte`)).toContain(`data-component-owner="${owners[component]}"`);
     }
   });

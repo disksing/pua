@@ -30,7 +30,6 @@ function model(overrides: Partial<SettingsModel> = {}): SettingsModel {
       pua: { address: "127.0.0.1", port: "4936", configPath: "/tmp/pua/serve.json", workspaces: [{ name: "Workspace A", path: "/tmp/a" }], buildBranch: "master", buildCommit: "pua-commit" },
       agentHub: { mode: "embedded", address: "127.0.0.1", port: "4936", endpoint: "http://127.0.0.1:4936/agenthub", connected: true, compatible: true, version: "hub-commit", paths: { config: "/tmp/agenthub/config.json", sessions: "/tmp/agenthub/sessions", archive: "/tmp/agenthub/sessions/Archive", logs: "/tmp/agenthub/logs" }, error: "" },
     },
-    appearance: { layout: "auto", fontScales: { sidebar: 1, details: 1, chat: 1 }, theme: "default", themeOptions: [{ id: "default", label: "Default", description: "The standard PUA appearance" }] },
     agentHub: {
       mode: "external",
       configuredEndpoint: "http://127.0.0.1:4646",
@@ -55,10 +54,6 @@ function model(overrides: Partial<SettingsModel> = {}): SettingsModel {
     onRemoveWorkspace: vi.fn(async () => undefined),
     onWorkspaceIcon: vi.fn(async () => undefined),
     onSaveWorkspaceName: vi.fn(async () => undefined),
-    onLayoutPreference: vi.fn(),
-    onFontScale: vi.fn(),
-    onResetFontScales: vi.fn(),
-    onThemePreference: vi.fn(),
     onSaveAgentHub: vi.fn(async () => undefined),
     onSetProviderCommand: vi.fn(async (providerId) => ({ id: providerId, name: providerId, type: providerId })),
     onBrowserNotifications: vi.fn(),
@@ -193,71 +188,6 @@ describe("settings domain panels", () => {
     await tick();
     expect(failing.onSaveWorkspaceName).toHaveBeenCalledTimes(1);
     expect(failingTarget.querySelector(".settings-workspace-name-form")).toBeNull();
-  });
-
-  it("routes appearance layout and font scale changes through the settings model", async () => {
-    const current = model({ appearance: { layout: "auto", fontScales: { sidebar: 1, details: 1.1, chat: 1 }, theme: "default", themeOptions: [{ id: "default", label: "Default", description: "The standard PUA appearance" }] } });
-    const draft = createSettingsDraft(current);
-    const target = document.body.appendChild(document.createElement("div"));
-    const component = mount(SettingsPanelHarness, { target, props: { panel: "appearance", model: current, initialDraft: draft } });
-    cleanups.push(() => unmount(component));
-    await tick();
-
-    const options = [...target.querySelectorAll<HTMLButtonElement>('[aria-label="Layout"] .layout-option')];
-    expect(options.map((option) => option.getAttribute("aria-checked"))).toEqual(["true", "false", "false", "false"]);
-    expect(options[0].classList.contains("active")).toBe(true);
-    expect(target.querySelectorAll(".layout-diagram svg")).toHaveLength(4);
-
-    // The split diagram keeps the collapsed sidebar drawer on the left edge.
-    const splitDiagram = options[3].querySelectorAll(".layout-diagram rect");
-    const splitDrawer = splitDiagram[splitDiagram.length - 1];
-    expect(splitDrawer.classList.contains("d-fill-strong")).toBe(true);
-    expect(Number(splitDrawer.getAttribute("x"))).toBe(6);
-
-    options[2].click();
-    expect(current.onLayoutPreference).toHaveBeenCalledWith("two");
-
-    const detailsSlider = target.querySelector<HTMLInputElement>('input[aria-label="Details text size"]')!;
-    expect(detailsSlider.value).toBe("110");
-    input(detailsSlider, "120");
-    expect(current.onFontScale).toHaveBeenCalledWith("details", 1.2);
-
-    const reset = target.querySelector<HTMLButtonElement>(".appearance-reset")!;
-    expect(reset.disabled).toBe(false);
-    reset.click();
-    expect(current.onResetFontScales).toHaveBeenCalledTimes(1);
-  });
-
-  it("routes theme selection through the settings model", async () => {
-    const themeOptions = [
-      { id: "default", label: "Default", description: "The standard PUA appearance" },
-      { id: "riso", label: "Riso", description: "Risograph print" }
-    ];
-    const current = model({ appearance: { layout: "auto", fontScales: { sidebar: 1, details: 1, chat: 1 }, theme: "default", themeOptions } });
-    const draft = createSettingsDraft(current);
-    const target = document.body.appendChild(document.createElement("div"));
-    const component = mount(SettingsPanelHarness, { target, props: { panel: "appearance", model: current, initialDraft: draft } });
-    cleanups.push(() => unmount(component));
-    await tick();
-
-    const options = [...target.querySelectorAll<HTMLButtonElement>('[aria-label="Theme"] .theme-option')];
-    expect(options).toHaveLength(2);
-    expect(options.map((option) => option.getAttribute("aria-checked"))).toEqual(["true", "false"]);
-    expect(options[0].classList.contains("active")).toBe(true);
-
-    options[1].click();
-    expect(current.onThemePreference).toHaveBeenCalledWith("riso");
-  });
-
-  it("disables the appearance reset while every column uses the default text size", async () => {
-    const current = model();
-    const draft = createSettingsDraft(current);
-    const target = document.body.appendChild(document.createElement("div"));
-    const component = mount(SettingsPanelHarness, { target, props: { panel: "appearance", model: current, initialDraft: draft } });
-    cleanups.push(() => unmount(component));
-    await tick();
-
-    expect(target.querySelector<HTMLButtonElement>(".appearance-reset")?.disabled).toBe(true);
   });
 
   it("owns AgentHub connection, provider status, agent draft dirtiness, save pending, and errors", async () => {

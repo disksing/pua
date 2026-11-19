@@ -5,8 +5,7 @@
    Only the turn's final assistant message keeps the assistant rail;
    mid-turn progress updates fall back to the muted base rail so the last
    message of a turn stands out. Bubble geometry (frame, radius, shadow,
-   padding) comes from the --chat-bubble-* tokens, so a theme can turn the
-   bare rails into framed bubbles without touching this file. */
+   padding) comes from the --chat-bubble-* tokens. */
 :where([data-component-owner="event-timeline"]) .agent-message-row {
   display: flex;
   min-width: 0;
@@ -29,14 +28,14 @@
 :where([data-component-owner="event-timeline"]) .agent-message-meta strong {
   min-width: 0;
   overflow-wrap: anywhere;
-  font-size: calc(13.5px * var(--chat-font-scale, 1));
+  font-size: 13.5px;
   font-weight: 700;
   color: var(--chat-name-color);
 }
 :where([data-component-owner="event-timeline"]) .agent-message-row.user .agent-message-meta strong { color: var(--chat-role-user-deep); }
 :where([data-component-owner="event-timeline"]) .agent-message-row.assistant .agent-message-meta strong { color: var(--chat-role-assistant); }
 :where([data-component-owner="event-timeline"]) .agent-message-row.agent .agent-message-meta strong { color: var(--chat-role-agent); }
-:where([data-component-owner="event-timeline"]) .agent-message-meta span { color: var(--faint); font-size: calc(11px * var(--chat-font-scale, 1)); }
+:where([data-component-owner="event-timeline"]) .agent-message-meta span { color: var(--faint); font-size: 11px; }
 
 /* A run header labels a stretch of agent activity (reasoning, tool calls,
    approvals, and the turn's messages) so the agent's name and the run's
@@ -53,14 +52,14 @@
 }
 
 :where([data-component-owner="event-timeline"]) .agent-run-header strong {
-  font-size: calc(13.5px * var(--chat-font-scale, 1));
+  font-size: 13.5px;
   font-weight: 700;
   color: var(--chat-role-assistant);
 }
 
 :where([data-component-owner="event-timeline"]) .agent-run-header span {
   color: var(--faint);
-  font-size: calc(11px * var(--chat-font-scale, 1));
+  font-size: 11px;
 }
 
 :where([data-component-owner="event-timeline"]) .agent-message-meta .agent-message-tag {
@@ -69,7 +68,7 @@
   border-radius: 0;
   background: transparent;
   color: var(--faint);
-  font-size: calc(10px * var(--chat-font-scale, 1));
+  font-size: 10px;
   font-weight: 600;
 }
 
@@ -112,7 +111,7 @@
 :where([data-component-owner="event-timeline"]) .agent-message-row.agent .agent-message-bubble { border-left-color: var(--chat-role-agent); }
 :where([data-component-owner="event-timeline"]) .agent-message-row.system .agent-message-bubble { border-left-color: var(--chat-role-system); }
 
-:where([data-component-owner="event-timeline"]) .agent-message-row.system .agent-message-bubble p { color: var(--muted); font-size: calc(12px * var(--chat-font-scale, 1)); }
+:where([data-component-owner="event-timeline"]) .agent-message-row.system .agent-message-bubble p { color: var(--muted); font-size: 12px; }
 
 :where([data-component-owner="event-timeline"]) .agent-message-row.system .agent-message-meta strong { color: var(--chat-role-system-deep); font-weight: 600; }
 
@@ -133,7 +132,7 @@
   min-width: 0;
   max-width: 100%;
   color: inherit;
-  font-size: calc(13px * var(--chat-font-scale, 1));
+  font-size: 13px;
   line-height: 1.6;
   overflow-wrap: break-word;
 }

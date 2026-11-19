@@ -130,9 +130,6 @@
   {#if model.userGate?.mode}
     <WorkspaceUserGate {model} />
   {:else}
-  <div class="workspace-toolbar">
-    <button id="splitMenuButton" class="workspace-menu-button" type="button" aria-label="Open navigation" aria-controls="mobileSidebar" aria-expanded={model.mobile.sidebarOpen} onclick={() => model.onMobileSidebar(true)}><Icon name="menu" /></button>
-  </div>
   <section id="detailsPanel" class="details-panel" data-component-owner="detail-panel">{#if details}{@render details()}{/if}</section>
   <PaneResizeHandle id="detailsResize" kind="chatWidth" className="details-resize" label="Resize right column" onPreview={model.onPanePreview} onCommit={model.onPaneCommit} />
   <div id="agentPanel" class="agent-panel" aria-hidden="true"></div>

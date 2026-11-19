@@ -106,7 +106,6 @@ export interface AppShellModel {
   doctor: DoctorSnapshotModel;
   paneSizes: { sidebarWidth: number; chatWidth: number; chatHeight: number };
   mobile: { sidebarOpen: boolean };
-  layout: { preference: "auto" | "three" | "two" | "split"; effective: "three" | "two" | "split" | "single" };
   route: { path: string; revision: number; replace: boolean };
   onSwitchWorkspace: (id: string) => Promise<void>;
   onResolveWorkspaceUser: (name: string, create: boolean) => Promise<void>;

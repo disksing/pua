@@ -44,8 +44,8 @@
   min-width: 0;
 }
 
-[data-component-owner="scheduler-nav"] strong { font-size: calc(12.5px * var(--sidebar-font-scale, 1)); }
-[data-component-owner="scheduler-nav"] small { color: var(--sidebar-muted); font-size: calc(10px * var(--sidebar-font-scale, 1)); }
+[data-component-owner="scheduler-nav"] strong { font-size: 12.5px; }
+[data-component-owner="scheduler-nav"] small { color: var(--sidebar-muted); font-size: 10px; }
 [data-component-owner="scheduler-nav"] .scheduler-nav-icon { color: var(--blue-bright); width: 14px; height: 14px; }
 [data-component-owner="scheduler-nav"] .scheduler-nav-chevron { opacity: .45; width: 13px; height: 13px; }
 

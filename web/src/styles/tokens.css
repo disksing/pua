@@ -1,21 +1,6 @@
 /* tokens styles. Keep selectors within the documented ownership boundary. */
 
-/* Theming contract: the default theme is the bare `:root` block below. An
-   alternate theme is a `:root[data-theme="<id>"]` block (in this file for
-   token overrides, or in a dedicated stylesheet for stronger restyling) that
-   redefines tokens and, where needed, adds scoped cosmetic rules. The active
-   theme id is applied to `document.documentElement.dataset.theme` by the
-   inline bootstrap in static/index.html and by controllers/theme-controller.ts,
-   and persisted under the `pua.web.themePreference` localStorage key.
-
-   The theme attribute lives on the root element (not <body>) so token
-   aliases defined here — e.g. `--chat-rail: var(--line-strong)` — re-resolve
-   against the theme's overridden tokens: a custom property's var() references
-   are substituted on the element where the property is defined and then
-   inherited as a frozen computed value. With overrides on <body>, aliases on
-   :root would silently keep the default theme's values.
-
-   Token layers, from most stable to most specific:
+/* Token layers, from most stable to most specific:
    1. Surface and text neutrals (`--bg`, `--panel`, `--line*`, `--text`,
       `--muted`, `--faint`) — every component must consume these instead of
       hard-coding grays.
@@ -24,17 +9,10 @@
       `-soft` (tinted fill), `-line` (border on tinted fill), `-bright`
       (legible on dark surfaces), `-ink` (text on tinted fill).
    3. Dark chrome (`--ink*` and `*-on-dark`) — dark accent elements on
-      light surfaces; kept separate so a theme can restyle dark surfaces
-      without touching light ones. Text or lines painted on dark chrome
+      light surfaces. Text or lines painted on dark chrome
       must use the `*-on-dark` tokens, never the neutral light-surface
       tokens.
    3b. Regions (`--sidebar-*`, `--chat-*`) — per-module color roles.
-      Components in a region reference region tokens, so a theme decides
-      per module whether it is dark chrome or another light surface. Layout
-      metrics below may also be overridden per theme; a theme stylesheet
-      may additionally scope structural overrides (borders, spacing, even
-      grid templates) under `:root[data-theme="<id>"]` as long as
-      functionality is unchanged.
    4. Effects (`--backdrop*`, `--accent-ring`, shadows) — overlays, focus
       rings and the rare shadow. */
 
@@ -61,8 +39,7 @@
   --disabled-text: var(--faint);
 
   /* ---- 2. hue ramps ---- */
-  /* Accent (restrained blue). Danger is a separate red ramp, so themes may
-     use a non-red brand color without losing a distinct danger color. */
+  /* Accent uses a blue ramp. Destructive actions use the red ramp. */
   --accent: #2980b9;
   --accent-deep: #1f618d;
   --accent-pressed: #1a5276;
@@ -111,13 +88,7 @@
   --red-line-on-dark: rgb(255 120 120 / 45%);
   --line-strong-on-dark: rgb(220 228 239 / 50%);
 
-  /* ---- region: sidebar ----
-     The left navigation column is a *region*: a theme decides whether it is
-     dark chrome or another light surface by redefining these aliases, while
-     components only reference the region tokens. --ink* remains available
-     for genuinely dark accent elements on light surfaces (toasts, strong
-     headings). The default is a quiet light region; the "slate" theme
-     restores the original dark chrome. */
+  /* ---- region: sidebar ---- */
   --sidebar-bg: #f7f8fa;
   --sidebar-bg-deep: #eef1f4;
   --sidebar-row: #eceff3;
@@ -127,25 +98,17 @@
   --sidebar-line-strong: var(--line-strong);
   --sidebar-text: var(--text);
   --sidebar-muted: var(--muted);
-  /* Sidebar status accents: waiting/paused and blocked tree markers must
-     stay legible on the sidebar surface; dark sidebars raise these. */
+  /* Sidebar status accents for waiting, paused, and blocked tree markers. */
   --sidebar-attention: var(--amber-deep);
   --sidebar-attention-soft: var(--amber);
-  /* Raised card for the active segmented tab on the sidebar; dark
-     sidebars pick a lighter chrome card instead of the white page panel. */
+  /* Raised card for the active segmented tab on the sidebar. */
   --sidebar-tab-active-bg: var(--panel);
 
   /* ---- region: chat ----
      The conversation column is a region: message bubbles, role coding,
      inline event cards (notices and approvals), the activity rail, output
-     blocks, and the composer card all consume these aliases. The default
-     look is Linear-minimal — messages are bare left rails with no box; a
-     theme turns them into framed bubbles by setting the border, radius,
-     shadow and padding tokens. --chat-font-scale (applied at runtime)
-     stays the user's text-size control and is independent of this layer. */
-  /* Message bubble geometry. The rail is the left edge of the bubble box;
-     with a full frame a theme usually matches the rail width to the frame
-     and lets the role color sit on top of the frame color. */
+     blocks, and the composer card all consume these aliases. */
+  /* Message bubble geometry. The rail is the left edge of the bubble box. */
   --chat-bubble-bg: transparent;
   --chat-bubble-text: var(--text);
   --chat-bubble-border-width: 0;
@@ -163,7 +126,7 @@
   --chat-role-agent: var(--blue);
   --chat-role-system: var(--line-soft);
   --chat-role-system-deep: var(--faint);
-  /* The user message is the one boxed bubble in the default look. */
+  /* The user message uses a boxed bubble. */
   --chat-user-bg: var(--bg);
   --chat-user-text: var(--chat-bubble-text);
   --chat-user-padding: 6px 12px;
@@ -188,9 +151,7 @@
   /* Thinking/tool activity rail. */
   --chat-activity-rail-width: 2px;
   --chat-activity-rail: var(--line-soft);
-  /* Inset output blocks (tool output, raw event payloads). The default
-     reuses the neutral text/line pair; a theme with a dark --line must
-     override both tokens to keep the block readable. */
+  /* Inset output blocks (tool output, raw event payloads). */
   --chat-output-bg: var(--text);
   --chat-output-text: var(--line);
   --chat-output-radius: 4px;

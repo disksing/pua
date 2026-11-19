@@ -22,7 +22,7 @@
   border-radius: 6px;
   background: transparent;
   color: var(--muted);
-  font-size: calc(12px * var(--chat-font-scale, 1));
+  font-size: 12px;
   cursor: pointer;
 }
 
@@ -93,7 +93,7 @@
   border-radius: 4px;
   background: var(--panel-sunken);
   color: var(--ink-row);
-  font-size: calc(11px * var(--chat-font-scale, 1));
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.05em;
   text-transform: uppercase;
@@ -115,7 +115,7 @@
   border-radius: 5px;
   background: transparent;
   color: var(--ink-row);
-  font-size: calc(12px * var(--chat-font-scale, 1));
+  font-size: 12px;
   text-align: left;
   cursor: pointer;
 }

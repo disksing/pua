@@ -1156,9 +1156,8 @@ test.describe("Tree filters on touch layouts", () => {
   test.use({ hasTouch: true, isMobile: true });
 
   for (const width of [320, 375]) {
-    test(`keeps the filter and Reorder reachable at ${width}px with larger sidebar text`, async ({ page }) => {
+    test(`keeps the filter and Reorder reachable at ${width}px`, async ({ page }) => {
       await page.setViewportSize({ width, height: 740 });
-      await page.addInitScript(() => localStorage.setItem("pua.web.fontScales", JSON.stringify({ sidebar: 1.4 })));
       await installMockApi(page, "project1", false, true);
       await page.goto("/w/ws-test/r/project1");
       await page.locator("#mobileMenuButton").tap();
@@ -1842,19 +1841,14 @@ test("creates and starts a task with a chosen agent from the wizard", async ({ p
   await expect(page).toHaveURL(/project1\.task3/);
 });
 
-test("anchors the wizard binding menu to its trigger under the Riso theme", async ({ page }) => {
-  // The Riso theme once applied an feDisplacementMap filter to dialogs; a
-  // filtered ancestor becomes the containing block for position:fixed
-  // children, which stranded the fixed binding menu against the dialog edge
-  // instead of the trigger.
-  await page.addInitScript(() => window.localStorage.setItem("pua.web.themePreference", "riso"));
+test("anchors the wizard binding menu to its trigger", async ({ page }) => {
   await installMockApi(page, "project1");
   await page.goto("/w/ws-test/r/project1");
   await page.locator("#projectTree > .resource-row").first().hover();
   await page.getByRole("button", { name: /^New Task in / }).click();
 
   const dialog = page.getByRole("dialog", { name: "Create task" });
-  await dialog.locator('input[name="title"]').fill("Riso binding anchor");
+  await dialog.locator('input[name="title"]').fill("Binding anchor");
   await dialog.getByRole("button", { name: "Next", exact: true }).click();
   await dialog.getByRole("button", { name: "Next", exact: true }).click();
   await dialog.getByRole("radio", { name: /Create and start/ }).click();
@@ -2464,87 +2458,53 @@ test("displays Chat beside the sidebar in the two-column layout", async ({ page 
   await expect(page.locator("#detailsResize")).toBeVisible();
 });
 
-test("lets users switch the layout from the Appearance settings tab, including the collapsed-sidebar split", async ({ page }) => {
+test("ignores saved appearance preferences and keeps responsive layout and pane resizing", async ({ page }) => {
   await installShellMockApi(page);
   await page.goto("/w/ws-a/r/project1.task1");
+  await page.evaluate(() => {
+    localStorage.setItem("pua.web.themePreference", "riso");
+    localStorage.setItem("pua.web.layoutPreference", "split");
+    localStorage.setItem("pua.web.fontScales", JSON.stringify({ sidebar: 1.25, details: 0.8, chat: 1.4 }));
+  });
+  await page.reload();
 
-  // Desktop default viewport (1500px): auto resolves to the three-column layout.
-  await expect(page.locator("body")).toHaveAttribute("data-layout", "three");
-  await expect(page.locator("#detailsResizeY")).toBeHidden();
+  const body = page.locator("body");
+  await expect(body).toHaveAttribute("data-layout", "three");
+  await expect(page.locator("html")).toHaveCSS("--bg", "#f4f5f7");
+  await expect(page.locator(".brand-copy strong")).toHaveCSS("font-size", "15px");
+  await expect(page.locator(".details-title")).toHaveCSS("font-size", "17px");
+  await expect(page.locator("#chatTimeline")).toHaveCSS("font-size", "13px");
+  await page.locator("#systemSettingsButton").click();
+  const settings = page.getByRole("dialog", { name: "System Settings" });
+  await expect(settings.locator(".settings-tab")).toHaveText(["System", "Workspace", "Agents", "Profiles", "Notifications"]);
+  await settings.locator(".settings-close").click();
 
-  const openAppearanceTab = async () => {
-    await page.locator("#systemSettingsButton").click();
-    await page.locator(".settings-tab", { hasText: "Appearance" }).click();
-    await expect(page.locator('[data-component-owner="appearance-settings-panel"]')).toBeVisible();
-  };
+  for (const [handle, offset] of [
+    ["#sidebarResize", 32],
+    ["#detailsResize", -32],
+  ] as const) {
+    const box = (await page.locator(handle).boundingBox())!;
+    const x = box.x + box.width / 2;
+    const y = box.y + box.height / 2;
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x + offset, y);
+    await page.mouse.up();
+  }
+  await page.reload();
+  await expect(page.locator("#mobileSidebar")).toHaveCSS("width", "312px");
+  await expect(page.locator("#agentPanel")).toHaveCSS("width", "452px");
 
-  // Scope to the workspace layout group; the theme group reuses the same classes.
-  const layoutGroup = page.locator('[role="radiogroup"][aria-label="Workspace layout"]');
-
-  await openAppearanceTab();
-  await expect(layoutGroup.locator(".layout-option.active")).toContainText("Auto");
-  await page.locator(".layout-option", { hasText: "Two columns" }).click();
-  await expect(page.locator("body")).toHaveAttribute("data-layout", "two");
-  await expect(page.locator("#detailsResize")).toBeHidden();
-  await expect(page.locator("#detailsResizeY")).toHaveCount(0);
-  await expect(page.locator("#detailsPanel")).toBeVisible();
-  await expect(page.locator("#agentPanel")).toBeHidden();
-
-  await page.locator(".layout-option", { hasText: "Split" }).click();
-  await expect(page.locator("body")).toHaveAttribute("data-layout", "split");
+  for (const [width, layout] of [[1441, "three"], [1440, "two"], [981, "two"], [980, "single"], [390, "single"]] as const) {
+    await page.setViewportSize({ width, height: 800 });
+    await expect(body).toHaveAttribute("data-layout", layout);
+  }
+  await expect(page.locator("#detailsPanel #chatTimeline")).toBeVisible();
   await expect(page.locator("#mobileSidebar")).toBeHidden();
-  await expect(page.locator(".workspace-toolbar")).toBeVisible();
-  await expect(page.locator("#detailsPanel")).toBeVisible();
-  await expect(page.locator("#agentPanel")).toBeVisible();
-  await expect(page.locator("#detailsResize")).toBeVisible();
-  await expect(page.locator("#sidebarResize")).toBeHidden();
-  await page.locator(".settings-close").click();
-
-  // The drawer opens from the toolbar and closes from the backdrop.
-  await page.locator("#splitMenuButton").click();
-  await expect(page.locator("body")).toHaveClass(/mobile-sidebar-open/);
-  await expect(page.locator("#mobileSidebar")).toBeVisible();
-  await page.locator("#mobileSidebarBackdrop").click({ position: { x: 800, y: 400 } });
-  await expect(page.locator("body")).not.toHaveClass(/mobile-sidebar-open/);
-
-  // The preference persists across reloads; switching back to auto restores the follow-width behavior.
-  await page.reload();
-  await expect(page.locator("body")).toHaveAttribute("data-layout", "split");
-  await page.locator("#splitMenuButton").click();
-  await openAppearanceTab();
-  await expect(layoutGroup.locator(".layout-option.active")).toContainText("Split");
-  await page.locator(".layout-option", { hasText: "Auto" }).click();
-  await expect(page.locator("body")).toHaveAttribute("data-layout", "three");
-  await expect(page.locator("#mobileSidebar")).toBeVisible();
-});
-
-test("lets users scale the text of each column independently from the Appearance settings tab", async ({ page }) => {
-  await installShellMockApi(page);
-  await page.goto("/w/ws-a/r/project1.task1");
-
-  await page.locator("#systemSettingsButton").click();
-  await page.locator(".settings-tab", { hasText: "Appearance" }).click();
-
-  const rootStyle = () => page.evaluate(() => ({
-    sidebar: document.documentElement.style.getPropertyValue("--sidebar-font-scale"),
-    details: document.documentElement.style.getPropertyValue("--details-font-scale"),
-    chat: document.documentElement.style.getPropertyValue("--chat-font-scale"),
-  }));
-  expect(await rootStyle()).toEqual({ sidebar: "1", details: "1", chat: "1" });
-
-  await page.locator('input[aria-label="Sidebar text size"]').fill("125");
-  await page.locator('input[aria-label="Chat text size"]').fill("85");
-  expect(await rootStyle()).toEqual({ sidebar: "1.25", details: "1", chat: "0.85" });
-  await expect(page.locator('input[aria-label="Sidebar text size"]')).toHaveValue("125");
-
-  // Scales persist across reloads and the reset restores every column.
-  await page.reload();
-  expect(await rootStyle()).toEqual({ sidebar: "1.25", details: "1", chat: "0.85" });
-  await page.locator("#systemSettingsButton").click();
-  await page.locator(".settings-tab", { hasText: "Appearance" }).click();
-  await page.locator(".appearance-reset").click();
-  expect(await rootStyle()).toEqual({ sidebar: "1", details: "1", chat: "1" });
-  await expect(page.locator(".appearance-reset")).toBeDisabled();
+  await page.locator("#mobileMenuButton").click();
+  await expect(page.locator('#projectTree [data-task-id="project1.task1"]')).toBeVisible();
+  await page.locator("#mobileSidebarBackdrop").click();
+  await expect(page.locator("#mobileSidebar")).toBeHidden();
 });
 
 test("keeps every task details tab reachable without horizontal scrolling in a 390px mobile viewport", async ({ page }) => {
@@ -2821,7 +2781,7 @@ test("keeps every System Settings tab reachable without horizontal scrolling in 
   const settings = page.getByRole("dialog", { name: "System Settings" });
   const tabs = settings.locator(".settings-tabs");
   await expect(tabs).toBeVisible();
-  await expect(tabs.locator(".settings-tab")).toHaveText(["System", "Workspace", "Appearance", "Agents", "Profiles", "Notifications"]);
+  await expect(tabs.locator(".settings-tab")).toHaveText(["System", "Workspace", "Agents", "Profiles", "Notifications"]);
 
   // The tab strip itself must not overflow the modal horizontally.
   const tabStrip = await tabs.evaluate((node) => ({ client: node.clientWidth, scroll: node.scrollWidth }));

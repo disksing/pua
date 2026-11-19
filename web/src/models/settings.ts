@@ -70,19 +70,6 @@ export interface AgentHubConfigAgent {
   environment?: Record<string, string>;
 }
 
-export interface ThemeOption {
-  id: string;
-  label: string;
-  description: string;
-}
-
-export interface AppearanceSettings {
-  layout: "auto" | "three" | "two" | "split";
-  fontScales: { sidebar: number; details: number; chat: number };
-  theme: string;
-  themeOptions: ThemeOption[];
-}
-
 export interface SystemInfo {
   pua: {
     address: string;
@@ -106,7 +93,7 @@ export interface SystemInfo {
 }
 
 export interface SettingsDraft {
-  tab: "system" | "workspace" | "appearance" | "agenthub" | "profiles" | "notifications";
+  tab: "system" | "workspace" | "agenthub" | "profiles" | "notifications";
   workspacePath: string;
   createWorkspace: boolean;
   workspaceLanguage: "en" | "zh-CN";
@@ -130,7 +117,6 @@ export interface SettingsModel {
   workspaceIconSavingId: string;
   suggestedUserName: string;
   system: SystemInfo | null;
-  appearance: AppearanceSettings;
   agentHub: AgentHubSettings;
   profiles: ProfileDraft[];
   agents: AgentOption[];
@@ -140,10 +126,6 @@ export interface SettingsModel {
   onRemoveWorkspace: (id: string, draft: SettingsDraft) => Promise<void>;
   onWorkspaceIcon: (id: string, icon: string, draft: SettingsDraft) => Promise<void>;
   onSaveWorkspaceName: (id: string, name: string, draft: SettingsDraft) => Promise<void>;
-  onLayoutPreference: (preference: AppearanceSettings["layout"]) => void;
-  onFontScale: (column: keyof AppearanceSettings["fontScales"], value: number) => void;
-  onResetFontScales: () => void;
-  onThemePreference: (theme: string) => void;
   onSaveAgentHub: (draft: SettingsDraft) => Promise<void>;
   onSetProviderCommand: (providerId: string, command: string) => Promise<AgentHubConfigProvider>;
   onBrowserNotifications: (enabled: boolean) => void;

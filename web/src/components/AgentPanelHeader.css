@@ -70,7 +70,7 @@ the details header via --pane-header-height (option A). */
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: calc(14px * var(--chat-font-scale, 1));
+  font-size: 14px;
   font-weight: 600;
 }
 
@@ -81,19 +81,19 @@ the details header via --pane-header-height (option A). */
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--blue);
-  font-size: calc(12px * var(--chat-font-scale, 1));
+  font-size: 12px;
 }
 
 :where([data-component-owner="agent-panel-header"]) .agent-header-state {
   flex: 0 0 auto;
   color: var(--muted);
-  font-size: calc(12px * var(--chat-font-scale, 1));
+  font-size: 12px;
 }
 
 :where([data-component-owner="agent-panel-header"]) .agent-header-queued {
   flex: 0 0 auto;
   color: var(--blue);
-  font-size: calc(11px * var(--chat-font-scale, 1));
+  font-size: 11px;
 }
 
 :where([data-component-owner="agent-panel-header"]) .agent-header-error {
@@ -104,7 +104,7 @@ the details header via --pane-header-height (option A). */
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--red-deep);
-  font-size: calc(11px * var(--chat-font-scale, 1));
+  font-size: 11px;
 }
 
 :where([data-component-owner="agent-panel-header"]) .agent-header-right {
@@ -118,13 +118,13 @@ the details header via --pane-header-height (option A). */
 
 :where([data-component-owner="agent-panel-header"]) .agent-header-model {
   color: var(--faint);
-  font-size: calc(11px * var(--chat-font-scale, 1));
+  font-size: 11px;
   white-space: nowrap;
 }
 
 :where([data-component-owner="agent-panel-header"]) .agent-header-turn {
   color: var(--muted);
-  font-size: calc(12px * var(--chat-font-scale, 1));
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }

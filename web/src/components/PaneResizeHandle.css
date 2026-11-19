@@ -88,14 +88,6 @@ body[data-layout="two"] :where([data-component-owner="pane-resize-handle"]).deta
   border-bottom: 1px solid var(--line);
 }
 
-body[data-layout="split"] :where([data-component-owner="pane-resize-handle"]).sidebar-resize {
-  display: none;
-}
-
-body[data-layout="split"] :where([data-component-owner="pane-resize-handle"]).details-resize {
-  grid-row: 2;
-}
-
 @media (max-width:980px) {
 
   :where([data-component-owner="pane-resize-handle"]).resize-handle {

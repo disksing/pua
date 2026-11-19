@@ -5,7 +5,7 @@
   white-space: pre-wrap;
   overflow: auto;
   color: var(--muted-strong);
-  font-size: calc(13px * var(--details-font-scale, 1));
+  font-size: 13px;
   line-height: 1.55;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
@@ -15,7 +15,7 @@
   padding: 0;
   color: var(--muted-strong);
   background: transparent;
-  font-size: calc(13px * var(--details-font-scale, 1));
+  font-size: 13px;
   line-height: 1.55;
   overflow: visible;
 }

@@ -229,7 +229,7 @@
       const fallback = treeRoot?.querySelector<HTMLElement>(".tree-item.active .tree-row-navigation") ??
         treeRoot?.closest(".tree-section")?.querySelector<HTMLElement>("#newProjectButton");
       fallback?.focus({ preventScroll: true });
-      if (fallback && document.activeElement !== fallback) document.querySelector<HTMLElement>("#splitMenuButton, #mobileMenuButton")?.focus();
+      if (fallback && document.activeElement !== fallback) document.getElementById("mobileMenuButton")?.focus();
     }
   }
 

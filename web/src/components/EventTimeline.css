@@ -17,7 +17,7 @@
   border-radius: 6px;
   background: transparent;
   color: var(--faint);
-  font-size: calc(12px * var(--chat-font-scale, 1));
+  font-size: 12px;
   font-weight: 700;
 }
 
@@ -70,7 +70,7 @@
   gap: 8px;
   margin: 18px 0 10px;
   color: var(--muted);
-  font-size: calc(11px * var(--chat-font-scale, 1));
+  font-size: 11px;
   text-transform: uppercase;
   letter-spacing: .06em;
 }
@@ -104,7 +104,7 @@
   border-radius: 8px;
   color: var(--amber-ink);
   background: var(--amber-soft);
-  font-size: calc(12px * var(--chat-font-scale, 1));
+  font-size: 12px;
 }
 
 :where([data-component-owner="event-timeline"]) .conversation-gap span,
@@ -123,7 +123,7 @@
 :where([data-component-owner="event-timeline"]) .turn-summary-preview {
   margin: 8px 0;
   color: var(--muted);
-  font-size: calc(12px * var(--chat-font-scale, 1));
+  font-size: 12px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -163,7 +163,7 @@
   border-radius: 999px;
   background: transparent;
   color: var(--faint);
-  font-size: calc(11px * var(--chat-font-scale, 1));
+  font-size: 11px;
   cursor: pointer;
 }
 
@@ -182,7 +182,7 @@
   border-radius: 999px;
   background: var(--accent-soft);
   color: var(--red-deep);
-  font-size: calc(11px * var(--chat-font-scale, 1));
+  font-size: 11px;
   font-weight: 600;
 }
 
@@ -205,7 +205,7 @@
   border-radius: 999px;
   background: transparent;
   color: var(--faint);
-  font-size: calc(11px * var(--chat-font-scale, 1));
+  font-size: 11px;
   cursor: pointer;
 }
 
@@ -232,7 +232,7 @@
   gap: 7px;
   margin: 10px 0;
   color: var(--muted);
-  font-size: calc(12px * var(--chat-font-scale, 1));
+  font-size: 12px;
   font-weight: 600;
 }
 

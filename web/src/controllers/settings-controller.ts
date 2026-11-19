@@ -1,4 +1,4 @@
-import type { AgentHubConfigAgent, AgentHubConfigProvider, AgentOption, AppearanceSettings, NotificationPreferences, SettingsDraft, SettingsModel, SystemInfo, WorkspaceOption } from "../components/models";
+import type { AgentHubConfigAgent, AgentHubConfigProvider, AgentOption, NotificationPreferences, SettingsDraft, SettingsModel, SystemInfo, WorkspaceOption } from "../components/models";
 import { confirmDialog } from "./confirm-dialog-controller";
 import type { AgentConfig, AgentProfile, WorkspaceConfig } from "../models/workspace";
 
@@ -51,11 +51,6 @@ export interface SettingsControllerDependencies {
 	publish(model: SettingsModel): void;
 	agentOptions(): AgentOption[];
 	workspaceIcons: SettingsModel["workspaceIcons"];
-	appearance(): AppearanceSettings;
-	setLayoutPreference(preference: AppearanceSettings["layout"]): void;
-	setFontScale(column: keyof AppearanceSettings["fontScales"], value: number): void;
-	resetFontScales(): void;
-	setThemePreference(theme: string): void;
 	notificationPreferences(): NotificationPreferences;
 	setBrowserNotifications(enabled: boolean): void;
 	setCompletionSound(enabled: boolean): void;
@@ -149,7 +144,6 @@ export function createSettingsController(dependencies: SettingsControllerDepende
 			workspaceIconSavingId: state.workspaceIconSavingId,
 			suggestedUserName: String(data.suggestedUserName || config.suggestedUserName || ""),
 			system: data.system || null,
-			appearance: dependencies.appearance(),
 			agentHub: {
 				mode: hub.mode || "embedded",
 				configuredEndpoint: hub.configuredEndpoint || "http://127.0.0.1:4646/agenthub",
@@ -175,22 +169,6 @@ export function createSettingsController(dependencies: SettingsControllerDepende
 			onRemoveWorkspace: async (id, draft) => { syncDraft(draft); await removeWorkspace(id); },
 			onWorkspaceIcon: async (id, icon, draft) => { syncDraft(draft); await updateWorkspaceIcon(id, icon); },
 			onSaveWorkspaceName: async (id, name, draft) => { syncDraft(draft); await updateWorkspaceName(id, name); },
-			onLayoutPreference: (preference) => {
-				dependencies.setLayoutPreference(preference);
-				render();
-			},
-			onFontScale: (column, value) => {
-				dependencies.setFontScale(column, value);
-				render();
-			},
-			onResetFontScales: () => {
-				dependencies.resetFontScales();
-				render();
-			},
-			onThemePreference: (theme) => {
-				dependencies.setThemePreference(theme);
-				render();
-			},
 			onSaveAgentHub: async (draft) => { syncDraft(draft); await saveAgentSettings(); },
 			onSetProviderCommand: setProviderCommand,
 			onBrowserNotifications: dependencies.setBrowserNotifications,

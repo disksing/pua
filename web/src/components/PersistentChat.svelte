@@ -281,7 +281,7 @@
     .own-message { align-self:flex-start; }
   }
   .message-meta { display:flex; flex-wrap:wrap; align-items:baseline; gap:0 8px; margin-bottom:3px; color:var(--muted-strong); opacity:1; }
-  article .markdown-rendered { overflow-wrap:anywhere; font-size:calc(14px * var(--chat-font-scale, 1)); }
+  article .markdown-rendered { overflow-wrap:anywhere; font-size:14px; }
   article :global(.markdown-rendered img) { max-width:100%; height:auto; }
   article :global(.markdown-rendered table) { display:block; overflow-x:auto; table-layout:auto; }
   small,.chat-hint { opacity:.7; }

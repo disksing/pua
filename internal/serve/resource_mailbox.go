@@ -398,14 +398,19 @@ func mailboxCounts(mailbox resourceMailbox, resourceID string) (resourceMailboxC
 			counts.Interrupting++
 		case resourceMessageDelivered:
 			counts.Delivered++
+			continue
 		case resourceMessageCancelled:
 			counts.Cancelled++
+			continue
 		case resourceMessageUndeliverable:
 			counts.Undeliverable++
 		case resourceMessageDeliveryUnknown:
 			counts.DeliveryUnknown++
 		case resourceMessageHandled:
 			counts.Handled++
+			continue
+		default:
+			continue
 		}
 		if strings.TrimSpace(message.LastError) != "" {
 			lastError = message.LastError

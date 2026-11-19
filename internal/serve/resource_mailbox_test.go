@@ -688,6 +688,67 @@ func TestResourceMailboxPersistsBindingAndTemporaryDeliveryErrors(t *testing.T) 
 	}
 }
 
+func TestResourceStatusSkipsResolvedMailboxErrors(t *testing.T) {
+	hub := httptest.NewServer(newRuntimeFakeAgentHub())
+	defer hub.Close()
+	manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+	const resource = "project1.task1"
+	now := time.Now().Format(time.RFC3339Nano)
+	_, err := mutateResourceMailboxForResource(workspace.Path, resource, func(mailbox *resourceMailbox) error {
+		mailbox.Messages = append(mailbox.Messages,
+			resourceMailboxMessage{ID: "old-delivered", ResourceID: resource, Sequence: 6,
+				Status: resourceMessageDelivered, UpdatedAt: now, TerminalAt: now, LastError: "old delivery error"},
+			resourceMailboxMessage{ID: "old-cancelled", ResourceID: resource, Sequence: 7,
+				Status: resourceMessageCancelled, UpdatedAt: now, TerminalAt: now, LastError: "old cancellation"},
+			resourceMailboxMessage{ID: "old-handled", ResourceID: resource, Sequence: 8,
+				Status: resourceMessageHandled, UpdatedAt: now, TerminalAt: now, LastError: "old turn_active",
+				LastErrorCode: "temporarily_undeliverable"},
+		)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, err := manager.resourceStatus(context.Background(), workspace, resource)
+	if err != nil || status.LastError != "" || status.LastErrorCode != "" ||
+		status.Messages.Delivered != 1 || status.Messages.Cancelled != 1 || status.Messages.Handled != 1 {
+		t.Fatalf("resolved mail affected current status: counts=%+v error=%q code=%q err=%v",
+			status.Messages, status.LastError, status.LastErrorCode, err)
+	}
+	mailbox, err := loadResourceMailboxForResource(workspace.Path, resource)
+	if err != nil || len(mailbox.Messages) != 3 {
+		t.Fatalf("historical receipts unavailable: count=%d err=%v", len(mailbox.Messages), err)
+	}
+	handled := mailbox.Messages[2]
+	if handled.ID != "old-handled" || !handled.receipt || handled.LastError != "old turn_active" ||
+		handled.LastErrorCode != "temporarily_undeliverable" {
+		t.Fatalf("historical receipt was changed: %+v", handled)
+	}
+
+	for index, failureStatus := range []string{
+		resourceMessageQueued, resourceMessageDelivering, resourceMessageInterrupting,
+		resourceMessageUndeliverable, resourceMessageDeliveryUnknown,
+	} {
+		t.Run(failureStatus, func(t *testing.T) {
+			_, err := mutateResourceMailboxForResource(workspace.Path, resource, func(mailbox *resourceMailbox) error {
+				mailbox.Messages = append(mailbox.Messages, resourceMailboxMessage{
+					ID: "current-" + failureStatus, ResourceID: resource, Sequence: uint64(index + 1),
+					Status: failureStatus, UpdatedAt: now, TerminalAt: now,
+					LastError: failureStatus + " failure", LastErrorCode: "temporarily_undeliverable",
+				})
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			status, err := manager.resourceStatus(context.Background(), workspace, resource)
+			if err != nil || status.LastError != failureStatus+" failure" || status.LastErrorCode != "temporarily_undeliverable" {
+				t.Fatalf("current failure is missing: error=%q code=%q err=%v", status.LastError, status.LastErrorCode, err)
+			}
+		})
+	}
+}
+
 func TestResourceMailboxSeparatesTargetsAndRejectsPersistenceFailure(t *testing.T) {
 	fake := newRuntimeFakeAgentHub()
 	hub := httptest.NewServer(fake)

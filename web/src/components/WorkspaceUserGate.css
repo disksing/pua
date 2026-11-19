@@ -70,3 +70,11 @@
   :where([data-component-owner="app-shell"]) .workspace-user-input-row { grid-template-columns: 1fr; }
   :where([data-component-owner="app-shell"]) .workspace-user-input-row button { justify-content: center; min-height: 44px; }
 }
+
+@media (max-width: 980px) {
+  :where([data-component-owner="app-shell"]) .workspace-user-heading {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+}

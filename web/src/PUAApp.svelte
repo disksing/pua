@@ -13,7 +13,7 @@
 </script>
 
 <AppShell channel={channels.appShell}>
-  {#snippet details()}<DetailPanel channel={channels.detail} />{/snippet}
+  {#snippet details(navigation)}<DetailPanel channel={channels.detail} {navigation} />{/snippet}
 </AppShell>
 <div data-component-owner="toast" style="display: contents"><Toast channel={channels.toast} /></div>
 <div data-component-owner="upload-dialog" style="display: contents"><UploadDialog channel={channels.upload} /></div>

@@ -2,7 +2,6 @@ import { mount, tick, unmount } from "svelte";
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import MobileToolbar from "../../src/components/MobileToolbar.svelte";
 import ProjectTree from "../../src/components/ProjectTree.svelte";
 import PaneResizeHandle from "../../src/components/PaneResizeHandle.svelte";
 import SchedulerNav from "../../src/components/SchedulerNav.svelte";
@@ -67,20 +66,6 @@ function loadVendor<T>(relativePath: string, globalName: string): T {
 
 
 describe("AppShell responsibility components", () => {
-  it("MobileToolbar owns navigation and backdrop actions", async () => {
-    const onSidebar = vi.fn();
-    const target = document.body.appendChild(document.createElement("div"));
-    const component = mount(MobileToolbar, { target, props: { sidebarOpen: false, onSidebar } });
-    cleanups.push(() => unmount(component));
-
-    target.querySelector<HTMLButtonElement>("#mobileMenuButton")!.click();
-    target.querySelector<HTMLButtonElement>("#mobileSidebarBackdrop")!.click();
-
-    expect(onSidebar.mock.calls).toEqual([[true], [false]]);
-    // The stacked single-column layout no longer switches views through tabs.
-    expect(target.querySelector("#mobileChatButton")).toBeNull();
-  });
-
   it("WorkspaceSwitcher owns menu dismissal, pending deduplication, and errors", async () => {
     let rejectSwitch!: (reason: unknown) => void;
     const pending = new Promise<void>((_resolve, reject) => { rejectSwitch = reject; });

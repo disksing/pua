@@ -2204,7 +2204,7 @@ test("keeps canonical navigation synchronized across history, workspace restore,
   await page.locator("#workspaceSwitcher").click();
   await page.getByRole("option", { name: /Workspace B/ }).click();
   await expect(page).toHaveURL(/\/w\/ws-b\/r\/project2\.task1$/);
-  await expect(page.getByRole("heading", { name: "Second workspace task", exact: true })).toBeVisible();
+  await expect(page.locator(".details-header").getByRole("heading", { name: /^Second workspace task\b/ })).toBeVisible();
   await page.locator("#workspaceSwitcher").click();
   await page.getByRole("option", { name: /Workspace A/ }).click();
   await expect(page).toHaveURL(/\/w\/ws-a\/r\/project1\.task2$/);
@@ -2238,7 +2238,7 @@ test("keeps mobile navigation and gives Chat the full details pane", async ({ pa
 
   await page.locator("#mobileMenuButton").click();
   await expect(page.locator("body")).toHaveClass(/mobile-sidebar-open/);
-  await page.locator("#mobileSidebarBackdrop").click();
+  await page.getByRole("button", { name: "Close navigation" }).click();
   await expect(page.locator("body")).not.toHaveClass(/mobile-sidebar-open/);
 
   await expect(page.locator("#detailsPanel")).toBeVisible();
@@ -2249,22 +2249,29 @@ test("keeps mobile navigation and gives Chat the full details pane", async ({ pa
   await expect(page.locator("#detailsPanel #chatTimeline")).toBeVisible();
 });
 
-test("closes the 440px navigation drawer without changing the selected resource", async ({ page }) => {
+test("opens full-width navigation from the title and restores keyboard focus when dismissed", async ({ page }) => {
   await page.setViewportSize({ width: 440, height: 844 });
   await installShellMockApi(page);
   await page.goto("/w/ws-a/r/project1.task1");
 
   const menuButton = page.locator("#mobileMenuButton");
+  const header = page.locator(".details-header");
+  const heading = header.getByRole("heading");
+  await expect(heading).toContainText("Infrastructure task");
   const menuBox = await menuButton.boundingBox();
-  const toolbarBox = await page.locator(".mobile-toolbar").boundingBox();
+  const headingBox = await heading.boundingBox();
+  const headerBox = await header.boundingBox();
   const detailsBox = await page.locator("#detailsPanel").boundingBox();
   expect(menuBox).not.toBeNull();
-  expect(toolbarBox).not.toBeNull();
+  expect(headingBox).not.toBeNull();
+  expect(headerBox).not.toBeNull();
   expect(detailsBox).not.toBeNull();
   expect(menuBox!.width).toBe(44);
   expect(menuBox!.height).toBe(44);
-  expect(toolbarBox!.height).toBe(52);
-  expect(detailsBox!.y).toBe(52);
+  expect(menuBox!.x + menuBox!.width).toBeLessThanOrEqual(headingBox!.x);
+  expect(menuBox!.y + menuBox!.height / 2).toBeCloseTo(headingBox!.y + headingBox!.height / 2, 0);
+  expect(headerBox!.y).toBe(0);
+  expect(detailsBox!.y).toBe(0);
 
   const documentSize = await page.evaluate(() => ({
     body: document.body.getBoundingClientRect().width,
@@ -2276,13 +2283,67 @@ test("closes the 440px navigation drawer without changing the selected resource"
   expect(documentSize.html).toBe(440);
   expect(documentSize.scrollWidth).toBeLessThanOrEqual(documentSize.clientWidth);
 
-  await menuButton.click();
-  await expect(page.locator("body")).toHaveClass(/mobile-sidebar-open/);
-  await page.getByRole("button", { name: "Close navigation" }).click();
+  const drawer = page.locator("#mobileSidebar");
+  const close = drawer.getByRole("button", { name: "Close navigation" });
+  await expect(menuButton).toHaveAttribute("aria-expanded", "false");
+  await menuButton.press("Enter");
+  await expect(close).toBeFocused();
+  await expect(close).toHaveCSS("width", "44px");
+  await expect(close).toHaveCSS("height", "44px");
+  await expect(menuButton).toHaveAttribute("aria-expanded", "true");
+  await expect(drawer).toHaveCSS("width", "440px");
+  await expect(page.locator(".workspace-panel")).toHaveJSProperty("inert", true);
+  await page.keyboard.press("Escape");
+  await expect(menuButton).toBeFocused();
+  await expect(menuButton).toHaveAttribute("aria-expanded", "false");
 
-  await expect(page.locator("body")).not.toHaveClass(/mobile-sidebar-open/);
+  await menuButton.click();
+  await close.click();
+  await expect(drawer).toBeHidden();
+  await expect(menuButton).toBeFocused();
   await expect(page).toHaveURL(/\/w\/ws-a\/r\/project1\.task1$/);
   await expect(page.locator("#projectTree .tree-item.active")).toContainText("Infrastructure task");
+});
+
+test("keeps title navigation usable while loading, with a long title, and without a workspace", async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 670 });
+  await installShellMockApi(page);
+  const title = "A long resource title that must fit next to the navigation button and breadcrumbs";
+  let releaseDetail!: () => void;
+  const detailReady = new Promise<void>((resolve) => { releaseDetail = resolve; });
+  await page.route("**/api/workspaces/ws-a/resources/project1.task2", async (route) => {
+    await detailReady;
+    await json(route, { ...project.children[1], title, files: [], artifacts: [], repos: [] });
+  });
+  const menuButton = page.getByRole("button", { name: "Open navigation" });
+  const drawer = page.locator("#mobileSidebar");
+  const close = drawer.getByRole("button", { name: "Close navigation" });
+  try {
+    await page.goto("/w/ws-a/r/project1.task1");
+    await expect(page.locator(".details-header h1")).toContainText("Infrastructure task");
+    await menuButton.click();
+    await drawer.getByRole("button", { name: /^Follow-up task/ }).click();
+    await expect(page.getByText("Loading details...")).toBeVisible();
+    await menuButton.click();
+    await expect(drawer).toHaveCSS("width", "320px");
+    await close.click();
+    await expect(menuButton).toBeFocused();
+  } finally {
+    releaseDetail();
+  }
+  const heading = page.locator(".details-header h1");
+  await expect(heading).toContainText(title);
+  await expect(heading).toHaveCSS("text-overflow", "ellipsis");
+  expect(await heading.evaluate((node) => node.scrollWidth > node.clientWidth && node.clientWidth > 0)).toBe(true);
+  await expect(menuButton).toBeFocused();
+
+  await page.route("**/api/workspaces", (route) => json(route, { version: 3, activeId: "", workspaces: [], agentProfiles: [] }));
+  await page.goto("/");
+  await expect(page.getByText("No workspace selected")).toBeVisible();
+  await menuButton.click();
+  await expect(close).toBeFocused();
+  await close.click();
+  await expect(menuButton).toBeFocused();
 });
 
 test("keeps the 440px workspace drawer controls at a 44px touch size", async ({ page }) => {
@@ -2438,14 +2499,16 @@ test("keeps 440px Projects resource rows at a 44px touch size without changing t
   await expect(page.locator("body")).toHaveClass(/mobile-sidebar-open/);
 
   const projectRow = page.locator("#projectTree > .tree-item").first();
+  const projectNavigation = projectRow.locator(".tree-row-navigation");
   const taskRows = page.locator("#projectTree .task-item");
+  const taskNavigation = taskRows.locator(".tree-row-navigation");
   await expect.poll(async () => (await projectRow.boundingBox())?.x ?? -1).toBeGreaterThanOrEqual(0);
-  await expect(projectRow).toHaveAttribute("type", "button");
-  await expect(projectRow).toHaveAttribute("aria-label", /Open tasks: 2 tasks; 0 working/);
+  await expect(projectNavigation).toHaveAttribute("type", "button");
+  await expect(projectNavigation).toHaveAttribute("aria-label", /Migration project/);
   await expect(taskRows).toHaveCount(2);
-  await expect(taskRows.first()).toHaveAttribute("type", "button");
-  await expect(taskRows.first()).toHaveAttribute("aria-label", /Infrastructure task.*Not started/);
-  await expect(taskRows.nth(1)).toHaveAttribute("aria-label", /Follow-up task.*Not started/);
+  await expect(taskNavigation.first()).toHaveAttribute("type", "button");
+  await expect(taskNavigation.first()).toHaveAttribute("aria-label", /Infrastructure task.*Not started/);
+  await expect(taskNavigation.nth(1)).toHaveAttribute("aria-label", /Follow-up task.*Not started/);
 
   const projectBox = await projectRow.boundingBox();
   expect(projectBox).not.toBeNull();
@@ -2478,8 +2541,10 @@ test("keeps 440px Projects resource rows at a 44px touch size without changing t
   expect(documentSize.html).toBe(440);
   expect(documentSize.scrollWidth).toBeLessThanOrEqual(documentSize.clientWidth);
 
-  await taskRows.nth(1).click();
+  await taskNavigation.nth(1).click();
   await expect(page).toHaveURL(/\/w\/ws-a\/r\/project1\.task2$/);
+  await expect(page.locator("#mobileSidebar")).toBeHidden();
+  await expect(page.locator("#mobileMenuButton")).toBeFocused();
   await expect(page.locator("#projectTree .tree-item.active")).toContainText("Follow-up task");
 });
 
@@ -2602,7 +2667,16 @@ test("ignores saved appearance preferences and keeps responsive layout and pane 
   await expect(page.locator("#mobileSidebar")).toBeHidden();
   await page.locator("#mobileMenuButton").click();
   await expect(page.locator('#projectTree [data-task-id="project1.task1"]')).toBeVisible();
-  await page.locator("#mobileSidebarBackdrop").click();
+  await page.setViewportSize({ width: 844, height: 390 });
+  await expect(page.locator("#mobileSidebar")).toHaveCSS("width", "844px");
+  await expect(page.locator("#mobileSidebarClose")).toBeInViewport();
+  await page.setViewportSize({ width: 980, height: 600 });
+  await expect(page.locator("#mobileSidebar")).toHaveCSS("width", "980px");
+  await page.setViewportSize({ width: 981, height: 600 });
+  await expect(page.locator("#mobileSidebar")).toHaveCSS("width", "312px");
+  await expect(page.locator("#mobileMenuButton")).toBeHidden();
+  await expect(page.locator("#sidebarResize")).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 800 });
   await expect(page.locator("#mobileSidebar")).toBeHidden();
 });
 

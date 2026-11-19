@@ -1,7 +1,7 @@
 <script lang="ts">
   import "./DetailPanel.css";
 
-  import { onDestroy, onMount, tick } from "svelte";
+  import { onDestroy, onMount, tick, type Snippet } from "svelte";
 
   import { ApiClient } from "../api/client";
   import { confirmDialog } from "../controllers/confirm-dialog-controller";
@@ -17,7 +17,7 @@
   import ResourceSettingsPanel from "./ResourceSettingsPanel.svelte";
   import type { DetailPanelModel, FilePreviewModel, ResourceFileModel, ResourceRepoModel } from "./models";
 
-  let { channel }: { channel: ModelChannel<DetailPanelModel> } = $props();
+  let { channel, navigation }: { channel: ModelChannel<DetailPanelModel>; navigation?: Snippet } = $props();
   // svelte-ignore state_referenced_locally
   let model = $state(channel.current());
   let identity = $state("");
@@ -198,10 +198,24 @@
   </div>
 {/snippet}
 
+<header class="details-header" class:details-header-empty={!model.workspaceId}>
+  {@render navigation?.()}
+  {#if !model.workspaceId}
+    <h1 class="details-title">PUA</h1>
+  {:else if model.resourceType === "workspace"}
+    <h1 class="details-title">{model.workspaceName}</h1>
+  {:else}
+    <nav class="breadcrumb" aria-label="Location">
+      <button type="button" class="breadcrumb-link" onclick={() => model.onNavigate("workspace")}>{model.workspaceName}</button>
+      {#if model.parent}<span class="breadcrumb-separator">/</span><button type="button" class="breadcrumb-link" onclick={() => model.onNavigate(model.parent?.id || "workspace")}>{model.parent.title}</button>{/if}
+    </nav>
+    <h1 class="details-title">{model.resourceTitle}{#if model.resourceType !== "scheduler"}<code class="resource-ref-badge">{resourceReference(model.resourceId)}</code>{/if}</h1>
+  {/if}
+</header>
+
 {#if !model.workspaceId}
   <div id="detailsContent" class="details-content"><div class="empty-state"><Icon name="folder-search" className="empty-state-icon" /><strong>No workspace selected</strong><span>Add an AgentWorkspace path in the sidebar.</span></div></div>
 {:else if model.resourceType === "workspace"}
-  <div class="details-header"><h1 class="details-title">{model.workspaceName}</h1></div>
   <div class="details-tabs" role="tablist" aria-label="Workspace details">
     {#each tabs as tab (tab.id)}<button type="button" class:active={activeTab === tab.id} class="details-tab" role="tab" aria-selected={activeTab === tab.id} onclick={() => selectTab(tab.id)}><Icon name={tab.icon} /><span>{tab.label}</span></button>{/each}
   </div>
@@ -232,13 +246,6 @@
     {@render chatPanel()}
   </div>
 {:else}
-  <div class="details-header">
-    <nav class="breadcrumb" aria-label="Location">
-      <button type="button" class="breadcrumb-link" onclick={() => model.onNavigate("workspace")}>{model.workspaceName}</button>
-      {#if model.parent}<span class="breadcrumb-separator">/</span><button type="button" class="breadcrumb-link" onclick={() => model.onNavigate(model.parent?.id || "workspace")}>{model.parent.title}</button>{/if}
-    </nav>
-    <h1 class="details-title">{model.resourceTitle}{#if model.resourceType !== "scheduler"}<code class="resource-ref-badge">{resourceReference(model.resourceId)}</code>{/if}</h1>
-  </div>
   {#if model.loading || !model.detail}<div id="detailsContent" class="details-content"><div class="empty-state"><Icon name="loader-circle" className="empty-state-icon" /><strong>Loading details...</strong></div></div>
   {:else}
     <div class="details-tabs" role="tablist" aria-label="Resource details">

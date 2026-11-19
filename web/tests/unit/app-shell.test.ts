@@ -10,6 +10,7 @@ afterEach(async () => {
   while (cleanups.length) await cleanups.pop()?.();
   document.body.replaceChildren();
   document.body.className = "";
+  vi.unstubAllGlobals();
 });
 
 const emptyStatus: ShellStatusPresentation = {
@@ -314,6 +315,7 @@ describe("AppShell", () => {
   });
 
   it("preserves Escape priority between the mobile sidebar and local menus", async () => {
+    vi.stubGlobal("matchMedia", () => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
     const onMobileSidebar = vi.fn();
     const initial = model({ mobile: { sidebarOpen: true }, onMobileSidebar });
     const channel = createModelChannel(initial);

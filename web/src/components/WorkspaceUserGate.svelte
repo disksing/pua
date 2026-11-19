@@ -1,15 +1,17 @@
 <script lang="ts">
   import "./WorkspaceUserGate.css";
+  import type { Snippet } from "svelte";
   import { sanitizeUserNameInput, validateUserName } from "../controllers/user-settings-controller";
   import type { AppShellModel } from "./models";
   import Icon from "./Icon.svelte";
 
-  let { model }: { model: AppShellModel } = $props();
+  let { model, navigation }: { model: AppShellModel; navigation: Snippet } = $props();
   let name = $state("");
   let pending = $state(false);
   let error = $state("");
   let adding = $state(false);
   let gateKey = $state("");
+  const title = $derived(model.userGate.mode === "loading" ? "Switching user…" : model.userGate.mode === "create" ? "Create the first user" : "Who are you in this Workspace?");
 
   $effect(() => {
     const nextKey = `${model.activeWorkspaceId}:${model.userGate.mode}`;
@@ -38,19 +40,22 @@
 <section class="workspace-user-gate" aria-labelledby="workspace-user-gate-title">
   <div class="workspace-user-card">
     <div class="workspace-user-icon"><Icon name="user-round" /></div>
-    {#if model.userGate.mode === "loading"}
-      <div class="workspace-user-copy">
-        <p class="workspace-user-eyebrow">{model.workspaceName}</p>
-        <h1 id="workspace-user-gate-title">Switching user…</h1>
+    <div class="workspace-user-copy">
+      <p class="workspace-user-eyebrow">{model.workspaceName}</p>
+      <div class="workspace-user-heading">
+        {@render navigation()}
+        <h1 id="workspace-user-gate-title">{title}</h1>
+      </div>
+      {#if model.userGate.mode === "loading"}
         <p>Loading this user’s preferences, read state, and inbox.</p>
-      </div>
-    {:else if model.userGate.mode === "create"}
-      <div class="workspace-user-copy">
-        <p class="workspace-user-eyebrow">{model.workspaceName}</p>
-        <h1 id="workspace-user-gate-title">Create the first user</h1>
+      {:else if model.userGate.mode === "create"}
         <p>This Workspace has no users yet. Your preferences, read state, and inbox will be stored under this name.</p>
-        {#if model.userGate.missingUserName}<p class="workspace-user-warning" role="status">Previously selected user <strong>{model.userGate.missingUserName}</strong> is no longer available.</p>{/if}
-      </div>
+      {:else}
+        <p>Select your Workspace-local identity before loading personal read state, preferences, and inbox.</p>
+      {/if}
+      {#if model.userGate.mode !== "loading" && model.userGate.missingUserName}<p class="workspace-user-warning" role="status">Previously selected user <strong>{model.userGate.missingUserName}</strong> is no longer available.</p>{/if}
+    </div>
+    {#if model.userGate.mode === "create"}
       <form class="workspace-user-create" onsubmit={(event) => { event.preventDefault(); void resolve(name, true); }}>
         <label for="workspaceUserName">User name</label>
         <div class="workspace-user-input-row">
@@ -59,13 +64,7 @@
         </div>
         <small>Letters, numbers, underscores, and hyphens only.</small>
       </form>
-    {:else}
-      <div class="workspace-user-copy">
-        <p class="workspace-user-eyebrow">{model.workspaceName}</p>
-        <h1 id="workspace-user-gate-title">Who are you in this Workspace?</h1>
-        <p>Select your Workspace-local identity before loading personal read state, preferences, and inbox.</p>
-        {#if model.userGate.missingUserName}<p class="workspace-user-warning" role="status">Previously selected user <strong>{model.userGate.missingUserName}</strong> is no longer available.</p>{/if}
-      </div>
+    {:else if model.userGate.mode !== "loading"}
       <div class="workspace-user-options">
         {#each model.userGate.users as user (user.name)}
           <button type="button" disabled={pending} onclick={() => resolve(user.name, false)}>

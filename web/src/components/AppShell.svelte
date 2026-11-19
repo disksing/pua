@@ -5,7 +5,6 @@
 
   import Icon from "./Icon.svelte";
   import DoctorDialog from "./DoctorDialog.svelte";
-  import MobileToolbar from "./MobileToolbar.svelte";
   import type { ModelChannel } from "./model-channel";
   import type { AppShellModel } from "./models";
   import PaneResizeHandle from "./PaneResizeHandle.svelte";
@@ -16,19 +15,25 @@
 
   let { channel, details }: {
     channel: ModelChannel<AppShellModel>;
-    details?: Snippet;
+    details?: Snippet<[Snippet]>;
   } = $props();
   // svelte-ignore state_referenced_locally
   let model = $state(channel.current());
   let appliedRouteRevision = $state(0);
   let doctorOpen = $state(false);
+  let narrow = $state(false);
+  let sidebar = $state<HTMLElement>();
+  let navigationTrigger = $state<HTMLButtonElement>();
+  let navigationClose = $state<HTMLButtonElement>();
+  const sidebarOpen = $derived(narrow && model.mobile.sidebarOpen);
+  let wasSidebarOpen = false;
 
   onMount(() => {
     const unsubscribe = channel.subscribe((next) => {
       model = next;
     });
     const keydown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !event.defaultPrevented && model.mobile.sidebarOpen) model.onMobileSidebar(false);
+      if (event.key === "Escape" && !event.defaultPrevented && sidebarOpen) model.onMobileSidebar(false);
     };
     const popstate = () => {
       void model.onHistoryNavigation(window.location.pathname).catch((reason) => {
@@ -42,12 +47,14 @@
       : { matches: false, addEventListener: () => undefined, removeEventListener: () => undefined } as unknown as MediaQueryList;
     const syncViewport = () => {
       const root = document.documentElement;
-      if (!mobileQuery.matches || !viewport) {
+      if (!narrow || !viewport) {
+        root.style.removeProperty("--app-viewport-width");
         root.style.removeProperty("--app-viewport-height");
         root.style.removeProperty("--app-viewport-offset-top");
         root.style.removeProperty("--app-viewport-offset-left");
         return;
       }
+      root.style.setProperty("--app-viewport-width", `${viewport.width}px`);
       root.style.setProperty("--app-viewport-height", `${viewport.height}px`);
       root.style.setProperty("--app-viewport-offset-top", `${viewport.offsetTop}px`);
       root.style.setProperty("--app-viewport-offset-left", `${viewport.offsetLeft}px`);
@@ -73,6 +80,12 @@
       scheduleViewportReset(300);
     };
     const resize = () => {
+      const nextNarrow = mobileQuery.matches;
+      if (nextNarrow && !narrow && sidebar?.contains(document.activeElement)) {
+        navigationTrigger?.focus({ preventScroll: true });
+      }
+      narrow = nextNarrow;
+      if (!narrow && model.mobile.sidebarOpen) model.onMobileSidebar(false);
       model.onPaneViewport();
       syncViewport();
     };
@@ -84,7 +97,7 @@
     viewport?.addEventListener("resize", syncViewport);
     viewport?.addEventListener("scroll", syncViewport);
     mobileQuery.addEventListener?.("change", resize);
-    syncViewport();
+    resize();
     return () => {
       unsubscribe();
       window.removeEventListener("keydown", keydown);
@@ -101,7 +114,19 @@
   });
 
   $effect(() => {
-    document.body.classList.toggle("mobile-sidebar-open", model.mobile.sidebarOpen);
+    const open = sidebarOpen;
+    if (open === wasSidebarOpen) return;
+    wasSidebarOpen = open;
+    if (open) {
+      navigationClose?.focus({ preventScroll: true });
+      return;
+    }
+    const focused = document.activeElement;
+    if (narrow && (focused === document.body || sidebar?.contains(focused))) {
+      navigationTrigger?.focus({ preventScroll: true });
+    } else if (!narrow && (focused === document.body || focused === navigationClose)) {
+      sidebar?.focus({ preventScroll: true });
+    }
   });
 
   $effect(() => {
@@ -113,10 +138,50 @@
   });
 </script>
 
+{#snippet navigation()}
+  <button
+    bind:this={navigationTrigger}
+    id="mobileMenuButton"
+    class="mobile-navigation-button"
+    type="button"
+    title="Open navigation"
+    aria-label="Open navigation"
+    aria-controls="mobileSidebar"
+    aria-expanded={sidebarOpen}
+    onclick={() => model.onMobileSidebar(true)}
+  ><Icon name="menu" /></button>
+{/snippet}
+
 <div data-component-owner="app-shell" class="app-shell">
-<MobileToolbar sidebarOpen={model.mobile.sidebarOpen} onSidebar={model.onMobileSidebar} />
-<aside id="mobileSidebar" class="sidebar">
-  <div class="brand-band"><div class="brand-mark"><img src="/workspace-icons/pua-yellow.png" alt="" aria-hidden="true" /></div><div class="brand-copy"><strong>PUA</strong><span>{model.version}</span></div>{#if model.doctor.summary.errors + model.doctor.summary.warnings > 0 || model.doctor.error}<button id="doctorButton" class:has-errors={model.doctor.summary.errors > 0} class="brand-doctor" type="button" title="Workspace problems" aria-label={`${model.doctor.summary.errors} errors and ${model.doctor.summary.warnings} warnings`} onclick={() => { model.onMobileSidebar(false); doctorOpen = true; }}><Icon name={model.doctor.summary.errors > 0 ? "circle-alert" : "triangle-alert"} /><span>{model.doctor.summary.errors + model.doctor.summary.warnings}</span></button>{/if}<button id="systemSettingsButton" class="brand-settings" type="button" title="Settings" aria-label="Settings" onclick={() => { model.onMobileSidebar(false); model.onOpenSettings(); }}><Icon name="settings" /></button></div>
+<aside bind:this={sidebar} id="mobileSidebar" class="sidebar" class:sidebar-open={sidebarOpen} aria-label="Navigation" tabindex="-1" inert={narrow && !sidebarOpen}>
+  <div class="brand-band">
+    <button
+      bind:this={navigationClose}
+      id="mobileSidebarClose"
+      class="mobile-navigation-button"
+      type="button"
+      title="Close navigation"
+      aria-label="Close navigation"
+      onclick={() => model.onMobileSidebar(false)}
+    ><Icon name="x" /></button>
+    <div class="brand-mark"><img src="/workspace-icons/pua-yellow.png" alt="" aria-hidden="true" /></div>
+    <div class="brand-copy"><strong>PUA</strong><span>{model.version}</span></div>
+    {#if model.doctor.summary.errors + model.doctor.summary.warnings > 0 || model.doctor.error}
+      <button
+        id="doctorButton"
+        class:has-errors={model.doctor.summary.errors > 0}
+        class="brand-doctor"
+        type="button"
+        title="Workspace problems"
+        aria-label={`${model.doctor.summary.errors} errors and ${model.doctor.summary.warnings} warnings`}
+        onclick={() => { model.onMobileSidebar(false); doctorOpen = true; }}
+      >
+        <Icon name={model.doctor.summary.errors > 0 ? "circle-alert" : "triangle-alert"} />
+        <span>{model.doctor.summary.errors + model.doctor.summary.warnings}</span>
+      </button>
+    {/if}
+    <button id="systemSettingsButton" class="brand-settings" type="button" title="Settings" aria-label="Settings" onclick={() => { model.onMobileSidebar(false); model.onOpenSettings(); }}><Icon name="settings" /></button>
+  </div>
   <div class="workspace-card">
     <WorkspaceSwitcher identity={model.identity} mobileSidebarOpen={model.mobile.sidebarOpen} activeWorkspaceId={model.activeWorkspaceId} workspaces={model.workspaces} onSwitch={model.onSwitchWorkspace} onOpen={() => model.onSelectResource("workspace")} onAdd={model.onAddWorkspace} onToast={model.onToast} />
     {#if !model.userGate?.mode}<SchedulerNav item={model.scheduler || null} onSelect={model.onSelectResource} onToast={model.onToast} />{/if}
@@ -126,11 +191,11 @@
   {/if}
 </aside>
 <PaneResizeHandle id="sidebarResize" kind="sidebarWidth" className="sidebar-resize" label="Resize sidebar" onPreview={model.onPanePreview} onCommit={model.onPaneCommit} />
-<main class="workspace-panel">
+<main class="workspace-panel" inert={sidebarOpen}>
   {#if model.userGate?.mode}
-    <WorkspaceUserGate {model} />
+    <WorkspaceUserGate {model} {navigation} />
   {:else}
-  <section id="detailsPanel" class="details-panel" data-component-owner="detail-panel">{#if details}{@render details()}{/if}</section>
+  <section id="detailsPanel" class="details-panel" data-component-owner="detail-panel">{#if details}{@render details(navigation)}{/if}</section>
   <PaneResizeHandle id="detailsResize" kind="chatWidth" className="details-resize" label="Resize right column" onPreview={model.onPanePreview} onCommit={model.onPaneCommit} />
   <div id="agentPanel" class="agent-panel" aria-hidden="true"></div>
   {/if}

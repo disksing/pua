@@ -26,7 +26,6 @@ const components = [
   "LifecycleNotice",
   "MarkdownDocument",
   "MarkdownEditor",
-  "MobileToolbar",
   "NotificationSettingsPanel",
   "PaneResizeHandle",
   "ProfilesSettingsPanel",
@@ -68,7 +67,6 @@ const owners: Record<(typeof components)[number], string> = {
   LifecycleNotice: "event-timeline",
   MarkdownDocument: "markdown-document",
   MarkdownEditor: "markdown-editor",
-  MobileToolbar: "mobile-toolbar",
   NotificationSettingsPanel: "notification-settings-panel",
   PaneResizeHandle: "pane-resize-handle",
   ProfilesSettingsPanel: "profiles-settings-panel",
@@ -126,7 +124,7 @@ describe("CSS ownership", () => {
     // Tokens applied at runtime by controllers rather than by stylesheets.
     const runtimeTokens = new Set([
       "--sidebar-width", "--chat-width",
-      "--app-viewport-height", "--app-viewport-offset-top", "--app-viewport-offset-left",
+      "--app-viewport-width", "--app-viewport-height", "--app-viewport-offset-top", "--app-viewport-offset-left",
       // Component-local variables set inline by FileBrowser rows.
       "--depth"
     ]);
@@ -186,7 +184,7 @@ describe("CSS ownership", () => {
 
   it("keeps file previews above application navigation and below higher-priority dialogs", () => {
     const filePreview = Math.max(...zIndexes("src/components/FilePreviewModal.css"));
-    const navigation = Math.max(...zIndexes("src/components/AppShell.css"), ...zIndexes("src/components/MobileToolbar.css"));
+    const navigation = Math.max(...zIndexes("src/components/AppShell.css"));
     const higherPriorityDialogs = ["CreateDialog", "UploadDialog", "SettingsModal", "ConfirmDialog", "DoctorDialog"]
       .map((component) => Math.max(...zIndexes(`src/components/${component}.css`)));
 
@@ -242,24 +240,6 @@ describe("CSS ownership", () => {
 
     const content = body(':where([data-component-owner="doctor-dialog"]) .doctor-content');
     expect(content).toContain("overflow-y: auto;");
-  });
-
-  it("keeps the mobile navigation trigger at a 44px touch size without growing the toolbar row", () => {
-    const css = read("src/components/MobileToolbar.css");
-    const body = (selector: string) => {
-      const start = css.indexOf(selector);
-      expect(start, selector).toBeGreaterThanOrEqual(0);
-      return css.slice(css.indexOf("{", start), css.indexOf("}", start) + 1);
-    };
-
-    const toolbar = body(':where([data-component-owner="mobile-toolbar"]).mobile-toolbar {');
-    expect(toolbar).toContain("grid-template-columns: 44px minmax(0, 1fr) 44px;");
-    expect(toolbar).toContain("padding: 4px 10px;");
-    expect(toolbar).toContain("padding-top: calc(4px + env(safe-area-inset-top, 0px));");
-
-    const trigger = body(':where([data-component-owner="mobile-toolbar"]) .mobile-icon-button');
-    expect(trigger).toContain("width: 44px;");
-    expect(trigger).toContain("height: 44px;");
   });
 
   it("keeps the mobile navigation drawer brand actions at a 44px touch size", () => {
@@ -690,7 +670,7 @@ describe("CSS ownership", () => {
   });
 
   it("marks nested component roots with the same owner used by their CSS", () => {
-	    for (const component of ["AgentPanelHeader", "ActivityGroup", "AgentHubSettingsPanel", "ApprovalCard", "DiffModal", "DoctorDialog", "FileBrowser", "FilePreviewModal", "HistoryTimeline", "LifecycleNotice", "MarkdownDocument", "MobileToolbar", "NotificationSettingsPanel", "PaneResizeHandle", "ProfilesSettingsPanel", "ProjectCreateForm", "ProjectTree", "SettingsNavigation", "StatusPresentation", "TaskWizard", "ThinkingBlock", "TimelineMessage", "TimelineNotice", "ToolGroup", "ToolItem", "UnknownEvent", "WorkspaceSettingsPanel", "WorkspaceSwitcher"] as const) {
+    for (const component of ["AgentPanelHeader", "ActivityGroup", "AgentHubSettingsPanel", "ApprovalCard", "DiffModal", "DoctorDialog", "FileBrowser", "FilePreviewModal", "HistoryTimeline", "LifecycleNotice", "MarkdownDocument", "NotificationSettingsPanel", "PaneResizeHandle", "ProfilesSettingsPanel", "ProjectCreateForm", "ProjectTree", "SettingsNavigation", "StatusPresentation", "TaskWizard", "ThinkingBlock", "TimelineMessage", "TimelineNotice", "ToolGroup", "ToolItem", "UnknownEvent", "WorkspaceSettingsPanel", "WorkspaceSwitcher"] as const) {
       expect(read(`src/components/${component}.svelte`)).toContain(`data-component-owner="${owners[component]}"`);
     }
   });

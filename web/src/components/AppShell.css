@@ -22,6 +22,10 @@
   background: var(--sidebar-bg);
   color: var(--line-strong);
 }
+
+:where([data-component-owner="app-shell"]) .mobile-navigation-button {
+  display: none;
+}
 :where([data-component-owner="app-shell"]) .sidebar,
 :where([data-component-owner="app-shell"]) .sidebar * {
   scrollbar-color: var(--sidebar-line) transparent;
@@ -238,8 +242,38 @@ body[data-layout="two"] :where([data-component-owner="app-shell"]) .agent-panel 
 }
 
 @media (max-width:980px) {
-  /* Keep the fixed 56px brand band while giving its two drawer actions a
-     44px hit area. The existing labels and visual icons stay unchanged. */
+  :where([data-component-owner="app-shell"]) .mobile-navigation-button {
+    flex: 0 0 44px;
+    width: 44px;
+    height: 44px;
+    display: grid;
+    place-items: center;
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+  }
+
+  :where([data-component-owner="app-shell"]) .brand-band {
+    flex-shrink: 0;
+    padding-inline: 10px;
+  }
+
+  :where([data-component-owner="app-shell"]) .brand-mark {
+    flex: 0 0 24px;
+  }
+
+  :where([data-component-owner="app-shell"]) .brand-copy span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  :where([data-component-owner="app-shell"]) .brand-band .mobile-navigation-button {
+    background: var(--sidebar-row);
+    color: var(--sidebar-text);
+  }
+
   :where([data-component-owner="app-shell"]) .brand-settings {
     flex: 0 0 44px;
     width: 44px;
@@ -255,11 +289,11 @@ body[data-layout="two"] :where([data-component-owner="app-shell"]) .agent-panel 
   :where([data-component-owner="app-shell"]).app-shell {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: calc(52px + env(safe-area-inset-top, 0px)) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
     position: fixed;
     top: var(--app-viewport-offset-top, 0px);
     left: var(--app-viewport-offset-left, 0px);
-    width: 100vw;
+    width: var(--app-viewport-width, 100vw);
     height: 100vh;
     height: 100dvh;
     height: var(--app-viewport-height, 100dvh);
@@ -267,28 +301,28 @@ body[data-layout="two"] :where([data-component-owner="app-shell"]) .agent-panel 
     overflow: hidden;
   }
   :where([data-component-owner="app-shell"]) .sidebar {
-    position: fixed;
+    position: absolute;
     z-index: 60;
-    inset: 0 auto 0 0;
-    width: min(86vw, 340px);
+    inset: 0;
+    padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
     min-height: 0;
     visibility: hidden;
     pointer-events: none;
     transform: translateX(-100%);
     transition: transform 180ms ease, visibility 0s linear 180ms;
-    border-right: 1px solid var(--sidebar-bg-deep);
   }
-  :where(body).mobile-sidebar-open :where([data-component-owner="app-shell"]) .sidebar {
+  :where([data-component-owner="app-shell"]) .sidebar.sidebar-open {
     visibility: visible;
     pointer-events: auto;
-    transform: translateX(0);
+    transform: none;
     transition-delay: 0s;
   }
   :where([data-component-owner="app-shell"]) .workspace-panel {
-    grid-row: 2;
+    grid-row: 1;
     min-height: 0;
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr);
+    padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) 0 env(safe-area-inset-left, 0px);
     overflow: hidden;
   }
   :where([data-component-owner="app-shell"]) .details-panel {

@@ -147,6 +147,12 @@ async function json(route: Route, body: unknown, status = 200) {
   await route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
 }
 
+async function openProjectTaskWizard(page: Page) {
+  const row = page.locator("#projectTree > .resource-row").first();
+  await row.getByRole("button", { name: /^Actions for / }).click();
+  await row.getByRole("button", { name: "New Task", exact: true }).click();
+}
+
 function mockSystemInfo(workspaces: Array<{ name: string; path: string }>) {
   return {
     pua: {
@@ -643,8 +649,7 @@ test("navigates resources and creates a task through the canonical application f
   await bindingMenu.getByRole("option", { name: "other-agent review" }).click();
   await expect.poll(() => harness.bindingBodies).toEqual([{ kind: "agent", name: "other-agent" }]);
   await page.getByRole("button", { name: "Migration project", exact: true }).click();
-  await page.locator("#projectTree > .resource-row").first().hover();
-  await page.getByRole("button", { name: /^New Task in / }).click();
+  await openProjectTaskWizard(page);
   const createDialog = page.getByRole("dialog", { name: "Create task" });
   await createDialog.locator('input[name="title"]').fill("Created from baseline");
   await createDialog.getByRole("button", { name: "Next", exact: true }).click();
@@ -1811,8 +1816,7 @@ test("creates and starts a task with a chosen agent from the wizard", async ({ p
     return route.fallback();
   });
   await page.goto("/w/ws-test/r/project1");
-  await page.locator("#projectTree > .resource-row").first().hover();
-  await page.getByRole("button", { name: /^New Task in / }).click();
+  await openProjectTaskWizard(page);
 
   const dialog = page.getByRole("dialog", { name: "Create task" });
   await dialog.locator('input[name="title"]').fill("Auto started task");
@@ -1844,8 +1848,7 @@ test("creates and starts a task with a chosen agent from the wizard", async ({ p
 test("anchors the wizard binding menu to its trigger", async ({ page }) => {
   await installMockApi(page, "project1");
   await page.goto("/w/ws-test/r/project1");
-  await page.locator("#projectTree > .resource-row").first().hover();
-  await page.getByRole("button", { name: /^New Task in / }).click();
+  await openProjectTaskWizard(page);
 
   const dialog = page.getByRole("dialog", { name: "Create task" });
   await dialog.locator('input[name="title"]').fill("Binding anchor");
@@ -1874,8 +1877,7 @@ test("anchors the wizard binding menu to its trigger", async ({ page }) => {
 test("keeps the Create task wizard usable across desktop and mobile layouts", async ({ page }) => {
   await installMockApi(page, "project1");
   await page.goto("/w/ws-test/r/project1");
-  await page.locator("#projectTree > .resource-row").first().hover();
-  await page.getByRole("button", { name: /^New Task in / }).click();
+  await openProjectTaskWizard(page);
 
   const dialog = page.getByRole("dialog", { name: "Create task" });
   const wizard = dialog.locator('[data-component-owner="task-wizard"]');
@@ -1904,8 +1906,10 @@ test("opens touch row actions and separates archive cancellation from drawer dis
   try {
     await installMockApi(page, "project1.task2");
     const archiveRequests: unknown[] = [];
+    let allowArchive = false;
     await page.route("**/api/workspaces/ws-test/archive", (route) => {
       archiveRequests.push(route.request().postDataJSON());
+      if (!allowArchive) return json(route, { error: "Archive denied" }, 403);
       return json(route, { path: "project1/archive/task1", warnings: [] });
     });
     await page.goto("/w/ws-test/r/project1.task2");
@@ -1940,10 +1944,20 @@ test("opens touch row actions and separates archive cancellation from drawer dis
     await actions.tap();
     await archive.tap();
     await confirm.getByRole("button", { name: "Archive", exact: true }).tap();
+    await expect(page.locator("#toast")).toContainText("Archive denied");
+    await expect(firstTask).toBeVisible();
+    await expect(actions).toBeFocused();
+    expect(archiveRequests).toEqual([{ resourceId: "project1.task1" }]);
+
+    allowArchive = true;
+    await actions.tap();
+    await archive.tap();
+    await confirm.getByRole("button", { name: "Archive", exact: true }).tap();
     await expect(firstTask).toHaveCount(0);
     await expect(page).toHaveURL(/project1\.task2$/);
     await expect(drawerToggle).toHaveAttribute("aria-expanded", "true");
-    expect(archiveRequests).toEqual([{ resourceId: "project1.task1" }]);
+    await expect(page.locator('[data-task-id="project1.task2"] .tree-row-navigation')).toBeFocused();
+    expect(archiveRequests).toEqual([{ resourceId: "project1.task1" }, { resourceId: "project1.task1" }]);
   } finally {
     await page.close();
   }
@@ -3064,10 +3078,18 @@ test("execution events stay live and read-only without a dialogue runtime", asyn
   await expect(page.getByText("Public conversation remains separate",{exact:true})).toBeVisible();
 });
 
-for (const sidebarWidth of [280, 220]) {
-  test(`aligns resource chat markers at the right edge in a ${sidebarWidth}px sidebar`, async ({ page }, testInfo) => {
+for (const width of [280, 220, 320]) {
+  const mobile = width === 320;
+  test(`keeps row actions and chat markers aligned in ${width}px ${mobile ? "mobile viewport" : "sidebar"}`, async ({ page }, testInfo) => {
     await installMockApi(page, "project1.task2");
-    await page.addInitScript(width => localStorage.setItem("pua.web.paneSizes", JSON.stringify({sidebarWidth:width,chatWidth:420,sidebarAttentionHeight:210})), sidebarWidth);
+    if (mobile) {
+      await page.setViewportSize({ width, height: 670 });
+      await page.emulateMedia({ reducedMotion: "reduce" });
+    } else {
+      await page.addInitScript(sidebarWidth => localStorage.setItem("pua.web.paneSizes", JSON.stringify({
+        sidebarWidth, chatWidth: 420, sidebarAttentionHeight: 210,
+      })), width);
+    }
     await page.route("**/api/workspaces/ws-test/**", async route => {
       const path = new URL(route.request().url()).pathname;
       if (path.endsWith("/ui-state")) return json(route, {version:2,expandedProjects:["project1"],lastResourceId:"project1.task2",folders:[{id:"vf-layout",projectId:"project1",name:"Nested tasks",expanded:true}],taskOrder:{project1:["project1.task1","project1.task2","vf-layout"]},folderOrder:{"vf-layout":["project1.task3"]}});
@@ -3075,51 +3097,110 @@ for (const sidebarWidth of [280, 220]) {
         projects:[{...project,title:"A project with a long descriptive title",chat:{open:true,unreadCount:5},children:[
           {...project.children[0],title:"A very long task title that must truncate before the chat markers",chat:{open:true,unreadCount:120}},
           {...project.children[1],title:"Short",chat:{open:true,unreadCount:0}},
-          {...project.children[0],id:"project1.task3",title:"Nested task with another very long title",chat:{open:true,unreadCount:3}},
+          {...project.children[0],id:"project1.task3",title:"Nested task with another very long title",chat:{open:false,unreadCount:3}},
+          {...project.children[0],id:"project1.task4",title:"Task with no chat",chat:{open:false,unreadCount:0}},
         ]}],workspace:{id:"workspace",type:"workspace",title:"Isolated E2E"},activity:{running:[],unread:[],problems:[]},
       });
       if (path.endsWith("/chat")) return json(route,{id:"layout-chat",open:true,epoch:1,unreadCount:0,messages:[],binding:{kind:"profile",name:"default"}});
       return route.fallback();
     });
     await page.goto("/w/ws-test/r/project1.task2");
+    if (mobile) await page.locator("#mobileMenuButton").click();
     const markers = page.locator('#projectTree .resource-chat-status');
     await expect(markers).toHaveCount(4);
-    const projectRow = page.locator("#projectTree > .resource-row").first();
-    const actions = projectRow.locator(".resource-actions");
-    await expect(actions).toHaveCSS("opacity", "0");
-    const markerBefore = await markers.first().boundingBox();
-    await projectRow.locator(".tree-row-navigation").press("Tab");
-    await expect(actions).toHaveCSS("opacity", "1");
-    if (sidebarWidth === 280) {
-      await expect(actions.getByRole("button", { name: /^New Task in / })).toBeFocused();
-    } else {
-      await expect(actions.getByRole("button", { name: /^Actions for / })).toBeFocused();
-    }
-    expect(await markers.first().boundingBox()).toEqual(markerBefore);
-    const geometry = await markers.evaluateAll(elements => elements.map(group => {
-      const row=group.parentElement!,name=row.querySelector('.name')!,title=name.querySelector('.name-text')!,icon=group.querySelector('.chat-open-icon')!,badge=group.querySelector('.unread-badge');
-      return {right:group.getBoundingClientRect().right,rowRight:row.getBoundingClientRect().right-parseFloat(getComputedStyle(row).paddingRight),left:group.getBoundingClientRect().left,nameRight:name.getBoundingClientRect().right,
-        gap:badge?badge.getBoundingClientRect().left-icon.getBoundingClientRect().right:0,truncated:title.scrollWidth>title.clientWidth,overflow:row.scrollWidth-row.clientWidth};
+    const rows = page.locator("#projectTree .resource-row");
+    const triggers = rows.getByRole("button", { name: /^Actions for / });
+    await expect(triggers).toHaveCount(5);
+    const geometry = () => rows.evaluateAll(elements => elements.map(row => {
+      const title = row.querySelector(".name-text")!;
+      const name = row.querySelector(".name")!;
+      const group = row.querySelector(".resource-chat-status");
+      const trigger = row.querySelector(".resource-actions-toggle")!;
+      const span = (element: Element) => {
+        const rect = element.getBoundingClientRect();
+        return { left: rect.left, right: rect.right, width: rect.width };
+      };
+      return {
+        title: span(title),
+        trigger: span(trigger),
+        group: group ? span(group) : null,
+        nameRight: span(name).right,
+        rowRight: span(row).right,
+        overflow: row.scrollWidth - row.clientWidth,
+      };
     }));
-    for(const g of geometry) {
-      expect(Math.abs(g.right-g.rowRight)).toBeLessThan(1);
-      expect(Math.abs(g.right-geometry[0].right)).toBeLessThan(1);
-      expect(g.nameRight).toBeLessThanOrEqual(g.left-5);
-      expect(g.gap).toBeGreaterThanOrEqual(0);expect(g.gap).toBeLessThanOrEqual(4);
-      expect(g.overflow).toBeLessThanOrEqual(1);
+    const resting = await geometry();
+    for (const [index, row] of resting.entries()) {
+      await expect(triggers.nth(index)).toBeVisible();
+      const actions = rows.nth(index).locator(".resource-actions");
+      await expect(actions).toHaveCSS("opacity", "1");
+      await expect(actions).toHaveCSS("pointer-events", "auto");
+      expect(row.trigger.width).toBe(mobile ? 44 : 28);
+      expect(row.rowRight - row.trigger.right).toBeCloseTo(4);
+      expect(row.trigger.right).toBeCloseTo(resting[0].trigger.right);
+      expect(row.overflow).toBeLessThanOrEqual(1);
+      if (row.group) {
+        expect(row.group.right).toBeCloseTo(resting[0].group!.right);
+        expect(row.trigger.left - row.group.right).toBeCloseTo(4);
+        expect(row.group.left - row.nameRight).toBeGreaterThanOrEqual(5);
+      }
     }
-    expect(geometry[1].truncated).toBe(true);expect(geometry[3].truncated).toBe(true);
-    await expect(page.locator('[data-task-id="project1.task1"] .unread-badge')).toHaveText('99+');
-    await expect(page.locator('[data-task-id="project1.task2"] .unread-badge')).toHaveCount(0);
-    await page.screenshot({path:testInfo.outputPath(`chat-markers-${sidebarWidth}.png`)});
+    const longTask = page.locator('[data-task-id="project1.task1"]');
+    await expect(longTask.locator(".unread-badge")).toHaveText("99+");
+    await expect(longTask.locator(".tree-row-navigation")).toHaveAccessibleName(/120 unread chat messages/);
+    const openTask = page.locator('[data-task-id="project1.task2"]');
+    await expect(openTask.locator(".unread-badge")).toHaveCount(0);
+    await expect(openTask.locator(".tree-row-navigation")).toHaveAccessibleDescription("Chat open");
+    const nestedTask = page.locator('[data-task-id="project1.task3"]');
+    await expect(nestedTask.locator(".chat-open-icon")).toHaveCount(0);
+    await expect(nestedTask.locator(".unread-badge")).toHaveText("3");
+    await expect(page.locator('[data-task-id="project1.task4"] .resource-chat-status')).toHaveCount(0);
+    for (const taskRow of [longTask, nestedTask]) {
+      const truncated = await taskRow.locator(".name-text").evaluate(title => title.scrollWidth > title.clientWidth);
+      expect(truncated).toBe(true);
+    }
+
+    const projectRow = rows.first();
+    const trigger = triggers.first();
+    await projectRow.hover();
+    expect(await geometry()).toEqual(resting);
+    await projectRow.locator(".tree-row-navigation").press("Tab");
+    await expect(trigger).toBeFocused();
+    expect(await geometry()).toEqual(resting);
+    await page.keyboard.press(width === 220 ? "Space" : "Enter");
+    const menu = page.locator("#tree-resource-actions");
+    const create = menu.getByRole("button", { name: "New Task" });
+    await expect(create).toBeFocused();
+    await expect(trigger).toHaveAttribute("aria-expanded", "true");
+    expect(await geometry()).toEqual(resting);
+    await page.keyboard.press("Tab");
+    await expect(menu.getByRole("button", { name: "Archive" })).toBeFocused();
+    await page.keyboard.press("Shift+Tab");
+    await expect(create).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(menu).toHaveCount(0);
+    await expect(trigger).toBeFocused();
+    await expect(page).toHaveURL(/project1\.task2$/);
+    expect(await geometry()).toEqual(resting);
+    await page.screenshot({ path: testInfo.outputPath(`chat-markers-${width}.png`) });
+
+    await trigger.click();
+    await expect(menu).toBeVisible();
+    await page.locator(".tree-section .section-label").click();
+    await expect(menu).toHaveCount(0);
+    await expect(page).toHaveURL(/project1\.task2$/);
+
     await page.locator('#treeEditButton').click();
     await expect(markers).toHaveCount(0);
+    await expect(triggers).toHaveCount(0);
     const overlaps=await page.locator('#projectTree .tree-item').evaluateAll(rows=>rows.some(row=>{
       const name=row.querySelector('.name')!,actions=row.querySelector('.row-actions'),drag=row.querySelector('.drag-handle');
       return (actions && name.getBoundingClientRect().right>actions.getBoundingClientRect().left+1)||(drag && drag.getBoundingClientRect().right>row.getBoundingClientRect().right+1);
     }));
     expect(overlaps).toBe(false);
-    await page.locator('#treeEditButton').click();await expect(markers).toHaveCount(4);
+    await page.locator("#treeEditButton").click();
+    await expect(markers).toHaveCount(4);
+    await expect(triggers).toHaveCount(5);
   });
 }
 

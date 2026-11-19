@@ -213,11 +213,11 @@
     popover.querySelector("button")?.focus({ preventScroll: true });
   }
 
-  async function runResourceAction(event: MouseEvent, item: ShellResourceItem, action: "create" | "archive"): Promise<void> {
-    const trigger = actionsMenu?.trigger ?? event.currentTarget as HTMLButtonElement;
-    closeActions();
+  async function runResourceAction(item: ShellResourceItem, action: "create" | "archive"): Promise<void> {
+    const trigger = actionsMenu?.trigger;
+    if (!trigger) return;
+    closeActions(true);
     hideStateTooltip();
-    trigger.focus({ preventScroll: true });
     const actionIdentity = identity;
     try {
       await (action === "create" ? onCreateTask(item.id) : onArchive(item.id));
@@ -487,6 +487,7 @@
 </script>
 
 <section class="tree-section" class:editing class:drawer-open={drawerOpen} data-component-owner="project-tree">
+  <span id="resource-tree-chat-open" hidden>Chat open</span>
   <div class="section-title">
     <span class="section-label">Projects</span>
     <span class="section-actions">
@@ -513,7 +514,7 @@
       {#each projects as project (project.id)}
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div class={`tree-item resource-row ${statusClass(project.status)} ${project.active ? "active" : ""} ${drag?.id === project.id ? "drag-source" : ""} ${rowDropClass(project.id)}`} ondragover={(event) => updateDrop(event, { kind: "project", id: project.id, projectId: "" })} ondrop={(event) => commitDrop(event, { kind: "project", id: project.id, projectId: "" })}>
-        <button type="button" class="tree-row-navigation" aria-label={project.ariaLabel || project.title} onclick={(event) => activate(event, project)}>
+        <button type="button" class="tree-row-navigation" aria-label={project.ariaLabel || project.title} aria-describedby={!editing && project.chatOpen ? "resource-tree-chat-open" : undefined} onclick={(event) => activate(event, project)}>
           <span class="chevron" class:expanded={project.expanded} data-project-toggle={project.children.length ? project.id : undefined}>{#if project.children.length}<Icon name="chevron-right" />{/if}</span>
           {#if editing}
             <Icon name="folder" className="tree-icon" />
@@ -588,7 +589,7 @@
 {#snippet taskRow(task: ShellResourceItem, project: ShellResourceItem, containerId: string)}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class={`tree-item task-item resource-row ${statusClass(task.status)} ${task.active ? "active" : ""} ${drag?.id === task.id ? "drag-source" : ""} ${rowDropClass(task.id)}`} data-task-id={task.id} onmouseenter={(event) => showStateTooltip(event, task)} onmouseleave={() => leaveStateTooltip(task)} ondragover={(event) => updateDrop(event, { kind: "task", id: task.id, projectId: project.id, containerId })} ondrop={(event) => commitDrop(event, { kind: "task", id: task.id, projectId: project.id, containerId })}>
-  <button type="button" class="tree-row-navigation" aria-label={task.ariaLabel || task.title} onclick={(event) => activate(event, task)}>
+  <button type="button" class="tree-row-navigation" aria-label={task.ariaLabel || task.title} aria-describedby={!editing && task.chatOpen ? "resource-tree-chat-open" : undefined} onclick={(event) => activate(event, task)}>
     <span class="chevron"></span>
     {#if editing}
       <span class="tree-icon-placeholder"></span>
@@ -613,17 +614,11 @@
   {@const label = item.ref ? `${item.title} (${item.ref})` : item.title}
   {@const expanded = actionsMenu?.id === item.id}
   <div class="resource-actions">
-    <div class="resource-direct-actions">
-      {#if item.type === "project"}
-        <button type="button" aria-label={`New Task in ${label}`} title="New Task" onclick={(event) => runResourceAction(event, item, "create")}><Icon name="plus" /></button>
-      {/if}
-      <button type="button" aria-label={`Archive ${label}`} title="Archive" onclick={(event) => runResourceAction(event, item, "archive")}><Icon name="archive" /></button>
-    </div>
     <button type="button" class="resource-actions-toggle" aria-label={`Actions for ${label}`} aria-expanded={expanded} aria-controls={expanded ? "tree-resource-actions" : undefined} onclick={(event) => toggleActions(event, item)}><span aria-hidden="true">⋯</span></button>
     {#if expanded}
       <div id="tree-resource-actions" class="resource-actions-popover" popover="manual" bind:this={actionsPopover}>
-        {#if item.type === "project"}<button type="button" onclick={(event) => runResourceAction(event, item, "create")}><Icon name="plus" />New Task</button>{/if}
-        <button type="button" class="resource-archive-action" onclick={(event) => runResourceAction(event, item, "archive")}><Icon name="archive" />Archive</button>
+        {#if item.type === "project"}<button type="button" onclick={() => runResourceAction(item, "create")}><Icon name="plus" />New Task</button>{/if}
+        <button type="button" class="resource-archive-action" onclick={() => runResourceAction(item, "archive")}><Icon name="archive" />Archive</button>
       </div>
     {/if}
   </div>
@@ -632,7 +627,7 @@
 {#snippet chatIndicator(item: ShellResourceItem)}
   {#if !editing && (item.chatOpen || item.unreadCount > 0)}
     <span class="resource-chat-status">
-      {#if item.chatOpen}<span class="chat-open-icon" aria-label="Chat open" title="Chat open"><Icon name="messages-square" /></span>{/if}
+      {#if item.chatOpen}<span class="chat-open-icon" title="Chat open"><Icon name="messages-square" /></span>{/if}
       {#if item.unreadCount > 0}<span class="unread-badge" aria-label={`${item.unreadCount} unread chat ${item.unreadCount === 1 ? "message" : "messages"}`}>{item.unreadCount > 99 ? "99+" : item.unreadCount}</span>{/if}
     </span>
   {/if}

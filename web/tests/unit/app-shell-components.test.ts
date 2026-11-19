@@ -334,9 +334,9 @@ describe("AppShell responsibility components", () => {
     target.querySelector<HTMLButtonElement>('[aria-label="task-a"]')!.click();
     await vi.waitFor(() => expect(onToggle).toHaveBeenCalledWith("project-a"));
     await vi.waitFor(() => expect(onSelect).toHaveBeenCalledWith("task-a"));
-    // Normal mode keeps the tree clean: no drag handles or row actions.
     expect(target.querySelector(".drag-handle")).toBeNull();
     expect(target.querySelector(".row-actions")).toBeNull();
+    expect(target.querySelectorAll(".resource-actions-toggle")).toHaveLength(3);
   });
 
   it("ProjectTree edit mode owns typed drag transactions and hides status chrome", async () => {
@@ -357,6 +357,7 @@ describe("AppShell responsibility components", () => {
     // longer navigate.
     expect(target.querySelector(".unread-badge")).toBeNull();
     expect(target.querySelector(".task-state-icon")).toBeNull();
+    expect(target.querySelector(".resource-actions-toggle")).toBeNull();
     target.querySelector<HTMLButtonElement>('[aria-label="task-a"]')!.click();
     await tick();
     expect(onSelect).not.toHaveBeenCalled();

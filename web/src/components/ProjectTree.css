@@ -481,7 +481,7 @@
 }
 
 :where([data-component-owner="project-tree"]) .tree-item.resource-row {
-  grid-template-columns: minmax(0, 1fr) 50px;
+  grid-template-columns: minmax(0, 1fr) max-content;
   gap: 0;
   padding: 0 4px 0 0;
 }
@@ -529,20 +529,6 @@
 :where([data-component-owner="project-tree"]) .resource-actions {
   display: flex;
   justify-content: flex-end;
-  opacity: 0;
-  pointer-events: none;
-}
-
-:where([data-component-owner="project-tree"]) .resource-row:hover .resource-actions,
-:where([data-component-owner="project-tree"]) .resource-row:has(:focus-visible) .resource-actions,
-:where([data-component-owner="project-tree"]) .resource-actions:has([aria-expanded="true"]) {
-  opacity: 1;
-  pointer-events: auto;
-}
-
-:where([data-component-owner="project-tree"]) .resource-direct-actions {
-  display: flex;
-  gap: 2px;
 }
 
 :where([data-component-owner="project-tree"]) .resource-actions button {
@@ -558,8 +544,10 @@
 }
 
 :where([data-component-owner="project-tree"]) .resource-actions button:hover,
-:where([data-component-owner="project-tree"]) .resource-actions button:focus-visible {
+:where([data-component-owner="project-tree"]) .resource-actions button:focus-visible,
+:where([data-component-owner="project-tree"]) .resource-actions button[aria-expanded="true"] {
   background: var(--sidebar-row);
+  color: var(--sidebar-text);
 }
 
 :where([data-component-owner="project-tree"]) .resource-actions button:focus-visible,
@@ -574,7 +562,9 @@
 }
 
 :where([data-component-owner="project-tree"]) .resource-actions .resource-actions-toggle {
-  display: none;
+  width: 28px;
+  aspect-ratio: 1;
+  color: var(--sidebar-muted);
   font-size: 20px;
   line-height: 1;
 }
@@ -604,44 +594,25 @@
 }
 
 @container project-tree (max-width: 220px) {
-  :where([data-component-owner="project-tree"]:not(.editing)) .tree-item.resource-row {
-    grid-template-columns: minmax(0, 1fr) 30px;
+  :where([data-component-owner="project-tree"]) .resource-row .project-task-summary {
+    display: none;
   }
-  :where([data-component-owner="project-tree"]) .resource-row .project-task-summary,
-  :where([data-component-owner="project-tree"]) .resource-direct-actions { display: none; }
-  :where([data-component-owner="project-tree"]) .resource-actions .resource-actions-toggle { display: inline-flex; }
 }
 
 :where([data-component-owner="project-tree"].drawer-open:not(.editing)) .tree-item.resource-row {
-  grid-template-columns: minmax(0, 1fr) 44px;
   min-height: 44px;
 }
 
-:where([data-component-owner="project-tree"].drawer-open) .resource-actions {
-  opacity: 1;
-  pointer-events: auto;
-}
-
-:where([data-component-owner="project-tree"].drawer-open) .resource-direct-actions { display: none; }
 :where([data-component-owner="project-tree"].drawer-open) .resource-actions .resource-actions-toggle {
-  display: inline-flex;
-  min-width: 44px;
-  min-height: 44px;
+  width: 44px;
 }
 
 @media (max-width: 980px), (hover: none), (any-pointer: coarse) {
   :where([data-component-owner="project-tree"]:not(.editing)) .tree-item.resource-row {
-    grid-template-columns: minmax(0, 1fr) 44px;
     min-height: 44px;
   }
-  :where([data-component-owner="project-tree"]) .resource-actions {
-    opacity: 1;
-    pointer-events: auto;
-  }
-  :where([data-component-owner="project-tree"]) .resource-direct-actions { display: none; }
+
   :where([data-component-owner="project-tree"]) .resource-actions .resource-actions-toggle {
-    display: inline-flex;
-    min-width: 44px;
-    min-height: 44px;
+    width: 44px;
   }
 }

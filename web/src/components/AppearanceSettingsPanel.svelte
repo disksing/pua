@@ -18,8 +18,8 @@
 
   const layoutOptions: Array<{ id: LayoutPreference; label: string; description: string }> = [
     { id: "auto", label: "Auto", description: "Follows the window width" },
-    { id: "three", label: "Three columns", description: "Sidebar, details, and chat side by side" },
-    { id: "two", label: "Two columns", description: "Details stacked above chat with a draggable divider" },
+    { id: "three", label: "Three columns", description: "Sidebar, resource details, and an empty right column" },
+    { id: "two", label: "Two columns", description: "Sidebar and full-width resource details" },
     { id: "split", label: "Split", description: "Sidebar collapsed into a drawer" },
   ];
 

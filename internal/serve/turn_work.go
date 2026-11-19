@@ -39,6 +39,9 @@ type turnWork struct {
 	CreatedAt            string                            `json:"createdAt,omitempty"`
 	TerminalObservedAt   string                            `json:"terminalObservedAt,omitempty"`
 	LastPublishedAt      string                            `json:"lastPublishedAt,omitempty"`
+	HistoryChat          bool                              `json:"historyChat,omitempty"`
+	ChatTextCount        int                               `json:"chatTextCount,omitempty"`
+	ChatSender           string                            `json:"chatSender,omitempty"`
 	PublishedIDs         []string                          `json:"publishedIds,omitempty"`
 	NotificationAccepted bool                              `json:"notificationAccepted,omitempty"`
 	Command              *turnWorkCommand                  `json:"command,omitempty"`
@@ -144,6 +147,9 @@ func prepareTurnWork(root, resource, generation, session string, message resourc
 			(existing.SessionID != session || !reflect.DeepEqual(existing.Context, *message.ProviderContext)) {
 			existing.GenerationID, existing.SessionID = generation, session
 			existing.Context = *message.ProviderContext
+			if existing.HistoryChat && existing.Context.ChatVisible {
+				existing.ChatSender = turnChatSender(root, resource, *existing)
+			}
 			return saveTurnWork(root, resource, file)
 		}
 		return nil
@@ -156,7 +162,10 @@ func prepareTurnWork(root, resource, generation, session string, message resourc
 		return err
 	}
 	work := turnWork{ID: message.ID, GenerationID: generation, SessionID: session,
-		Context: *message.ProviderContext, State: "running", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+		Context: *message.ProviderContext, HistoryChat: true, State: "running", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	if work.Context.ChatVisible {
+		work.ChatSender = turnChatSender(root, resource, work)
+	}
 	for _, parent := range file.Works {
 		if parent.TargetID == message.ID && parent.State == "suspended" {
 			work.ParentID = parent.ID
@@ -182,6 +191,19 @@ func bindTurnWork(root, resource, id, turn string) error {
 
 func syncTurnChat(root, resource string, work *turnWork, turn agentHubTurn) error {
 	if !work.Context.ChatVisible {
+		return nil
+	}
+	if work.HistoryChat {
+		messages := historyChatTexts(*work, turn, "")
+		if len(messages) > work.ChatTextCount {
+			work.ChatTextCount = len(messages)
+			for _, message := range messages {
+				if generationTime(message.CreatedAt).After(generationTime(work.LastPublishedAt)) {
+					work.LastPublishedAt = message.CreatedAt
+				}
+			}
+		}
+		work.LastError = ""
 		return nil
 	}
 	chatMu.Lock()
@@ -628,15 +650,15 @@ func (m *agentManager) handleTurnWork(w http.ResponseWriter, r *http.Request, wo
 					return errors.New("work has no shared Chat audience")
 				}
 				chatMu.Lock()
-				defer chatMu.Unlock()
 				chat, err := loadChatLocked(workspace.Path, sharedChatID(resource))
+				chatMu.Unlock()
 				if err != nil {
 					return err
 				}
 				if !chat.Open || chat.Epoch != work.Context.ChatEpoch {
 					return errors.New("Chat epoch closed")
 				}
-				result, err = chat.publicPage(40, "", "", "")
+				result, err = m.historyPublicPage(r.Context(), workspace.Path, chat, 40, "", "", "")
 				return err
 			}
 			chat, err := readTurnChatSnapshot(workspace.Path, resource)

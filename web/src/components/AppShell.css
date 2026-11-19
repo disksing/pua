@@ -222,26 +222,21 @@
   padding: 10px 12px;
 }
 
-/* Two-column mode: the sidebar stays visible while the details and chat panes
-stack vertically in a single column, split by a draggable horizontal divider.
-Each pane shrinks down to its header band at most. The effective layout is
-computed in JS and exposed as body[data-layout]. */
+/* Two-column mode gives all space beside the sidebar to resource details. */
 body[data-layout="two"] :where([data-component-owner="app-shell"]).app-shell {
   grid-template-columns: minmax(var(--sidebar-min-width), min(var(--sidebar-width), calc(100vw - var(--pane-handle-width) - var(--details-min-width))))
   var(--pane-handle-width) minmax(0, 1fr);
 }
 body[data-layout="two"] :where([data-component-owner="app-shell"]) .workspace-panel {
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: minmax(var(--details-min-height), 1fr) var(--pane-handle-width)
-  minmax(var(--chat-min-height), min(var(--chat-height), calc(100% - var(--details-min-height) - var(--pane-handle-width))));
+  grid-template-rows: minmax(0, 1fr);
 }
 body[data-layout="two"] :where([data-component-owner="app-shell"]) .details-panel {
   grid-column: 1;
   grid-row: 1;
 }
 body[data-layout="two"] :where([data-component-owner="app-shell"]) .agent-panel {
-  grid-column: 1;
-  grid-row: 3;
+  display: none;
 }
 
 /* Split mode: the sidebar collapses into an overlay drawer and the details
@@ -354,10 +349,7 @@ body[data-layout="split"] :where([data-component-owner="app-shell"]) .agent-pane
     grid-row: 2;
     min-height: 0;
     grid-template-columns: minmax(0, 1fr);
-    /* Single-column mode stacks details above chat with the same draggable
-       horizontal divider as the two-column layout. */
-    grid-template-rows: minmax(var(--details-min-height), 1fr) var(--pane-handle-width)
-    minmax(var(--chat-min-height), min(var(--chat-height), calc(100% - var(--details-min-height) - var(--pane-handle-width))));
+    grid-template-rows: minmax(0, 1fr);
     overflow: hidden;
   }
   :where([data-component-owner="app-shell"]) .details-panel {
@@ -366,9 +358,7 @@ body[data-layout="split"] :where([data-component-owner="app-shell"]) .agent-pane
     overflow: hidden;
   }
   :where([data-component-owner="app-shell"]) .agent-panel {
-    grid-column: 1;
-    grid-row: 3;
-    min-height: 0;
+    display: none;
   }
   :where([data-component-owner="app-shell"]) .chat-composer {
     padding-bottom: env(safe-area-inset-bottom, 0px);

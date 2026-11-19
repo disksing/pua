@@ -376,6 +376,18 @@ func (rt *telegramRuntime) openTopic(ctx context.Context, st *telegramState, use
 		say("The earlier chat period cannot be verified. To reconnect from now, send /resume confirm. Earlier unforwarded messages and any unconfirmed delivery will be held for review in Workspace Telegram settings, not automatically sent.", nil)
 		return nil
 	}
+	if initial || rebind || legacy || unknownEpoch {
+		view, err := rt.server.agents.chatHistory(ctx, rt.workspace.Path, c)
+		if err != nil {
+			lifecycle.Unlock()
+			return err
+		}
+		for _, message := range view.Messages {
+			if message.workID != "" {
+				route.advanceHistory(message.workID, message.workOffset)
+			}
+		}
+	}
 	if initial {
 		route.Epoch = c.Epoch
 		route.Cursor = len(c.Messages)
@@ -463,6 +475,9 @@ func (rt *telegramRuntime) resourceMenu(ws *app.Workspace, st telegramState, use
 			updated := ""
 			if len(c.Messages) > 0 {
 				updated = c.Messages[len(c.Messages)-1].CreatedAt
+			}
+			if _, latest, err := chatHistoryActivity(rt.workspace.Path, c, user); err == nil && generationTime(latest).After(generationTime(updated)) {
+				updated = latest
 			}
 			items = append(items, telegramResourceItem{ID: c.ResourceID, Title: title, Updated: updated})
 		}

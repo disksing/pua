@@ -37,21 +37,22 @@ type telegramPairing struct {
 	Expires time.Time `json:"expires"`
 }
 type telegramRoute struct {
-	User         string                 `json:"user"`
-	ChatID       int64                  `json:"chatId"`
-	ThreadID     int64                  `json:"threadId"`
-	Resource     string                 `json:"resource"`
-	Title        string                 `json:"title"`
-	Epoch        uint64                 `json:"epoch"`
-	Cursor       int                    `json:"cursor"`
-	Paused       bool                   `json:"paused"`
-	PauseReason  string                 `json:"pauseReason,omitempty"`
-	PausedAt     string                 `json:"pausedAt,omitempty"`
-	Pending      *telegramDelivery      `json:"pending,omitempty"`
-	Held         []telegramHeldDelivery `json:"held,omitempty"`
-	SharedChat   bool                   `json:"sharedChat,omitempty"`
-	LegacyChat   string                 `json:"legacyChat,omitempty"`
-	LegacyCursor int                    `json:"legacyCursor,omitempty"`
+	HistoryCursor map[string]int64       `json:"historyCursor,omitempty"`
+	User          string                 `json:"user"`
+	ChatID        int64                  `json:"chatId"`
+	ThreadID      int64                  `json:"threadId"`
+	Resource      string                 `json:"resource"`
+	Title         string                 `json:"title"`
+	Epoch         uint64                 `json:"epoch"`
+	Cursor        int                    `json:"cursor"`
+	Paused        bool                   `json:"paused"`
+	PauseReason   string                 `json:"pauseReason,omitempty"`
+	PausedAt      string                 `json:"pausedAt,omitempty"`
+	Pending       *telegramDelivery      `json:"pending,omitempty"`
+	Held          []telegramHeldDelivery `json:"held,omitempty"`
+	SharedChat    bool                   `json:"sharedChat,omitempty"`
+	LegacyChat    string                 `json:"legacyChat,omitempty"`
+	LegacyCursor  int                    `json:"legacyCursor,omitempty"`
 }
 type telegramHeldDelivery struct {
 	ID      string            `json:"id"`
@@ -62,6 +63,8 @@ type telegramHeldDelivery struct {
 	Pending *telegramDelivery `json:"pending,omitempty"`
 }
 type telegramDelivery struct {
+	WorkID     string    `json:"workId,omitempty"`
+	WorkOffset int64     `json:"workOffset,omitempty"`
 	Text       string    `json:"text"`
 	Chunks     []string  `json:"chunks"`
 	Part       int       `json:"part"`
@@ -212,6 +215,9 @@ func (r telegramRoute) key() string {
 func (r telegramRoute) deliveryKey() string {
 	if r.Pending == nil {
 		return ""
+	}
+	if r.Pending.WorkID != "" {
+		return chatID(r.key(), fmt.Sprintf("%d/%s/%d", r.Epoch, r.Pending.WorkID, r.Pending.WorkOffset))
 	}
 	return chatID(r.key(), fmt.Sprintf("%d/%d/%s", r.Epoch, r.Pending.NextCursor, r.Pending.Text))
 }

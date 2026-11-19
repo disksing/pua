@@ -1211,6 +1211,11 @@ for (const viewport of [{ width: 1500, height: 800 }, { width: 440, height: 844 
     });
     await page.goto("/w/ws-test/r/project1.task1");
     const scroller = page.locator("#chatTimeline");
+    await expect(page.getByRole("tab").first()).toHaveText("Chat");
+    await expect(page.locator("#detailsPanel #chatTimeline")).toBeVisible();
+    await expect(page.locator("#agentPanel > *")).toHaveCount(0);
+    if (viewport.width < 980) await expect(page.locator("#agentPanel")).toBeHidden();
+    else await expect(page.locator("#agentPanel")).toBeVisible();
     const heading = scroller.locator(".chat-heading");
     const articles = scroller.locator(".public-messages article");
     await expect(articles).toHaveCount(40);
@@ -1291,14 +1296,14 @@ test("keeps public chat unread and both event cursors independent in the resourc
   await page.screenshot({path:testInfo.outputPath('unread-tree.png')});
   await row.click();
   const details=page.locator('#detailsPanel');
-  const execution=details.getByRole('tab',{name:/^Execution events/}),dialogue=details.getByRole('tab',{name:/^Dialog events/});
+  const execution=details.getByRole('button',{name:/^All turns/}),dialogue=details.getByRole('tab',{name:/^Dialog events/});
   await expect(row.locator('.unread-badge')).toHaveCount(0);
   await expect(execution).toContainText('3');await expect(dialogue).toHaveCount(0);
   expect(writes.filter(w=>w.op.endsWith('-read'))).toHaveLength(0);
   await execution.click();await expect(details).toContainText('execution completed 3');
   await expect(execution.locator('.event-unread-count')).toHaveCount(0);
   await expect(dialogue).toHaveCount(0);
-  await details.getByRole('tab',{name:'Task',exact:true}).click();
+  await details.getByRole('button',{name:'Chat only',exact:true}).click();
   state('User','project1.task1').dialogue=5;state('User','project1.task1').execution=4;
   await expect(execution).toContainText('1',{timeout:10_000});
   expect(state('User','project1.task1').readExecution).toBe(3);
@@ -1309,7 +1314,6 @@ test("keeps public chat unread and both event cursors independent in the resourc
   await page.getByRole('button',{name:'Reopen chat',exact:true}).click();
   await expect(row.locator('.chat-open-icon')).toBeVisible();
   await page.screenshot({path:testInfo.outputPath('unread-channels.png')});
-  await details.getByRole('tab',{name:'Task',exact:true}).click();
   await page.locator('#workspaceOpen').click();
   await details.getByRole('tab',{name:'Settings',exact:true}).click();
   await page.locator('#workspaceCurrentUser').selectOption('Other');
@@ -1327,8 +1331,8 @@ test("manages natural-language schedules from the fixed Scheduler resource", asy
   await page.locator('[data-component-owner="scheduler-nav"] button').click();
   await expect(page).toHaveURL(/\/w\/ws-test\/r\/scheduler$/);
   await expect(page.getByRole("heading", { name: /Scheduler/ }).first()).toBeVisible();
-  await expect(page.locator(".details-tabs [role=\"tab\"]")).toHaveText(["Schedules", "Context", "Execution events", "Settings"]);
-  await expect(page.getByRole("tab", { name: "Schedules" })).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator(".details-tabs [role=\"tab\"]")).toHaveText(["Chat", "Schedules", "Context", "Settings"]);
+  await page.getByRole("tab", { name: "Schedules" }).click();
   await expect(page.getByText("No schedules. The Server will not create empty Scheduler Turns.")).toBeVisible();
 
   await page.locator(".schedule-list-heading").getByRole("button", { name: "Add schedule" }).click();
@@ -2104,7 +2108,7 @@ test("keeps canonical navigation synchronized across history, workspace restore,
   expect(harness.uiStateBodies.some((entry) => entry.workspaceId === "ws-a" && Object.keys((entry.body.taskOrder as Record<string, unknown>) || {}).length > 0)).toBe(true);
 });
 
-test("keeps mobile navigation in the Svelte app shell and stacks both panes with a draggable divider", async ({ page }) => {
+test("keeps mobile navigation and gives Chat the full details pane", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await installShellMockApi(page);
   await page.goto("/w/ws-a/r/project1.task1");
@@ -2114,28 +2118,12 @@ test("keeps mobile navigation in the Svelte app shell and stacks both panes with
   await page.locator("#mobileSidebarBackdrop").click();
   await expect(page.locator("body")).not.toHaveClass(/mobile-sidebar-open/);
 
-  // Single-column mode stacks details above chat; both stay visible.
   await expect(page.locator("#detailsPanel")).toBeVisible();
-  await expect(page.locator("#agentPanel")).toBeVisible();
+  await expect(page.locator("#agentPanel")).toBeHidden();
   await expect(page.locator("#mobileChatButton")).toHaveCount(0);
-  const divider = page.locator("#detailsResizeY");
-  await expect(divider).toBeVisible();
-
-  // The divider drags with touch pointers and keeps both header bands visible.
-  const panelHeight = async (selector: string) => (await page.locator(selector).boundingBox())!.height;
-  const chatBefore = await panelHeight("#agentPanel");
-  const box = (await divider.boundingBox())!;
-  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-  await page.mouse.down();
-  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2 - 120, { steps: 5 });
-  await page.mouse.up();
-  expect(await panelHeight("#agentPanel")).toBeGreaterThan(chatBefore + 80);
-
-  // The stacked panes and the chosen height persist across reloads.
+  await expect(page.locator("#detailsResizeY")).toHaveCount(0);
   await page.reload();
-  await expect(page.locator("#detailsPanel")).toBeVisible();
-  await expect(page.locator("#agentPanel")).toBeVisible();
-  expect(await panelHeight("#agentPanel")).toBeGreaterThan(chatBefore + 80);
+  await expect(page.locator("#detailsPanel #chatTimeline")).toBeVisible();
 });
 
 test("closes the 440px navigation drawer without changing the selected resource", async ({ page }) => {
@@ -2427,41 +2415,16 @@ test("keeps Workspace Wiki file rows at a 44px touch size without overflow", asy
   await page.getByRole("dialog", { name: "File preview" }).getByRole("button", { name: "Close" }).click();
 });
 
-test("stacks details above chat with a draggable divider in the two-column layout", async ({ page }) => {
+test("displays Chat beside the sidebar in the two-column layout", async ({ page }) => {
   await page.setViewportSize({ width: 1100, height: 800 });
   await installShellMockApi(page);
   await page.goto("/w/ws-a/r/project1.task1");
 
-  // Sidebar stays visible; details stack above chat behind a horizontal divider.
   await expect(page.locator("#mobileSidebar")).toBeVisible();
   await expect(page.locator("#detailsResize")).toBeHidden();
-  await expect(page.locator("#detailsResizeY")).toBeVisible();
-  await expect(page.locator("#detailsPanel")).toBeVisible();
-  await expect(page.locator("#agentPanel")).toBeVisible();
-
-  const panelHeight = async (selector: string) => (await page.locator(selector).boundingBox())!.height;
-  const dragDivider = async (deltaY: number) => {
-    const box = (await page.locator("#detailsResizeY").boundingBox())!;
-    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-    await page.mouse.down();
-    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2 + deltaY, { steps: 5 });
-    await page.mouse.up();
-  };
-
-  // Dragging the divider up grows the chat pane and persists the new height.
-  const chatBefore = await panelHeight("#agentPanel");
-  await dragDivider(-120);
-  expect(await panelHeight("#agentPanel")).toBeGreaterThan(chatBefore + 80);
-  const saved = await page.evaluate(() => JSON.parse(window.localStorage.getItem("pua.web.paneSizes") || "{}"));
-  expect(saved.chatHeight).toBeGreaterThan(320);
-
-  // Dragging the divider to the bottom shrinks the chat pane to its header band.
-  await dragDivider(2000);
-  expect(await panelHeight("#agentPanel")).toBeLessThanOrEqual(64);
-
-  // Dragging the divider to the top shrinks the details pane to its header band.
-  await dragDivider(-2000);
-  expect(await panelHeight("#detailsPanel")).toBeLessThanOrEqual(64);
+  await expect(page.locator("#detailsResizeY")).toHaveCount(0);
+  await expect(page.locator("#detailsPanel #chatTimeline")).toBeVisible();
+  await expect(page.locator("#agentPanel")).toBeHidden();
 
   // Widening back to the three-column layout shows both panes side by side.
   await page.setViewportSize({ width: 1500, height: 800 });
@@ -2488,17 +2451,15 @@ test("lets users switch the layout from the Appearance settings tab, including t
   // Scope to the workspace layout group; the theme group reuses the same classes.
   const layoutGroup = page.locator('[role="radiogroup"][aria-label="Workspace layout"]');
 
-  // Two columns: details stack above chat even on a wide window.
   await openAppearanceTab();
   await expect(layoutGroup.locator(".layout-option.active")).toContainText("Auto");
   await page.locator(".layout-option", { hasText: "Two columns" }).click();
   await expect(page.locator("body")).toHaveAttribute("data-layout", "two");
   await expect(page.locator("#detailsResize")).toBeHidden();
-  await expect(page.locator("#detailsResizeY")).toBeVisible();
+  await expect(page.locator("#detailsResizeY")).toHaveCount(0);
   await expect(page.locator("#detailsPanel")).toBeVisible();
-  await expect(page.locator("#agentPanel")).toBeVisible();
+  await expect(page.locator("#agentPanel")).toBeHidden();
 
-  // Split: the sidebar collapses into a drawer, details and chat sit side by side.
   await page.locator(".layout-option", { hasText: "Split" }).click();
   await expect(page.locator("body")).toHaveAttribute("data-layout", "split");
   await expect(page.locator("#mobileSidebar")).toBeHidden();
@@ -3081,10 +3042,11 @@ test("execution events stay live and read-only without a dialogue runtime", asyn
   });
   await page.goto("/w/ws-test/r/project1.task1");
   const details=page.locator("#detailsPanel");
-  await details.getByRole("tab",{name:"Execution events",exact:true}).click();
+  await details.getByRole("textbox",{name:"Chat message"}).fill("Draft across modes");
+  await details.getByRole("button",{name:/^All turns/}).click();
   await expect(details).toContainText("execution live revision 10");
   await expect(details.locator('[data-component-owner="event-timeline"]').first()).toBeVisible();
-  await expect(details.locator("textarea,input")).toHaveCount(0);
+  await expect(details.locator("textarea:visible,input:visible")).toHaveCount(0);
   await expect(details.getByRole("button",{name:"Execution model",exact:true})).toBeVisible();
   await expect(details.locator(".agent-message-row")).toContainText(["execution trigger", "execution history paragraph", "execution live revision"]);
   const geometry=await details.locator(".channel-timeline").evaluate(el=>({client:el.clientHeight,scroll:el.scrollHeight,overflow:getComputedStyle(el).overflowY}));
@@ -3098,14 +3060,16 @@ test("execution events stay live and read-only without a dialogue runtime", asyn
   await expect(details.getByRole("tab",{name:"Dialog events",exact:true})).toHaveCount(0);
   expect(streams.some(s=>s.includes("/chat/runtime/"))).toBe(false);
   await expect(page.getByLabel("Dialogue controls")).toHaveCount(0);
-  await expect(page.getByLabel("Execution controls")).toBeVisible();
+  await expect(details.getByRole("button",{name:"All turns"})).toHaveAttribute("aria-pressed","true");
   running=false;
   await expect(details.locator(".turn-working-indicator")).toHaveCount(0);
   expect(writes.filter(p=>/\/(timer|messages|approval)$/.test(p))).toEqual([]);
   expect(harness.inputBodies).toHaveLength(0);
+  await details.getByRole("button",{name:"Chat only",exact:true}).click();
+  await expect(details.getByRole("textbox",{name:"Chat message"})).toHaveValue("Draft across modes");
   await page.getByRole("button",{name:"Close chat",exact:true}).click();
   await expect(page.getByText("Public conversation remains separate",{exact:true})).toBeVisible();
-  await expect(details).toContainText("execution history paragraph");
+  await expect(details.locator(".channel-timeline")).toHaveCount(0);
   await page.getByRole("button",{name:"Reopen chat",exact:true}).click();
   await expect(page.getByText("Public conversation remains separate",{exact:true})).toBeVisible();
 });
@@ -3228,7 +3192,7 @@ test("Unread follows public Chat badges and keeps the selected detail after read
   await expect(page).toHaveURL(/\/r\/project1\.task1$/);
   const details = page.locator("#detailsPanel");
   await expect(details).toContainText("Infrastructure task");
-  await expect(details.getByRole("tab", { name: /^Execution events/ })).toContainText("3");
+  await expect(details.getByRole("button", { name: /^All turns/ })).toContainText("3");
   expect(writes.filter((entry) => entry.op.endsWith("-read"))).toHaveLength(0);
 
   state("User", "project1.task2").unread = 1;
@@ -3320,7 +3284,7 @@ test("public Chat restores the upload dialog, send card and execution model sele
   for (const theme of ["default", "slate", "riso"]) {
     await page.evaluate(theme => {
       document.documentElement.dataset.theme = theme;
-      const chatPanel = document.getElementById("agentPanel")!;
+      const chatPanel = document.getElementById("chatTimeline")!;
       chatPanel.style.width = "260px"; chatPanel.style.minWidth = "260px";
     }, theme);
     await input.fill("A draft in the restored composer");

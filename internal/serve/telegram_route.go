@@ -1,6 +1,8 @@
 package serve
 
 import (
+	"context"
+	"errors"
 	"os"
 	"strings"
 	"time"
@@ -39,6 +41,22 @@ func (r *telegramRoute) unpause() bool {
 	r.PauseReason = ""
 	r.PausedAt = ""
 	return true
+}
+
+func (r *telegramRoute) advanceHistory(work string, offset int64) {
+	if r.HistoryCursor == nil {
+		r.HistoryCursor = make(map[string]int64)
+	}
+	r.HistoryCursor[work] = max(r.HistoryCursor[work], offset)
+}
+
+func (r *telegramRoute) finishDelivery() {
+	if r.Pending.WorkID != "" {
+		r.advanceHistory(r.Pending.WorkID, r.Pending.WorkOffset)
+	} else {
+		r.Cursor = r.Pending.NextCursor
+	}
+	r.Pending = nil
 }
 
 func telegramAutoRecheck(reason string) bool {
@@ -191,16 +209,24 @@ func (rt *telegramRuntime) checkRoute(st *telegramState, r *telegramRoute, ws *a
 	id := sharedChatID(r.Resource)
 	chatMu.Lock()
 	c, err := ensureChatLocked(rt.workspace.Path, r.Resource, r.User)
+	if err != nil {
+		chatMu.Unlock()
+		return empty, time.Time{}, false, r.pause(telegramPauseChat)
+	}
+	info, err := os.Stat(chatPath(rt.workspace.Path, id))
 	chatMu.Unlock()
 	if err != nil {
 		return empty, time.Time{}, false, r.pause(telegramPauseChat)
 	}
-	info, err := os.Stat(chatPath(rt.workspace.Path, id))
-	if err != nil {
+	modTime := info.ModTime()
+	workInfo, workErr := os.Stat(turnWorkPath(rt.workspace.Path, r.Resource))
+	if workErr == nil && workInfo.ModTime().After(modTime) {
+		modTime = workInfo.ModTime()
+	} else if workErr != nil && !errors.Is(workErr, os.ErrNotExist) {
 		return empty, time.Time{}, false, r.pause(telegramPauseChat)
 	}
-	if allowCached && r.SharedChat && !r.Paused && r.Pending == nil && rt.lastFiles[r.key()].Equal(info.ModTime()) {
-		return empty, info.ModTime(), true, false
+	if allowCached && r.SharedChat && !r.Paused && r.Pending == nil && rt.lastFiles[r.key()].Equal(modTime) {
+		return empty, modTime, true, false
 	}
 	if !c.Open {
 		return c, info.ModTime(), false, r.pause(telegramPauseClosed)
@@ -216,13 +242,27 @@ func (rt *telegramRuntime) checkRoute(st *telegramState, r *telegramRoute, ws *a
 		return c, info.ModTime(), false, r.pause(telegramPauseEpoch)
 	}
 	if c.Epoch != r.Epoch {
+		view, err := rt.server.agents.chatHistory(context.Background(), rt.workspace.Path, c)
+		if err != nil {
+			return c, modTime, false, r.pause(telegramPauseChat)
+		}
 		if c.Epoch <= r.Epoch || c.EpochStart == nil || !r.holdUntil(c, *c.EpochStart, "chat_reopened") {
 			return c, info.ModTime(), false, r.pause(telegramPauseEpoch)
+		}
+		held := 0
+		for _, message := range view.Messages {
+			if message.workID != "" && message.workEpoch < c.Epoch && message.workOffset > r.HistoryCursor[message.workID] {
+				r.advanceHistory(message.workID, message.workOffset)
+				held++
+			}
+		}
+		if held > 0 {
+			r.Held = append(r.Held, telegramHeldDelivery{ID: newGenerationRecordID(), Epoch: r.Epoch, Count: held, Reason: "chat_reopened", HeldAt: time.Now().UTC().Format(time.RFC3339)})
 		}
 		r.Epoch = c.Epoch
 		delete(rt.lastFiles, r.key())
 		changed = true
 	}
 	changed = r.unpause() || changed
-	return c, info.ModTime(), true, changed
+	return c, modTime, true, changed
 }

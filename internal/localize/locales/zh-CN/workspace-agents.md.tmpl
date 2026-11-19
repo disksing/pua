@@ -221,7 +221,7 @@ Agent 消息是单向的，无论其开启 Turn 还是作为 steer 插入，PUA 
 
 当前 Turn 内已经完成的普通 Agent 输入可以批量核对和确认。使用 `pua message list [--from=<resource>]` 查看 waiting 元数据，用 `pua message read --from=<resource>` 或 `--ids=<id,id...>` 读取完整正文；只在必要工作完成后执行 `pua message ack --ids=<id,id...> --summary="<已完成事项>"`。确认会保存 durable `handled` 终态，不是删除；不得确认用户、系统、Scheduler、interrupt、续接、投递中或未读消息。
 
-每个资源有一条 Workspace 用户共享的 Chat，用户消息标明发送者，各用户的未读进度独立。Chat 与执行历史独立保存，直接交给资源原执行 Agent。执行 Agent 负责实际工作、用户回复和正常 Task 状态收口，不再使用独立交流 Session 或要求转述。Inbox 和用户名消息目标仍已移除。
+每个资源有一条 Workspace 用户共享的 Chat，用户消息标明发送者，各用户的未读进度独立。用户输入直接交给资源的执行 Agent。Chat 从受众为共享 Chat 的执行轮读取普通进度和最终答复。执行 Agent 在同一轮处理用户请求并完成正常的 Task 状态收口。
 
 Turn 开头固定本轮的对话对象及 Chat 可见性，并提供稳定的 work ID。新 Turn 开始时读取当前 AGENTS.md。用户 Chat Turn 的普通阶段回复及最终回复自动进入共享 Chat；推理和工具事件留在执行历史。耗时工作先简短、真实地回应。内部 Agent、Scheduler 和系统 Turn 的输出保持内部可见，不在内部轮直接对用户发言；Agent 消息仍是单向消息。
 
@@ -239,7 +239,7 @@ Turn 开头固定本轮的对话对象及 Chat 可见性，并提供稳定的 wo
 
 内部正式工作需要用户获知时，Chat 开启则优先请求独立可见通知；关闭则向 status 所示稳定上层发必要业务摘要，委派回报义务保留。Chat 快照或开关提醒不改变固定受众、不恢复已撤销资格，也不允许失效用户回复跨周期或跨资源转投。空闲开关不唤醒 Agent，下轮 opener/status 读取最新快照；通知前重查当前状态，输出后核对发布事实。
 
-使用 `pua turn status` 查询工作、续接与输出状态；可见 Turn 使用 `pua chat show --work=<work-id>` 读取近期共享历史。Chat 关闭撤销原周期输出资格，重开不转投旧输出；暂停或手动停止资源取消其自动续接。恢复提示包含历史引用，应核对插话造成的变更及外部操作状态后继续，避免重做原始请求。
+使用 `pua turn status` 查询工作和续接状态。Chat 开启时，可见 Turn 可以使用 `pua chat show --work=<work-id>` 读取近期共享历史。关闭 Chat 后停止接收新的用户输入和通知请求，已经开始的可见 Turn 仍可能完成回复。暂停或手动停止资源会取消自动续接。恢复时按提示中的历史引用核对用户插话和外部操作，再继续工作。
 
 升级兼容：仅原输入仍明确提供 `--reply-to` 发布命令的旧轮沿用 `pua chat publish`，按原指令收口；新的固定受众 Turn 自动同步，不能再重复调用发布命令。旧历史不会回灌 Chat。工作进展不解除最终答复义务；输出后通过 `pua turn status` 或共享历史核对发布事实。发布受阻时保留执行结果，不改投其他周期。
 

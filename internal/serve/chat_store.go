@@ -21,6 +21,7 @@ import (
 const dialoguePrefix = "dialogue-"
 
 var chatMu sync.Mutex
+var errChatCursor = errors.New("chat message cursor not found")
 
 // A Telegram send holds a per-chat read lock until the external request
 // finishes. Close and reopen take the write lock to fence old sends.
@@ -32,6 +33,10 @@ func chatLifecycleLock(root, id string) *sync.RWMutex {
 }
 
 type chatMessage struct {
+	workID        string
+	workEpoch     uint64
+	workOffset    int64
+	rawPosition   int
 	ID            string `json:"id"`
 	Role          string `json:"role"`
 	Text          string `json:"text"`
@@ -45,14 +50,18 @@ type chatMessage struct {
 	LegacyIndex   int    `json:"legacyIndex,omitempty"`
 }
 type chatDelivery struct {
-	Automatic    bool   `json:"automatic,omitempty"`
-	ID           string `json:"id"`
-	Target       string `json:"target"`
-	Text         string `json:"text"`
-	Sender       string `json:"sender,omitempty"`
-	Accepted     bool   `json:"accepted"`
-	Epoch        uint64 `json:"epoch"`
-	SourceChatID string `json:"sourceChatId,omitempty"`
+	InputPosition int    `json:"inputPosition,omitempty"`
+	CreatedAt     string `json:"createdAt,omitempty"`
+	ClientID      string `json:"clientId,omitempty"`
+	OriginRoute   string `json:"originRoute,omitempty"`
+	Automatic     bool   `json:"automatic,omitempty"`
+	ID            string `json:"id"`
+	Target        string `json:"target"`
+	Text          string `json:"text"`
+	Sender        string `json:"sender,omitempty"`
+	Accepted      bool   `json:"accepted"`
+	Epoch         uint64 `json:"epoch"`
+	SourceChatID  string `json:"sourceChatId,omitempty"`
 }
 
 func (d chatDelivery) userInput() bool {
@@ -60,6 +69,9 @@ func (d chatDelivery) userInput() bool {
 }
 
 type resourceChat struct {
+	omitted         int
+	omittedUnread   int
+	HistoryReads    map[string]map[string]int64 `json:"historyReads,omitempty"`
 	ReadThrough     int                         `json:"readThrough"`
 	ReadCursors     map[string]int              `json:"readCursors,omitempty"`
 	LegacyUnread    map[string][]string         `json:"legacyUnread,omitempty"`
@@ -128,20 +140,52 @@ func loadChatLocked(root, id string) (resourceChat, error) {
 		return c, err
 	}
 	expectedID := chatID(c.ResourceID, c.User)
-	if c.Version == 4 {
+	if c.Version >= 4 {
 		expectedID = sharedChatID(c.ResourceID)
 	}
-	if (c.Version < 1 || c.Version > 4) || c.ID != id || c.ID != expectedID {
+	if (c.Version < 1 || c.Version > 5) || c.ID != id || c.ID != expectedID {
 		return c, errors.New("invalid chat record")
 	}
 	if c.Messages == nil {
 		c.Messages = []chatMessage{}
 	}
+	for _, delivery := range c.Outbox {
+		if delivery.InputPosition == 0 {
+			continue
+		}
+		index := delivery.InputPosition - 1
+		if index < 0 || index > len(c.Messages) {
+			return c, errors.New("invalid chat input position")
+		}
+		c.Messages = append(c.Messages, chatMessage{})
+		copy(c.Messages[index+1:], c.Messages[index:])
+		c.Messages[index] = chatMessage{ID: strings.TrimPrefix(delivery.ID, "input-"), Role: "user",
+			Text: delivery.Text, Sender: delivery.Sender, CreatedAt: delivery.CreatedAt,
+			ClientID: delivery.ClientID, OriginRoute: delivery.OriginRoute}
+	}
 	return c, nil
 }
 func saveChatLocked(root string, c resourceChat) error {
+	inputs := make(map[int]bool)
+	for _, delivery := range c.Outbox {
+		if delivery.InputPosition > 0 {
+			inputs[delivery.InputPosition] = true
+		}
+	}
+	if len(inputs) > 0 {
+		stored := make([]chatMessage, 0, len(c.Messages))
+		for index, message := range c.Messages {
+			if !inputs[index+1] {
+				stored = append(stored, message)
+			}
+		}
+		c.Messages = stored
+	}
 	if c.ID == sharedChatID(c.ResourceID) {
 		c.Version = 4
+		if len(inputs) > 0 || len(c.HistoryReads) > 0 {
+			c.Version = 5
+		}
 	} else {
 		c.Version = 3
 	}
@@ -188,6 +232,12 @@ func (c resourceChat) unread(user string, i int, message chatMessage, legacyUnre
 	if message.Role != "agent" {
 		return false
 	}
+	if message.workID != "" {
+		return message.workOffset > c.HistoryReads[user][message.workID]
+	}
+	if message.rawPosition > 0 {
+		i = message.rawPosition - 1
+	}
 	if c.Version < 4 {
 		return i >= c.ReadThrough
 	}
@@ -199,7 +249,7 @@ func (c resourceChat) snapshot(users ...string) *chatSnapshot {
 	if len(users) > 0 {
 		user = users[0]
 	}
-	unread := 0
+	unread := c.omittedUnread
 	legacyUnread := c.legacyUnreadSet(user)
 	for i, message := range c.Messages {
 		if c.unread(user, i, message, legacyUnread) {
@@ -222,6 +272,8 @@ type publicChat struct {
 	UnreadCount     int                 `json:"unreadCount"`
 	HasOlder        *bool               `json:"hasOlder,omitempty"`
 	HasNewer        *bool               `json:"hasNewer,omitempty"`
+	EndPosition     int                 `json:"endPosition,omitempty"`
+	Reset           bool                `json:"reset,omitempty"`
 }
 
 type publicChatMessage struct {
@@ -268,7 +320,7 @@ func (c resourceChat) publicPage(limit int, before, after string, users ...strin
 			}
 		}
 		if index < 0 {
-			return publicChat{}, errors.New("chat message cursor not found")
+			return publicChat{}, errChatCursor
 		}
 		if before != "" {
 			end = index
@@ -282,7 +334,8 @@ func (c resourceChat) publicPage(limit int, before, after string, users ...strin
 		start = max(start, end-limit)
 	}
 	result.Messages = result.Messages[start:end]
-	older, newer := start > 0, end < len(c.Messages)
+	result.EndPosition = end + c.omitted
+	older, newer := start+c.omitted > 0, end < len(c.Messages)
 	result.HasOlder, result.HasNewer = &older, &newer
 	return result, nil
 }
@@ -321,8 +374,30 @@ func (c *resourceChat) markRead(user, id string) bool {
 	if c.ReadCursors == nil {
 		c.ReadCursors = make(map[string]int)
 	}
+	rawPosition := 0
+	historyChanged := false
+	for i, message := range c.Messages[:index+1] {
+		if message.workID == "" {
+			position := message.rawPosition
+			if position == 0 {
+				position = i + 1
+			}
+			rawPosition = max(rawPosition, position)
+			continue
+		}
+		if message.workOffset > c.HistoryReads[user][message.workID] {
+			if c.HistoryReads == nil {
+				c.HistoryReads = make(map[string]map[string]int64)
+			}
+			if c.HistoryReads[user] == nil {
+				c.HistoryReads[user] = make(map[string]int64)
+			}
+			c.HistoryReads[user][message.workID] = message.workOffset
+			historyChanged = true
+		}
+	}
 	previous := c.ReadCursors[user]
-	c.ReadCursors[user] = max(previous, index+1)
+	c.ReadCursors[user] = max(previous, rawPosition)
 	remaining := make([]string, 0, len(c.LegacyUnread[user]))
 	legacyUnread := c.legacyUnreadSet(user)
 	for _, message := range c.Messages[index+1:] {
@@ -330,7 +405,7 @@ func (c *resourceChat) markRead(user, id string) bool {
 			remaining = append(remaining, message.ID)
 		}
 	}
-	changed := previous != c.ReadCursors[user] || len(remaining) != len(c.LegacyUnread[user])
+	changed := historyChanged || previous != c.ReadCursors[user] || len(remaining) != len(c.LegacyUnread[user])
 	if c.LegacyUnread != nil {
 		c.LegacyUnread[user] = remaining
 	}
@@ -454,6 +529,9 @@ func (c *resourceChat) appendUserInput(id, text string, context ...string) error
 		}
 	}
 	publicID := id
+	if strings.HasPrefix(publicID, "auto-") {
+		publicID = "user-" + chatID(user, id)
+	}
 	for _, message := range c.Messages {
 		if message.ID == publicID {
 			publicID = "user-" + chatID(user, id)
@@ -472,6 +550,11 @@ func (c *resourceChat) appendUserInput(id, text string, context ...string) error
 	if err := c.queue("input-"+publicID, c.ResourceID, text, user); err != nil {
 		return err
 	}
-	c.Outbox[len(c.Outbox)-1].Automatic = true
+	delivery := &c.Outbox[len(c.Outbox)-1]
+	delivery.Automatic = true
+	if c.Version >= 4 {
+		delivery.InputPosition, delivery.ClientID, delivery.OriginRoute = len(c.Messages), id, originRoute
+		delivery.CreatedAt = c.Messages[len(c.Messages)-1].CreatedAt
+	}
 	return nil
 }

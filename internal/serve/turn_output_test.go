@@ -97,7 +97,7 @@ func TestTurnOutputPublishesWhileColdAuditIsBlocked(t *testing.T) {
 	waitForRuntimeTest(t, func() bool {
 		return outputTestDone(t, workspace, "project1.task1", message.ID)
 	})
-	chat, err := loadDialogue(workspace.Path, dialoguePrefix+sharedChatID("project1.task1"))
+	chat, err := workflowChat(manager, workspace)
 	if err != nil || len(chat.Messages) != 2 || chat.Messages[1].Text != "Published without waiting for the audit" {
 		t.Fatalf("final reply missing or duplicated: %+v, %v", chat.Messages, err)
 	}
@@ -164,7 +164,7 @@ func TestTurnOutputSlowResourceDoesNotBlockAnotherAndRequestsCoalesce(t *testing
 	}
 	releaseOnce.Do(func() { close(release) })
 	waitForRuntimeTest(t, func() bool { return outputTestDone(t, workspace, "project1.task1", first.ID) })
-	chat, err := loadDialogue(workspace.Path, dialoguePrefix+sharedChatID("project1.task1"))
+	chat, err := workflowChat(manager, workspace)
 	if err != nil || len(chat.Messages) != 2 {
 		t.Fatalf("coalesced requests duplicated output: %+v, %v", chat.Messages, err)
 	}
@@ -192,7 +192,7 @@ func TestTurnOutputRestartRecoversWithoutRuntimeOrColdAudit(t *testing.T) {
 	if len(manager.runtimeSnapshots()) != 0 || runtimeFakeListCalls(fake) != listCalls {
 		t.Fatal("output recovery depended on session-list polling or a runtime")
 	}
-	chat, err := loadDialogue(workspace.Path, dialoguePrefix+sharedChatID("project1.task1"))
+	chat, err := workflowChat(manager, workspace)
 	if err != nil || len(chat.Messages) != 2 || chat.Messages[1].Text != "Recovered after restart" {
 		t.Fatalf("recovered reply missing or duplicated: %+v, %v", chat.Messages, err)
 	}
@@ -226,14 +226,17 @@ func TestTurnOutputKeepsChatAudienceAndEpoch(t *testing.T) {
 			}
 			startOutputTestLoop(t, manager)
 			waitForRuntimeTest(t, func() bool { return outputTestDone(t, workspace, "project1.task1", work.ID) })
-			chat, err := loadDialogue(workspace.Path, dialoguePrefix+sharedChatID("project1.task1"))
+			chat, err := workflowChat(manager, workspace)
 			if err != nil {
 				t.Fatal(err)
 			}
+			want := scenario == "closed" || scenario == "reopened"
+			found := false
 			for _, message := range chat.Messages {
-				if message.Role == "agent" {
-					t.Fatalf("output crossed audience or epoch: %+v", message)
-				}
+				found = found || message.Role == "agent"
+			}
+			if found != want {
+				t.Fatalf("chat visibility in %s = %t, want %t", scenario, found, want)
 			}
 		})
 	}
@@ -255,10 +258,10 @@ func TestTurnOutputCompletionWakesStableLoopAndSealsProgress(t *testing.T) {
 	manager.activePollInterval = time.Hour
 	startOutputTestLoop(t, manager)
 	waitForRuntimeTest(t, func() bool {
-		chat, err := loadDialogue(workspace.Path, dialoguePrefix+sharedChatID("project1.task1"))
+		chat, err := workflowChat(manager, workspace)
 		return err == nil && len(chat.Messages) == 2
 	})
-	chat, _ := loadDialogue(workspace.Path, dialoguePrefix+sharedChatID("project1.task1"))
+	chat, _ := workflowChat(manager, workspace)
 	if chat.Messages[1].Text != "Progress" {
 		t.Fatalf("unsealed or private output was published: %+v", chat.Messages)
 	}
@@ -291,7 +294,7 @@ func TestTurnOutputCompletionWakesStableLoopAndSealsProgress(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForRuntimeTest(t, func() bool { return outputTestDone(t, workspace, "project1.task1", work.ID) })
-	chat, _ = loadDialogue(workspace.Path, dialoguePrefix+sharedChatID("project1.task1"))
+	chat, _ = workflowChat(manager, workspace)
 	if len(chat.Messages) != 3 || chat.Messages[2].Text != "Sealed final" {
 		t.Fatalf("terminal wake lost or duplicated a text block: %+v", chat.Messages)
 	}
@@ -354,7 +357,7 @@ func TestTurnOutputRetriesTransientTurnQueryFailure(t *testing.T) {
 		t.Fatal("transient query failure was not retried")
 	}
 	observed := workFile(t, workspace).find(message.ID)
-	if observed.LastError != "" || len(observed.PublishedIDs) != 1 {
+	if observed.LastError != "" || observed.ChatTextCount != 1 || len(observed.PublishedIDs) != 0 {
 		t.Fatalf("query recovery left an error or duplicated output: %+v", observed)
 	}
 }

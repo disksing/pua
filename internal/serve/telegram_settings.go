@@ -227,8 +227,7 @@ func (s *server) handleTelegram(w http.ResponseWriter, r *http.Request, id strin
 				route.Pending.RetryAt = time.Time{}
 				route.Pending.Error = ""
 			case "skip":
-				route.Cursor = route.Pending.NextCursor
-				route.Pending = nil
+				route.finishDelivery()
 			default:
 				writeError(w, errors.New("choose retry or skip"), 400)
 				return

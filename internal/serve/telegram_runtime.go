@@ -145,9 +145,6 @@ func (rt *telegramRuntime) run(ctx context.Context) {
 	}
 }
 
-// flush reads only chats whose files changed (or have queued delivery). It never
-// reads execution history. Forward public replies and web inputs, but do not
-// echo Telegram inputs back to their originating topic. Startup audits all chats.
 func (rt *telegramRuntime) flush(ctx context.Context, st *telegramState) error {
 	ws, err := app.OpenWorkspace(rt.workspace.Path)
 	if err != nil {
@@ -166,8 +163,15 @@ func (rt *telegramRuntime) flush(ctx context.Context, st *telegramState) error {
 			continue
 		}
 		if route.Pending == nil {
-			for route.Cursor < len(chat.Messages) {
-				message := chat.Messages[route.Cursor]
+			view, err := rt.server.agents.chatHistory(ctx, rt.workspace.Path, chat)
+			if err != nil {
+				return err
+			}
+			for _, message := range view.Messages {
+				if (message.workID == "" && message.rawPosition <= route.Cursor) ||
+					(message.workID != "" && message.workOffset <= route.HistoryCursor[message.workID]) {
+					continue
+				}
 				text := message.Text
 				if !telegramForwardable(message, route) {
 					text = ""
@@ -183,11 +187,11 @@ func (rt *telegramRuntime) flush(ctx context.Context, st *telegramState) error {
 					text = sender + " (" + channel + "):\n" + text
 				}
 				if text == "" {
-					route.Cursor++
+					route.Cursor = message.rawPosition
 					changed = true
 					continue
 				}
-				route.Pending = &telegramDelivery{Text: text, Chunks: telegramChunks(text), NextCursor: route.Cursor + 1, Status: "queued"}
+				route.Pending = &telegramDelivery{Text: text, Chunks: telegramChunks(text), NextCursor: max(route.Cursor, message.rawPosition), WorkID: message.workID, WorkOffset: message.workOffset, Status: "queued"}
 				changed = true
 				break
 			}
@@ -206,8 +210,7 @@ func (rt *telegramRuntime) flush(ctx context.Context, st *telegramState) error {
 			continue
 		}
 		if len(pending.Chunks) == 0 {
-			route.Cursor = pending.NextCursor
-			route.Pending = nil
+			route.finishDelivery()
 			changed = true
 			continue
 		}
@@ -253,8 +256,7 @@ func (rt *telegramRuntime) flush(ctx context.Context, st *telegramState) error {
 			pending.Part++
 			pending.Status = "queued"
 			if pending.Part == len(pending.Chunks) {
-				route.Cursor = pending.NextCursor
-				route.Pending = nil
+				route.finishDelivery()
 			}
 		} else {
 			var apiErr *telegramAPIError

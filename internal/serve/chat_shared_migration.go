@@ -237,6 +237,10 @@ func revokeLegacyChatUserLocked(root, user string) error {
 				changed = true
 			}
 		}
+		if _, found := c.HistoryReads[user]; found {
+			delete(c.HistoryReads, user)
+			changed = true
+		}
 		if _, found := c.ReadCursors[user]; found {
 			delete(c.ReadCursors, user)
 			changed = true

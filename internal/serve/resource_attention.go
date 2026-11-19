@@ -681,6 +681,9 @@ func (s *server) enrichTreeUserState(workspacePath string, tree *workspaceTree, 
 		resourceID := normalizedResourceID(item.ID)
 		if c, ok := chats[resourceID]; ok {
 			item.Chat = c.snapshot(selectedUserName(userNames))
+			if unread, _, err := chatHistoryActivity(workspacePath, c, selectedUserName(userNames)); err == nil {
+				item.Chat.UnreadCount += unread
+			}
 			legacyAddress := c.address()
 			legacyID := chatID(c.ResourceID, selectedUserName(userNames))
 			if _, found := c.LegacySources[legacyID]; found {

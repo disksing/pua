@@ -14,12 +14,9 @@
   import WorkspaceSwitcher from "./WorkspaceSwitcher.svelte";
   import WorkspaceUserGate from "./WorkspaceUserGate.svelte";
 
-  let { channel, details, timeline, composer, agentHeader }: {
+  let { channel, details }: {
     channel: ModelChannel<AppShellModel>;
     details?: Snippet;
-    timeline?: Snippet;
-    composer?: Snippet;
-    agentHeader?: Snippet;
   } = $props();
   // svelte-ignore state_referenced_locally
   let model = $state(channel.current());
@@ -137,9 +134,8 @@
     <button id="splitMenuButton" class="workspace-menu-button" type="button" aria-label="Open navigation" aria-controls="mobileSidebar" aria-expanded={model.mobile.sidebarOpen} onclick={() => model.onMobileSidebar(true)}><Icon name="menu" /></button>
   </div>
   <section id="detailsPanel" class="details-panel" data-component-owner="detail-panel">{#if details}{@render details()}{/if}</section>
-  <PaneResizeHandle id="detailsResize" kind="chatWidth" className="details-resize" label="Resize chat panel" onPreview={model.onPanePreview} onCommit={model.onPaneCommit} />
-  <PaneResizeHandle id="detailsResizeY" kind="chatHeight" className="horizontal-resize details-resize-y" label="Resize chat panel height" onPreview={model.onPanePreview} onCommit={model.onPaneCommit} />
-  <aside id="agentPanel" class="agent-panel"><div class="chat-panel">{#if agentHeader}{@render agentHeader()}{/if}<div id="chatTimeline" class="chat-timeline" data-component-owner="event-timeline">{#if timeline}{@render timeline()}{/if}</div><div id="chatComposer" class="chat-composer" data-component-owner="chat-composer">{#if composer}{@render composer()}{/if}</div></div></aside>
+  <PaneResizeHandle id="detailsResize" kind="chatWidth" className="details-resize" label="Resize right column" onPreview={model.onPanePreview} onCommit={model.onPaneCommit} />
+  <div id="agentPanel" class="agent-panel" aria-hidden="true"></div>
   {/if}
 </main>
 </div>

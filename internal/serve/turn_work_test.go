@@ -78,6 +78,14 @@ func reconcileWorkflow(t *testing.T, m *agentManager, w serveWorkspace, client *
 	}
 }
 
+func workflowChat(m *agentManager, workspace serveWorkspace) (resourceChat, error) {
+	chat, err := loadDialogue(workspace.Path, dialoguePrefix+sharedChatID("project1.task1"))
+	if err != nil {
+		return chat, err
+	}
+	return m.chatHistory(context.Background(), workspace.Path, chat)
+}
+
 func queueWorkflowUser(t *testing.T, m *agentManager, w serveWorkspace, id, text string) resourceMailboxMessage {
 	t.Helper()
 	mustChatOK(t, chatCall(t, m, w, "project1.task1", "reader", "messages", chatRequest{ID: id, Text: text}, false))
@@ -136,12 +144,12 @@ func TestTurnWorkYieldPreviewResumeAndReplay(t *testing.T) {
 	if parent.State != "resuming" || resumed == nil || resumed.Context.ChatVisible || resumed.Context.OpenerSender.ID != "project1" {
 		t.Fatalf("lost original audience: %+v", file)
 	}
-	chat, _ := loadDialogue(w.Path, dialoguePrefix+sharedChatID("project1.task1"))
+	chat, _ := workflowChat(m, w)
 	if len(chat.Messages) != 2 || chat.Messages[1].Text != "I have changed the file." {
 		t.Fatalf("internal output leaked or reply lost: %+v", chat.Messages)
 	}
 	reconcileWorkflow(t, m, w, client)
-	replayed, _ := loadDialogue(w.Path, dialoguePrefix+sharedChatID("project1.task1"))
+	replayed, _ := workflowChat(m, w)
 	if len(replayed.Messages) != len(chat.Messages) || len(workFile(t, w).Works) != 3 {
 		t.Fatal("replay duplicated output or resume")
 	}
@@ -313,7 +321,7 @@ func TestTurnWorkRecoversDeliveredChatWithoutTurnID(t *testing.T) {
 	if err != nil || receipt.TurnID != turnID || recovered.TurnID != turnID || recovered.State != "completed" {
 		t.Fatalf("failed to restore delivery: work=%+v receipt=%+v err=%v", recovered, receipt, err)
 	}
-	chat, err := loadDialogue(workspace.Path, dialoguePrefix+sharedChatID(resource))
+	chat, err := workflowChat(manager, workspace)
 	if err != nil || len(chat.Messages) != 2 || chat.Messages[1].Text != "Answer about K" {
 		t.Fatalf("expected exactly one published answer: %+v, %v", chat.Messages, err)
 	}
@@ -530,7 +538,7 @@ func TestTurnWorkFastPollPublishesProgressBeforeCompletion(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	chat, _ := loadDialogue(w.Path, dialoguePrefix+sharedChatID("project1.task1"))
+	chat, _ := workflowChat(m, w)
 	if len(chat.Messages) != 2 || chat.Messages[1].Text != "Working on it." || workFile(t, w).find(work.ID).OutputDone {
 		t.Fatalf("active progress missing or duplicated: %+v", chat.Messages)
 	}
@@ -594,7 +602,7 @@ func TestTurnWorkAuditContinuesAfterResourceFailure(t *testing.T) {
 			if !workFile(t, workspace).find(work.ID).OutputDone {
 				t.Fatal("earlier resource failure blocked final reply recovery")
 			}
-			chat, err := loadDialogue(workspace.Path, dialoguePrefix+sharedChatID("project1.task1"))
+			chat, err := workflowChat(manager, workspace)
 			if err != nil || len(chat.Messages) != 2 || chat.Messages[1].Text != "Recovered final reply." {
 				t.Fatalf("final reply missing or duplicated: %+v, %v", chat.Messages, err)
 			}
@@ -640,7 +648,7 @@ func TestTurnWorkFastPollRetriesOutputForStableSession(t *testing.T) {
 	if !workFile(t, workspace).find(work.ID).OutputDone {
 		t.Fatal("stable session left final output pending")
 	}
-	chat, err := loadDialogue(workspace.Path, dialoguePrefix+sharedChatID("project1.task1"))
+	chat, err := workflowChat(manager, workspace)
 	if err != nil || len(chat.Messages) != 2 || chat.Messages[1].Text != "Final reply after idle." {
 		t.Fatalf("final reply missing or duplicated: %+v, %v", chat.Messages, err)
 	}

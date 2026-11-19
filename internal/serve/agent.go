@@ -207,6 +207,7 @@ type agentRuntime struct {
 }
 
 type agentManager struct {
+	chatHistoryCache      chatHistoryCache
 	server                *server
 	mu                    sync.Mutex
 	backgroundMu          sync.Mutex

@@ -10,13 +10,20 @@
   import type { ModelChannel } from "./model-channel";
   import type { DetailPanelModel } from "./models";
   import { markdownHTML, markdownResourceNavigation } from "./markdown";
-  let { channel }: { channel: ModelChannel<DetailPanelModel> } = $props();
+  let { channel, visible = true }: { channel: ModelChannel<DetailPanelModel>; visible?: boolean } = $props();
   // svelte-ignore state_referenced_locally
   let model = $state(channel.current());
   type Message = { id: string; role: string; sender?: string; text: string; createdAt: string };
-  type Chat = { id: string; open: boolean; epoch: number; unreadCount: number; messages: Message[]; hasOlder?: boolean; hasNewer?: boolean };
+  type Chat = { id: string; open: boolean; epoch: number; unreadCount: number; messages: Message[]; hasOlder?: boolean; hasNewer?: boolean; reset?: boolean; endPosition?: number };
   const PAGE_SIZE = 40;
   let chat = $state<Chat | null>(null);
+  let echoes = $state<Message[]>([]);
+  const messages = $derived.by(() => {
+    const confirmed = chat?.messages || [];
+    if (!echoes.length) return confirmed;
+    const known = new Set(confirmed.map(message => message.id));
+    return [...confirmed, ...echoes.filter(message => !known.has(message.id))];
+  });
   let root: HTMLElement;
   let followTail = true;
   let scrollIdentity = "";
@@ -44,11 +51,12 @@
   $effect(() => {
     const key = identity, path = base, userHeaders = { "X-PUA-User": userName };
     chat = null; draft = ""; error = ""; requestID = ""; pending = false; uploadOpen = false; bindingSaving = false;
+    echoes = [];
     hasOlder = false; loadingOlder = false; olderError = "";
     if (!canLoad) return;
     let disposed = false, loading = false;
     async function refresh() {
-      if (loading || untrack(() => pending)) return;
+      if (loading || untrack(() => pending || !visible)) return;
       loading = true; const revision = mutationRevision;
       try {
         let after = untrack(() => chat?.messages.at(-1)?.id);
@@ -57,10 +65,13 @@
         do {
           const query = new URLSearchParams({ limit: String(PAGE_SIZE) });
           if (after) query.set("after", after);
+          const position = untrack(() => chat?.endPosition);
+          if (after && position) query.set("afterPosition", String(position));
           next = await client.request<Chat>(`${path}?${query}`, { headers: userHeaders });
           if (disposed || key !== identity || revision !== mutationRevision || untrack(() => pending)) return;
           const current = untrack(() => chat);
-          if (!current || !after) {
+          error = "";
+          if (!current || !after || next.reset) {
             chat = next;
             hasOlder = Boolean(next.hasOlder);
           } else {
@@ -68,6 +79,8 @@
             chat = { ...next, messages: [...current.messages, ...next.messages.filter(message => !known.has(message.id))] };
           }
           model.onChatState?.({ open: next.open, unreadCount: next.unreadCount || 0 });
+          const received = new Set(next.messages.map(message => message.id));
+          echoes = untrack(() => echoes.filter(message => !received.has(message.id)));
           const last = next.messages.at(-1)?.id;
           if (!last || last === after) break;
           after = last;
@@ -76,8 +89,8 @@
         if (disposed || key !== identity || revision !== mutationRevision) return;
         const latest = untrack(() => chat);
         const last = latest?.messages.at(-1);
-        if (last && latest && latest.unreadCount > 0 && document.visibilityState !== "hidden" && followTail && !next.hasNewer) {
-          const read = await client.request<Chat>(`${path}/read?limit=1`, { method:"POST", headers:{...userHeaders,"Content-Type":"application/json"}, body:JSON.stringify({id:last.id}) });
+        if (last && latest && latest.unreadCount > 0 && visible && document.visibilityState !== "hidden" && followTail && !next.hasNewer) {
+          const read = await client.request<Chat>(`${path}/read?limit=1`, { method:"POST", headers:{...userHeaders,"Content-Type":"application/json"}, body:JSON.stringify({id:last.id, position:latest.endPosition}) });
           if (!disposed && key === identity && revision === mutationRevision) model.onChatState?.({ open: read.open, unreadCount: read.unreadCount || 0 });
         }
       }
@@ -123,9 +136,9 @@
     return { destroy: () => container?.removeEventListener("scroll", onScroll) };
   }
   $effect(() => {
-    const last = chat?.messages.at(-1)?.id;
+    const last = messages.at(-1)?.id;
     if (scrollIdentity !== identity) { scrollIdentity = identity; followTail = true; }
-    if (!last || !followTail) return;
+    if (!visible || !last || !followTail) return;
     void tick().then(() => { const container = root?.closest<HTMLElement>("#chatTimeline"); if (container) container.scrollTop = container.scrollHeight; });
   });
   async function act(operation: string, body: unknown = {}) {
@@ -133,9 +146,11 @@
     try {
       const next = await client.request<Chat>(`${base}/${operation}?limit=1`, { method: "POST", headers, body: JSON.stringify(body) });
       if (key !== identity) return false;
-      chat = chat ? { ...next, messages: chat.messages } : next;
+      chat = chat ? { ...next, endPosition: chat.endPosition, messages: chat.messages } : next;
       model.onChatState?.({ open: next.open, unreadCount: next.unreadCount || 0 });
       if (operation === "messages") {
+        const accepted = next.messages.find(message => message.role === "user" && message.text === sentText);
+        if (accepted && !messages.some(message => message.id === accepted.id)) echoes = [...echoes, accepted];
         if (draft === sentText) { draft = ""; draftResetVersion++; }
         requestID = "";
       }
@@ -211,7 +226,7 @@
   {#snippet heading()}
     <header><strong>Chat</strong><span>{model.resourceTitle}</span>{#if chat?.open && model.resourceId !== "workspace" && !model.detail?.archived}<button disabled={pending} onclick={() => act("close")}>Close chat</button>{/if}</header>
   {/snippet}
-  {#if chat}<SessionControls {model} {heading} />{:else}<div class="chat-heading">{@render heading()}</div>{/if}
+  {#if chat && visible}<SessionControls {model} {heading} />{:else}<div class="chat-heading">{@render heading()}</div>{/if}
   <div class="public-messages" aria-live="polite">
     {#if hasOlder}
       <div class="older-messages">
@@ -219,13 +234,13 @@
         {#if olderError}<small role="alert">{olderError}</small>{/if}
       </div>
     {/if}
-    {#each chat?.messages || [] as message (message.id)}
+    {#each messages as message (message.id)}
       <article class:user-message={message.role === "user"}>
         <small>{message.role === "user" ? (message.sender || "User") : (message.sender?.trim() || "Agent")} · {new Date(message.createdAt).toLocaleString()}</small>
         <div class="markdown-rendered" use:markdownResourceNavigation={{ resolveResourceTitle: model.resolveResourceTitle, onNavigate: model.onNavigate, onOpenFile: openLinkedFile }}>{@html markdownHTML(message.text, { resolveResourceTitle: model.resolveResourceTitle, workspaceId: model.workspaceId })}</div>
       </article>
     {/each}
-    {#if chat && !chat.messages.length}<p class="chat-hint">Start a conversation about this resource. Execution events are available in their own tab.</p>{/if}
+    {#if chat && !messages.length}<p class="chat-hint">No chat messages yet.</p>{/if}
   </div>
   {#if error}<p role="alert">{error}</p>{/if}
   {#if chat && !model.detail?.archived}

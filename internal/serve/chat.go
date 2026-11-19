@@ -20,11 +20,12 @@ import (
 )
 
 type chatRequest struct {
-	ID      string           `json:"id"`
-	Text    string           `json:"text"`
-	Target  string           `json:"target"`
-	Seconds int              `json:"seconds"`
-	Binding app.AgentBinding `json:"binding"`
+	Position int              `json:"position,omitempty"`
+	ID       string           `json:"id"`
+	Text     string           `json:"text"`
+	Target   string           `json:"target"`
+	Seconds  int              `json:"seconds"`
+	Binding  app.AgentBinding `json:"binding"`
 }
 
 func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, workspaceID, resourceID string, parts []string) {
@@ -204,9 +205,24 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 			http.NotFound(w, r)
 			return
 		}
-		page, pageErr := c.publicPage(pageLimit, before, after, user)
+		page, pageErr := m.historyPublicPage(r.Context(), workspace.Path, c, pageLimit, before, after, user)
+		if position := r.URL.Query().Get("afterPosition"); after != "" && position != "" {
+			previous, parseErr := strconv.Atoi(position)
+			if parseErr != nil || previous < 0 {
+				writeError(w, errors.New("invalid chat cursor position"), 400)
+				return
+			}
+			if errors.Is(pageErr, errChatCursor) || (pageErr == nil && page.EndPosition-len(page.Messages) != previous) {
+				page, pageErr = m.historyPublicPage(r.Context(), workspace.Path, c, pageLimit, "", "", user)
+				page.Reset = true
+			}
+		}
 		if pageErr != nil {
-			writeError(w, pageErr, 400)
+			status := http.StatusServiceUnavailable
+			if errors.Is(pageErr, errChatCursor) {
+				status = http.StatusBadRequest
+			}
+			writeError(w, pageErr, status)
 			return
 		}
 		writeJSON(w, page)
@@ -257,12 +273,32 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 			c.NextCheckAt = ""
 		}
 	case "read":
-		if !c.markRead(user, body.ID) {
-			chatMu.Unlock()
-			page, _ := c.publicPage(pageLimit, "", "", user)
-			writeJSON(w, page)
+		chatMu.Unlock()
+		view, readErr := m.chatHistory(r.Context(), workspace.Path, c)
+		if readErr != nil {
+			writeError(w, readErr, http.StatusServiceUnavailable)
 			return
 		}
+		chatMu.Lock()
+		c, err = loadChatLocked(workspace.Path, c.ID)
+		if err != nil {
+			break
+		}
+		view.ReadCursors, view.LegacyUnread, view.HistoryReads = c.ReadCursors, c.LegacyUnread, c.HistoryReads
+		positionMatches := body.Position == 0 || (body.Position > 0 && body.Position <= len(view.Messages) && view.Messages[body.Position-1].ID == body.ID)
+		if positionMatches && view.markRead(user, body.ID) {
+			c.ReadCursors, c.LegacyUnread, c.HistoryReads = view.ReadCursors, view.LegacyUnread, view.HistoryReads
+			err = saveChatLocked(workspace.Path, c)
+		}
+		chatMu.Unlock()
+		if err != nil {
+			writeError(w, err, 500)
+			return
+		}
+		view.Open, view.Epoch = c.Open, c.Epoch
+		page, _ := view.publicPage(pageLimit, "", "", user)
+		writeJSON(w, page)
+		return
 	case "messages":
 		err = c.appendUserInput(body.ID, body.Text, user)
 	case "publish":
@@ -303,6 +339,10 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 			}
 		}
 		previousLength := len(c.Messages)
+		if strings.HasPrefix(body.ID, "auto-") {
+			err = errors.New("auto- message IDs are reserved for Turn output")
+			break
+		}
 		err = c.appendMessage(body.ID, "agent", body.Text)
 		if err == nil && identity.ID != c.ID && len(c.Messages) > previousLength {
 			c.Messages[len(c.Messages)-1].PublishOrigin = identity.ID
@@ -341,6 +381,9 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 	// revokes publication without interrupting execution.
 	m.requestReconcile(reconcileMailboxes | reconcileAgentHub)
 	page, _ := c.publicPage(pageLimit, "", "", user)
+	if unread, _, activityErr := chatHistoryActivity(workspace.Path, c, user); activityErr == nil {
+		page.UnreadCount += unread
+	}
 	writeJSON(w, page)
 }
 
@@ -546,6 +589,15 @@ func (m *agentManager) handleChats(w http.ResponseWriter, r *http.Request, works
 			if c.unread(user, i, message, legacyUnread) {
 				item.Unread++
 			}
+		}
+		unread, updated, activityErr := chatHistoryActivity(workspace.Path, c, user)
+		if activityErr != nil {
+			err = activityErr
+			break
+		}
+		item.Unread += unread
+		if generationTime(updated).After(generationTime(item.UpdatedAt)) {
+			item.UpdatedAt = updated
 		}
 		entries = append(entries, item)
 	}

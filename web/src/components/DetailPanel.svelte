@@ -12,6 +12,7 @@
   import FilePreviewModal from "./FilePreviewModal.svelte";
   import Icon from "./Icon.svelte";
   import ChannelEvents from "./ChannelEvents.svelte";
+  import PersistentChat from "./PersistentChat.svelte";
   import MarkdownDocument from "./MarkdownDocument.svelte";
   import SchedulerPanel from "./SchedulerPanel.svelte";
   import ResourceSettingsPanel from "./ResourceSettingsPanel.svelte";
@@ -22,6 +23,7 @@
   let model = $state(channel.current());
   let identity = $state("");
   let activeTab = $state("");
+  let allTurns = $state(false);
   let expanded = $state(new Set<string>());
   let preview = $state<{ section: string; path: string; mode?: "edit" | "annotate" } | null>(null);
   let diffRepo = $state<ResourceRepoModel | null>(null);
@@ -56,7 +58,8 @@
       diffRepo = null;
       expanded = new Set();
       const remembered = tabMemory.get(identity);
-      activeTab = remembered && remembered !== "work" ? remembered : initialTab(next);
+      activeTab = remembered || "chat";
+      allTurns = false;
       const content = document.getElementById("detailsContent");
       if (content) content.scrollTop = 0;
     } else if (tabs.length && !tabs.some((tab) => tab.id === activeTab)) {
@@ -79,29 +82,23 @@
 
   onDestroy(() => client.dispose());
 
-  function initialTab(value: DetailPanelModel): string {
-    if (value.resourceType === "scheduler") return "schedules";
-    if (value.resourceType === "workspace" || value.resourceType === "project" || value.resourceType === "task") return "spec";
-    return "execution-events";
-  }
-
   function resourceTabs(): Array<{ id: string; label: string; icon: string }> {
+    const chatTab = { id: "chat", label: "Chat", icon: "message-square" };
     if (model.resourceType === "workspace") return [
+      chatTab,
       ...RESOURCE_DOCUMENTS,
 	  { id: "agents", label: "AGENTS.md", icon: "file-text" },
 	  { id: "wiki", label: "Wiki", icon: "book-open" },
-	  { id: "execution-events", label: "Execution events", icon: "history" },
       { id: "settings", label: "Settings", icon: "settings" }
 	];
     if (!model.detail) return [];
 	if (model.resourceType === "scheduler") return [
+      chatTab,
 	  { id: "schedules", label: "Schedules", icon: "calendar-clock" },
 	  { id: "context", label: "Context", icon: "file-text" },
-	  { id: "execution-events", label: "Execution events", icon: "history" },
       { id: "settings", label: "Settings", icon: "settings" }
 	];
-    const result: Array<{ id: string; label: string; icon: string }> = [...RESOURCE_DOCUMENTS];
-    result.push({ id: "execution-events", label: "Execution events", icon: "history" }, { id: "artifacts", label: "Artifacts", icon: "paperclip" });
+    const result = [chatTab, ...RESOURCE_DOCUMENTS, { id: "artifacts", label: "Artifacts", icon: "paperclip" }];
     if (model.resourceType === "task") result.push({ id: "worktrees", label: "Worktrees", icon: "folder-git-2" });
     result.push({ id: "settings", label: "Settings", icon: "settings" });
     return result;
@@ -198,14 +195,29 @@
   }
 </script>
 
+{#snippet chatPanel()}
+  {#if activeTab === "chat"}
+    <div class="chat-view-options" role="group" aria-label="Chat view">
+      <button type="button" aria-pressed={!allTurns} onclick={() => allTurns = false}>Chat only</button>
+      <button type="button" aria-pressed={allTurns} onclick={() => allTurns = true}>All turns{#if model.executionUnreadCount}<span class="event-unread-count" aria-label={`${model.executionUnreadCount} unread execution Turns`}>{model.executionUnreadCount}</span>{/if}</button>
+    </div>
+    {#if allTurns}
+      {#key `${model.identity}:${model.currentUserName}`}<ChannelEvents {model} onOpenFile={openLinkedFile} onOpenLegacy={(path) => openPreview("Artifacts", path)} />{/key}
+    {/if}
+  {/if}
+  <div id="chatTimeline" class="chat-timeline" hidden={activeTab !== "chat" || allTurns}>
+    <PersistentChat {channel} visible={activeTab === "chat" && !allTurns} />
+  </div>
+{/snippet}
+
 {#if !model.workspaceId}
   <div id="detailsContent" class="details-content"><div class="empty-state"><Icon name="folder-search" className="empty-state-icon" /><strong>No workspace selected</strong><span>Add an AgentWorkspace path in the sidebar.</span></div></div>
 {:else if model.resourceType === "workspace"}
   <div class="details-header"><h1 class="details-title">{model.workspaceName}</h1></div>
   <div class="details-tabs" role="tablist" aria-label="Workspace details">
-    {#each tabs as tab (tab.id)}<button type="button" class:active={activeTab === tab.id} class="details-tab" role="tab" aria-selected={activeTab === tab.id} onclick={() => selectTab(tab.id)}><Icon name={tab.icon} /><span>{tab.label}</span>{#if tab.id === "execution-events" && model.executionUnreadCount}<span class="event-unread-count" aria-label={`${model.executionUnreadCount} unread execution Turns`}>{model.executionUnreadCount}</span>{/if}</button>{/each}
+    {#each tabs as tab (tab.id)}<button type="button" class:active={activeTab === tab.id} class="details-tab" role="tab" aria-selected={activeTab === tab.id} onclick={() => selectTab(tab.id)}><Icon name={tab.icon} /><span>{tab.label}</span></button>{/each}
   </div>
-  <div id="detailsContent" class="details-content" class:details-events={activeTab === "execution-events"}>
+  <div id="detailsContent" class="details-content" class:details-events={activeTab === "chat"}>
     <div hidden={activeTab !== "agents"}>
       {#if agentsFile}<MarkdownDocument file={agentsFile} workspaceId={model.workspaceId} editable={true} resolveResourceTitle={model.resolveResourceTitle} onNavigate={model.onNavigate} onOpenFile={openLinkedFile} onEdit={openEditor} onAnnotate={openAnnotator} />
       {:else if model.workspaceAgents?.error}<div class="content-section"><div class="file-modal-empty error-preview wiki-status"><Icon name="triangle-alert" /><strong>AGENTS.md unavailable</strong><span>{model.workspaceAgents.error}</span></div></div>
@@ -229,7 +241,7 @@
       {:else}<FileBrowser title="Wiki" entries={model.wiki.entries || []} emptyMessage="No Wiki files yet." {expanded} activePath={activePreviewPath} onToggle={toggleFile} onPreview={openPreview} {rawURL} showHeading={false} />{/if}
     </div>
     <div hidden={activeTab !== "settings"}><ResourceSettingsPanel {model} /></div>
-    {#if activeTab === "execution-events"}{#key `${model.identity}:${model.currentUserName}:${activeTab}`}<ChannelEvents {model} onOpenFile={openLinkedFile} onOpenLegacy={(path) => openPreview("Artifacts", path)} />{/key}{/if}
+    {@render chatPanel()}
   </div>
 {:else}
   <div class="details-header">
@@ -242,9 +254,9 @@
   {#if model.loading || !model.detail}<div id="detailsContent" class="details-content"><div class="empty-state"><Icon name="loader-circle" className="empty-state-icon" /><strong>Loading details...</strong></div></div>
   {:else}
     <div class="details-tabs" role="tablist" aria-label="Resource details">
-      {#each tabs as tab (tab.id)}<button type="button" class:active={activeTab === tab.id} class="details-tab" role="tab" aria-selected={activeTab === tab.id} onclick={() => selectTab(tab.id)}><Icon name={tab.icon} /><span>{tab.label}</span>{#if tab.id === "execution-events" && model.executionUnreadCount}<span class="event-unread-count" aria-label={`${model.executionUnreadCount} unread execution Turns`}>{model.executionUnreadCount}</span>{/if}</button>{/each}
+      {#each tabs as tab (tab.id)}<button type="button" class:active={activeTab === tab.id} class="details-tab" role="tab" aria-selected={activeTab === tab.id} onclick={() => selectTab(tab.id)}><Icon name={tab.icon} /><span>{tab.label}</span></button>{/each}
     </div>
-    <div id="detailsContent" class="details-content" class:details-events={activeTab === "execution-events"}>
+    <div id="detailsContent" class="details-content" class:details-events={activeTab === "chat"}>
       {#each files as file (file.path || file.name)}<div hidden={activeTab !== documentTab(file)}><MarkdownDocument {file} workspaceId={model.workspaceId} editable={!model.detail.archived && (model.resourceType === "project" || model.resourceType === "task")} resolveResourceTitle={model.resolveResourceTitle} onNavigate={model.onNavigate} onOpenFile={openLinkedFile} onEdit={openEditor} onAnnotate={openAnnotator} /></div>{/each}
       {#if model.resourceType !== "scheduler"}
         {#each RESOURCE_DOCUMENTS as document (document.id)}
@@ -253,7 +265,7 @@
       {/if}
       {#if model.resourceType === "scheduler" && model.detail.scheduler}<div hidden={activeTab !== "schedules"}><SchedulerPanel workspaceId={model.workspaceId} config={model.detail.scheduler} resolveResourceTitle={model.resolveResourceTitle} onChanged={model.onRefreshScheduler || (async () => undefined)} onToast={model.onToast} /></div>{/if}
       <div hidden={activeTab !== "settings"}><ResourceSettingsPanel {model} /></div>
-      {#if activeTab === "execution-events"}{#key `${model.identity}:${model.currentUserName}:${activeTab}`}<ChannelEvents {model} onOpenFile={openLinkedFile} onOpenLegacy={(path) => openPreview("Artifacts", path)} />{/key}{/if}
+      {@render chatPanel()}
       <div hidden={activeTab !== "artifacts"}><FileBrowser title="Artifacts" entries={model.detail.artifacts || []} emptyMessage="No artifacts." {expanded} activePath={activePreviewPath} onToggle={toggleFile} onPreview={openPreview} {rawURL} onDelete={model.detail.archived ? undefined : deleteArtifact} showHeading={false} /></div>
       <div hidden={activeTab !== "worktrees"}><div class="content-section"><div class="worktree-list">{#if model.detail.repos?.length}{#each model.detail.repos as repo (`${repo.name}:${repo.worktreePath}`)}<div class="worktree-row"><div class="worktree-main"><Icon name="git-branch" className="worktree-icon" /><div><strong>{repo.branch || "HEAD"}</strong><span>{repo.name || "repository"}{repo.targetBranch ? ` · base ${repo.targetBranch}` : ""}</span><small>{repo.worktreePath || ""}</small></div></div><button type="button" class="secondary-button" onclick={() => diffRepo = repo}><Icon name="git-compare-arrows" /><span>View Diff</span></button></div>{/each}{:else}<div class="empty-list-row"><Icon name="git-branch" /><span>No worktrees.</span></div>{/if}</div></div></div>
     </div>

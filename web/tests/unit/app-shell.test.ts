@@ -336,7 +336,7 @@ describe("AppShell", () => {
     expect(target.querySelector("#workspaceMenu")).toBeNull();
   });
 
-  it("renders both panes with a horizontal divider for the stacked two-column layout", async () => {
+  it("reserves an empty right column without a stacked divider", async () => {
     const initial = model();
     const channel = createModelChannel(initial);
     const target = document.body.appendChild(document.createElement("div"));
@@ -348,9 +348,8 @@ describe("AppShell", () => {
     expect(target.querySelector("#agentPanel")).not.toBeNull();
     expect(target.querySelector("#paneDetailsTab")).toBeNull();
     expect(target.querySelector("#paneChatTab")).toBeNull();
-    const divider = target.querySelector<HTMLElement>("#detailsResizeY")!;
-    expect(divider.getAttribute("role")).toBe("separator");
-    expect(divider.getAttribute("aria-orientation")).toBe("horizontal");
+    expect(target.querySelector("#agentPanel")?.childElementCount).toBe(0);
+    expect(target.querySelector("#detailsResizeY")).toBeNull();
     const vertical = target.querySelector<HTMLElement>("#detailsResize")!;
     expect(vertical.getAttribute("aria-orientation")).toBe("vertical");
   });

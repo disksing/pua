@@ -232,7 +232,7 @@ describe("DetailPanel", () => {
     expect(target.querySelector(".resource-ref-badge")?.textContent).toBe("#2");
   });
 
-  it("keeps the resource document tab selected when detail data arrives after navigation", async () => {
+  it("keeps Chat selected when detail data arrives after navigation", async () => {
     const loaded = resourceModel();
     const loading = resourceModel({ detail: null, loading: true });
     const { channel, target } = mountModel(loading);
@@ -240,7 +240,7 @@ describe("DetailPanel", () => {
     channel.publish(loaded);
     await tick();
     const selected = target.querySelector('[role="tab"][aria-selected="true"]');
-    expect(selected?.textContent).toContain("Spec");
+    expect(selected?.textContent).toContain("Chat");
   });
 
   it("does not expose a retired Work tab for legacy detail data", async () => {
@@ -251,11 +251,11 @@ describe("DetailPanel", () => {
 
     const tabs = Array.from(target.querySelectorAll<HTMLButtonElement>("[role=tab]"));
     expect(tabs.find((tab) => tab.textContent?.trim() === "Work")).toBeUndefined();
-    expect(target.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain("Spec");
+    expect(target.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain("Chat");
 
     channel.publish({ ...initial, detail: { ...initial.detail!, files: initial.detail!.files } });
     await tick();
-    expect(target.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain("Spec");
+    expect(target.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain("Chat");
   });
 
   it("keeps the Task Spec tab visible with a missing-file notice", async () => {
@@ -266,6 +266,8 @@ describe("DetailPanel", () => {
     const tabs = Array.from(target.querySelectorAll<HTMLButtonElement>("[role=tab]"));
     const taskTab = tabs.find((tab) => tab.textContent?.includes("Spec"));
     expect(taskTab).toBeDefined();
+    taskTab!.click();
+    await tick();
     expect(taskTab!.getAttribute("aria-selected")).toBe("true");
     expect(target.textContent).toContain("Spec is missing");
     expect(target.querySelector('[data-doc-file="spec.md"]')).toBeNull();
@@ -286,6 +288,8 @@ describe("DetailPanel", () => {
     const tabs = Array.from(target.querySelectorAll<HTMLButtonElement>("[role=tab]"));
     const projectTab = tabs.find((tab) => tab.textContent?.includes("Spec"));
     expect(projectTab).toBeDefined();
+    projectTab!.click();
+    await tick();
     expect(projectTab!.getAttribute("aria-selected")).toBe("true");
     expect(target.textContent).toContain("Spec is missing");
   });
@@ -430,8 +434,8 @@ describe("DetailPanel", () => {
     await tick();
 
     const tabs = Array.from(target.querySelectorAll<HTMLButtonElement>("[role=tab]"));
-    expect(tabs.map((tab) => tab.textContent?.trim())).toEqual(["Spec", "Memory", "AGENTS.md", "Wiki", "Execution events", "Settings"]);
-    expect(target.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain("Spec");
+    expect(tabs.map((tab) => tab.textContent?.trim())).toEqual(["Chat", "Spec", "Memory", "AGENTS.md", "Wiki", "Settings"]);
+    expect(target.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain("Chat");
     tabs.find((tab) => tab.textContent?.trim() === "AGENTS.md")!.click();
     await tick();
     expect(target.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain("AGENTS.md");

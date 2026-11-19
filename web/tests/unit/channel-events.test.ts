@@ -105,7 +105,9 @@ it('cleans up the real detail tabs when switching resource, user or channel',asy
  cleanups.push(()=>unmount(component));
  await tick();
  const tab = (name: string) => [...target.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find(b=>b.textContent?.trim()===name)!;
- tab('Execution events').click();
+ const turns = () => [...target.querySelectorAll<HTMLButtonElement>('[aria-pressed]')].find(button=>button.textContent?.startsWith('All turns'))!;
+ expect(tab('Chat').getAttribute('aria-selected')).toBe('true');
+ turns().click();
  await vi.waitFor(()=>expect(FakeEventSource.instances).toHaveLength(1));
  const first=FakeEventSource.instances[0];
  expect(tab('Dialog events')).toBeUndefined();
@@ -118,7 +120,7 @@ it('cleans up the real detail tabs when switching resource, user or channel',asy
  // The selected tab may reset for a new resource; either way the old stream
  // must close before a stream for the next resource can be used.
  expect(third.closed).toBe(true);
- tab('Execution events').click();
+ turns().click();
  await vi.waitFor(()=>expect(FakeEventSource.instances.at(-1)?.url).toContain('/project1.task2/'));
  first.emit(99,'message.assistant.delta',{text:'late old-resource event',role:'assistant'});
  await tick();

@@ -303,9 +303,7 @@ func (m *agentManager) routeNotification(ctx context.Context, source serveWorksp
 			return err
 		}
 		if accepted.Status == resourceMessageQueued || accepted.Status == resourceMessageDelivering || accepted.Status == resourceMessageInterrupting {
-			if err := m.reconcileResourceMailboxLocked(ctx, target, accepted.ResourceID); err != nil {
-				recordMailboxFailure(target.Path, accepted.ID, err)
-			}
+			m.reconcileAcceptedResourceMailbox(ctx, target, accepted.ResourceID)
 		}
 		var found bool
 		var loadErr error

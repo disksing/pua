@@ -377,10 +377,7 @@ func (m *agentManager) reconcileScheduler(ctx context.Context, workspace serveWo
 		return err
 	}
 	if accepted.Status == resourceMessageQueued || accepted.Status == resourceMessageDelivering || accepted.Status == resourceMessageInterrupting {
-		if err := m.reconcileResourceMailboxLocked(ctx, workspace, app.SchedulerResourceID); err != nil {
-			recordMailboxFailure(workspace.Path, accepted.ID, err)
-			return err
-		}
+		return m.reconcileResourceMailboxLocked(ctx, workspace, app.SchedulerResourceID)
 	}
 	return nil
 }

@@ -1,14 +1,17 @@
 package serve
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -152,6 +155,174 @@ func TestTurnWorkSwitchPreviewResumeAndReplay(t *testing.T) {
 	replayed, _ := workflowChat(m, w)
 	if len(replayed.Messages) != len(chat.Messages) || len(workFile(t, w).Works) != 3 {
 		t.Fatal("replay duplicated output or resume")
+	}
+}
+
+func TestTurnResumeDeliveryReconcilesCanonicalInputAfterRestart(t *testing.T) {
+	tests := []struct {
+		name           string
+		unaccepted     bool
+		conflict       bool
+		newerTurn      bool
+		eventError     bool
+		changedSession bool
+		wantStatus     string
+		wantCode       string
+	}{
+		{name: "accepted active", wantStatus: resourceMessageDelivered},
+		{name: "accepted before different active turn", newerTurn: true, wantStatus: resourceMessageDelivered},
+		{name: "unaccepted waits for turn boundary", unaccepted: true, wantStatus: resourceMessageDelivering, wantCode: "temporarily_undeliverable"},
+		{name: "same ID with different content", conflict: true, wantStatus: resourceMessageUndeliverable, wantCode: "message_conflict"},
+		{name: "history read fails", eventError: true, wantStatus: resourceMessageDelivering, wantCode: "temporarily_undeliverable"},
+		{name: "different delivery Session", changedSession: true, wantStatus: resourceMessageDeliveryUnknown, wantCode: "delivery_session_changed"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			const resource = "project1.task1"
+			const resumeID = "resume-restart-fixture"
+			ctx := context.Background()
+			fake := newRuntimeFakeAgentHub()
+			fake.enforceMessageIDs, fake.materializeTurns = true, true
+			fake.failNextMessage = !test.unaccepted
+			var resumePosts atomic.Int32
+			hub := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/messages") {
+					var input agentHubInboundMessage
+					if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+						t.Error(err)
+						writer.WriteHeader(http.StatusBadRequest)
+						return
+					}
+					if input.MessageID == resumeID && resumePosts.Add(1) == 1 {
+						if test.unaccepted {
+							writer.WriteHeader(http.StatusBadGateway)
+							return
+						}
+						if test.conflict {
+							input.Text += " Different content."
+						}
+					}
+					sessionID := strings.Split(request.URL.Path, "/")[3]
+					fake.mu.Lock()
+					active := fake.sessions[sessionID].CurrentTurnID != ""
+					fake.mu.Unlock()
+					if active && !input.Steer {
+						writer.WriteHeader(http.StatusConflict)
+						writeRuntimeFakeJSON(writer, map[string]any{"error": map[string]any{"code": "turn_active"}})
+						return
+					}
+					wire, err := json.Marshal(input)
+					if err != nil {
+						t.Error(err)
+						writer.WriteHeader(http.StatusBadRequest)
+						return
+					}
+					request.Body = io.NopCloser(bytes.NewReader(wire))
+				}
+				fake.ServeHTTP(writer, request)
+			}))
+			t.Cleanup(hub.Close)
+			manager, workspace, _ := newRuntimeTestManager(t, hub.URL)
+			_, client, err := manager.agentHubRuntimeConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = acceptGeneratedMailboxMessage(workspace.Path, resourceMailboxMessage{
+				ID: resumeID, ResourceID: resource, Type: "turn_resume", Text: "Resume isolated work",
+				RequestedMode:   resourceMessageModeEnqueue,
+				ProviderContext: &providerMessageContext{Protocol: 1, WorkID: resumeID, OpenerRole: "agent"},
+				Causation:       &resourceMessageCausation{Type: "turn_resume", SourceResourceID: resource, MessageID: "isolated-parent"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			reconcile := func(manager *agentManager) error {
+				return manager.withResourceController(ctx, workspace, resource, func() error {
+					return manager.reconcileResourceMailboxLocked(ctx, workspace, resource)
+				})
+			}
+			if err := reconcile(manager); err == nil {
+				t.Fatal("first response should leave the delivery outcome unconfirmed")
+			}
+			resume, found, err := mailboxMessageByID(workspace.Path, resumeID)
+			if err != nil || !found || resume.Status != resourceMessageDelivering || resume.AttemptCount != 1 {
+				t.Fatalf("first attempt was not persisted: %+v found=%v err=%v", resume, found, err)
+			}
+			session, err := client.GetSession(ctx, resume.AgentHubSessionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			originalTurn := session.CurrentTurnID
+			if test.newerTurn {
+				closeWorkflowTurn(fake, turnWork{SessionID: session.ID, TurnID: originalTurn}, "completed", "first Turn done")
+			}
+			if test.newerTurn || test.unaccepted {
+				session, err = client.Message(ctx, session.ID, agentHubInboundMessage{MessageID: "independent-input", Text: "Independent active Turn"})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if test.changedSession {
+				_, err := updateMailboxMessage(workspace.Path, resumeID, func(message *resourceMailboxMessage) {
+					message.AgentHubSessionID = "different-session"
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			fake.mu.Lock()
+			fake.failEvents = test.eventError
+			fake.mu.Unlock()
+
+			manager.waitBackground()
+			restarted := newAgentManager(manager.server)
+			manager.server.agents = restarted
+			neighbor := acceptTestResourceMessage(t, restarted, workspace, resource, "Independent queued message", resourceMessageModeEnqueue, nil)
+			if neighbor.Status != resourceMessageQueued || neighbor.LastError != "" || neighbor.LastErrorCode != "" {
+				t.Fatalf("the adjacent input inherited a different delivery failure: %+v", neighbor)
+			}
+			resume, found, err = mailboxMessageByID(workspace.Path, resumeID)
+			if err != nil || !found || resume.Status != test.wantStatus || resume.LastErrorCode != test.wantCode {
+				t.Fatalf("unexpected recovered receipt: %+v found=%v err=%v", resume, found, err)
+			}
+			if resumePosts.Load() != 1 {
+				t.Fatalf("resume was reposted while a Turn was active: posts=%d", resumePosts.Load())
+			}
+			work := workFile(t, workspace).find(resumeID)
+			if test.wantStatus == resourceMessageDelivered {
+				if originalTurn == "" || resume.TurnID != originalTurn || work == nil || work.TurnID != originalTurn {
+					t.Fatalf("resume was not bound to its canonical Turn: receipt=%+v work=%+v", resume, work)
+				}
+			} else if resume.TurnID != "" || work == nil || work.TurnID != "" {
+				t.Fatalf("unconfirmed resume was bound to a Turn: receipt=%+v work=%+v", resume, work)
+			}
+			if test.eventError && !strings.Contains(resume.LastError, "events_unavailable") {
+				t.Fatalf("failed history read was not recorded on the resume: %q", resume.LastError)
+			}
+			if test.unaccepted {
+				closeWorkflowTurn(fake, turnWork{SessionID: session.ID, TurnID: session.CurrentTurnID}, "completed", "independent Turn done")
+				if err := reconcile(restarted); err != nil {
+					t.Fatal(err)
+				}
+				resume, found, err = mailboxMessageByID(workspace.Path, resumeID)
+				if err != nil || !found || resume.Status != resourceMessageDelivered ||
+					resume.TurnID == "" || resume.TurnID == session.CurrentTurnID || resumePosts.Load() != 2 {
+					t.Fatalf("unaccepted resume did not deliver once the Session became ready: %+v found=%v err=%v", resume, found, err)
+				}
+			}
+			fake.mu.Lock()
+			var canonicalCount int
+			for _, event := range fake.events[session.ID] {
+				var input agentHubInboundMessage
+				if event.Type == "message.input" && json.Unmarshal(event.Data, &input) == nil && input.MessageID == resumeID {
+					canonicalCount++
+				}
+			}
+			fake.mu.Unlock()
+			if canonicalCount != 1 {
+				t.Fatalf("canonical input count=%d, want 1", canonicalCount)
+			}
+		})
 	}
 }
 

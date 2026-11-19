@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"reflect"
 	"sort"
@@ -807,6 +808,9 @@ func findCanonicalAgentHubMessage(ctx context.Context, client *agentHubClient, s
 				if json.Unmarshal(event.Data, &canonical) != nil || canonical.MessageID != expected.ID {
 					continue
 				}
+				if event.SessionID != "" && event.SessionID != sessionID {
+					return agentHubInboundMessage{}, false, errors.New("canonical AgentHub input belongs to a different Session")
+				}
 				if !canonicalAgentHubMessageMatches(canonical, expected) {
 					return agentHubInboundMessage{}, false, &resourceAPIError{Code: "message_conflict", Message: "stable message id conflicts with a different canonical AgentHub input"}
 				}
@@ -819,6 +823,68 @@ func findCanonicalAgentHubMessage(ctx context.Context, client *agentHubClient, s
 		}
 		cursor = frames[len(frames)-1].Cursor
 	}
+}
+
+func recordMailboxDelivery(workspacePath, messageID, turnID string) error {
+	_, err := updateMailboxMessage(workspacePath, messageID, func(current *resourceMailboxMessage) {
+		current.Status = resourceMessageDelivered
+		current.DeliveredAt = time.Now().Format(time.RFC3339Nano)
+		current.TerminalAt = current.DeliveredAt
+		current.TurnID = turnID
+		current.LastError = ""
+		current.LastErrorCode = ""
+	})
+	return err
+}
+
+func finishTurnResumeDeliveryFailure(workspacePath, messageID, status, code, detail string) error {
+	_, err := updateMailboxMessage(workspacePath, messageID, func(current *resourceMailboxMessage) {
+		current.Status = status
+		current.TerminalAt = time.Now().Format(time.RFC3339Nano)
+		current.LastErrorCode = code
+		current.LastError = detail
+	})
+	return err
+}
+
+func (m *agentManager) recoverTurnResumeDelivery(ctx context.Context, workspace serveWorkspace, record generationRecord, session agentHubSession, client *agentHubClient, message resourceMailboxMessage) (bool, error) {
+	if message.GenerationID != record.GenerationID || message.AgentHubSessionID != session.ID {
+		return true, finishTurnResumeDeliveryFailure(workspace.Path, message.ID, resourceMessageDeliveryUnknown,
+			"delivery_session_changed", "Cannot confirm Turn resumption in the original AgentHub Session.")
+	}
+	canonical, found, err := findCanonicalAgentHubMessage(ctx, client, session.ID, message, 0)
+	if canonical.Steer {
+		err = &resourceAPIError{Code: "message_conflict", Message: "Turn resumption ID belongs to an AgentHub steer input"}
+	}
+	var apiErr *resourceAPIError
+	if errors.As(err, &apiErr) && apiErr.Code == "message_conflict" {
+		return true, finishTurnResumeDeliveryFailure(workspace.Path, message.ID, resourceMessageUndeliverable, apiErr.Code, apiErr.Message)
+	}
+	if err != nil || !found {
+		return false, err
+	}
+	turnID := strings.TrimSpace(canonical.TurnID)
+	if turnID == "" {
+		turnID, err = findMailboxOpenerTurn(ctx, client, session.ID, message.ID)
+		if err != nil {
+			return false, err
+		}
+		if turnID == "" {
+			return false, errors.New("accepted Turn resumption has no confirmed AgentHub Turn")
+		}
+	}
+	current, currentFound, err := currentGenerationRecordByID(workspace.Path, record.ResourceID, record.GenerationID)
+	if err != nil || !currentFound || current.AgentHubSessionID != session.ID {
+		return true, err
+	}
+	if err := recordMailboxDelivery(workspace.Path, message.ID, turnID); err != nil {
+		return false, err
+	}
+	if err := bindTurnWork(workspace.Path, message.ResourceID, message.ID, turnID); err != nil {
+		return false, err
+	}
+	m.requestTurnOutput(workspace, message.ResourceID)
+	return true, nil
 }
 
 // deliveredMailboxTurnID prefers the Turn ID attached to AgentHub's canonical
@@ -1009,6 +1075,12 @@ func recordMailboxFailure(workspacePath, messageID string, err error) {
 	})
 }
 
+func (m *agentManager) reconcileAcceptedResourceMailbox(ctx context.Context, workspace serveWorkspace, resourceID string) {
+	if err := m.reconcileResourceMailboxLocked(ctx, workspace, resourceID); err != nil {
+		log.Printf("reconcile accepted resource mailbox workspace=%s resource=%s: %v", workspace.ID, resourceID, err)
+	}
+}
+
 func (m *agentManager) acceptResourceMessage(ctx context.Context, workspace serveWorkspace, resourceID string, request resourceMessageRequest) (resourceMailboxMessage, error) {
 	resourceID = normalizedResourceID(resourceID)
 	var message resourceMailboxMessage
@@ -1018,9 +1090,7 @@ func (m *agentManager) acceptResourceMessage(ctx context.Context, workspace serv
 		if err != nil {
 			return err
 		}
-		if reconcileErr := m.reconcileResourceMailboxLocked(ctx, workspace, resourceID); reconcileErr != nil {
-			recordMailboxFailure(workspace.Path, message.ID, reconcileErr)
-		}
+		m.reconcileAcceptedResourceMailbox(ctx, workspace, resourceID)
 		if updated, found, loadErr := mailboxMessageByID(workspace.Path, message.ID); loadErr == nil && found {
 			message = updated
 		}
@@ -1071,9 +1141,7 @@ func (m *agentManager) promoteWaitingMessage(ctx context.Context, workspace serv
 		if err != nil {
 			return err
 		}
-		if reconcileErr := m.reconcileResourceMailboxLocked(ctx, workspace, message.ResourceID); reconcileErr != nil {
-			recordMailboxFailure(workspace.Path, message.ID, reconcileErr)
-		}
+		m.reconcileAcceptedResourceMailbox(ctx, workspace, message.ResourceID)
 		if updated, found, loadErr := mailboxMessageByID(workspace.Path, message.ID); loadErr == nil && found {
 			message = updated
 		}
@@ -1322,6 +1390,20 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 		rt.applyAgentHubSessionState(m, session)
 		record = rt.snapshotGeneration()
 		active := session.State == "running" || session.State == "waiting_approval"
+		turnResume := message.Type == "turn_resume"
+		if turnResume && message.Status == resourceMessageDelivering {
+			settled, recoveryErr := m.recoverTurnResumeDelivery(ctx, workspace, record, session, client, message)
+			if recoveryErr != nil {
+				recordMailboxFailure(workspace.Path, message.ID, recoveryErr)
+				return recoveryErr
+			}
+			if settled {
+				continue
+			}
+			if active || session.CurrentTurnID != "" {
+				return nil
+			}
+		}
 		workFile, workErr := loadTurnWork(workspace.Path, resourceID)
 		if workErr != nil {
 			return workErr
@@ -1572,16 +1654,20 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 		if message.Status != resourceMessageDelivering && session.State != "ready" && message.ActualMode != resourceMessageModeSteer {
 			return nil
 		}
-		message, err = m.ensureProviderMessageContext(ctx, workspace, client, session, record.GenerationID, message)
+		contextualMessage, err := m.ensureProviderMessageContext(ctx, workspace, client, session, record.GenerationID, message)
 		if err != nil {
+			recordMailboxFailure(workspace.Path, message.ID, err)
 			return err
 		}
+		message = contextualMessage
 		if err := prepareTurnWork(workspace.Path, resourceID, record.GenerationID, session.ID, message); err != nil {
+			recordMailboxFailure(workspace.Path, message.ID, err)
 			return err
 		}
 		m.requestTurnOutput(workspace, resourceID)
 		deliveryPlan := lifecyclePlan
 		if err := m.prepareTaskWorkChain(workspace, message, rt); err != nil {
+			recordMailboxFailure(workspace.Path, message.ID, err)
 			return err
 		}
 		message, err = updateMailboxMessage(workspace.Path, message.ID, func(current *resourceMailboxMessage) {
@@ -1602,6 +1688,7 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 		}
 		outbound, outboundErr := agentHubMailboxMessage(message)
 		if outboundErr != nil {
+			recordMailboxFailure(workspace.Path, message.ID, outboundErr)
 			return outboundErr
 		}
 		delivered, deliveryErr := client.Message(ctx, session.ID, outbound)
@@ -1614,18 +1701,27 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 				return nil
 			}
 			var deliveryAPIError *agentHubAPIError
-			if errors.As(deliveryErr, &deliveryAPIError) && deliveryAPIError.StatusCode == http.StatusConflict && deliveryAPIError.Code == "provider_busy" {
+			isConflict := errors.As(deliveryErr, &deliveryAPIError) && deliveryAPIError.StatusCode == http.StatusConflict
+			if isConflict && turnResume && deliveryAPIError.Code == "turn_active" {
+				return nil
+			}
+			if isConflict && deliveryAPIError.Code == "provider_busy" {
 				_, err := updateMailboxMessage(workspace.Path, message.ID, func(current *resourceMailboxMessage) {
 					current.Status = resourceMessageQueued
 				})
 				return err
 			}
-			conflict := errors.As(deliveryErr, &deliveryAPIError) && deliveryAPIError.StatusCode == http.StatusConflict &&
-				strings.Contains(deliveryAPIError.Message, "message id conflicts with an existing input")
+			conflict := isConflict && strings.Contains(deliveryAPIError.Message, "message id conflicts with an existing input")
 			var canonical agentHubInboundMessage
 			var canonicalFound bool
 			var canonicalErr error
-			if conflict {
+			if conflict && turnResume {
+				settled, recoveryErr := m.recoverTurnResumeDelivery(ctx, workspace, record, session, client, message)
+				if recoveryErr == nil && settled {
+					continue
+				}
+				canonicalErr = recoveryErr
+			} else if conflict {
 				// The conflicting canonical event may come from an earlier
 				// attempt that predates the session snapshot taken by this pass,
 				// so the recovery scan cannot use the pre-delivery cursor hint.
@@ -1681,15 +1777,7 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 			return nil
 		}
 		turnID := deliveredMailboxTurnID(ctx, client, session.ID, message, delivered, session)
-		_, err = updateMailboxMessage(workspace.Path, message.ID, func(current *resourceMailboxMessage) {
-			current.Status = resourceMessageDelivered
-			current.DeliveredAt = time.Now().Format(time.RFC3339Nano)
-			current.TerminalAt = current.DeliveredAt
-			current.TurnID = turnID
-			current.LastError = ""
-			current.LastErrorCode = ""
-		})
-		if err != nil {
+		if err := recordMailboxDelivery(workspace.Path, message.ID, turnID); err != nil {
 			return err
 		}
 		rt.applyAgentHubSessionState(m, delivered)
@@ -1910,9 +1998,7 @@ func (m *agentManager) handleResourceMessages(w http.ResponseWriter, r *http.Req
 		}
 	}
 	if wakeErr := m.enqueueResourceController(workspace, resourceID, func() error {
-		if err := m.reconcileResourceMailboxLocked(context.Background(), workspace, resourceID); err != nil {
-			recordMailboxFailure(workspace.Path, message.ID, err)
-		}
+		m.reconcileAcceptedResourceMailbox(context.Background(), workspace, resourceID)
 		m.requestReconcile(reconcileNotifications)
 		return nil
 	}); wakeErr != nil {

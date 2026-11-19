@@ -1245,6 +1245,133 @@ for (const viewport of [{ width: 1500, height: 800 }, { width: 440, height: 844 
   });
 }
 
+for (const viewport of [{ width: 1500, height: 844 }, { width: 440, height: 820 }]) {
+  test(`keeps open Chat Turn controls clear of the dock at ${viewport.width}px`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await installMockApi(page);
+    const timeAt = (index: number) => new Date(Date.parse(now) + index * 1000).toISOString();
+    const messages = Array.from({ length: 120 }, (_, index) => ({
+      id: `m${index}`, role: "agent", text: `Shared message ${index}`, createdAt: timeAt(index),
+    }));
+    const turnAt = (index: number) => ({
+      reference: `ref-${index}`, turnId: `turn-${index}`, generation: resourceGeneration,
+      closed: true, status: "completed", startedAt: timeAt(index), startEventId: index, lastEventId: index,
+      triggerRole: "agent", triggerSender: { id: "project1.task2" }, triggerPreview: "Inspect the chat layout",
+    });
+    const turn = turnAt(105), olderTurn = turnAt(35);
+    await page.route("**/resources/project1.task1/chat?*", route => {
+      const params = new URL(route.request().url()).searchParams;
+      const before = params.get("before");
+      const end = before ? messages.findIndex(message => message.id === before) : messages.length;
+      const start = Math.max(0, end - Number(params.get("limit")));
+      return json(route, {
+        id: "scroll-padding-chat", open: true, epoch: 1, unreadCount: 0,
+        messages: params.has("after") ? [] : messages.slice(start, end), hasOlder: start > 0,
+      });
+    });
+    await page.route("**/resources/project1.task1/history/turns?*", route => {
+      const older = new URL(route.request().url()).searchParams.has("cursor");
+      return json(route, {
+        segments: [{ generation: resourceGeneration, turns: [older ? olderTurn : turn] }],
+        page: { hasMore: !older, nextCursor: older ? undefined : "earlier-turns" },
+      });
+    });
+    await page.route(`**/resources/project1.task1/history/turns/${turn.reference}*`, route => json(route, {
+      turn, latestEventId: turn.lastEventId,
+      items: [{ type: "message", role: "assistant", text: longDetailBody, startEventId: turn.startEventId }],
+    }));
+    await page.goto("/w/ws-test/r/project1.task1");
+    const scroller = page.locator("#chatTimeline");
+    const articles = scroller.locator(".public-messages article");
+    const dock = scroller.locator(".public-chat-dock");
+    const composer = dock.getByRole("textbox", { name: "Chat message" });
+    const chip = scroller.getByRole("button", { name: "Turn · Agent · project1.task2" });
+    const jump = dock.getByRole("button", { name: "Jump to latest" });
+    const dockHeight = () => dock.evaluate(element => element.getBoundingClientRect().height);
+    const expectDockPadding = async (height: number) => {
+      await expect.poll(() => scroller.evaluate(element => parseFloat(getComputedStyle(element).scrollPaddingBlockEnd)))
+        .toBe(Math.ceil(height) + 8);
+    };
+    const nearestFromBelow = (target: Locator) => target.evaluate(element => {
+      const scroll = element.closest<HTMLElement>("#chatTimeline")!;
+      const dock = scroll.querySelector(".public-chat-dock")!;
+      scroll.scrollTop += element.getBoundingClientRect().top - scroll.getBoundingClientRect().bottom - 150;
+      const startedBelow = element.getBoundingClientRect().top > scroll.getBoundingClientRect().bottom;
+      element.scrollIntoView({ block: "nearest" });
+      const rect = element.getBoundingClientRect();
+      const x = rect.x + rect.width / 2, y = rect.y + rect.height / 2;
+      const hit = document.elementFromPoint(x, y);
+      return { x, y, startedBelow, hitTarget: element.contains(hit), clearOfDock: rect.bottom <= dock.getBoundingClientRect().top };
+    });
+
+    await expect(articles).toHaveCount(40);
+    await expect(composer).toBeVisible();
+    await expect(jump).toHaveCount(0);
+    await expect.poll(() => scroller.evaluate(element => element.scrollHeight - element.clientHeight - element.scrollTop))
+      .toBeLessThan(2);
+    const initialDock = await dockHeight();
+    await chip.evaluate(element => element.scrollIntoView({ block: "center" }));
+    await expect(jump).toBeVisible();
+    await expect.poll(dockHeight).toBeGreaterThan(initialDock);
+    const compactDock = await dockHeight();
+    await expectDockPadding(compactDock);
+    const chipCenter = await nearestFromBelow(chip);
+    expect(chipCenter).toMatchObject({ startedBelow: true, hitTarget: true, clearOfDock: true });
+    await page.mouse.move(chipCenter.x, chipCenter.y);
+    const preview = scroller.getByRole("tooltip");
+    await expect(preview).toContainText("project1.task2");
+    await expect(preview).toContainText("Inspect the chat layout");
+    await page.mouse.click(chipCenter.x, chipCenter.y);
+    await expect(chip).toHaveAttribute("aria-expanded", "true");
+    await expect(scroller.locator(".expanded-history")).toContainText("Stable detail paragraph 60.");
+
+    await composer.fill(Array.from({ length: 10 }, (_, index) => `Draft line ${index}`).join("\n"));
+    await expect.poll(dockHeight).toBeGreaterThan(compactDock);
+    const grownDock = await dockHeight();
+    await expectDockPadding(grownDock);
+    const collapseCenter = await nearestFromBelow(scroller.getByRole("button", { name: "Collapse turn" }));
+    expect(collapseCenter).toMatchObject({ startedBelow: true, hitTarget: true, clearOfDock: true });
+    await page.mouse.click(collapseCenter.x, collapseCenter.y);
+    await expect(chip).toHaveAttribute("aria-expanded", "false");
+    await expect(chip).toBeFocused();
+    await expect.poll(() => chip.evaluate(element => {
+      const rect = element.getBoundingClientRect();
+      return element.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2));
+    })).toBe(true);
+
+    await jump.click();
+    await expect(jump).toHaveCount(0);
+    await expect.poll(dockHeight).toBeLessThan(grownDock);
+    await expectDockPadding(await dockHeight());
+    await composer.fill("");
+    await expect.poll(dockHeight).toBe(initialDock);
+    await expectDockPadding(initialDock);
+
+    for (const [before, total] of [["m80", 80], ["m40", 120]] as const) {
+      const sharedPage = page.waitForRequest(request => new URL(request.url()).searchParams.get("before") === before);
+      await scroller.evaluate(element => { element.scrollTop = 0; });
+      await sharedPage;
+      await expect(articles).toHaveCount(total);
+    }
+    await expect(scroller.getByRole("button", { name: "Load older messages" })).toHaveCount(0);
+    const pager = scroller.getByRole("button", { name: "Load older Turns" });
+    await pager.evaluate(element => element.scrollIntoView({ block: "nearest" }));
+    const center = await pager.evaluate(element => {
+      const { x, y, width, height } = element.getBoundingClientRect();
+      const center = { x: x + width / 2, y: y + height / 2 };
+      return { ...center, hitTarget: element.contains(document.elementFromPoint(center.x, center.y)) };
+    });
+    expect(center.hitTarget).toBe(true);
+    const turnPage = page.waitForResponse(response => {
+      const url = new URL(response.url());
+      return url.pathname.endsWith("/history/turns") && url.searchParams.get("cursor") === "earlier-turns";
+    });
+    await page.mouse.click(center.x, center.y);
+    expect((await turnPage).ok()).toBe(true);
+    await expect(chip).toHaveCount(2);
+  });
+}
+
 test("fits shared chat bubbles to the panel and caps long replies", async ({ page }) => {
   await installMockApi(page);
   const messages = [

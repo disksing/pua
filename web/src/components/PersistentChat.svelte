@@ -145,6 +145,11 @@
     root = element;
     const container = element.closest<HTMLElement>("#chatTimeline");
     if (!container) return;
+    const dock = element.querySelector<HTMLElement>(".public-chat-dock");
+    const updateScrollPadding = () => {
+      const height = dock?.getBoundingClientRect().height ?? 0;
+      container.style.scrollPaddingBlockEnd = height ? `${Math.ceil(height) + 8}px` : "";
+    };
     const movePreview = () => {
       if (!("showPopover" in HTMLElement.prototype)) return;
       const preview = element.querySelector<HTMLElement>(".timeline-preview:popover-open");
@@ -156,14 +161,18 @@
       if (container.scrollTop < 120) loadOlder();
     };
     const resize = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => {
+      updateScrollPadding();
       movePreview();
       if (visible && followTail && window.getSelection()?.isCollapsed !== false) pinToTail();
     });
+    updateScrollPadding();
     resize?.observe(container);
     resize?.observe(element);
+    if (dock) resize?.observe(dock, { box: "border-box" });
     container.addEventListener("scroll", onScroll, { passive: true });
     return { destroy: () => {
       resize?.disconnect();
+      container.style.scrollPaddingBlockEnd = "";
       container.removeEventListener("scroll", onScroll);
     } };
   }

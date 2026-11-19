@@ -324,13 +324,21 @@ type agentHubTurn struct {
 }
 
 type agentHubTurnPage struct {
-	Turns []agentHubTurn `json:"turns"`
-	Page  struct {
+	Turns  []agentHubTurn      `json:"turns"`
+	Totals *agentHubTurnTotals `json:"totals,omitempty"`
+	Page   struct {
 		NextBefore    int64 `json:"nextBefore"`
 		HasMoreBefore bool  `json:"hasMoreBefore"`
 	} `json:"page"`
 	LatestCursor  int64 `json:"latestCursor"`
 	LatestEventID int64 `json:"latestEventId"`
+}
+
+type agentHubTurnTotals struct {
+	Count           int    `json:"count"`
+	ExecutionMS     *int64 `json:"executionMs,omitempty"`
+	ActiveStartedAt string `json:"activeStartedAt,omitempty"`
+	LatestEventID   int64  `json:"latestEventId"`
 }
 
 func newAgentHubClient(endpoint string, httpClient *http.Client) (*agentHubClient, error) {

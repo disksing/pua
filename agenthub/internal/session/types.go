@@ -428,6 +428,14 @@ type TurnPage struct {
 	HasMoreBefore bool          `json:"hasMoreBefore,omitempty"`
 	LatestCursor  int64         `json:"latestCursor"`
 	LatestEventID int64         `json:"latestEventId"`
+	Totals        TurnTotals    `json:"totals"`
+}
+
+type TurnTotals struct {
+	Count           int        `json:"count"`
+	ExecutionMS     *int64     `json:"executionMs,omitempty"`
+	ActiveStartedAt *time.Time `json:"activeStartedAt,omitempty"`
+	LatestEventID   int64      `json:"latestEventId"`
 }
 
 // ValidateLaunchEnvironment checks values before they are persisted and

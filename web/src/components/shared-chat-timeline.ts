@@ -11,10 +11,17 @@ export interface SharedChatMessage {
   startEventId?: number;
 }
 
-type TimelineRow =
-  | { kind: "message"; key: string; time: number; message: SharedChatMessage }
-  | { kind: "generation"; key: string; time: number; generation: ResourceHistoryGeneration }
-  | { kind: "history"; key: string; time: number; block: ConversationBlock; input?: SharedChatMessage };
+export interface HistoryRow {
+  kind: "history";
+  key: string;
+  time: number;
+  block: ConversationBlock;
+  input?: SharedChatMessage;
+}
+
+type TimelineRow = { kind: "message"; key: string; time: number; message: SharedChatMessage } | HistoryRow;
+type GenerationBoundary = { kind: "generation"; key: string; time: number; generation: ResourceHistoryGeneration };
+type TimelineSection = { key: string; generation?: ResourceHistoryGeneration; rows: TimelineRow[] };
 
 export interface TimelineSource {
   role: string;
@@ -28,6 +35,7 @@ function source(role = "", type = "", sender?: WaitingMessage["sender"], text = 
   role = role.trim().toLowerCase();
   const id = sender?.id?.trim() || (role === "user" ? "" : sourceResourceId);
   const name = sender?.name?.trim() || id;
+  if (type === "chat_notification") return { role: "user", label: "User notification", icon: "user", sender: name, text };
   if (id === "scheduler" || type === "scheduler_tick" || type === "schedule_exact_due" || role === "scheduler") {
     return { role: "scheduler", label: "Scheduler", icon: "calendar-clock", sender: name, text };
   }
@@ -48,6 +56,17 @@ export function queueSource(message: WaitingMessage): TimelineSource {
   return source(message.type === "user_chat_input" ? "user" : message.role, message.type, message.sender, legacyInputText(message.text), message.causation?.sourceResourceId);
 }
 
+export function turnWorkingLabel(row: HistoryRow): string {
+  if (row.block.turn?.triggerType === "chat_notification") return "Agent is updating you";
+  switch (turnSource(row.block, row.input).role) {
+    case "user": return "Agent is replying";
+    case "agent": return "Agent is handling an agent message";
+    case "scheduler": return "Agent is running scheduled work";
+    case "system": return "Agent is handling a system message";
+    default: return "Agent is working…";
+  }
+}
+
 export function legacyInputText(text?: string): string {
   if (!text?.startsWith("User Chat input for resource ")) return text || "";
   const boundary = text.indexOf("\nReply: pua chat publish --reply-to=");
@@ -55,10 +74,10 @@ export function legacyInputText(text?: string): string {
   return body >= 0 ? text.slice(body + 2).replace(/^User message [^\n]+:\n/, "") : "Legacy Chat input";
 }
 
-export function timelineRows(messages: SharedChatMessage[], blocks: ConversationBlock[]): TimelineRow[] {
+export function timelineSections(messages: SharedChatMessage[], blocks: ConversationBlock[]): TimelineSection[] {
   const byInput = new Map(messages.flatMap(message => (message.inputMessageIds || []).map(id => [id, message] as const)));
-  const generations = new Map<string, { generation: ResourceHistoryGeneration; time: number }>();
-  const rows: TimelineRow[] = messages.map(message => ({ kind: "message", key: `message:${message.id}`, time: timestamp(message.createdAt), message }));
+  const generations = new Map<string, GenerationBoundary>();
+  const rows: (TimelineRow | GenerationBoundary)[] = messages.map(message => ({ kind: "message", key: `message:${message.id}`, time: timestamp(message.createdAt), message }));
   for (const block of blocks) {
     const firstEvent = block.events?.[0];
     if (!block.turn && block.kind !== "gap" && (!firstEvent || firstEvent.turnId)) continue;
@@ -66,34 +85,47 @@ export function timelineRows(messages: SharedChatMessage[], blocks: Conversation
     const time = timestamp(block.turn?.startedAt || firstEvent?.time || block.generation.createdAt);
     const id = block.generation.generationId;
     const marker = generations.get(id);
-    if (!marker || time < marker.time) generations.set(id, { generation: block.generation, time });
+    const boundary = Math.min(time, timestamp(block.generation.createdAt) || time);
+    if (!marker || boundary < marker.time) generations.set(id, { kind: "generation", key: `generation:${id}`, generation: block.generation, time: boundary });
     rows.push({ kind: "history", key: block.key, time, block, input });
   }
-  for (const { generation, time } of generations.values()) {
-    rows.push({ kind: "generation", key: `generation:${generation.generationId}`, time, generation });
-  }
+  rows.push(...generations.values());
   const order = { generation: 0, message: 1, history: 2 };
-  return rows.sort((left, right) => left.time - right.time || order[left.kind] - order[right.kind]);
+  rows.sort((left, right) => left.time - right.time || order[left.kind] - order[right.kind]);
+  const sections: TimelineSection[] = [];
+  let section: TimelineSection = { key: "before-generations", rows: [] };
+  for (const row of rows) {
+    if (row.kind === "generation") {
+      if (section.generation || section.rows.length) sections.push(section);
+      section = { key: row.key, generation: row.generation, rows: [] };
+    } else {
+      section.rows.push(row);
+    }
+  }
+  if (section.generation || section.rows.length) sections.push(section);
+  return sections;
 }
 
 function timestamp(value?: string): number {
   return Date.parse(value || "") || 0;
 }
 
-export function publicMessageIndex(messages: SharedChatMessage[]): Set<string> {
-  const keys = new Set<string>();
-  for (const message of messages) {
-    for (const input of message.inputMessageIds || []) keys.add(input);
-    if (message.turnId && message.startEventId) keys.add(`${message.turnId}:${message.startEventId}`);
-  }
-  return keys;
+export function captureChatAnchor(container: HTMLElement, root: HTMLElement): () => void {
+  const top = container.getBoundingClientRect().top;
+  const anchor = [...root.querySelectorAll<HTMLElement>("[data-chat-row]")].find(row => row.getBoundingClientRect().bottom > top);
+  const key = anchor?.dataset.chatRow;
+  const offset = anchor?.getBoundingClientRect().top ?? 0;
+  const height = container.scrollHeight;
+  return () => {
+    const row = anchor?.isConnected ? anchor : key
+      ? root.querySelector<HTMLElement>(`[data-chat-row="${CSS.escape(key)}"]`)
+      : null;
+    container.scrollTop += row ? row.getBoundingClientRect().top - offset : container.scrollHeight - height;
+  };
 }
 
-export function historyItem(item: TimelineItem, turnId: string, publicMessages: Set<string>): TimelineItem | undefined {
-  if (item.kind !== "message") return item;
-  if (item.role === "user" && item.messageId && publicMessages.has(item.messageId)) return;
-  if (item.role === "assistant" && item.startEventId && publicMessages.has(`${turnId}:${item.startEventId}`)) return;
-  return item.role === "user" ? { ...item, text: legacyInputText(item.text) } : item;
+export function historyItem(item: TimelineItem): TimelineItem {
+  return item.kind === "message" && item.role === "user" ? { ...item, text: legacyInputText(item.text) } : item;
 }
 
 export function positionTimelinePreview(preview: HTMLElement, scroller?: HTMLElement) {

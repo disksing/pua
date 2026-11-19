@@ -161,7 +161,7 @@ func TestUIAndResourceStateAreIsolatedByUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(alice.ExpandedProjects) != 1 || alice.ResourceStates[project.ID].ReadTurnNumber == nil {
+	if len(alice.ExpandedProjects) != 1 || len(alice.ResourceStates) != 0 {
 		t.Fatalf("Alice state = %#v", alice)
 	}
 	if len(defaultUser.ExpandedProjects) != 0 || defaultUser.ResourceStates[project.ID].ReadTurnNumber != nil {
@@ -198,8 +198,8 @@ func TestLegacyUIStateMigratesToDefaultUserAndResourceState(t *testing.T) {
 		t.Fatalf("migrated resource state = %#v", resourceState)
 	}
 	workspaceState := migrated.ResourceStates["workspace"]
-	if workspaceState.ReadTurnNumber == nil || *workspaceState.ReadTurnNumber != 3 {
-		t.Fatalf("untracked resource did not receive migration baseline: %#v", workspaceState)
+	if workspaceState.ReadTurnNumber != nil {
+		t.Fatalf("migration created an execution cursor: %#v", workspaceState)
 	}
 	loadedShared, err := loadResourceStateFile(resourceStatePath(workspace))
 	if err != nil {
@@ -219,7 +219,7 @@ func TestLegacyUIStateMigratesToDefaultUserAndResourceState(t *testing.T) {
 	}
 }
 
-func TestNewWorkspaceUserStartsAtCurrentTurnBaseline(t *testing.T) {
+func TestNewWorkspaceUserDoesNotSeedExecutionCursors(t *testing.T) {
 	server, workspace := userTestServer(t)
 	puaWorkspace, err := app.OpenWorkspace(workspace)
 	if err != nil {
@@ -246,7 +246,7 @@ func TestNewWorkspaceUserStartsAtCurrentTurnBaseline(t *testing.T) {
 		t.Fatal(err)
 	}
 	baseline := state.ResourceStates[project.ID].ReadTurnNumber
-	if baseline == nil || *baseline != 5 {
-		t.Fatalf("new user baseline = %#v, want Turn 5", state.ResourceStates[project.ID])
+	if baseline != nil {
+		t.Fatalf("new user got an execution cursor: %#v", state.ResourceStates[project.ID])
 	}
 }

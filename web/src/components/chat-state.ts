@@ -64,6 +64,7 @@ interface ResourceChatContext {
   stream: EventSource | null;
   pendingEvents: AgentEvent[];
   headRefreshing: boolean;
+  headRefreshPending: boolean;
   terminalMaterializing: Set<string>;
   // terminalPending holds Turn ids whose terminal materialization exhausted
   // its retry budget; later status or head syncs retry them until the compact
@@ -91,7 +92,7 @@ export interface ChatSessionControllerOptions {
   keepHistoryOnGenerationChange?: boolean;
   /** Event audit panes disable role-based Turn folding, including terminal updates. */
   collapseNonUserTurns?: boolean;
-  trackReadState?: boolean;
+  refreshHistoryOnStatusChange?: boolean;
 }
 
 // The public name is retained to avoid churn in embedders. Its identity and
@@ -112,7 +113,7 @@ export class ChatSessionController {
   private readonly syncStatus: boolean;
   private readonly keepHistoryOnGenerationChange: boolean;
   private readonly collapseNonUserTurns: boolean;
-  private readonly trackReadState: boolean;
+  private readonly refreshHistoryOnStatusChange: boolean;
   private activeKey = "";
   private disposed = false;
 
@@ -130,7 +131,7 @@ export class ChatSessionController {
     this.syncStatus = options.syncStatus !== false;
     this.keepHistoryOnGenerationChange = options.keepHistoryOnGenerationChange === true;
     this.collapseNonUserTurns = options.collapseNonUserTurns !== false;
-    this.trackReadState = options.trackReadState === true;
+    this.refreshHistoryOnStatusChange = options.refreshHistoryOnStatusChange === true;
   }
 
   subscribe(listener: SnapshotListener): () => void {
@@ -182,8 +183,9 @@ export class ChatSessionController {
     } else if (this.realtime) {
       if (context.stream && (!isStreamable(status) || (previousSessionId && previousSessionId !== nextSessionId))) this.closeStream(context);
       this.connect(context);
-      if (!this.syncStatus && this.trackReadState && (previousStatus?.generation?.turnNumber !== status?.generation?.turnNumber
+      if (!this.syncStatus && this.refreshHistoryOnStatusChange && (previousStatus?.generation?.turnNumber !== status?.generation?.turnNumber
         || previousStatus?.session?.currentTurnId !== status?.session?.currentTurnId
+        || previousStatus?.session?.state !== status?.session?.state
         || previousStatus?.generation?.status !== status?.generation?.status)) void this.refreshHead(context);
       this.retryPendingTerminals(context);
     }
@@ -304,10 +306,15 @@ export class ChatSessionController {
     try {
       const detail = await this.api.latest<ResourceHistoryTurnDetail>(turnPath(context, reference), { scope: requestScope(context, `turn:${reference}`) });
       if (!this.isCurrent(context, generation)) return;
+      if (context.details.get(reference)?.turn.closed) return;
+      if (!detail.turn.closed && this.findTurn(context, reference)?.closed) return;
       context.details.set(reference, detail);
-      if (!detail.turn.closed && detail.turn.generation.generationId === context.generationId) {
+      if (detail.turn.closed) {
+        this.mergeTurnSummary(context, detail.turn);
+        context.liveEvents.delete(reference);
+      } else if (detail.turn.generation.generationId === context.generationId) {
         const events = await this.loadTurnRange(context, detail, generation);
-        if (!this.isCurrent(context, generation)) return;
+        if (!this.isCurrent(context, generation) || context.details.get(reference)?.turn.closed) return;
         context.liveEvents.set(reference, compactTimelineEvents(mergeCanonicalEvents([...events, ...(context.liveEvents.get(reference) || [])])));
       }
       if (this.realtime) this.connect(context);
@@ -376,7 +383,7 @@ export class ChatSessionController {
       key: contextKey(workspaceId, resourceId), workspaceId, resourceId, status: null, generationId: "",
       requestGeneration: 1, streamGeneration: 0, segments: new Map(), details: new Map(), detailLoading: new Set(),
       detailErrors: new Map(), expandedTurns: new Set(), liveEvents: new Map(), orphanEvents: new Map(), detailChain: Promise.resolve(), notices: [], noticeTimers: new Map(), nextCursor: "", hasMoreBefore: false,
-      loading: false, loadingOlder: false, loaded: false, error: "", stream: null, pendingEvents: [], headRefreshing: false,
+      loading: false, loadingOlder: false, loaded: false, error: "", stream: null, pendingEvents: [], headRefreshing: false, headRefreshPending: false,
       terminalMaterializing: new Set(), terminalPending: new Set(), terminalError: "", flushTimer: null, statusSyncTimer: null, statusSyncInFlight: false,
     };
     this.contexts.set(context.key, context);
@@ -427,9 +434,17 @@ export class ChatSessionController {
         continue;
       }
       const turns = new Map(existing.turns.map((turn) => [turn.reference, turn]));
-      for (const turn of incoming.turns || []) turns.set(turn.reference, turn);
+      for (const turn of incoming.turns || []) {
+        if (turn.closed || !turns.get(turn.reference)?.closed) turns.set(turn.reference, turn);
+        if (turn.closed && context.expandedTurns.has(turn.reference) && !context.details.get(turn.reference)?.turn.closed) {
+          context.details.delete(turn.reference);
+          if (this.isActive(context) && !context.terminalMaterializing.has(`${id}:${turn.turnId}`)) void this.loadTurn(turn.reference);
+        }
+      }
       existing.turns = [...turns.values()].sort((left, right) => left.startEventId - right.startEventId);
-      existing.generation = incoming.generation;
+      const previousTotals = existing.generation.turnTotals;
+      const nextTotals = incoming.generation.turnTotals;
+      existing.generation = { ...incoming.generation, turnTotals: (nextTotals?.latestEventId ?? -1) >= (previousTotals?.latestEventId ?? -1) ? nextTotals : previousTotals };
       existing.gap = incoming.gap || (incoming.turns?.length ? undefined : existing.gap);
     }
     for (const segment of page.segments || []) for (const turn of segment.turns || []) {
@@ -451,9 +466,10 @@ export class ChatSessionController {
       context.segments.set(id, { generation: turn.generation, turns: [turn] });
     } else {
       const turns = new Map(segment.turns.map((candidate) => [candidate.reference, candidate]));
+      if (!turn.closed && turns.get(turn.reference)?.closed) return;
       turns.set(turn.reference, turn);
       segment.turns = [...turns.values()].sort((left, right) => left.startEventId - right.startEventId);
-      segment.generation = turn.generation;
+      segment.generation = { ...turn.generation, turnTotals: segment.generation.turnTotals };
       // A successful targeted Turn read proves this generation is readable.
       // Do not let a stale gap classification override the canonical detail.
       segment.gap = undefined;
@@ -607,7 +623,7 @@ export class ChatSessionController {
         || context.status?.generation?.completionState !== status.generation?.completionState;
       context.status = status;
       context.generationId = nextGeneration;
-      if (completedStateChanged && context.loaded && this.trackReadState) void this.refreshHead(context);
+      if (completedStateChanged && context.loaded && this.refreshHistoryOnStatusChange) void this.refreshHead(context);
       const nextSessionId = String(status.session?.id || "");
       const nextGenerationStatus = String(status.generation?.status || "");
       if (context.stream && (!isStreamable(status) || (previousSessionId && previousSessionId !== nextSessionId))) this.closeStream(context);
@@ -690,7 +706,7 @@ export class ChatSessionController {
           context.liveEvents.delete(detail.turn.reference);
           this.clearTerminalErrorIfHealed(context);
           this.emit();
-          if (this.trackReadState) void this.refreshHead(context);
+          if (this.refreshHistoryOnStatusChange) void this.refreshHead(context);
           return;
         } catch (error) {
           if (error instanceof StaleResponseError || !this.isCurrent(context, generation)) return;
@@ -733,7 +749,10 @@ export class ChatSessionController {
   }
 
   private async refreshHead(context: ResourceChatContext): Promise<void> {
-    if (context.headRefreshing) return;
+    if (context.headRefreshing) {
+      context.headRefreshPending = true;
+      return;
+    }
     context.headRefreshing = true;
     const generation = context.requestGeneration;
     try {
@@ -748,7 +767,12 @@ export class ChatSessionController {
       // The semantic stream remains authoritative for the open Turn. A later event,
       // terminal materialization, or status refresh retries the summary head.
     } finally {
-      context.headRefreshing = false;
+      if (context.requestGeneration === generation) {
+        context.headRefreshing = false;
+        const pending = context.headRefreshPending;
+        context.headRefreshPending = false;
+        if (pending && this.isCurrent(context, generation)) void this.refreshHead(context);
+      }
     }
   }
 
@@ -859,6 +883,7 @@ export class ChatSessionController {
     this.api.requests.abort(requestScope(context, "initial"));
     this.api.requests.abort(requestScope(context, "older"));
     this.api.requests.abort(requestScope(context, "status"));
+    this.api.requests.abort(requestScope(context, "stream-head"));
     if (!keepHistory) {
       context.segments.clear();
       context.details.clear();
@@ -879,6 +904,7 @@ export class ChatSessionController {
     context.loaded = false;
     context.error = "";
     context.headRefreshing = false;
+    context.headRefreshPending = false;
     context.terminalMaterializing.clear();
     context.terminalPending.clear();
     context.terminalError = "";
@@ -896,9 +922,13 @@ export class ChatSessionController {
     this.closeStream(context);
     context.loading = false;
     context.loadingOlder = false;
+    context.detailLoading.clear();
+    context.headRefreshing = false;
+    context.headRefreshPending = false;
     this.api.requests.abort(requestScope(context, "initial"));
     this.api.requests.abort(requestScope(context, "older"));
     this.api.requests.abort(requestScope(context, "status"));
+    this.api.requests.abort(requestScope(context, "stream-head"));
   }
 
   private isCurrent(context: ResourceChatContext, generation: number): boolean {

@@ -835,7 +835,7 @@ func TestResourceServerAPIStatusSendAndMessageQuery(t *testing.T) {
 	}
 }
 
-func TestUserMessageSendMarksResourceRead(t *testing.T) {
+func TestResourceMessageSendDoesNotWriteExecutionReadState(t *testing.T) {
 	fake := newRuntimeFakeAgentHub()
 	hub := httptest.NewServer(fake)
 	defer hub.Close()
@@ -854,8 +854,8 @@ func TestUserMessageSendMarksResourceRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tree.Projects) != 1 || len(tree.Projects[0].Children) != 1 || tree.Projects[0].Children[0].UnreadCount != 2 {
-		t.Fatalf("task should start with two unread Turns: %#v", tree.Projects)
+	if len(tree.Projects) != 1 || len(tree.Projects[0].Children) != 1 || tree.Projects[0].Children[0].LatestTurnNumber != 2 {
+		t.Fatalf("task should start at completed Turn 2: %#v", tree.Projects)
 	}
 
 	// Agent-to-agent messages leave the user's read cursor untouched.
@@ -864,11 +864,11 @@ func TestUserMessageSendMarksResourceRead(t *testing.T) {
 	if agentRecorder.Code != http.StatusAccepted {
 		t.Fatalf("agent send failed: %d %s", agentRecorder.Code, agentRecorder.Body.String())
 	}
-	state, err := manager.server.resourceUserStateForResource(workspace.Path, "project1.task1", app.LegacyDefaultUserName)
+	state, err := loadUIStateFile(userUIStatePath(workspace.Path, app.LegacyDefaultUserName))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.ReadTurnNumber != nil {
+	if len(state.ResourceStates) != 0 {
 		t.Fatalf("agent message moved the read cursor: %#v", state)
 	}
 
@@ -880,7 +880,6 @@ func TestUserMessageSendMarksResourceRead(t *testing.T) {
 	if userRecorder.Code != http.StatusGone {
 		t.Fatalf("legacy user input returned %d", userRecorder.Code)
 	}
-	// Explicitly viewing execution events still permits marking that history read.
 	readRequest := httptest.NewRequest(http.MethodPut, "/api/workspaces/"+workspace.ID+"/resources/project1.task1/read", strings.NewReader(`{"throughTurnNumber":2}`))
 	readRequest.Header.Set(workspaceUserHeader, app.LegacyDefaultUserName)
 	readRecorder := httptest.NewRecorder()
@@ -889,7 +888,6 @@ func TestUserMessageSendMarksResourceRead(t *testing.T) {
 		t.Fatal(readRecorder.Body.String())
 	}
 
-	// The Turn the sends triggered becomes the next unread one once done.
 	manager.waitBackground()
 	current, found, err := currentResourceGeneration(workspace.Path, "project1.task1")
 	if err != nil || !found {
@@ -907,8 +905,8 @@ func TestUserMessageSendMarksResourceRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if task := tree.Projects[0].Children[0]; task.UnreadCount != 1 {
-		t.Fatalf("next completed Turn did not become unread: %#v", task)
+	if task := tree.Projects[0].Children[0]; task.LatestTurnNumber != 3 || task.Chat != nil {
+		t.Fatalf("completion changed the wrong tree fields: %#v", task)
 	}
 }
 

@@ -27,16 +27,8 @@ type resourceUserState struct {
 	ReadTurnNumber *int `json:"readTurnNumber,omitempty"`
 }
 
-type resourceUserStateSnapshot struct {
-	ReadTurnNumber *int `json:"readTurnNumber,omitempty"`
-}
-
 type desktopActivitySnapshot struct {
 	Running []resourceSnapshot `json:"running"`
-}
-
-func resourceUserStateSnapshotForState(state resourceUserState) *resourceUserStateSnapshot {
-	return &resourceUserStateSnapshot{ReadTurnNumber: cloneIntPointer(state.ReadTurnNumber)}
 }
 
 type resourceState struct {
@@ -171,49 +163,6 @@ func selectedUserName(userNames []string) string {
 		return userNames[0]
 	}
 	return ""
-}
-
-func (s *server) loadResourceStatesAtPath(path string, userNames ...string) (map[string]resourceUserState, error) {
-	userName := selectedUserName(userNames)
-	if userName == "" {
-		return map[string]resourceUserState{}, nil
-	}
-	s.uiStateMu.Lock()
-	defer s.uiStateMu.Unlock()
-	state, err := loadUIStateFile(userUIStatePath(path, userName))
-	if err != nil {
-		return nil, err
-	}
-	return state.ResourceStates, nil
-}
-
-func (s *server) mutateResourceUserStateAtPath(path, resourceID string, mutate func(*resourceUserState), userNames ...string) (resourceUserState, error) {
-	userName := selectedUserName(userNames)
-	if userName == "" {
-		return resourceUserState{}, &resourceAPIError{Code: "user_required", Message: "select a Workspace user before accessing personal data"}
-	}
-	s.uiStateMu.Lock()
-	defer s.uiStateMu.Unlock()
-	statePath := userUIStatePath(path, userName)
-	state, err := loadUIStateFile(statePath)
-	if err != nil {
-		return resourceUserState{}, err
-	}
-	if state.ResourceStates == nil {
-		state.ResourceStates = map[string]resourceUserState{}
-	}
-	resourceID = normalizedResourceID(resourceID)
-	resourceState := state.ResourceStates[resourceID]
-	mutate(&resourceState)
-	if resourceState.ReadTurnNumber == nil {
-		delete(state.ResourceStates, resourceID)
-	} else {
-		state.ResourceStates[resourceID] = resourceState
-	}
-	if err := saveUIStateFile(statePath, state); err != nil {
-		return resourceUserState{}, err
-	}
-	return resourceState, nil
 }
 
 // pruneUIStateForArchivedResources removes persisted UI state entries that
@@ -418,7 +367,7 @@ func (s *server) handleResourceRead(w http.ResponseWriter, r *http.Request, work
 		return
 	}
 	resourceID = normalizedResourceID(resourceID)
-	userName, err := s.workspaceUserName(r, workspace.Path)
+	_, err = s.workspaceUserName(r, workspace.Path)
 	if err != nil {
 		writeError(w, err, http.StatusBadRequest)
 		return
@@ -427,11 +376,11 @@ func (s *server) handleResourceRead(w http.ResponseWriter, r *http.Request, work
 		writeError(w, err, http.StatusBadRequest)
 		return
 	}
-	s.handleSessionRead(w, r, workspace.Path, resourceID, userName)
+	s.handleSessionRead(w, r, workspace.Path, resourceID)
 }
 
 // Callers validate the owning resource and current user before choosing a runtime partition.
-func (s *server) handleSessionRead(w http.ResponseWriter, r *http.Request, workspacePath, resourceID, userName string) {
+func (s *server) handleSessionRead(w http.ResponseWriter, r *http.Request, workspacePath, resourceID string) {
 	if r.Method != http.MethodPut {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
@@ -461,40 +410,7 @@ func (s *server) handleSessionRead(w http.ResponseWriter, r *http.Request, works
 		writeError(w, fmt.Errorf("throughTurnNumber %d exceeds current completed Turn %d", *body.ThroughTurnNumber, currentTurnNumber), http.StatusBadRequest)
 		return
 	}
-	resourceState, err := s.mutateResourceUserStateAtPath(workspacePath, resourceID, func(state *resourceUserState) {
-		if state.ReadTurnNumber == nil || *state.ReadTurnNumber < *body.ThroughTurnNumber {
-			state.ReadTurnNumber = cloneIntPointer(body.ThroughTurnNumber)
-		}
-	}, userName)
-	if err != nil {
-		writeError(w, err, http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, resourceUserStateSnapshotForState(resourceState))
-}
-
-// markResourceReadOnUserMessage clears a resource's unread state when a user
-// sends it a message: sending implies the sender has seen every Turn completed
-// so far, and the Turn the message triggers becomes the next unread one once
-// it completes. The read state is per user, so the acting user must be known.
-func (s *server) markResourceReadOnUserMessage(workspacePath, resourceID, userName string) {
-	completed, err := s.currentCompletedResourceTurnNumber(workspacePath, resourceID)
-	if err != nil || completed <= 0 {
-		return
-	}
-	_, _ = s.mutateResourceUserStateAtPath(workspacePath, resourceID, func(state *resourceUserState) {
-		if state.ReadTurnNumber == nil || *state.ReadTurnNumber < completed {
-			state.ReadTurnNumber = cloneIntPointer(&completed)
-		}
-	}, userName)
-}
-
-func (s *server) resourceUserStateForResource(path, resourceID string, userNames ...string) (resourceUserState, error) {
-	resourceStates, err := s.loadResourceStatesAtPath(path, userNames...)
-	if err != nil {
-		return resourceUserState{}, err
-	}
-	return resourceStates[normalizedResourceID(resourceID)], nil
+	writeJSON(w, struct{}{})
 }
 
 func validateAttentionResource(path, resourceID string) error {
@@ -568,31 +484,6 @@ func latestCompletedTurnByResource(records []generationRecord) map[string]comple
 	return byResourceID
 }
 
-func completedTurnNumbersByResource(records []generationRecord) map[string]int {
-	completed := latestCompletedTurnByResource(records)
-	turnNumbers := make(map[string]int, len(completed))
-	for resourceID, turn := range completed {
-		turnNumbers[resourceID] = turn.TurnNumber
-	}
-	return turnNumbers
-}
-
-func completedTurnBaseline(turnNumbers map[string]int, records []generationRecord) map[string]int {
-	baseline := make(map[string]int, len(turnNumbers))
-	for resourceID, turnNumber := range turnNumbers {
-		baseline[resourceID] = turnNumber
-	}
-	completed := completedTurnNumbersByResource(records)
-	for resourceID := range latestTurnGenerationByResource(records) {
-		if turnNumber := completed[resourceID]; turnNumber > 0 {
-			baseline[resourceID] = turnNumber
-		} else {
-			delete(baseline, resourceID)
-		}
-	}
-	return baseline
-}
-
 func (s *server) currentCompletedResourceTurnNumber(workspacePath, resourceID string) (int, error) {
 	records, err := loadGenerationRecords(workspacePath)
 	if err != nil {
@@ -642,10 +533,6 @@ func sortResourceActivity(items []resourceSnapshot, timestamp func(resourceSnaps
 }
 
 func (s *server) enrichTreeUserState(workspacePath string, tree *workspaceTree, userNames ...string) error {
-	resourceStates, err := s.loadResourceStatesAtPath(workspacePath, userNames...)
-	if err != nil {
-		return fmt.Errorf("load user resource state for tree: %w", err)
-	}
 	records, err := loadGenerationRecords(workspacePath)
 	if err != nil {
 		return fmt.Errorf("load resource generations for user state: %w", err)
@@ -675,30 +562,16 @@ func (s *server) enrichTreeUserState(workspacePath string, tree *workspaceTree, 
 		return chatErr
 	}
 	latestCompletedTurns := latestCompletedTurnByResource(records)
+	userName := selectedUserName(userNames)
 	tree.Activity.Running = make([]resourceSnapshot, 0)
 	var applyState func(*resourceSnapshot)
 	applyState = func(item *resourceSnapshot) {
 		resourceID := normalizedResourceID(item.ID)
 		if c, ok := chats[resourceID]; ok {
-			item.Chat = c.snapshot(selectedUserName(userNames))
-			if unread, _, err := chatHistoryActivity(workspacePath, c, selectedUserName(userNames)); err == nil {
+			item.Chat = c.snapshot(userName)
+			if unread, _, err := chatHistoryActivity(workspacePath, c, userName); err == nil {
 				item.Chat.UnreadCount += unread
 			}
-			legacyAddress := c.address()
-			legacyID := chatID(c.ResourceID, selectedUserName(userNames))
-			if _, found := c.LegacySources[legacyID]; found {
-				legacyAddress = dialoguePrefix + legacyID
-			}
-			latest := latestCompletedTurns[legacyAddress].TurnNumber
-			read := 0
-			if cursor := resourceStates[legacyAddress].ReadTurnNumber; cursor != nil {
-				read = *cursor
-			}
-			item.DialogueEvents = &sessionReadSnapshot{LatestTurnNumber: latest, ReadTurnNumber: read, UnreadCount: max(0, latest-read)}
-		}
-		state, hasState := resourceStates[resourceID]
-		if hasState {
-			item.UserState = resourceUserStateSnapshotForState(state)
 		}
 		if completed, ok := latestCompletedTurns[resourceID]; ok {
 			item.LatestTurnNumber = completed.TurnNumber
@@ -708,13 +581,6 @@ func (s *server) enrichTreeUserState(workspacePath string, tree *workspaceTree, 
 				item.LatestTurnAt = record.TurnStartedAt
 			}
 			item.LatestAgentName = record.AgentHubAgentName
-		}
-		readTurnNumber := 0
-		if state.ReadTurnNumber != nil {
-			readTurnNumber = *state.ReadTurnNumber
-		}
-		if item.LatestTurnNumber > readTurnNumber {
-			item.UnreadCount = item.LatestTurnNumber - readTurnNumber
 		}
 		if !item.Archived && item.Runtime != nil && item.Runtime.ActiveTurn {
 			running := *item

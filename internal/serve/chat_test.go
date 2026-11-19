@@ -632,7 +632,7 @@ func TestChatStreamUserSelectionIsScopedAndValidated(t *testing.T) {
 	}
 }
 
-func TestChatAndEventReadCursorsRemainIndependentPerUser(t *testing.T) {
+func TestChatReadCursorsRemainIndependentPerUser(t *testing.T) {
 	m, w := chatTestManager(t)
 	resource := "project1.task1"
 	c := resourceChat{ID: sharedChatID(resource), ResourceID: resource, User: "disksing", Open: true, Epoch: 1,
@@ -669,11 +669,11 @@ func TestChatAndEventReadCursorsRemainIndependentPerUser(t *testing.T) {
 		t.Fatal("task missing")
 		return resourceSnapshot{}
 	}
-	assertCounts := func(chat, execution, dialogue int) {
+	assertUnread := func(user string, count int) {
 		t.Helper()
-		item := snapshot("disksing")
-		if item.Chat == nil || item.Chat.UnreadCount != chat || item.UnreadCount != execution || item.DialogueEvents == nil || item.DialogueEvents.UnreadCount != dialogue {
-			t.Fatalf("chat=%+v execution=%d dialogue=%+v", item.Chat, item.UnreadCount, item.DialogueEvents)
+		item := snapshot(user)
+		if item.Chat == nil || item.Chat.UnreadCount != count {
+			t.Fatalf("%s chat = %+v, want %d unread", user, item.Chat, count)
 		}
 	}
 	read := func(user, suffix string, through, wantStatus int) {
@@ -686,20 +686,14 @@ func TestChatAndEventReadCursorsRemainIndependentPerUser(t *testing.T) {
 			t.Fatalf("read %s status=%d body=%s", suffix, out.Code, out.Body.String())
 		}
 	}
-	assertCounts(2, 3, 4)
-	other := snapshot("other")
-	if other.Chat == nil || other.Chat.UnreadCount != 2 || other.DialogueEvents == nil || other.DialogueEvents.UnreadCount != 0 || other.UnreadCount != 3 {
-		t.Fatalf("shared chat or independent user state missing: %+v", other)
-	}
+	assertUnread("disksing", 2)
+	assertUnread("other", 2)
 	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "read", chatRequest{ID: "a"}, false))
-	assertCounts(1, 3, 4)
+	assertUnread("disksing", 1)
 	read("disksing", "/chat/runtime/read", 4, 200)
-	assertCounts(1, 3, 0)
 	read("other", "/chat/runtime/read", 4, 400)
 	read("disksing", "/read", 2, 200)
-	assertCounts(1, 1, 0)
 	read("disksing", "/read", 1, 200)
-	assertCounts(1, 1, 0)
 	// An active Turn must not move the completed read boundary forward.
 	records[0].Status = "running"
 	records[0].CurrentTurnID = "active"
@@ -708,7 +702,7 @@ func TestChatAndEventReadCursorsRemainIndependentPerUser(t *testing.T) {
 		t.Fatal(err)
 	}
 	read("disksing", "/read", 4, 400)
-	assertCounts(1, 1, 0)
+	assertUnread("disksing", 1)
 	c, err := loadChatLocked(w.Path, c.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -721,16 +715,13 @@ func TestChatAndEventReadCursorsRemainIndependentPerUser(t *testing.T) {
 	if item.Chat.Open || item.Chat.UnreadCount != 1 {
 		t.Fatalf("closing lost history/unread: %+v", item.Chat)
 	}
-	if snapshot("other").UnreadCount != 3 {
-		t.Fatal("execution read leaked to other user")
-	}
-	// Reloading user state retains both independent runtime cursors.
+	assertUnread("other", 2)
 	state, err := loadUIStateFile(userUIStatePath(w.Path, "disksing"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if *state.ResourceStates[resource].ReadTurnNumber != 2 || *state.ResourceStates[legacyAddress].ReadTurnNumber != 4 {
-		t.Fatalf("persisted cursors: %+v", state.ResourceStates)
+	if len(state.ResourceStates) != 0 {
+		t.Fatalf("legacy endpoints persisted execution cursors: %+v", state.ResourceStates)
 	}
 }
 

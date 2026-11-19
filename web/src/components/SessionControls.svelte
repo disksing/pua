@@ -12,7 +12,7 @@
     enabled: boolean;
     followTail: boolean;
     onLatest: () => void;
-    children: Snippet<[Snippet, Snippet, ResourceMessageStatus | null]>;
+    children: Snippet<[Snippet<[Snippet | undefined, string, boolean]>, Snippet, ResourceMessageStatus | null]>;
   } = $props();
 
   type ApprovalReply = Parameters<EventTimelineModel["onApproval"]>[2];
@@ -209,7 +209,7 @@
   }
 </script>
 
-{#snippet tail()}
+{#snippet tail(trigger: Snippet | undefined, label: string, closed: boolean)}
   {#if approvals.length}
     <section class="public-chat-approvals" aria-label="Pending approvals" tabindex="-1" bind:this={approvalGroup}>
       {#each approvals as item (`${generation}:${item.approvalId}`)}
@@ -217,10 +217,11 @@
       {/each}
     </section>
   {/if}
-  {#if hasTail}
+  {#if !closed && (hasTail || trigger)}
     <div class="public-chat-execution" role="group" aria-label="Execution controls">
+      {@render trigger?.()}
       {#if working}
-        <TurnWorkingIndicator label="Agent is working…" />
+        <TurnWorkingIndicator label={label || "Agent is working…"} />
       {:else if waitingApproval}
         <span role="status">Waiting for approval</span>
       {/if}
@@ -267,9 +268,9 @@
     font-size: 12px;
     --turn-working-margin: 0;
   }
-  .public-chat-execution { padding-bottom: 2px; }
+  .public-chat-execution { flex: 0 0 100%; padding-bottom: 2px; }
   .public-chat-stop { color: var(--red-deep); font-weight: 650; }
-  .public-chat-approvals { display: grid; min-width: 0; gap: 6px; max-width: 720px; scroll-margin-bottom: 110px; }
+  .public-chat-approvals { display: grid; flex: 0 1 min(100%, 720px); min-width: 0; gap: 6px; scroll-margin-bottom: 110px; }
   .public-chat-shortcuts button, .public-chat-stop { min-height: 32px; padding: 4px 8px; }
   .public-chat-shortcuts:empty { display: none; }
   .public-chat-error {

@@ -20,17 +20,10 @@ export interface ResourceRecord {
   wiki?: { exists?: boolean; error?: string; entries?: FileTreeModel[] };
   scheduler?: SchedulerConfigRecord;
   runtime?: ResourceRuntime;
-  userState?: ResourceUserState;
   latestTurnNumber?: number;
   latestTurnAt?: string;
   latestAgentName?: string;
-  unreadCount?: number;
   chat?: { open: boolean; unreadCount: number };
-  dialogueEvents?: { latestTurnNumber: number; readTurnNumber: number; unreadCount: number };
-}
-
-export interface ResourceUserState {
-  readTurnNumber?: number;
 }
 
 export interface ResourceRuntime {

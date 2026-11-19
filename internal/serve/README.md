@@ -83,7 +83,9 @@ DELETE /api/workspaces/{workspaceId}/users/{name}
 
 `GET /api/workspaces/{workspaceId}/tree` 返回层级资源。浏览器的 Running 筛选读取各节点的 `runtime.activeTurn`，Unread 筛选读取当前用户的 `chat.unreadCount`。筛选保留命中 Task 所在的 Project 和虚拟目录。`activity.running` 继续服务桌面活跃 Turn 计数的兼容路径。
 
-资源树快照包含当前用户的 `userState.readTurnNumber`、`latestTurnNumber` 与 `unreadCount`。`latestTurnNumber` 只表示最新已完成 Turn。`PUT .../read` 接收前端实际观察到的 `throughTurnNumber`，仅单调推进当前用户的已读游标，最高为资源已完成 Turn 的高水位。Scheduler 的事件采用相同未读语义。树行展示自身的 `chat.open` 图标及 `chat.unreadCount`，Chat 关闭后保留历史与未读数字。统一时间线显示资源执行未读数，点击标记后以已加载历史页的 `completedTurnNumber` 更新执行游标。旧交流通道通过 `PUT .../chat/runtime/read` 写入当前用户的游标。共享 Chat 通过 `POST .../chat/read` 按消息 ID 推进自己的游标。三类游标独立。图标和计数通过只读轮询与操作后刷新同步，事件通过 SSE 和状态同步刷新。
+资源树的 `latestTurnNumber` 表示最新已完成 Turn。旧客户端的 `PUT .../read` 和 `PUT .../chat/runtime/read` 继续验证身份及 `throughTurnNumber` 的已完成边界，成功时返回 `{}`。树行展示自身的 `chat.open` 图标及 `chat.unreadCount`，Chat 关闭后保留历史与未读数字。共享 Chat 通过 `POST .../chat/read` 按消息 ID 推进各用户自己的游标。图标和计数通过只读轮询与操作后刷新同步，执行事件通过 SSE 和状态同步刷新。
+
+共享 Chat 分页响应的 `queuedMessages` 投影当前仍待执行的用户消息，顺序来自持久投递记录，独立于 `messages` 的游标范围。历史分段的 `generation.turnTotals` 来自 AgentHub 的整代统计，包含已启动 Turn 数、已知累计执行毫秒数和可选的活动 Turn 起始时间。旧 AgentHub 可省略整代统计。缺失历史起止边界时省略执行毫秒数。
 
 共享 Chat 消息可包含 `inputMessageIds`，用于关联用户消息的邮箱输入；历史投影的自动回复包含 `turnId` 和 `startEventId`。执行历史摘要的 `triggerMessageId` 来自 canonical Turn，收紧与队列及共享消息的关联；`triggerType` 为已知的来源类型。展开 Turn 时可按消息 ID 或事件位置省略同一时间线已展示的共享消息。
 

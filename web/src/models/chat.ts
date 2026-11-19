@@ -169,6 +169,7 @@ export interface ResourceHistoryGeneration {
   createdAt: string;
   updatedAt: string;
   replacementPending?: boolean;
+  turnTotals?: { count: number; executionMs?: number; activeStartedAt?: string; latestEventId: number };
 }
 
 export interface ResourceHistoryGap {

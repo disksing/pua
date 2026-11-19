@@ -1,16 +1,42 @@
 <script lang="ts">
   import type { ResourceHistoryGeneration } from "./models";
 
-  let { generation, status = generation.status }: { generation: ResourceHistoryGeneration; status?: string } = $props();
+  let { generation, status = generation.status, sticky = false }: { generation: ResourceHistoryGeneration; status?: string; sticky?: boolean } = $props();
   const agent = $derived(generation.agentName || generation.resolvedProfile || generation.binding?.name || "Unknown agent");
+  const totals = $derived(generation.turnTotals);
+  const activeStart = $derived(Date.parse(totals?.activeStartedAt || ""));
+  let now = $state(Date.now());
+  const executionMs = $derived(totals?.executionMs === undefined ? undefined
+    : totals.executionMs + (Number.isFinite(activeStart) ? Math.max(0, now - activeStart) : 0));
+
+  $effect(() => {
+    if (!Number.isFinite(activeStart)) return;
+    now = Date.now();
+    const timer = setInterval(() => now = Date.now(), 1000);
+    return () => clearInterval(timer);
+  });
+
+  function executionDuration(milliseconds: number): string {
+    const seconds = Math.floor(milliseconds / 1000);
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor(seconds / 60) % 60;
+    const remainder = seconds % 60;
+    if (hours) return `${hours}h ${minutes}m ${remainder}s`;
+    if (minutes) return `${minutes}m ${remainder}s`;
+    return seconds ? `${seconds}s` : milliseconds ? "<1s" : "0s";
+  }
 </script>
 
-<div class="history-generation" data-generation-id={generation.generationId}>
+<div class="history-generation" class:sticky data-generation-id={generation.generationId}>
   <span class="generation-label">Generation {generation.generation}</span>
   <strong>{agent}</strong>
   <span class="generation-meta">
     <span>{generation.provider || generation.providerId || "Unknown provider"}</span>
     <span>{generation.model || "Unknown model"}</span>
+    {#if totals}
+      <span data-generation-turn-count>{totals.count} {totals.count === 1 ? "Turn" : "Turns"}</span>
+      <span data-generation-duration>{executionMs === undefined ? "Execution time unavailable" : `${executionDuration(executionMs)} execution`}</span>
+    {/if}
     <span class="generation-status" data-generation-status={status}>{status || "unknown"}</span>
   </span>
 </div>
@@ -30,6 +56,7 @@
     padding: 6px 10px;
     overflow-wrap: anywhere;
   }
+  .sticky { position: sticky; inset-block-start: 0; z-index: 1; }
   .generation-label {
     color: var(--faint);
     font-size: 11px;

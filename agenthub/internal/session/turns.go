@@ -43,6 +43,7 @@ func (s *Store) TurnsPage(id string, after, before int64, latest bool, limit int
 		latestCursor = turns[len(turns)-1].FirstEventID
 	}
 	page := TurnPage{Turns: []TurnSummary{}, After: after, Before: before, Limit: limit, LatestCursor: latestCursor, LatestEventID: state.session.LastEventID, NextAfter: after}
+	page.Totals = turnTotals(turns, state.session.CurrentTurnID, state.session.LastEventID)
 	if latest {
 		before = latestCursor + 1
 		page.Before = before
@@ -73,6 +74,33 @@ func (s *Store) TurnsPage(id string, after, before int64, latest bool, limit int
 		page.NextAfter = page.Turns[len(page.Turns)-1].FirstEventID
 	}
 	return page, nil
+}
+
+func turnTotals(turns []TurnSummary, activeTurnID string, latestEventID int64) TurnTotals {
+	var executionMS int64
+	totals := TurnTotals{LatestEventID: latestEventID, ExecutionMS: &executionMS}
+	for _, turn := range turns {
+		if turn.TurnStartedEventID == 0 && !turn.Closed && turn.TurnID != activeTurnID {
+			continue
+		}
+		totals.Count++
+		var start time.Time
+		for _, item := range turn.Items {
+			if item.StartEventID == turn.TurnStartedEventID {
+				start = item.StartedAt
+				break
+			}
+		}
+		switch {
+		case !start.IsZero() && turn.Closed && turn.EndedAt != nil && !turn.EndedAt.Before(start):
+			executionMS += turn.EndedAt.Sub(start).Milliseconds()
+		case !start.IsZero() && !turn.Closed && turn.TurnID == activeTurnID:
+			totals.ActiveStartedAt = &start
+		default:
+			totals.ExecutionMS = nil
+		}
+	}
+	return totals
 }
 
 // Turn returns one compact materialized Turn, repairing a missing or stale

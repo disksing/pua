@@ -8,7 +8,7 @@
   import type { ComposerModel, FilePreviewModel, UploadDialogModel } from "./models";
   import SessionControls from "./SessionControls.svelte";
   import SharedChatTimeline from "./SharedChatTimeline.svelte";
-  import { positionTimelinePreview, type SharedChatMessage } from "./shared-chat-timeline";
+  import { captureChatAnchor, positionTimelinePreview, type SharedChatMessage } from "./shared-chat-timeline";
   import { onDestroy, onMount, tick, untrack } from "svelte";
   import { ApiClient } from "../api/client";
   import type { ModelChannel } from "./model-channel";
@@ -18,15 +18,14 @@
   // svelte-ignore state_referenced_locally
   let model = $state(channel.current());
   type Message = SharedChatMessage;
-  type Chat = { id: string; open: boolean; epoch: number; unreadCount: number; messages: Message[]; hasOlder?: boolean; hasNewer?: boolean; reset?: boolean; endPosition?: number };
+  type Chat = { id: string; open: boolean; epoch: number; unreadCount: number; messages: Message[]; queuedMessages?: Message[]; hasOlder?: boolean; hasNewer?: boolean; reset?: boolean; endPosition?: number };
   const PAGE_SIZE = 40;
   let chat = $state<Chat | null>(null);
   let echoes = $state<Message[]>([]);
   const messages = $derived.by(() => {
     const confirmed = chat?.messages || [];
-    if (!echoes.length) return confirmed;
-    const known = new Set(confirmed.map(message => message.id));
-    return [...confirmed, ...echoes.filter(message => !known.has(message.id))];
+    if (!echoes.length && !chat?.queuedMessages?.length) return confirmed;
+    return [...new Map([...confirmed, ...echoes, ...(chat?.queuedMessages || [])].map(message => [message.id, message])).values()];
   });
   let root: HTMLElement;
   let followTail = $state(true);
@@ -90,8 +89,9 @@
             chat = { ...next, messages: [...current.messages, ...next.messages.filter(message => !known.has(message.id))] };
           }
           model.onChatState?.({ open: next.open, unreadCount: next.unreadCount || 0 });
-          const received = new Set(next.messages.map(message => message.id));
-          echoes = untrack(() => echoes.filter(message => !received.has(message.id)));
+          const received = new Set(chat.messages.map(message => message.id));
+          echoes = untrack(() => [...new Map([...echoes, ...(current?.queuedMessages || [])]
+            .filter(message => !received.has(message.id)).map(message => [message.id, message])).values()]);
           const last = next.messages.at(-1)?.id;
           if (!last || last === after) break;
           after = last;
@@ -120,19 +120,13 @@
         const active = untrack(() => chat);
         if (!active || active.id !== current.id) return;
         const container = root?.closest<HTMLElement>("#chatTimeline");
-        const height = container?.scrollHeight || 0, top = container?.scrollTop || 0;
-        const viewportTop = container?.getBoundingClientRect().top ?? 0;
-        const anchor = [...root.querySelectorAll("[data-chat-row]")].find(row => row.getBoundingClientRect().bottom > viewportTop);
-        const anchorTop = anchor?.getBoundingClientRect().top;
+        const restore = container ? captureChatAnchor(container, root) : undefined;
         const known = new Set(active.messages.map(message => message.id));
         followTail = false;
         chat = { ...active, messages: [...next.messages.filter(message => !known.has(message.id)), ...active.messages] };
         hasOlder = Boolean(next.hasOlder);
         await tick();
-        if (!disposed && key === identity && container) {
-          if (anchor?.isConnected && anchorTop !== undefined) container.scrollTop += anchor.getBoundingClientRect().top - anchorTop;
-          else container.scrollTop = top + container.scrollHeight - height;
-        }
+        if (!disposed && key === identity) restore?.();
       } catch (e) { if (!disposed) olderError = String(e); }
       finally { if (!disposed) loadingOlder = false; }
     }
@@ -149,6 +143,9 @@
     const updateScrollPadding = () => {
       const height = dock?.getBoundingClientRect().height ?? 0;
       container.style.scrollPaddingBlockEnd = height ? `${Math.ceil(height) + 8}px` : "";
+      const markers = element.querySelectorAll(".history-generation.sticky");
+      const headerHeight = Math.max(0, ...Array.from(markers, marker => marker.getBoundingClientRect().height));
+      container.style.scrollPaddingBlockStart = headerHeight ? `${Math.ceil(headerHeight) + 8}px` : "";
     };
     const movePreview = () => {
       if (!("showPopover" in HTMLElement.prototype)) return;
@@ -173,6 +170,7 @@
     return { destroy: () => {
       resize?.disconnect();
       container.style.scrollPaddingBlockEnd = "";
+      container.style.scrollPaddingBlockStart = "";
       container.removeEventListener("scroll", onScroll);
     } };
   }
@@ -294,7 +292,7 @@
         </div>
       {/if}
       {#key identity}
-        <SharedChatTimeline {model} {visible} {status} {messages} onOpenFile={openLinkedFile} onInspect={() => followTail = false}>
+        <SharedChatTimeline {model} {visible} {status} {messages} queuedMessages={chat?.queuedMessages} {execution} {followTail} onOpenFile={openLinkedFile} onInspect={() => followTail = false}>
           {#snippet bubble(message)}
           <article class:own-message={message.role === "user" && message.sender === userName}>
             <small class="message-meta"><strong>{message.role === "user" ? (message.sender || "User") : (message.sender?.trim() || "Agent")}</strong> <time datetime={message.createdAt}>{new Date(message.createdAt).toLocaleString()}</time></small>
@@ -313,7 +311,6 @@
           {/snippet}
         </SharedChatTimeline>
       {/key}
-      {@render execution()}
       <div class="public-chat-dock">
         {@render notices()}
         {#if error}<div class="chat-error" role="alert">Could not load chat. {error}</div>{/if}

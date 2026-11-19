@@ -216,12 +216,6 @@ type chatSnapshot struct {
 	UnreadCount int  `json:"unreadCount"`
 }
 
-type sessionReadSnapshot struct {
-	LatestTurnNumber int `json:"latestTurnNumber"`
-	ReadTurnNumber   int `json:"readTurnNumber"`
-	UnreadCount      int `json:"unreadCount"`
-}
-
 func (c resourceChat) legacyUnreadSet(user string) map[string]bool {
 	set := make(map[string]bool, len(c.LegacyUnread[user]))
 	for _, id := range c.LegacyUnread[user] {
@@ -262,20 +256,21 @@ func (c resourceChat) snapshot(users ...string) *chatSnapshot {
 }
 
 type publicChat struct {
-	ID              string              `json:"id"`
-	ResourceID      string              `json:"resourceId"`
-	Open            bool                `json:"open"`
-	Epoch           uint64              `json:"epoch"`
-	Binding         app.AgentBinding    `json:"binding"`
-	Messages        []publicChatMessage `json:"messages"`
-	IntervalSeconds int                 `json:"intervalSeconds"`
-	NextCheckAt     string              `json:"nextCheckAt,omitempty"`
-	TimerMode       string              `json:"timerMode"`
-	UnreadCount     int                 `json:"unreadCount"`
-	HasOlder        *bool               `json:"hasOlder,omitempty"`
-	HasNewer        *bool               `json:"hasNewer,omitempty"`
-	EndPosition     int                 `json:"endPosition,omitempty"`
-	Reset           bool                `json:"reset,omitempty"`
+	ID              string               `json:"id"`
+	ResourceID      string               `json:"resourceId"`
+	Open            bool                 `json:"open"`
+	Epoch           uint64               `json:"epoch"`
+	Binding         app.AgentBinding     `json:"binding"`
+	Messages        []publicChatMessage  `json:"messages"`
+	QueuedMessages  *[]publicChatMessage `json:"queuedMessages,omitempty"`
+	IntervalSeconds int                  `json:"intervalSeconds"`
+	NextCheckAt     string               `json:"nextCheckAt,omitempty"`
+	TimerMode       string               `json:"timerMode"`
+	UnreadCount     int                  `json:"unreadCount"`
+	HasOlder        *bool                `json:"hasOlder,omitempty"`
+	HasNewer        *bool                `json:"hasNewer,omitempty"`
+	EndPosition     int                  `json:"endPosition,omitempty"`
+	Reset           bool                 `json:"reset,omitempty"`
 }
 
 type publicChatMessage struct {
@@ -296,17 +291,68 @@ func (c resourceChat) public(users ...string) publicChat {
 func (c resourceChat) publicRange(start, end int, users ...string) publicChat {
 	messages := make([]publicChatMessage, 0, end-start)
 	for _, message := range c.Messages[start:end] {
-		messages = append(messages, publicChatMessage{
-			ID: message.ID, Role: message.Role, Text: message.Text,
-			CreatedAt: message.CreatedAt, Sender: message.Sender,
-			InputMessageIDs: c.executionInputIDs(message), TurnID: message.turnID, StartEventID: message.startEventID,
-		})
+		messages = append(messages, c.publicMessage(message))
 	}
 	return publicChat{
 		ID: c.ID, ResourceID: c.ResourceID, Open: c.Open, Epoch: c.Epoch,
 		Binding: c.Binding, Messages: messages, IntervalSeconds: c.IntervalSeconds,
 		NextCheckAt: c.NextCheckAt, TimerMode: "once", UnreadCount: c.snapshot(users...).UnreadCount,
 	}
+}
+
+func (c resourceChat) publicMessage(message chatMessage) publicChatMessage {
+	return publicChatMessage{
+		ID: message.ID, Role: message.Role, Text: message.Text,
+		CreatedAt: message.CreatedAt, Sender: message.Sender,
+		InputMessageIDs: c.executionInputIDs(message), TurnID: message.turnID, StartEventID: message.startEventID,
+	}
+}
+
+func (c resourceChat) addQueuedMessages(workspacePath string, page *publicChat) {
+	queued := make([]publicChatMessage, 0)
+	if !c.Open || len(c.Outbox) == 0 {
+		page.QueuedMessages = &queued
+		return
+	}
+	mailbox, err := loadResourceMailboxForResource(workspacePath, c.ResourceID)
+	if err != nil {
+		return
+	}
+	statuses := make(map[string]string)
+	for _, message := range mailbox.Messages {
+		statuses[message.ID] = message.Status
+	}
+	pending := make(map[string]publicChatMessage)
+	order := make([]string, 0)
+	for _, delivery := range c.Outbox {
+		if !delivery.userInput() || delivery.Target != c.ResourceID || delivery.Epoch != c.Epoch {
+			continue
+		}
+		id := "chat-" + chatID(firstNonEmpty(delivery.SourceChatID, c.ID), delivery.ID)
+		status, found := statuses[id]
+		if status == resourceMessageQueued || status == resourceMessageDelivering || status == resourceMessageInterrupting ||
+			(!found && !delivery.Accepted) {
+			pending[id] = publicChatMessage{}
+			order = append(order, id)
+		}
+	}
+	if len(pending) != 0 {
+		for _, message := range c.Messages {
+			for _, id := range c.executionInputIDs(message) {
+				if _, found := pending[id]; found {
+					pending[id] = c.publicMessage(message)
+				}
+			}
+		}
+		seen := make(map[string]bool)
+		for _, id := range order {
+			if message := pending[id]; message.ID != "" && !seen[message.ID] {
+				queued = append(queued, message)
+				seen[message.ID] = true
+			}
+		}
+	}
+	page.QueuedMessages = &queued
 }
 
 func (c resourceChat) executionInputIDs(message chatMessage) []string {

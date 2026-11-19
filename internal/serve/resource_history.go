@@ -34,20 +34,21 @@ type resourceHistoryReference struct {
 }
 
 type resourceHistoryGeneration struct {
-	Generation         int              `json:"generation"`
-	GenerationID       string           `json:"generationId"`
-	Title              string           `json:"title"`
-	Binding            app.AgentBinding `json:"binding"`
-	ResolvedProfile    string           `json:"resolvedProfile,omitempty"`
-	AgentName          string           `json:"agentName,omitempty"`
-	Provider           string           `json:"provider,omitempty"`
-	ProviderID         string           `json:"providerId,omitempty"`
-	Model              string           `json:"model,omitempty"`
-	Status             string           `json:"status"`
-	CreatedAt          string           `json:"createdAt"`
-	UpdatedAt          string           `json:"updatedAt"`
-	AgentHubSessionID  string           `json:"agentHubSessionId,omitempty"`
-	ReplacementPending bool             `json:"replacementPending,omitempty"`
+	Generation         int                 `json:"generation"`
+	GenerationID       string              `json:"generationId"`
+	Title              string              `json:"title"`
+	Binding            app.AgentBinding    `json:"binding"`
+	ResolvedProfile    string              `json:"resolvedProfile,omitempty"`
+	AgentName          string              `json:"agentName,omitempty"`
+	Provider           string              `json:"provider,omitempty"`
+	ProviderID         string              `json:"providerId,omitempty"`
+	Model              string              `json:"model,omitempty"`
+	Status             string              `json:"status"`
+	CreatedAt          string              `json:"createdAt"`
+	UpdatedAt          string              `json:"updatedAt"`
+	AgentHubSessionID  string              `json:"agentHubSessionId,omitempty"`
+	ReplacementPending bool                `json:"replacementPending,omitempty"`
+	TurnTotals         *agentHubTurnTotals `json:"turnTotals,omitempty"`
 }
 
 type resourceHistoryDelivery struct {
@@ -451,6 +452,7 @@ func (m *agentManager) resourceHistoryPage(ctx context.Context, workspace serveW
 			before = 0
 			continue
 		}
+		segment.Generation.TurnTotals = turnPage.Totals
 		for _, turn := range turnPage.Turns {
 			summary, summaryErr := historyTurnSummary(instanceID, resourceID, record, turn, mailbox)
 			if summaryErr != nil {

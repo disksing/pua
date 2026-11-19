@@ -15,7 +15,7 @@
   import TurnWorkingIndicator from "./TurnWorkingIndicator.svelte";
   import { formatClock } from "./timeline-events";
 
-  let { channel, readOnly = false, controllerOptions = {}, onViewed }: { channel: ModelChannel<EventTimelineModel>; readOnly?: boolean; controllerOptions?: ChatSessionControllerOptions; onViewed?: (snapshot: ChatContextSnapshot) => void } = $props();
+  let { channel, readOnly = false, controllerOptions = {} }: { channel: ModelChannel<EventTimelineModel>; readOnly?: boolean; controllerOptions?: ChatSessionControllerOptions } = $props();
   // svelte-ignore state_referenced_locally
   let model = $state(channel.current());
   // svelte-ignore state_referenced_locally
@@ -52,8 +52,7 @@
 
   onMount(() => {
     const scroll = scroller();
-    const trackFollow = () => { follow = isNearBottom(scroller()); reportViewed(); };
-    document.addEventListener("visibilitychange", trackFollow);
+    const trackFollow = () => { follow = isNearBottom(scroller()); };
     scroll?.addEventListener("scroll", trackFollow, { passive: true });
     const followResize = typeof ResizeObserver === "undefined" || !scroll ? null : new ResizeObserver(() => {
       if (follow && !hasActiveSelection()) scrollToBottom();
@@ -116,7 +115,6 @@
       document.removeEventListener("selectionchange", selectionChanged);
       document.removeEventListener("keydown", keydown);
       scroll?.removeEventListener("scroll", trackFollow);
-      document.removeEventListener("visibilitychange", trackFollow);
       followResize?.disconnect();
       controller?.dispose();
       controller = undefined;
@@ -146,13 +144,7 @@
     void tick().then(() => {
       if (followAfterUpdate && !hasActiveSelection()) scrollToBottom();
       if (next.loaded) void fillViewport(next.identity);
-      reportViewed();
     });
-  }
-
-  function reportViewed(): void {
-    if (follow && snapshot.loaded && !snapshot.error && document.visibilityState !== "hidden"
-      && !hasActiveSelection() && !snapshot.blocks.some(block => block.kind === "gap")) onViewed?.(snapshot);
   }
 
   function observeTurn(node: HTMLElement, reference: string) {

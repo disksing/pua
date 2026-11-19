@@ -173,7 +173,7 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 		}
 		switch parts[1] {
 		case "read":
-			m.server.handleSessionRead(w, r, workspace.Path, legacyAddress, user)
+			m.server.handleSessionRead(w, r, workspace.Path, legacyAddress)
 		case "history":
 			m.handleResourceHistory(w, r, workspaceID, legacyAddress, parts[2:])
 		case "status":
@@ -225,6 +225,7 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 			writeError(w, pageErr, status)
 			return
 		}
+		c.addQueuedMessages(workspace.Path, &page)
 		writeJSON(w, page)
 		return
 	}
@@ -381,6 +382,7 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 	// revokes publication without interrupting execution.
 	m.requestReconcile(reconcileMailboxes | reconcileAgentHub)
 	page, _ := c.publicPage(pageLimit, "", "", user)
+	c.addQueuedMessages(workspace.Path, &page)
 	if unread, _, activityErr := chatHistoryActivity(workspace.Path, c, user); activityErr == nil {
 		page.UnreadCount += unread
 	}

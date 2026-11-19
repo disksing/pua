@@ -221,7 +221,6 @@ func (s *server) ensureWorkspaceUsersAndMigrateUIState(workspacePath string) err
 			return err
 		}
 	}
-	completedTurnNumbers := completedTurnBaseline(shared.TurnNumbers, records)
 	users, err := workspace.Users()
 	if err != nil {
 		return err
@@ -255,7 +254,6 @@ func (s *server) ensureWorkspaceUsersAndMigrateUIState(workspacePath string) err
 			}
 		}
 		if !stateExists || state.Version < 2 {
-			seedUnreadBaseline(&state, completedTurnNumbers)
 			if err := saveUIStateFile(statePath, state); err != nil {
 				return err
 			}
@@ -267,21 +265,6 @@ func (s *server) ensureWorkspaceUsersAndMigrateUIState(workspacePath string) err
 		}
 	}
 	return nil
-}
-
-func seedUnreadBaseline(state *uiState, turnNumbers map[string]int) {
-	if state.ResourceStates == nil {
-		state.ResourceStates = map[string]resourceUserState{}
-	}
-	for resourceID, turnNumber := range turnNumbers {
-		if turnNumber <= 0 {
-			continue
-		}
-		if _, exists := state.ResourceStates[resourceID]; exists {
-			continue
-		}
-		state.ResourceStates[resourceID] = resourceUserState{ReadTurnNumber: cloneIntPointer(&turnNumber)}
-	}
 }
 
 func (s *server) ensureUserUIStateBaseline(workspacePath, userName string) error {
@@ -355,7 +338,6 @@ func (s *server) ensureUserUIStateBaseline(workspacePath, userName string) error
 			return err
 		}
 	}
-	seedUnreadBaseline(&state, completedTurnBaseline(shared.TurnNumbers, records))
 	if err := saveUIStateFile(statePath, state); err != nil {
 		return err
 	}

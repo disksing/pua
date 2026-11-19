@@ -1671,6 +1671,7 @@ func (s *Server) turns(w http.ResponseWriter, r *http.Request, id string) {
 		},
 		"latestCursor":  page.LatestCursor,
 		"latestEventId": page.LatestEventID,
+		"totals":        page.Totals,
 	})
 }
 

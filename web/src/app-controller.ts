@@ -911,7 +911,8 @@ function appShellSchedulerModel(item: ResourceRecord | null | undefined): ShellR
 		status: appShellStatusModel(state.statusPresentation),
 		summary: null,
 		children: [],
-		unreadCount: Number(item.unreadCount) || 0
+		chatOpen: Boolean(item.chat?.open),
+		unreadCount: Number(item.chat?.unreadCount) || 0
 	};
 }
 function renderAppShell() {
@@ -1224,10 +1225,7 @@ function detailPanelModel(): DetailPanelModel {
 	const workspaceId = controllerState.activeWorkspaceId || "";
 	const resourceId = controllerState.selectedId || "";
 	const userName = currentUserName();
-	const unreadResource = findTreeResource(resourceId);
 	const base: DetailPanelModel = {
-		executionUnreadCount: unreadResource?.unreadCount || 0,
-		dialogueUnreadCount: unreadResource?.dialogueEvents?.unreadCount || 0,
 		onChatState: (chat) => {
 			if (workspaceId !== controllerState.activeWorkspaceId || userName !== currentUserName()) return;
 			const item = findTreeResource(resourceId);
@@ -1236,10 +1234,6 @@ function detailPanelModel(): DetailPanelModel {
 			item.chat = chat;
 			renderAppShell();
 			void refreshTreeAfterResourceMutation().then(() => publishViewModels()).catch(err => console.warn("chat state refresh failed", err));
-		},
-		onSessionRead: () => {
-			if (workspaceId !== controllerState.activeWorkspaceId || userName !== currentUserName()) return;
-			void refreshTreeAfterResourceMutation().then(() => publishViewModels()).catch(err => console.warn("read state refresh failed", err));
 		},
 		identity: workspaceId ? `${workspaceId}:${controllerState.selectedId || "workspace"}` : "empty",
 		workspaceId,

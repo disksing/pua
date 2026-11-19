@@ -48,6 +48,52 @@ func inputTestDelivered(t *testing.T, workspace serveWorkspace, resource, input 
 	return found && message.Status == resourceMessageDelivered
 }
 
+func TestChatPageProjectsDurableQueuedMessagesOutsideCursorPage(t *testing.T) {
+	manager, workspace, _, _ := outputTestFixture(t, nil)
+	const resource = "project1.task1"
+	read := func(expected ...string) {
+		t.Helper()
+		path := "/api/workspaces/" + workspace.ID + "/resources/" + resource + "/chat?limit=1"
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set(workspaceUserHeader, "reader")
+		response := httptest.NewRecorder()
+		manager.server.handleWorkspace(response, request)
+		var page publicChat
+		if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &page) != nil ||
+			len(page.Messages) != 1 || page.QueuedMessages == nil || len(*page.QueuedMessages) != len(expected) {
+			t.Fatalf("unexpected queue projection: %d %s", response.Code, response.Body)
+		}
+		for index, message := range *page.QueuedMessages {
+			if message.Text != expected[index] || len(message.InputMessageIDs) != 1 {
+				t.Fatalf("queued message %d: %+v", index, message)
+			}
+		}
+	}
+	first, second := "First [attachment](/project1/task1/files/first.md)", "Second"
+	mustChatOK(t, chatCall(t, manager, workspace, resource, "reader", "messages", chatRequest{ID: "queue-first", Text: first}, false))
+	mustChatOK(t, chatCall(t, manager, workspace, resource, "reader", "messages", chatRequest{ID: "queue-second", Text: second}, false))
+	read(first, second)
+	if _, err := manager.reconcileChatOutbox(context.Background(), workspace, sharedChatID(resource), map[string]bool{"reader": true}); err != nil {
+		t.Fatal(err)
+	}
+	read(first, second)
+	firstID := "chat-" + chatID(sharedChatID(resource), "input-queue-first")
+	if _, err := mutateResourceMailboxForResource(workspace.Path, resource, func(mailbox *resourceMailbox) error {
+		for index := range mailbox.Messages {
+			if mailbox.Messages[index].ID == firstID {
+				mailbox.Messages[index].Status = resourceMessageDelivered
+				mailbox.Messages[index].TerminalAt = time.Now().UTC().Format(time.RFC3339Nano)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	read(second)
+	mustChatOK(t, chatCall(t, manager, workspace, resource, "reader", "close", chatRequest{}, false))
+	read()
+}
+
 func TestChatInputTransfersWhileColdAuditIsBlocked(t *testing.T) {
 	var blockNextList atomic.Bool
 	reached, release := make(chan struct{}), make(chan struct{})

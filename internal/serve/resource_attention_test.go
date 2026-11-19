@@ -59,20 +59,16 @@ func TestResourceReadAPI(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("read returned %d: %s", recorder.Code, recorder.Body.String())
 	}
-	var state resourceUserStateSnapshot
-	if err := json.Unmarshal(recorder.Body.Bytes(), &state); err != nil {
-		t.Fatal(err)
-	}
-	if state.ReadTurnNumber == nil || *state.ReadTurnNumber != 3 {
-		t.Fatalf("read did not record current Turn: %#v", state)
+	if recorder.Body.String() != "{}\n" {
+		t.Fatalf("legacy read returned %s", recorder.Body.String())
 	}
 
 	tree, err := server.treeAt(context.Background(), workspace, app.LegacyDefaultUserName)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tree.Projects[0].UnreadCount != 0 {
-		t.Fatalf("read resource remained unread: %#v", tree.Projects[0])
+	if tree.Projects[0].LatestTurnNumber != 3 {
+		t.Fatalf("completed Turn projection missing: %#v", tree.Projects[0])
 	}
 
 	record.TurnNumber = 4
@@ -83,12 +79,12 @@ func TestResourceReadAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tree.Projects[0].UnreadCount != 1 || tree.Projects[0].Chat != nil {
-		t.Fatalf("event unread should increase independently of chat: %#v", tree.Projects[0])
+	if tree.Projects[0].LatestTurnNumber != 4 || tree.Projects[0].Chat != nil {
+		t.Fatalf("execution history changed Chat projection: %#v", tree.Projects[0])
 	}
 }
 
-func TestResourceReadAPIRejectsFutureTurnsAndNeverRegresses(t *testing.T) {
+func TestResourceReadAPIRejectsFutureTurnsAndDoesNotPersist(t *testing.T) {
 	server, workspace := attentionTestServer(t)
 	now := "2026-08-13T00:00:00Z"
 	if err := rewriteTestGenerationRecords(workspace, []generationRecord{{
@@ -104,12 +100,8 @@ func TestResourceReadAPIRejectsFutureTurnsAndNeverRegresses(t *testing.T) {
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("read through Turn %d returned %d: %s", through, recorder.Code, recorder.Body.String())
 		}
-		var state resourceUserStateSnapshot
-		if err := json.Unmarshal(recorder.Body.Bytes(), &state); err != nil {
-			t.Fatal(err)
-		}
-		if state.ReadTurnNumber == nil || *state.ReadTurnNumber != 2 {
-			t.Fatalf("read cursor regressed after Turn %d request: %#v", through, state)
+		if recorder.Body.String() != "{}\n" {
+			t.Fatalf("legacy read returned %s", recorder.Body.String())
 		}
 	}
 
@@ -117,16 +109,16 @@ func TestResourceReadAPIRejectsFutureTurnsAndNeverRegresses(t *testing.T) {
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("future read returned %d: %s", recorder.Code, recorder.Body.String())
 	}
-	state, err := server.resourceUserStateForResource(workspace, "project1", app.LegacyDefaultUserName)
+	state, err := loadUIStateFile(userUIStatePath(workspace, app.LegacyDefaultUserName))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.ReadTurnNumber == nil || *state.ReadTurnNumber != 2 {
-		t.Fatalf("future read changed cursor: %#v", state)
+	if len(state.ResourceStates) != 0 {
+		t.Fatalf("legacy read persisted a cursor: %#v", state)
 	}
 }
 
-func TestActiveTurnDoesNotCountAsUnreadAndCannotBeMarkedRead(t *testing.T) {
+func TestActiveTurnPreservesLatestCompletedTurnAndLegacyCursor(t *testing.T) {
 	server, workspace := attentionTestServer(t)
 	now := "2026-08-13T00:00:00Z"
 	record := generationRecord{
@@ -138,9 +130,9 @@ func TestActiveTurnDoesNotCountAsUnreadAndCannotBeMarkedRead(t *testing.T) {
 	if err := rewriteTestGenerationRecords(workspace, []generationRecord{record}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := server.mutateResourceUserStateAtPath(workspace, "project1", func(state *resourceUserState) {
-		state.ReadTurnNumber = intPointer(1)
-	}, app.LegacyDefaultUserName); err != nil {
+	if err := saveUIStateFile(userUIStatePath(workspace, app.LegacyDefaultUserName), uiState{
+		ResourceStates: map[string]resourceUserState{"project1": {ReadTurnNumber: intPointer(1)}},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	tree, err := server.treeAt(context.Background(), workspace, app.LegacyDefaultUserName)
@@ -150,8 +142,8 @@ func TestActiveTurnDoesNotCountAsUnreadAndCannotBeMarkedRead(t *testing.T) {
 	if len(tree.Activity.Running) != 1 || !tree.Activity.Running[0].Runtime.ActiveTurn {
 		t.Fatalf("active Turn must remain in Running: %#v", tree.Activity.Running)
 	}
-	if tree.Projects[0].UnreadCount != 0 || tree.Projects[0].LatestTurnNumber != 1 || !tree.Projects[0].Runtime.ActiveTurn {
-		t.Fatalf("active Turn projection or unread state is incorrect: %#v", tree.Projects[0])
+	if tree.Projects[0].LatestTurnNumber != 1 || !tree.Projects[0].Runtime.ActiveTurn {
+		t.Fatalf("active Turn projection is incorrect: %#v", tree.Projects[0])
 	}
 	recorder := attentionRequest(t, server, http.MethodPut, "/api/workspaces/workspace-one/resources/project1/read", `{"throughTurnNumber":2}`)
 	if recorder.Code != http.StatusBadRequest {
@@ -168,8 +160,8 @@ func TestActiveTurnDoesNotCountAsUnreadAndCannotBeMarkedRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tree.Activity.Running) != 0 || tree.Projects[0].Runtime.ActiveTurn || tree.Projects[0].UnreadCount != 1 || tree.Projects[0].LatestTurnNumber != 2 {
-		t.Fatalf("completed Turn did not become unread: project=%#v activity=%#v", tree.Projects[0], tree.Activity)
+	if len(tree.Activity.Running) != 0 || tree.Projects[0].Runtime.ActiveTurn || tree.Projects[0].LatestTurnNumber != 2 {
+		t.Fatalf("completed Turn projection is incorrect: project=%#v activity=%#v", tree.Projects[0], tree.Activity)
 	}
 	recorder = attentionRequest(t, server, http.MethodPut, "/api/workspaces/workspace-one/resources/project1/read", `{"throughTurnNumber":2}`)
 	if recorder.Code != http.StatusOK {
@@ -184,12 +176,12 @@ func TestActiveTurnDoesNotCountAsUnreadAndCannotBeMarkedRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.ResourceStates["project1"].ReadTurnNumber == nil || *state.ResourceStates["project1"].ReadTurnNumber != 2 {
+	if state.ResourceStates["project1"].ReadTurnNumber == nil || *state.ResourceStates["project1"].ReadTurnNumber != 1 {
 		t.Fatalf("ui-state update overwrote resource state: %#v", state.ResourceStates)
 	}
 }
 
-func TestSchedulerCountsUnreadInEventTabs(t *testing.T) {
+func TestSchedulerRetainsLatestCompletedTurn(t *testing.T) {
 	server, workspace := attentionTestServer(t)
 	now := "2026-08-13T00:00:00Z"
 	if err := rewriteTestGenerationRecords(workspace, []generationRecord{
@@ -210,8 +202,8 @@ func TestSchedulerCountsUnreadInEventTabs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tree.Scheduler.UnreadCount != 3 || tree.Scheduler.LatestTurnNumber != 3 {
-		t.Fatalf("scheduler must count unread event Turns: %#v", tree.Scheduler)
+	if tree.Scheduler.LatestTurnNumber != 3 {
+		t.Fatalf("scheduler must retain its latest completed Turn: %#v", tree.Scheduler)
 	}
 	if tree.Scheduler.Chat != nil {
 		t.Fatalf("event unread must not create a chat: %#v", tree.Scheduler)
@@ -267,17 +259,6 @@ func TestLatestCompletedTurnPrefersAnExactCompletedGeneration(t *testing.T) {
 	inferred := latestCompletedTurnByResource(records[1:])["project1"]
 	if inferred.TurnNumber != 3 || inferred.Record.ID != "gen-active" || inferred.Exact {
 		t.Fatalf("inferred completed Turn = %#v, want Turn 3 from active generation", inferred)
-	}
-	baselineRecords := append(records, generationRecord{
-		ID: "gen-first-active", ResourceID: "project3", Generation: 1, GenerationID: "gen-first-active",
-		AgentHubSessionID: "session-first-active", Status: "running", CurrentTurnID: "turn-1", TurnNumber: 1,
-	})
-	baseline := completedTurnBaseline(map[string]int{"project1": 4, "project2": 8, "project3": 1}, baselineRecords)
-	if baseline["project1"] != 3 || baseline["project2"] != 8 {
-		t.Fatalf("completed baseline = %#v, want project1=3 and fallback project2=8", baseline)
-	}
-	if _, exists := baseline["project3"]; exists {
-		t.Fatalf("first active Turn remained in completed baseline: %#v", baseline)
 	}
 }
 
@@ -404,7 +385,7 @@ func intPointer(value int) *int {
 	return &value
 }
 
-func TestTreeProjectsChatAndEventCursorsForCurrentUser(t *testing.T) {
+func TestTreeProjectsSharedChatUnreadForCurrentUser(t *testing.T) {
 	s, workspace := attentionTestServer(t)
 	user := app.LegacyDefaultUserName
 	ids := []string{"workspace", "scheduler", "project1", "project1.task1"}
@@ -455,9 +436,6 @@ func TestTreeProjectsChatAndEventCursorsForCurrentUser(t *testing.T) {
 		t.Fatal(err)
 	}
 	project := tree.Projects[0]
-	if project.Children[1].DialogueEvents.UnreadCount != 5 {
-		t.Fatal("dialogue-only unread must stay in event tab")
-	}
 	if project.Children[0].Chat == nil || project.Children[0].Chat.Open || project.Children[0].Chat.UnreadCount != 1 {
 		t.Fatalf("closed chat must keep its unread count: %#v", project.Children[0].Chat)
 	}
@@ -471,8 +449,8 @@ func TestTreeProjectsChatAndEventCursorsForCurrentUser(t *testing.T) {
 	if err := s.enrichTreeUserState(workspace, &other, "other"); err != nil {
 		t.Fatal(err)
 	}
-	if other.Projects[0].Children[3].UnreadCount != 9 || other.Projects[0].Chat == nil {
-		t.Fatal("shared chat visibility or event counts changed")
+	if other.Projects[0].Children[3].LatestTurnNumber != 9 || other.Projects[0].Chat == nil {
+		t.Fatal("shared chat visibility or completed Turn projection changed")
 	}
 	for _, id := range ids {
 		c, err := loadChatLocked(workspace, sharedChatID(id))

@@ -1988,15 +1988,6 @@ func (m *agentManager) handleResourceMessages(w http.ResponseWriter, r *http.Req
 		writeError(w, sendErr, resourceErrorStatus(sendErr))
 		return
 	}
-	// A user sending a message has seen every completed Turn so far, so the
-	// send implicitly marks the resource read; the Turn it triggers becomes
-	// the next unread one when it completes. Agent-to-agent messages do not
-	// touch the user's read cursor.
-	if message.Role == "user" {
-		if userName, userErr := m.server.workspaceUserName(r, workspace.Path); userErr == nil {
-			m.server.markResourceReadOnUserMessage(workspace.Path, resourceID, userName)
-		}
-	}
 	if wakeErr := m.enqueueResourceController(workspace, resourceID, func() error {
 		m.reconcileAcceptedResourceMailbox(context.Background(), workspace, resourceID)
 		m.requestReconcile(reconcileNotifications)

@@ -277,7 +277,7 @@
     border-color:var(--green-line);
     border-radius:14px 14px 4px 14px;
   }
-  @container shared-chat (min-width:800px) {
+  @container shared-chat (min-width:1024px) {
     .own-message { align-self:flex-start; }
   }
   .message-meta { display:flex; flex-wrap:wrap; align-items:baseline; gap:0 8px; margin-bottom:3px; color:var(--muted-strong); opacity:1; }

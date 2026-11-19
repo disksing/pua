@@ -1252,14 +1252,14 @@ test("fits shared chat bubbles to the panel and caps long replies", async ({ pag
   const panel = page.locator("#chatTimeline");
   const articles = panel.locator("article");
   await expect(articles).toHaveCount(3);
-  for (const width of [390, 799, 800, 1200]) {
+  for (const width of [390, 800, 1023, 1024, 1200]) {
     await panel.evaluate((element, size) => { element.style.width = `${size}px`; }, width);
     const [own, peer, reply] = await articles.evaluateAll(items => items.map(item => {
       const { x, width } = item.getBoundingClientRect();
       return { x, width };
     }));
     expect(peer.x).toBe(reply.x);
-    if (width < 800) expect(own.x).toBeGreaterThan(peer.x);
+    if (width < 1024) expect(own.x).toBeGreaterThan(peer.x);
     else expect(own.x).toBe(peer.x);
     expect(own.width).toBeLessThan(reply.width);
     expect(reply.width).toBeLessThan(width);

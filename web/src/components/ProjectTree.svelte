@@ -627,7 +627,7 @@
 {#snippet chatIndicator(item: ShellResourceItem)}
   {#if !editing && (item.chatOpen || item.unreadCount > 0)}
     <span class="resource-chat-status">
-      {#if item.chatOpen}<span class="chat-open-icon" title="Chat open"><Icon name="messages-square" /></span>{/if}
+      {#if item.chatOpen}<span class="chat-open-icon" title="Chat open"><Icon name="message-square" /></span>{/if}
       {#if item.unreadCount > 0}<span class="unread-badge" aria-label={`${item.unreadCount} unread chat ${item.unreadCount === 1 ? "message" : "messages"}`}>{item.unreadCount > 99 ? "99+" : item.unreadCount}</span>{/if}
     </span>
   {/if}

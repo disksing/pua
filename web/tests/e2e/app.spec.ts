@@ -3192,6 +3192,17 @@ for (const width of [280, 220, 320]) {
     if (mobile) await page.locator("#mobileMenuButton").click();
     const markers = page.locator('#projectTree .resource-chat-status');
     await expect(markers).toHaveCount(4);
+    const chatTabIcon = page.locator("#detailsPanel").getByRole("tab", { name: "Chat", exact: true }).locator("svg");
+    await expect(chatTabIcon).toHaveAttribute("data-lucide", "message-square");
+    await expect(chatTabIcon.locator("path")).not.toHaveCount(0);
+    const chatGlyph = await chatTabIcon.innerHTML();
+    const openIcons = markers.locator(".chat-open-icon svg");
+    await expect(openIcons).toHaveCount(3);
+    for (const marker of await openIcons.all()) {
+      await expect(marker).toBeVisible();
+      await expect(marker).toHaveAttribute("data-lucide", "message-square");
+      await expect.poll(() => marker.innerHTML()).toBe(chatGlyph);
+    }
     const rows = page.locator("#projectTree .resource-row");
     const triggers = rows.getByRole("button", { name: /^Actions for / });
     await expect(triggers).toHaveCount(5);

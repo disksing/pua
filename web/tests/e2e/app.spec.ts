@@ -1,4 +1,4 @@
-import { expect, test, type Page, type Route } from "@playwright/test";
+import { expect, test, type Locator, type Page, type Route } from "@playwright/test";
 
 const now = "2026-08-10T12:00:00Z";
 
@@ -1903,7 +1903,7 @@ test("keeps the Create task wizard usable across desktop and mobile layouts", as
   expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(844);
 });
 
-test("highlights only the hovered resource action and clears it when the pointer leaves", async ({ page }) => {
+test("keeps the hovered resource action and keyboard focus clearly distinguishable", async ({ page }) => {
   await installMockApi(page, "project1.task2");
   await page.goto("/w/ws-test/r/project1.task2");
 
@@ -1913,24 +1913,73 @@ test("highlights only the hovered resource action and clears it when the pointer
   const create = menu.getByRole("button", { name: "New Task" });
   const archive = menu.getByRole("button", { name: "Archive" });
   const outside = page.locator(".tree-section .section-label");
-  const highlight = "rgb(220, 223, 228)";
   const transparent = "rgba(0, 0, 0, 0)";
 
+  function luminance(color: string): number {
+    const channels = color.match(/[\d.]+/g)!.slice(0, 3).map(channel => Number(channel) / 255);
+    const [red, green, blue] = channels.map(channel => (
+      channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4
+    ));
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+  }
+
+  function contrast(first: string, second: string): number {
+    const firstLuminance = luminance(first);
+    const secondLuminance = luminance(second);
+    return (Math.max(firstLuminance, secondLuminance) + 0.05) / (Math.min(firstLuminance, secondLuminance) + 0.05);
+  }
+
+  async function hoverAction(action: Locator) {
+    await action.hover({ position: { x: 150, y: 22 } });
+    await expect(action).toHaveCSS("background-color", /^rgb\(/);
+    const colors = await action.evaluate(button => {
+      const style = getComputedStyle(button);
+      return {
+        background: style.backgroundColor,
+        menu: getComputedStyle(button.parentElement!).backgroundColor,
+        text: style.color,
+        icon: getComputedStyle(button.querySelector("svg")!).stroke,
+        outline: style.outlineColor,
+      };
+    });
+    expect(contrast(colors.background, colors.menu), "hover against the menu").toBeGreaterThanOrEqual(3);
+    expect(contrast(colors.text, colors.background), "text against the hover fill").toBeGreaterThanOrEqual(4.5);
+    expect(contrast(colors.icon, colors.background), "icon against the hover fill").toBeGreaterThanOrEqual(3);
+    return colors;
+  }
+
   await projectActions.click();
-  await create.hover({ position: { x: 150, y: 22 } });
-  await expect(create).toHaveCSS("background-color", highlight);
+  const restingText = await create.evaluate(button => getComputedStyle(button).color);
+  await hoverAction(create);
   await expect(archive).toHaveCSS("background-color", transparent);
-  await archive.hover({ position: { x: 150, y: 22 } });
-  await expect(archive).toHaveCSS("background-color", highlight);
+  await hoverAction(archive);
   await expect(create).toHaveCSS("background-color", transparent);
+  await expect(create).toHaveCSS("color", restingText);
   await outside.hover();
   await expect(archive).toHaveCSS("background-color", transparent);
+  await expect(archive).toHaveCSS("color", restingText);
   await outside.click();
   await expect(menu).toHaveCount(0);
 
+  await projectActions.press("Enter");
+  await expect(create).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(archive).toBeFocused();
+  await expect(archive).toHaveCSS("outline-style", "solid");
+  await expect(archive).toHaveCSS("outline-width", "2px");
+  const focusContrast = await archive.evaluate(button => ({
+    outline: getComputedStyle(button).outlineColor,
+    menu: getComputedStyle(button.parentElement!).backgroundColor,
+  }));
+  expect(contrast(focusContrast.outline, focusContrast.menu), "focus against the menu").toBeGreaterThanOrEqual(3);
+  const hoveredFocus = await hoverAction(archive);
+  expect(contrast(hoveredFocus.outline, hoveredFocus.background), "focus against the hover fill").toBeGreaterThanOrEqual(3);
+  await page.keyboard.press("Escape");
+  await expect(menu).toHaveCount(0);
+  await expect(projectActions).toBeFocused();
+
   await taskActions.click();
-  await archive.hover({ position: { x: 150, y: 22 } });
-  await expect(archive).toHaveCSS("background-color", highlight);
+  await hoverAction(archive);
   await outside.hover();
   await expect(archive).toHaveCSS("background-color", transparent);
 });

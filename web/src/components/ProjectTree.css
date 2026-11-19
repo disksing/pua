@@ -591,10 +591,16 @@
   min-height: 44px;
   gap: 8px;
   padding-inline: 10px;
+  transition: none;
 }
 
 :where([data-component-owner="project-tree"]) .resource-actions-popover button:hover {
-  background: var(--line);
+  background: var(--blue-deep);
+  color: var(--text-on-dark);
+}
+
+:where([data-component-owner="project-tree"]) .resource-actions-popover button:hover:focus-visible {
+  outline-color: var(--text-on-dark);
 }
 
 @container project-tree (max-width: 220px) {

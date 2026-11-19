@@ -78,6 +78,8 @@ type resourceHistoryTurnSummary struct {
 	TriggerPreview    string                    `json:"triggerPreview,omitempty"`
 	TriggerRole       string                    `json:"triggerRole,omitempty"`
 	TriggerSender     *agentHubMessageSender    `json:"triggerSender,omitempty"`
+	TriggerMessageID  string                    `json:"triggerMessageId,omitempty"`
+	TriggerType       string                    `json:"triggerType,omitempty"`
 	FinalReplyPreview string                    `json:"finalReplyPreview,omitempty"`
 	EventCount        int                       `json:"eventCount"`
 	ToolEventCount    int                       `json:"toolEventCount"`
@@ -93,6 +95,7 @@ type resourceHistoryTurnItem struct {
 	Role                 string                 `json:"role,omitempty"`
 	Sender               *agentHubMessageSender `json:"sender,omitempty"`
 	Steer                bool                   `json:"steer,omitempty"`
+	MessageID            string                 `json:"messageId,omitempty"`
 	Text                 string                 `json:"text,omitempty"`
 	StartEventID         int64                  `json:"startEventId"`
 	EndEventID           int64                  `json:"endEventId"`
@@ -265,20 +268,26 @@ func historyTurnSummary(instanceID, resourceID string, record generationRecord, 
 		trigger = &value
 	}
 	triggerPreview, triggerRole, triggerSender := turn.TriggerPreview, turn.TriggerRole, turn.TriggerSender
+	var triggerType string
 	for _, delivery := range deliveries {
 		if delivery.MessageID == turn.TriggerMessageID {
 			trigger = &delivery
+			triggerType = delivery.Type
 			break
 		}
 	}
 	if len(turn.TriggerPayload) > 0 {
 		triggerPreview, triggerRole, triggerSender = puaMessagePresentation(triggerPreview, triggerRole, triggerSender, turn.TriggerPayload)
 		triggerPreview = resourceMessagePreview(triggerPreview)
+		if decoded, ok := decodePUAMessagePayload(turn.TriggerPayload); ok {
+			triggerType = firstNonEmpty(decoded.Type, triggerType)
+		}
 	}
 	return resourceHistoryTurnSummary{
 		Reference: reference, TurnID: turnID, Status: turn.Status, Closed: turn.Closed,
 		StartedAt: turn.StartedAt, EndedAt: turn.EndedAt, DurationMS: turn.DurationMS,
 		TriggerPreview: triggerPreview, TriggerRole: triggerRole, TriggerSender: triggerSender,
+		TriggerMessageID: turn.TriggerMessageID, TriggerType: triggerType,
 		FinalReplyPreview: turn.FinalReplyPreview, EventCount: turn.EventCount, ToolEventCount: turn.ToolEventCount,
 		StartEventID: turn.StartEventID, LastEventID: turn.LastEventID, EndEventID: turn.EndEventID,
 		TriggerDelivery: trigger, Generation: historyGeneration(record),
@@ -602,7 +611,7 @@ func (m *agentManager) resourceHistoryTurnForRecord(ctx context.Context, workspa
 			return resourceHistoryTurnDetail{}, encodeErr
 		}
 		detail.Items = append(detail.Items, resourceHistoryTurnItem{
-			Type: item.Type, Role: itemRole, Sender: itemSender, Steer: item.Steer, Text: itemText,
+			Type: item.Type, Role: itemRole, Sender: itemSender, Steer: item.Steer, Text: itemText, MessageID: item.MessageID,
 			StartEventID: item.StartEventID, EndEventID: item.EndEventID, StartEventRef: startRef, EndEventRef: endRef,
 			StartedAt: item.StartedAt, EndedAt: item.EndedAt, DurationMS: item.DurationMS, Count: item.Count, Data: item.Data,
 			ThinkingCount: item.ThinkingCount, ReasoningUpdateCount: item.ReasoningUpdateCount, ToolCallCount: item.ToolCallCount,

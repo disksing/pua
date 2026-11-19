@@ -55,6 +55,10 @@ export function projectConversationEvents(events: AgentEvent[]): TimelineItem[] 
   for (const item of items) {
     const event = byKey.get(String(item.key));
     applyPUAMessagePayload(item, event?.data?.payload);
+    if (item.kind === "message" && event) {
+      item.startEventId = event.id;
+      if (typeof event.data?.messageId === "string") item.messageId = event.data.messageId;
+    }
     const range = event?.data?.compactRange as { start?: number; end?: number } | undefined;
     if (!range) continue;
     item.compact = true;

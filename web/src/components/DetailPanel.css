@@ -1,24 +1,5 @@
 /* DetailPanel styles. Keep selectors within the documented ownership boundary. */
 
-:where([data-component-owner="detail-panel"]) .chat-view-options {
-  display: flex;
-  gap: 4px;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--line);
-}
-
-:where([data-component-owner="detail-panel"]) .chat-view-options button {
-  padding: 5px 10px;
-  border-radius: 5px;
-  color: var(--muted);
-}
-
-:where([data-component-owner="detail-panel"]) .chat-view-options button[aria-pressed="true"] {
-  background: var(--bg);
-  color: var(--text);
-  font-weight: 600;
-}
-
 :where([data-component-owner="detail-panel"]) .worktree-row {
   transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease;
 }
@@ -178,24 +159,6 @@
   border-bottom-color: var(--accent);
   color: var(--accent);
   font-weight: 700;
-}
-
-/* Keep unread badges blue and legible independently of the active tab accent. */
-:where([data-component-owner="detail-panel"]) .event-unread-count {
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  min-width: 22px;
-  height: 18px;
-  padding: 0 7px;
-  border-radius: 999px;
-  background: var(--blue-line);
-  color: var(--ink-deep);
-  font-size: 11px;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  line-height: 1;
 }
 
 :where([data-component-owner="detail-panel"]) .details-tab-count {

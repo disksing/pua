@@ -87,6 +87,8 @@ export interface ChatSessionControllerOptions {
   terminalRetryDelaysMs?: number[];
   noticeTimeoutMs?: number;
   realtime?: boolean;
+  syncStatus?: boolean;
+  keepHistoryOnGenerationChange?: boolean;
   /** Event audit panes disable role-based Turn folding, including terminal updates. */
   collapseNonUserTurns?: boolean;
   trackReadState?: boolean;
@@ -107,6 +109,8 @@ export class ChatSessionController {
   private readonly terminalRetryDelaysMs: number[];
   private readonly noticeTimeoutMs: number;
   private readonly realtime: boolean;
+  private readonly syncStatus: boolean;
+  private readonly keepHistoryOnGenerationChange: boolean;
   private readonly collapseNonUserTurns: boolean;
   private readonly trackReadState: boolean;
   private activeKey = "";
@@ -123,6 +127,8 @@ export class ChatSessionController {
     this.terminalRetryDelaysMs = (options.terminalRetryDelaysMs ?? TERMINAL_RETRY_DELAYS_MS).map((value) => Math.max(0, value));
     this.noticeTimeoutMs = Math.max(0, options.noticeTimeoutMs ?? NOTICE_TIMEOUT_MS);
     this.realtime = options.realtime !== false;
+    this.syncStatus = options.syncStatus !== false;
+    this.keepHistoryOnGenerationChange = options.keepHistoryOnGenerationChange === true;
     this.collapseNonUserTurns = options.collapseNonUserTurns !== false;
     this.trackReadState = options.trackReadState === true;
   }
@@ -159,20 +165,27 @@ export class ChatSessionController {
     // poll alive; generation ordering below rejects an older response.
     this.startStatusSync(context);
     const generationChanged = Boolean(context.generationId && nextGeneration && context.generationId !== nextGeneration);
-    const previousSessionId = String(context.status?.session?.id || "");
+    const previousStatus = context.status;
+    const previousSessionId = String(previousStatus?.session?.id || "");
     context.status = status;
     context.generationId = nextGeneration;
     const nextSessionId = String(status?.session?.id || "");
     const nextGenerationStatus = String(status?.generation?.status || "");
     if (generationChanged) {
-      this.resetForGeneration(context);
-      void this.loadInitial(context);
+      const keepHistory = this.keepHistoryOnGenerationChange && context.loaded;
+      this.resetForGeneration(context, keepHistory);
+      void this.loadInitial(context, keepHistory);
     } else if (context.loaded && !context.loading && this.shouldReloadUnresolvedGap(context, nextGeneration, previousSessionId, nextSessionId, nextGenerationStatus)) {
       this.reloadGapContext(context);
     } else if (!context.loaded && !context.loading) {
       void this.loadInitial(context);
     } else if (this.realtime) {
+      if (context.stream && (!isStreamable(status) || (previousSessionId && previousSessionId !== nextSessionId))) this.closeStream(context);
       this.connect(context);
+      if (!this.syncStatus && this.trackReadState && (previousStatus?.generation?.turnNumber !== status?.generation?.turnNumber
+        || previousStatus?.session?.currentTurnId !== status?.session?.currentTurnId
+        || previousStatus?.generation?.status !== status?.generation?.status)) void this.refreshHead(context);
+      this.retryPendingTerminals(context);
     }
     if (contextChanged || generationChanged) this.emit();
   }
@@ -295,7 +308,7 @@ export class ChatSessionController {
       if (!detail.turn.closed && detail.turn.generation.generationId === context.generationId) {
         const events = await this.loadTurnRange(context, detail, generation);
         if (!this.isCurrent(context, generation)) return;
-        context.liveEvents.set(reference, events);
+        context.liveEvents.set(reference, compactTimelineEvents(mergeCanonicalEvents([...events, ...(context.liveEvents.get(reference) || [])])));
       }
       if (this.realtime) this.connect(context);
     } catch (error) {
@@ -370,7 +383,7 @@ export class ChatSessionController {
     return context;
   }
 
-  private async loadInitial(context: ResourceChatContext): Promise<void> {
+  private async loadInitial(context: ResourceChatContext, keepHistory = false): Promise<void> {
     if (context.loading) return;
     const generation = context.requestGeneration;
     context.loading = true;
@@ -379,14 +392,19 @@ export class ChatSessionController {
     try {
       const page = await this.api.latest<ResourceHistoryPage>(historyPath(context), { scope: requestScope(context, "initial") });
       if (!this.isCurrent(context, generation)) return;
-      context.segments.clear();
-      context.details.clear();
-      context.detailErrors.clear();
-      context.expandedTurns.clear();
-      context.liveEvents.clear();
-      context.orphanEvents.clear();
+      const overlaps = keepHistory && page.segments.some(segment => segment.turns?.some(
+        turn => context.segments.get(segment.generation.generationId)?.turns.some(item => item.reference === turn.reference),
+      ));
+      if (!overlaps) {
+        context.segments.clear();
+        context.details.clear();
+        context.detailErrors.clear();
+        context.expandedTurns.clear();
+        context.liveEvents.clear();
+        context.orphanEvents.clear();
+      }
       context.completedTurnNumber = page.completedTurnNumber;
-      this.mergePage(context, page);
+      this.mergePage(context, page, !overlaps);
       context.loaded = true;
       this.connect(context);
     } catch (error) {
@@ -400,7 +418,7 @@ export class ChatSessionController {
     }
   }
 
-  private mergePage(context: ResourceChatContext, page: ResourceHistoryPage): void {
+  private mergePage(context: ResourceChatContext, page: ResourceHistoryPage, updateCursor = true): void {
     for (const incoming of page.segments || []) {
       const id = incoming.generation.generationId;
       const existing = context.segments.get(id);
@@ -412,7 +430,7 @@ export class ChatSessionController {
       for (const turn of incoming.turns || []) turns.set(turn.reference, turn);
       existing.turns = [...turns.values()].sort((left, right) => left.startEventId - right.startEventId);
       existing.generation = incoming.generation;
-      existing.gap = incoming.gap || existing.gap;
+      existing.gap = incoming.gap || (incoming.turns?.length ? undefined : existing.gap);
     }
     for (const segment of page.segments || []) for (const turn of segment.turns || []) {
       const orphan = context.orphanEvents.get(turn.turnId);
@@ -420,8 +438,10 @@ export class ChatSessionController {
       context.liveEvents.set(turn.reference, compactTimelineEvents(mergeCanonicalEvents([...(context.liveEvents.get(turn.reference) || []), ...orphan])));
       context.orphanEvents.delete(turn.turnId);
     }
-    context.nextCursor = String(page.page?.nextCursor || "");
-    context.hasMoreBefore = Boolean(page.page?.hasMore && context.nextCursor);
+    if (updateCursor) {
+      context.nextCursor = String(page.page?.nextCursor || "");
+      context.hasMoreBefore = Boolean(page.page?.hasMore && context.nextCursor);
+    }
   }
 
   private mergeTurnSummary(context: ResourceChatContext, turn: ResourceHistoryTurnSummary): void {
@@ -549,13 +569,13 @@ export class ChatSessionController {
       if (stream.readyState === 2) {
         context.stream = null;
         context.streamGeneration++;
-        void this.refreshCurrentStatus(context);
+        if (this.syncStatus) void this.refreshCurrentStatus(context);
       }
     };
   }
 
   private startStatusSync(context: ResourceChatContext): void {
-    if (!this.realtime || context.statusSyncTimer) return;
+    if (!this.realtime || !this.syncStatus || context.statusSyncTimer) return;
     context.statusSyncTimer = setInterval(() => void this.refreshCurrentStatus(context), this.statusSyncIntervalMs);
   }
 
@@ -720,7 +740,7 @@ export class ChatSessionController {
       const page = await this.api.latest<ResourceHistoryPage>(historyPath(context), { scope: requestScope(context, "stream-head") });
       if (this.isCurrent(context, generation)) {
         context.completedTurnNumber = page.completedTurnNumber;
-        this.mergePage(context, page);
+        this.mergePage(context, page, !context.segments.size);
         this.retryPendingTerminals(context);
         this.emit();
       }
@@ -830,7 +850,7 @@ export class ChatSessionController {
     context.stream = null;
   }
 
-  private resetForGeneration(context: ResourceChatContext): void {
+  private resetForGeneration(context: ResourceChatContext, keepHistory: boolean): void {
     if (context.flushTimer) clearTimeout(context.flushTimer);
     context.flushTimer = null;
     context.pendingEvents = [];
@@ -839,15 +859,21 @@ export class ChatSessionController {
     this.api.requests.abort(requestScope(context, "initial"));
     this.api.requests.abort(requestScope(context, "older"));
     this.api.requests.abort(requestScope(context, "status"));
-    context.segments.clear();
-    context.details.clear();
+    if (!keepHistory) {
+      context.segments.clear();
+      context.details.clear();
+      context.expandedTurns.clear();
+      context.nextCursor = "";
+      context.hasMoreBefore = false;
+    } else {
+      for (const [reference, detail] of context.details) {
+        if (!detail.turn.closed) context.details.delete(reference);
+      }
+    }
     context.detailLoading.clear();
     context.detailErrors.clear();
-    context.expandedTurns.clear();
     context.liveEvents.clear();
     context.orphanEvents.clear();
-    context.nextCursor = "";
-    context.hasMoreBefore = false;
     context.loading = false;
     context.loadingOlder = false;
     context.loaded = false;
@@ -916,7 +942,7 @@ function compactTurnItem(item: AgentTurnItem, generationId: string): TimelineIte
   const base = { key, time: item.endedAt || item.startedAt, startTime: item.startedAt, generationId };
   const data = item.data && typeof item.data === "object" ? item.data : {};
   switch (item.type) {
-    case "message": return [applyPUAMessagePayload({ ...base, kind: "message", role: item.role || "user", sender: item.sender, steer: item.steer, text: item.text || "" }, item.payload)];
+    case "message": return [applyPUAMessagePayload({ ...base, kind: "message", role: item.role || "user", sender: item.sender, steer: item.steer, text: item.text || "", messageId: item.messageId, startEventId: item.startEventId }, item.payload)];
     case "thinking": {
       const count = Math.max(1, Number(item.count) || 1);
       return [{ ...base, kind: "thinking", count, text: `Reasoning details omitted from compact history · ${count} update(s)`, compact: true, rangeStartEventId: item.startEventId, rangeEndEventId: item.endEventId }];

@@ -365,7 +365,7 @@ describe("DetailPanel", () => {
     await tick();
     (Array.from(target.querySelectorAll(".artifact-row")) as HTMLButtonElement[]).find((button) => button.textContent?.includes("b.txt"))!.click();
     await tick();
-    const urls = [...pending.keys()];
+    const urls = [...pending.keys()].filter(url => url.includes("/files?"));
     pending.get(urls[0])!(new Response(JSON.stringify({ path: "a.txt", content: "old response", contentHash: "old" }), { headers: { "content-type": "application/json" } }));
     pending.get(urls[1])!(new Response(JSON.stringify({ path: "b.txt", content: "current response", contentHash: "current" }), { headers: { "content-type": "application/json" } }));
     await vi.waitFor(() => expect(target.querySelector('[role="dialog"]')?.textContent).toContain("current response"));
@@ -373,7 +373,7 @@ describe("DetailPanel", () => {
   });
 
   it("preserves an open artifact preview while the same file is refreshed", async () => {
-    const fetch = vi.fn(async () => new Response(JSON.stringify({
+    const fetch = vi.fn(async (_input: RequestInfo | URL) => new Response(JSON.stringify({
       path: "a.txt",
       content: Array.from({ length: 40 }, (_, index) => `line ${index + 1}`).join("\n"),
       contentHash: "a-v1",
@@ -397,7 +397,7 @@ describe("DetailPanel", () => {
     file.click();
     await tick();
 
-    expect(fetch).toHaveBeenCalledOnce();
+    expect(fetch.mock.calls.filter(([input]) => String(input).includes("/files?"))).toHaveLength(1);
     expect(scroller.scrollTop).toBe(40);
     expect(scroller.scrollLeft).toBe(7);
   });
@@ -417,7 +417,7 @@ describe("DetailPanel", () => {
     await tick();
     viewButtons[1].click();
     await tick();
-    const urls = [...pending.keys()];
+    const urls = [...pending.keys()].filter(url => url.includes("/diff?"));
     pending.get(urls[0])!(new Response(JSON.stringify({ path: "pua", diff: "stale diff", hasChanges: true }), { headers: { "content-type": "application/json" } }));
     pending.get(urls[1])!(new Response(JSON.stringify({ path: "docs", diff: "current diff", hasChanges: true }), { headers: { "content-type": "application/json" } }));
     await vi.waitFor(() => expect(target.querySelector('[role="dialog"]')?.textContent).toContain("current diff"));

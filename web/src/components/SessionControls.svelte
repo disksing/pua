@@ -12,7 +12,7 @@
     enabled: boolean;
     followTail: boolean;
     onLatest: () => void;
-    children: Snippet<[Snippet, Snippet]>;
+    children: Snippet<[Snippet, Snippet, ResourceMessageStatus | null]>;
   } = $props();
 
   type ApprovalReply = Parameters<EventTimelineModel["onApproval"]>[2];
@@ -55,8 +55,7 @@
   const canStop = $derived(Boolean(turn && turn !== stoppedTurn && current?.session?.id
     && !current?.archived && !current?.generation?.replacementPending
     && (sessionState === "running" || sessionState === "waiting_approval")));
-  const waiting = $derived(current?.messages?.waiting || 0);
-  const hasTail = $derived(working || waitingApproval || canStop || stopping || waiting > 0);
+  const hasTail = $derived(working || waitingApproval || canStop || stopping);
 
   function activeTurnKey(next: ResourceMessageStatus | null): string {
     const generationId = next?.generation?.generationId;
@@ -228,22 +227,19 @@
       {#if canStop || stopping}
         <button type="button" class="public-chat-stop ghost-button" disabled={stopping} onclick={stop}>{stopping ? "Stopping…" : "Stop execution"}</button>
       {/if}
-      {#if waiting}
-        <span class="public-chat-queued" role="status">Queued inputs: {waiting}</span>
-      {/if}
     </div>
   {/if}
 {/snippet}
 
 {#snippet notices()}
-  {#if pendingIDs.length || hasTail && !followTail}
+  {#if pendingIDs.length || !followTail}
     <div class="public-chat-shortcuts">
       {#if approvals.length}
         <button type="button" class="ghost-button" onclick={viewApprovals}>View {pendingIDs.length === 1 ? "pending approval" : `${pendingIDs.length} pending approvals`}</button>
       {:else if pendingIDs.length && !approvalError}
         <span role="status">Loading pending approvals…</span>
       {/if}
-      {#if hasTail && !followTail}
+      {#if !followTail}
         <button type="button" class="ghost-button" onclick={onLatest}>Jump to latest</button>
       {/if}
     </div>
@@ -259,7 +255,7 @@
   {/each}
 {/snippet}
 
-{@render children(tail, notices)}
+{@render children(tail, notices, current)}
 
 <style>
   .public-chat-execution, .public-chat-shortcuts {
@@ -273,7 +269,6 @@
   }
   .public-chat-execution { padding-bottom: 2px; }
   .public-chat-stop { color: var(--red-deep); font-weight: 650; }
-  .public-chat-queued { padding: 3px 7px; border-radius: 5px; background: var(--panel-sunken); }
   .public-chat-approvals { display: grid; min-width: 0; gap: 6px; max-width: 720px; scroll-margin-bottom: 110px; }
   .public-chat-shortcuts button, .public-chat-stop { min-height: 32px; padding: 4px 8px; }
   .public-chat-shortcuts:empty { display: none; }

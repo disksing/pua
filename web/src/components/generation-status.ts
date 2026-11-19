@@ -31,7 +31,7 @@ export function turnIsWorking(status: ResourceMessageStatus | null): boolean {
  * Generation also has a live resource status; use it to repair a cached
  * History value when it disagrees about whether the resource is active.
  */
-export function effectiveGenerationStatus(block: ConversationBlock, status: ResourceMessageStatus | null): string {
+export function effectiveGenerationStatus(block: Pick<ConversationBlock, "generation">, status: ResourceMessageStatus | null): string {
   const historyStatus = normalized(block.generation.status) || "unknown";
   const liveGeneration = status?.generation;
   if (!liveGeneration || liveGeneration.generationId !== block.generation.generationId) return historyStatus;

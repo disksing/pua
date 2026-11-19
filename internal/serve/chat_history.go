@@ -62,6 +62,7 @@ func historyChatTexts(work turnWork, turn agentHubTurn, sender string) []chatMes
 		messages = append(messages, chatMessage{
 			ID:   "auto-" + chatID(work.SessionID, fmt.Sprintf("%s:%d", work.TurnID, item.StartEventID)),
 			Role: "agent", Text: item.Text, Sender: sender, workID: work.ID, workEpoch: work.Context.ChatEpoch, workOffset: int64(len(messages) + 1),
+			turnID: work.TurnID, startEventID: item.StartEventID,
 			CreatedAt: firstNonEmpty(item.EndedAt, item.StartedAt, turn.CompletedAt, work.CreatedAt),
 		})
 	}

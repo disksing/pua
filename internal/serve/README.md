@@ -83,7 +83,9 @@ DELETE /api/workspaces/{workspaceId}/users/{name}
 
 `GET /api/workspaces/{workspaceId}/tree` 返回层级资源。浏览器的 Running 筛选读取各节点的 `runtime.activeTurn`，Unread 筛选读取当前用户的 `chat.unreadCount`。筛选保留命中 Task 所在的 Project 和虚拟目录。`activity.running` 继续服务桌面活跃 Turn 计数的兼容路径。
 
-资源树快照包含当前用户的 `userState.readTurnNumber`、`latestTurnNumber` 与 `unreadCount`。`latestTurnNumber` 只表示最新已完成 Turn。`PUT .../read` 接收前端实际观察到的 `throughTurnNumber`，仅单调推进当前用户的已读游标，最高为资源已完成 Turn 的高水位。Scheduler 的事件采用相同未读语义。树行展示自身的 `chat.open` 图标及 `chat.unreadCount`，Chat 关闭后保留历史与未读数字。Execution events 标题使用资源 `unreadCount`，Dialog events 标题使用 `dialogueEvents.unreadCount`。浏览器在时间线可见、跟随底部并加载历史后，以历史页的 `completedTurnNumber` 推进该通道游标。交流通道通过 `PUT .../chat/runtime/read` 写入当前用户的游标。公开 Chat 通过 `POST .../chat/read` 按消息 ID 推进自己的游标。三类游标独立。图标和计数通过只读轮询与操作后刷新同步，事件通过 SSE 和状态同步刷新。
+资源树快照包含当前用户的 `userState.readTurnNumber`、`latestTurnNumber` 与 `unreadCount`。`latestTurnNumber` 只表示最新已完成 Turn。`PUT .../read` 接收前端实际观察到的 `throughTurnNumber`，仅单调推进当前用户的已读游标，最高为资源已完成 Turn 的高水位。Scheduler 的事件采用相同未读语义。树行展示自身的 `chat.open` 图标及 `chat.unreadCount`，Chat 关闭后保留历史与未读数字。统一时间线显示资源执行未读数，点击标记后以已加载历史页的 `completedTurnNumber` 更新执行游标。旧交流通道通过 `PUT .../chat/runtime/read` 写入当前用户的游标。共享 Chat 通过 `POST .../chat/read` 按消息 ID 推进自己的游标。三类游标独立。图标和计数通过只读轮询与操作后刷新同步，事件通过 SSE 和状态同步刷新。
+
+共享 Chat 消息可包含 `inputMessageIds`，用于关联用户消息的邮箱输入；历史投影的自动回复包含 `turnId` 和 `startEventId`。执行历史摘要的 `triggerMessageId` 来自 canonical Turn，收紧与队列及共享消息的关联；`triggerType` 为已知的来源类型。展开 Turn 时可按消息 ID 或事件位置省略同一时间线已展示的共享消息。
 
 个人 UI 和资源状态保存在 `<control-dir>/users/{name}/ui-state.json`，公共 Turn 编号高水位保存在 `<control-dir>/resource-state.json`。用户级请求通过 `X-PUA-User` 指定用户。`ui-state` 保存侧栏虚拟目录和顺序（`folders` 与 `folderOrder`），`taskOrder` 中混合记录项目根级的 Task 和目录 ID。虚拟目录只挂在 Project 下。归档 Project/Task 时删除相关阅读状态和目录引用。
 

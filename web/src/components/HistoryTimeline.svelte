@@ -6,6 +6,7 @@
 
   import ActivityGroup from "./ActivityGroup.svelte";
   import { ChatSessionController } from "./chat-state";
+  import GenerationMarker from "./GenerationMarker.svelte";
   import Icon from "./Icon.svelte";
   import LifecycleNotice from "./LifecycleNotice.svelte";
   import TimelineMessage from "./TimelineMessage.svelte";
@@ -79,10 +80,6 @@
     if (!seconds) return "<1s";
     if (seconds < 60) return `${seconds}s`;
     return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
-  }
-
-  function valueOrUnknown(value: string | undefined, label: string): string {
-    return value?.trim() || `Unknown ${label}`;
   }
 
   type StatusTone = "completed" | "active" | "cancelled" | "failed" | "neutral";
@@ -219,15 +216,7 @@
       <div class="history-state"><Icon name="history" /><span>No resource History yet.</span></div>
     {/if}
     {#each generationGroups as group (group.generation.generationId)}
-      <div class="history-generation" data-generation-id={group.generation.generationId}>
-        <span class="history-generation-label">Generation {group.generation.generation}</span>
-        <strong>{valueOrUnknown(group.generation.agentName, "agent")}</strong>
-        <span class="history-generation-meta">
-          <span>{valueOrUnknown(group.generation.provider || group.generation.providerId, "provider")}</span>
-          <span>{valueOrUnknown(group.generation.model, "model")}</span>
-          <span class="history-status-pill" data-tone={statusTone(group.generation.status)}>{group.generation.status || "unknown"}</span>
-        </span>
-      </div>
+      <GenerationMarker generation={group.generation} />
       <div class="history-track">
         {#each group.blocks as block (block.key)}
           {#if block.kind === "gap"}

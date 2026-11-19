@@ -48,6 +48,10 @@ export interface WaitingMessage {
   acceptedAt: string;
   requestedMode: string;
   actualMode: string;
+  role?: string;
+  sender?: { name?: string; id?: string };
+  type?: string;
+  causation?: { sourceResourceId?: string };
 }
 
 export interface ResourceMessageStatus {
@@ -133,6 +137,7 @@ export interface AgentSemanticFrame {
 
 export interface AgentTurnItem {
   type: string;
+  messageId?: string;
   role?: string;
   sender?: { name?: string; id?: string; sessionId?: string };
   steer?: boolean;
@@ -185,6 +190,8 @@ export interface ResourceHistoryTurnSummary {
   // "agent"); the chat timeline collapses closed non-user Turns by default.
   triggerRole?: string;
   triggerSender?: { name?: string; id?: string; sessionId?: string };
+  triggerMessageId?: string;
+  triggerType?: string;
   finalReplyPreview?: string;
   eventCount: number;
   toolEventCount: number;
@@ -242,6 +249,8 @@ export interface TimelineItem {
   kind: string;
   key?: string | number;
   generationId?: string;
+  messageId?: string;
+  startEventId?: number;
   role?: string;
   text?: string;
   time?: string;

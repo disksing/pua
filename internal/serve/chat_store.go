@@ -37,6 +37,8 @@ type chatMessage struct {
 	workEpoch     uint64
 	workOffset    int64
 	rawPosition   int
+	turnID        string
+	startEventID  int64
 	ID            string `json:"id"`
 	Role          string `json:"role"`
 	Text          string `json:"text"`
@@ -277,19 +279,27 @@ type publicChat struct {
 }
 
 type publicChatMessage struct {
-	ID        string `json:"id"`
-	Role      string `json:"role"`
-	Text      string `json:"text"`
-	CreatedAt string `json:"createdAt"`
-	Sender    string `json:"sender,omitempty"`
+	ID              string   `json:"id"`
+	Role            string   `json:"role"`
+	Text            string   `json:"text"`
+	CreatedAt       string   `json:"createdAt"`
+	Sender          string   `json:"sender,omitempty"`
+	InputMessageIDs []string `json:"inputMessageIds,omitempty"`
+	TurnID          string   `json:"turnId,omitempty"`
+	StartEventID    int64    `json:"startEventId,omitempty"`
 }
 
 func (c resourceChat) public(users ...string) publicChat {
-	messages := make([]publicChatMessage, 0, len(c.Messages))
-	for _, message := range c.Messages {
+	return c.publicRange(0, len(c.Messages), users...)
+}
+
+func (c resourceChat) publicRange(start, end int, users ...string) publicChat {
+	messages := make([]publicChatMessage, 0, end-start)
+	for _, message := range c.Messages[start:end] {
 		messages = append(messages, publicChatMessage{
 			ID: message.ID, Role: message.Role, Text: message.Text,
 			CreatedAt: message.CreatedAt, Sender: message.Sender,
+			InputMessageIDs: c.executionInputIDs(message), TurnID: message.turnID, StartEventID: message.startEventID,
 		})
 	}
 	return publicChat{
@@ -299,12 +309,24 @@ func (c resourceChat) public(users ...string) publicChat {
 	}
 }
 
+func (c resourceChat) executionInputIDs(message chatMessage) []string {
+	if message.Role != "user" {
+		return nil
+	}
+	if message.LegacyChatID != "" && message.LegacyID != "" {
+		return []string{
+			"chat-" + chatID(message.LegacyChatID, "input-"+message.LegacyID),
+			"chat-" + chatID(message.LegacyChatID, "migrated-input-"+chatID(message.LegacyChatID, message.LegacyID)),
+		}
+	}
+	return []string{"chat-" + chatID(c.ID, "input-"+message.ID)}
+}
+
 // Message IDs are stable across appends and chat epochs, unlike offsets from
 // the end of the history when new messages arrive between page requests.
 func (c resourceChat) publicPage(limit int, before, after string, users ...string) (publicChat, error) {
-	result := c.public(users...)
 	if limit == 0 {
-		return result, nil
+		return c.public(users...), nil
 	}
 	start, end := 0, len(c.Messages)
 	if before != "" || after != "" {
@@ -333,7 +355,7 @@ func (c resourceChat) publicPage(limit int, before, after string, users ...strin
 	} else {
 		start = max(start, end-limit)
 	}
-	result.Messages = result.Messages[start:end]
+	result := c.publicRange(start, end, users...)
 	result.EndPosition = end + c.omitted
 	older, newer := start+c.omitted > 0, end < len(c.Messages)
 	result.HasOlder, result.HasNewer = &older, &newer

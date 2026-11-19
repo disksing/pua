@@ -7,7 +7,9 @@
   import { createModelChannel } from "./model-channel";
   import type { ComposerModel, FilePreviewModel, UploadDialogModel } from "./models";
   import SessionControls from "./SessionControls.svelte";
-  import { onMount, tick, untrack } from "svelte";
+  import SharedChatTimeline from "./SharedChatTimeline.svelte";
+  import { positionTimelinePreview, type SharedChatMessage } from "./shared-chat-timeline";
+  import { onDestroy, onMount, tick, untrack } from "svelte";
   import { ApiClient } from "../api/client";
   import type { ModelChannel } from "./model-channel";
   import type { DetailPanelModel } from "./models";
@@ -15,7 +17,7 @@
   let { channel, visible = true }: { channel: ModelChannel<DetailPanelModel>; visible?: boolean } = $props();
   // svelte-ignore state_referenced_locally
   let model = $state(channel.current());
-  type Message = { id: string; role: string; sender?: string; text: string; createdAt: string };
+  type Message = SharedChatMessage;
   type Chat = { id: string; open: boolean; epoch: number; unreadCount: number; messages: Message[]; hasOlder?: boolean; hasNewer?: boolean; reset?: boolean; endPosition?: number };
   const PAGE_SIZE = 40;
   let chat = $state<Chat | null>(null);
@@ -55,10 +57,11 @@
   const firstOpen = $derived(Boolean(chat && !chat.open && !chat.epoch && !messages.length && !archived));
   const headers = $derived({ "Content-Type": "application/json", "X-PUA-User": userName });
   onMount(() => channel.subscribe(next => model = next));
+  onDestroy(() => client.dispose());
   $effect(() => {
     const key = identity, path = base, userHeaders = { "X-PUA-User": userName };
     mutationRevision++;
-    chat = null; draft = ""; error = ""; actionError = ""; requestID = ""; pending = false; uploadOpen = false; bindingSaving = false;
+    chat = null; draft = ""; error = ""; actionError = ""; requestID = ""; pending = false; uploadOpen = false; bindingSaving = false; preview = null;
     echoes = [];
     hasOlder = false; loadingOlder = false; olderError = "";
     if (!canLoad) return;
@@ -119,7 +122,7 @@
         const container = root?.closest<HTMLElement>("#chatTimeline");
         const height = container?.scrollHeight || 0, top = container?.scrollTop || 0;
         const viewportTop = container?.getBoundingClientRect().top ?? 0;
-        const anchor = [...root.querySelectorAll(".public-messages article")].find(article => article.getBoundingClientRect().bottom > viewportTop);
+        const anchor = [...root.querySelectorAll("[data-chat-row]")].find(row => row.getBoundingClientRect().bottom > viewportTop);
         const anchorTop = anchor?.getBoundingClientRect().top;
         const known = new Set(active.messages.map(message => message.id));
         followTail = false;
@@ -142,12 +145,19 @@
     root = element;
     const container = element.closest<HTMLElement>("#chatTimeline");
     if (!container) return;
+    const movePreview = () => {
+      if (!("showPopover" in HTMLElement.prototype)) return;
+      const preview = element.querySelector<HTMLElement>(".timeline-preview:popover-open");
+      if (preview) positionTimelinePreview(preview, container);
+    };
     const onScroll = () => {
+      movePreview();
       followTail = container.scrollHeight - container.scrollTop - container.clientHeight < 120;
       if (container.scrollTop < 120) loadOlder();
     };
     const resize = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => {
-      if (visible && followTail) pinToTail();
+      movePreview();
+      if (visible && followTail && window.getSelection()?.isCollapsed !== false) pinToTail();
     });
     resize?.observe(container);
     resize?.observe(element);
@@ -266,39 +276,34 @@
 
 </script>
 <section tabindex="-1" use:trackScroll class="persistent-chat" aria-label="Resource chat">
-  <SessionControls {model} enabled={visible && Boolean(chat) && !archived} {followTail} onLatest={jumpToLatest}>
-    {#snippet children(execution, notices)}
-      <div class="public-messages" aria-live="polite">
-        {#if hasOlder}
-          <div class="older-messages">
-            <button type="button" disabled={loadingOlder} onclick={() => loadOlder()}>{loadingOlder ? "Loading older messages…" : "Load older messages"}</button>
-            {#if olderError}<small role="alert">{olderError}</small>{/if}
-          </div>
-        {/if}
-        {#each messages as message (message.id)}
+  <SessionControls {model} enabled={visible && canLoad && !archived && Boolean(chat || model.detail || model.resourceType === "workspace")} {followTail} onLatest={jumpToLatest}>
+    {#snippet children(execution, notices, status)}
+      {#if hasOlder}
+        <div class="older-messages">
+          <button type="button" disabled={loadingOlder} onclick={() => loadOlder()}>{loadingOlder ? "Loading older messages…" : "Load older messages"}</button>
+          {#if olderError}<small role="alert">{olderError}</small>{/if}
+        </div>
+      {/if}
+      {#key identity}
+        <SharedChatTimeline {model} {visible} {status} {messages} onOpenFile={openLinkedFile} onInspect={() => followTail = false}>
+          {#snippet bubble(message)}
           <article class:own-message={message.role === "user" && message.sender === userName}>
             <small class="message-meta"><strong>{message.role === "user" ? (message.sender || "User") : (message.sender?.trim() || "Agent")}</strong> <time datetime={message.createdAt}>{new Date(message.createdAt).toLocaleString()}</time></small>
             <div class="markdown-rendered" use:markdownResourceNavigation={{ resolveResourceTitle: model.resolveResourceTitle, onNavigate: model.onNavigate, onOpenFile: openLinkedFile }}>{@html markdownHTML(message.text, { resolveResourceTitle: model.resolveResourceTitle, workspaceId: model.workspaceId })}</div>
           </article>
-        {/each}
-        {#if chat && !messages.length}
-          <div class="chat-empty">
-            {#if firstOpen}
-              <Icon name="message-square" />
-              <strong>Chat hasn’t been opened</strong>
-              <p>Open a shared chat to message this resource.</p>
-              <button type="button" class="primary-button" disabled={pending} onclick={() => toggleChat("open")}>Open chat</button>
-            {:else if archived || !chat.open}
-              <strong>No chat history</strong>
-            {:else}
-              <strong>No messages yet</strong>
-              <p>Send a message to start the conversation.</p>
+          {/snippet}
+          {#snippet empty()}
+            {#if chat && !firstOpen}
+              <div class="chat-empty">
+                <strong>{archived || !chat.open ? "No chat history" : "No messages yet"}</strong>
+                {#if chat.open && !archived}<p>Send a message to start the conversation.</p>{/if}
+              </div>
+            {:else if !chat && canLoad && !error}
+              <div class="chat-empty" role="status">Loading chat…</div>
             {/if}
-          </div>
-        {:else if !chat && canLoad && !error}
-          <div class="chat-empty" role="status">Loading chat…</div>
-        {/if}
-      </div>
+          {/snippet}
+        </SharedChatTimeline>
+      {/key}
       {@render execution()}
       <div class="public-chat-dock">
         {@render notices()}
@@ -317,9 +322,9 @@
                 {/snippet}
               </ChatComposer>
             </div>
-          {:else if !firstOpen}
+          {:else}
             <div class="chat-closed">
-              <div><strong>Chat is closed</strong><p>{messages.length ? "History is available. " : ""}Background work can continue.</p></div>
+              <div><strong>{firstOpen ? "Chat hasn’t been opened" : "Chat is closed"}</strong><p>{firstOpen ? "Open a shared chat to message this resource." : "Background work can continue."}</p></div>
               <button type="button" class="secondary-button" bind:this={openButton} disabled={pending} onclick={() => toggleChat("open")}>{chat.epoch ? "Reopen chat" : "Open chat"}</button>
             </div>
           {/if}
@@ -332,7 +337,6 @@
 <FilePreviewModal {client} workspaceId={model.workspaceId} resourceId={model.resourceId} selection={preview} editable={false} resolveResourceTitle={model.resolveResourceTitle} onNavigate={model.onNavigate} onOpenFile={openLinkedFile} onSaveMarkdown={rejectReadOnlySave} onClose={() => preview = null} onError={model.onToast} />
 <style>
   .persistent-chat { display:flex; flex-direction:column; min-height:100%; gap:8px; padding:12px 16px 0; }
-  .public-messages { flex:1; min-width:0; display:flex; flex-direction:column; gap:10px; }
   .older-messages { display:flex; flex-direction:column; align-items:center; gap:4px; }
   article {
     align-self:flex-start;
@@ -360,7 +364,6 @@
   .chat-empty { margin:auto; padding:20px 6px; text-align:center; color:var(--muted-strong); }
   .chat-empty strong { display:block; font-size:15px; color:var(--text); }
   .chat-empty p, .chat-closed p { margin:2px 0 0; }
-  .chat-empty button { margin-top:12px; }
   .public-chat-dock {
     position:sticky;
     z-index:2;
@@ -377,10 +380,10 @@
   .public-chat-composer :global(.chat-input) { margin:2px 0 0; }
   .chat-closed { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:6px 12px; padding:6px 0 3px; color:var(--muted-strong); }
   .chat-closed strong { color:var(--text); }
-  .chat-empty button, .chat-closed button, .older-messages button { min-height:36px; padding:6px 12px; }
+  .chat-closed button, .older-messages button { min-height:36px; padding:6px 12px; }
   .chat-error { border-left:2px solid var(--red); padding:5px 8px; overflow-wrap:anywhere; }
   [role="alert"] { color:var(--red-deep); }
   @container shared-chat (max-width:500px) {
-    .chat-empty button, .chat-closed button, .older-messages button { min-height:44px; }
+    .chat-closed button, .older-messages button { min-height:44px; }
   }
 </style>

@@ -11,7 +11,6 @@
   import FileBrowser from "./FileBrowser.svelte";
   import FilePreviewModal from "./FilePreviewModal.svelte";
   import Icon from "./Icon.svelte";
-  import ChannelEvents from "./ChannelEvents.svelte";
   import PersistentChat from "./PersistentChat.svelte";
   import MarkdownDocument from "./MarkdownDocument.svelte";
   import SchedulerPanel from "./SchedulerPanel.svelte";
@@ -23,7 +22,6 @@
   let model = $state(channel.current());
   let identity = $state("");
   let activeTab = $state("");
-  let allTurns = $state(false);
   let expanded = $state(new Set<string>());
   let preview = $state<{ section: string; path: string; mode?: "edit" | "annotate" } | null>(null);
   let diffRepo = $state<ResourceRepoModel | null>(null);
@@ -59,7 +57,6 @@
       expanded = new Set();
       const remembered = tabMemory.get(identity);
       activeTab = remembered || "chat";
-      allTurns = false;
       const content = document.getElementById("detailsContent");
       if (content) content.scrollTop = 0;
     } else if (tabs.length && !tabs.some((tab) => tab.id === activeTab)) {
@@ -196,17 +193,8 @@
 </script>
 
 {#snippet chatPanel()}
-  {#if activeTab === "chat"}
-    <div class="chat-view-options" role="group" aria-label="Chat view">
-      <button type="button" aria-pressed={!allTurns} onclick={() => allTurns = false}>Chat only</button>
-      <button type="button" aria-pressed={allTurns} onclick={() => allTurns = true}>All turns{#if model.executionUnreadCount}<span class="event-unread-count" aria-label={`${model.executionUnreadCount} unread execution Turns`}>{model.executionUnreadCount}</span>{/if}</button>
-    </div>
-    {#if allTurns}
-      {#key `${model.identity}:${model.currentUserName}`}<ChannelEvents {model} onOpenFile={openLinkedFile} onOpenLegacy={(path) => openPreview("Artifacts", path)} />{/key}
-    {/if}
-  {/if}
-  <div id="chatTimeline" class="chat-timeline" hidden={activeTab !== "chat" || allTurns}>
-    <PersistentChat {channel} visible={activeTab === "chat" && !allTurns} />
+  <div id="chatTimeline" class="chat-timeline" hidden={activeTab !== "chat"}>
+    <PersistentChat {channel} visible={activeTab === "chat"} />
   </div>
 {/snippet}
 

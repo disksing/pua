@@ -47,6 +47,7 @@ it("loads older messages without moving the reader and catches up more than one 
   vi.stubGlobal("fetch", vi.fn(async (input, init) => {
     const url = new URL(String(input), "http://localhost");
     if (url.pathname.endsWith("/status")) return response({ sessionState: "idle" });
+    if (url.pathname.endsWith("/history/turns")) return response({ segments: [] });
     requests.push(url);
     if (url.pathname.endsWith("/messages")) {
       const body = JSON.parse(String(init?.body));

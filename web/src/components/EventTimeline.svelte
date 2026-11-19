@@ -4,20 +4,16 @@
   import { onDestroy, onMount, tick } from "svelte";
 
   import { ApiClient } from "../api/client";
-  import ActivityGroup from "./ActivityGroup.svelte";
-  import ApprovalCard from "./ApprovalCard.svelte";
   import { ChatSessionController, turnIsCollapsedByPolicy, type ChatSessionControllerOptions } from "./chat-state";
   import { effectiveGenerationStatus, turnIsWorking } from "./generation-status";
   import FilePreviewModal from "./FilePreviewModal.svelte";
-  import LifecycleNotice from "./LifecycleNotice.svelte";
   import type { ModelChannel } from "./model-channel";
   import Icon from "./Icon.svelte";
   import type { ChatContextSnapshot, ConversationBlock, EventTimelineModel, FilePreviewModel, ResourceHistoryTurnSummary, TimelineItem } from "./models";
-  import TimelineMessage from "./TimelineMessage.svelte";
   import TimelineNotice from "./TimelineNotice.svelte";
+  import TurnEventDetails from "./TurnEventDetails.svelte";
   import TurnWorkingIndicator from "./TurnWorkingIndicator.svelte";
-  import { formatClock, groupTimelineActivities, markTurnAgentRuns, markTurnFinalAssistant } from "./timeline-events";
-  import UnknownEvent from "./UnknownEvent.svelte";
+  import { formatClock } from "./timeline-events";
 
   let { channel, readOnly = false, controllerOptions = {}, onViewed }: { channel: ModelChannel<EventTimelineModel>; readOnly?: boolean; controllerOptions?: ChatSessionControllerOptions; onViewed?: (snapshot: ChatContextSnapshot) => void } = $props();
   // svelte-ignore state_referenced_locally
@@ -176,11 +172,6 @@
       update(next: string) { current = next; if (deferredTurnExpands.has(node)) deferredTurnExpands.set(node, next); },
       destroy() { observer.disconnect(); deferredTurnExpands.delete(node); },
     };
-  }
-
-  function blockItems(block: ConversationBlock): TimelineItem[] {
-    const items = block.events ? projector(block.events).map((item) => ({ ...item, generationId: block.generation.generationId })) : block.items || [];
-    return markTurnAgentRuns(groupTimelineActivities(markTurnFinalAssistant(items)));
   }
 
   function blockAgentName(block: ConversationBlock): string {
@@ -379,13 +370,6 @@
     return [...scroll.querySelectorAll<HTMLElement>("[data-timeline-key]")].find((item) => item.getBoundingClientRect().bottom >= top) ?? null;
   }
 
-  function timelineKey(item: TimelineItem): string {
-    const key = item.kind === "activity" && item.rangeStartEventId
-      ? String(item.rangeStartEventId)
-      : String(item.key ?? item.approvalId ?? item.time ?? item.type ?? "event");
-    return `${item.generationId || snapshot.generationId}:${item.kind}:${key}`;
-  }
-
   function emptySnapshot(): ChatContextSnapshot {
     return { identity: "", workspaceId: "", resourceId: "", generationId: "", blocks: [], notices: [], hasMoreBefore: false, loading: false, loadingOlder: false, loaded: false, error: "" };
   }
@@ -457,31 +441,9 @@
               <div class="turn-summary-preview">{block.turn.triggerPreview}</div>
             {/if}
           {/if}
-          {#each blockItems(block) as item (timelineKey(item))}
-            <div data-timeline-key={timelineKey(item)}>
-              {#if item.agentStart}
-                <!-- Reasoning, tool calls, and approvals render without their own
-                     author label, so a run that starts with them gets a header
-                     carrying the agent's name and the run's start time;
-                     otherwise both would first appear on the initial progress
-                     update instead of the turn's first event. -->
-                <div data-component-owner="event-timeline" class="agent-run-header"><strong>{blockAgentName(block)}</strong>{#if formatClock(item.time)}<span>{formatClock(item.time)}</span>{/if}</div>
-              {/if}
-              {#if item.kind === "message"}
-                <TimelineMessage {item} agentName={blockAgentName(block)} workspaceId={model.workspaceId} resolveResourceTitle={model.resolveResourceTitle} onNavigate={model.onNavigate} onOpenFile={openLinkedFile} />
-              {:else if item.kind === "activity"}
-                <ActivityGroup {item} onExpand={() => expandCompact(item)} />
-              {:else if item.kind === "approval"}
-                <ApprovalCard {item} {readOnly} generationId={block.generation.generationId} contextIdentity={snapshot.identity} onApproval={model.onApproval} onToast={model.onToast} />
-              {:else if item.kind === "lifecycle"}
-                <LifecycleNotice {item} />
-              {:else if item.kind === "error"}
-                <TimelineNotice title="Provider error" text={item.text || ""} error />
-              {:else}
-                <UnknownEvent {item} />
-              {/if}
-            </div>
-          {/each}
+          <TurnEventDetails {block} project={projector} agentName={model.agentName} workspaceId={model.workspaceId}
+            resolveResourceTitle={model.resolveResourceTitle} onNavigate={model.onNavigate} onOpenFile={openLinkedFile}
+            onExpand={expandCompact} {readOnly} contextIdentity={snapshot.identity} onApproval={model.onApproval} onToast={model.onToast} />
           {#if block.turn && isTurnCollapsed(block.turn) && (block.items?.length || block.events?.length)}
             <button type="button" class="turn-collapse-again" onclick={() => collapseExpandedTurn(block)}><Icon name="chevron-up" /><span>Collapse turn</span></button>
           {/if}

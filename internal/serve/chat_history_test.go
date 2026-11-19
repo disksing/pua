@@ -19,6 +19,7 @@ func TestHistoryChatReadsBeforeReconciliationAndAfterRestart(t *testing.T) {
 	file := workFile(t, workspace)
 	work := file.find(input.ID)
 	closeWorkflowTurn(fake, *work, "completed", "history only answer")
+	turnID := work.TurnID
 	work.TurnID = ""
 	if err := saveTurnWork(workspace.Path, resource, file); err != nil {
 		t.Fatal(err)
@@ -38,6 +39,12 @@ func TestHistoryChatReadsBeforeReconciliationAndAfterRestart(t *testing.T) {
 	page := read("", nil)
 	if len(page.Messages) != 2 || page.Messages[1].Text != "history only answer" || page.UnreadCount != 1 {
 		t.Fatalf("unexpected public history: %+v", page)
+	}
+	if ids := page.Messages[0].InputMessageIDs; len(ids) != 1 || ids[0] != input.ID {
+		t.Fatalf("Chat input lost its canonical mailbox ID: %v, want %s", ids, input.ID)
+	}
+	if answer := page.Messages[1]; answer.TurnID != turnID || answer.StartEventID <= 0 || len(answer.InputMessageIDs) != 0 {
+		t.Fatalf("reconstructed answer lost its Turn event identity: %+v", answer)
 	}
 	if read("read", chatRequest{ID: page.Messages[1].ID, Position: 2}).UnreadCount != 0 {
 		t.Fatal("could not mark reconstructed reply read")

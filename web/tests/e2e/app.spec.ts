@@ -1227,7 +1227,8 @@ for (const viewport of [{ width: 1500, height: 800 }, { width: 440, height: 844 
     expect(requests[0].searchParams.get("limit")).toBe("40");
     await expect.poll(() => scroller.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
     await expect(scroller.locator(".chat-heading")).toHaveCount(0);
-    const bottomDockY = (await dock.boundingBox())!.y;
+    const dockBottom = () => dock.evaluate(element => element.getBoundingClientRect().bottom);
+    const bottomDockY = await dockBottom();
     const beforeY = await scroller.evaluate(element => {
       element.scrollTop = 0;
       return [...element.querySelectorAll("article")].find(article => article.textContent?.includes("Paginated message 80:"))!.getBoundingClientRect().top;
@@ -1235,7 +1236,7 @@ for (const viewport of [{ width: 1500, height: 800 }, { width: 440, height: 844 
     await expect(articles).toHaveCount(80);
     const afterY = await articles.filter({ hasText: "Paginated message 80:" }).evaluate(element => element.getBoundingClientRect().top);
     expect(Math.abs(afterY - beforeY)).toBeLessThan(2);
-    expect(Math.abs((await dock.boundingBox())!.y - bottomDockY)).toBeLessThan(2);
+    expect(Math.abs((await dockBottom()) - bottomDockY)).toBeLessThan(2);
     expect(requests.some(url => url.searchParams.get("before") === "m80")).toBe(true);
     await scroller.getByRole("button", { name: "Chat options" }).click();
     await scroller.getByRole("button", { name: "Close chat" }).click();
@@ -1331,14 +1332,15 @@ test("keeps public chat unread and both event cursors independent in the resourc
   await page.screenshot({path:testInfo.outputPath('unread-tree.png')});
   await row.click();
   const details=page.locator('#detailsPanel');
-  const execution=details.getByRole('button',{name:/^All turns/}),dialogue=details.getByRole('tab',{name:/^Dialog events/});
+  const execution=details.getByRole('button',{name:/unread execution Turns?/}),dialogue=details.getByRole('tab',{name:/^Dialog events/});
   await expect(row.locator('.unread-badge')).toHaveCount(0);
   await expect(execution).toContainText('3');await expect(dialogue).toHaveCount(0);
   expect(writes.filter(w=>w.op.endsWith('-read'))).toHaveLength(0);
-  await execution.click();await expect(details).toContainText('execution completed 3');
-  await expect(execution.locator('.event-unread-count')).toHaveCount(0);
+  await details.getByRole('button',{name:/^Turn · System/}).click();
+  await expect(details.locator('.expanded-history')).toContainText('execution completed 3');
+  await execution.click();
+  await expect(execution).toHaveCount(0);
   await expect(dialogue).toHaveCount(0);
-  await details.getByRole('button',{name:'Chat only',exact:true}).click();
   state('User','project1.task1').dialogue=5;state('User','project1.task1').execution=4;
   await expect(execution).toContainText('1',{timeout:10_000});
   expect(state('User','project1.task1').readExecution).toBe(3);
@@ -3066,7 +3068,7 @@ test("keeps Workspace settings card actions inside a 440px mobile viewport witho
   }
 });
 
-test("execution events stay live and read-only without a dialogue runtime", async ({ page }, testInfo) => {
+test("expanded execution Turns stay live and read-only alongside the Chat composer", async ({ page }, testInfo) => {
   const harness = await installMockApi(page);
   let revision = 10;
   let open = true;
@@ -3129,14 +3131,14 @@ test("execution events stay live and read-only without a dialogue runtime", asyn
   });
   await page.goto("/w/ws-test/r/project1.task1");
   const details=page.locator("#detailsPanel");
-  await details.getByRole("textbox",{name:"Chat message"}).fill("Draft across modes");
-  await details.getByRole("button",{name:/^All turns/}).click();
+  await details.getByRole("textbox",{name:"Chat message"}).fill("Draft across Turn details");
+  const turnChip = details.getByRole("button", { name: /^Turn · Unknown source/ });
+  await turnChip.click();
   await expect(details).toContainText("execution live revision 10");
   await expect(details.locator('[data-component-owner="event-timeline"]').first()).toBeVisible();
-  await expect(details.locator("textarea:visible,input:visible")).toHaveCount(0);
-  await expect(details.getByRole("button",{name:"Execution model",exact:true})).toBeVisible();
+  await expect(details.getByRole("textbox",{name:"Chat message"})).toBeVisible();
   await expect(details.locator(".agent-message-row")).toContainText(["execution trigger", "execution history paragraph", "execution live revision"]);
-  const geometry=await details.locator(".channel-timeline").evaluate(el=>({client:el.clientHeight,scroll:el.scrollHeight,overflow:getComputedStyle(el).overflowY}));
+  const geometry=await details.locator("#chatTimeline").evaluate(el=>({client:el.clientHeight,scroll:el.scrollHeight,overflow:getComputedStyle(el).overflowY}));
   expect(geometry.client).toBeGreaterThan(100);expect(geometry.scroll).toBeGreaterThan(geometry.client);expect(geometry.overflow).toBe("auto");
   revision=11;
   await expect(details).toContainText("execution live revision 11");
@@ -3147,19 +3149,178 @@ test("execution events stay live and read-only without a dialogue runtime", asyn
   await expect(details.getByRole("tab",{name:"Dialog events",exact:true})).toHaveCount(0);
   expect(streams.some(s=>s.includes("/chat/runtime/"))).toBe(false);
   await expect(page.getByLabel("Dialogue controls")).toHaveCount(0);
-  await expect(details.getByRole("button",{name:"All turns"})).toHaveAttribute("aria-pressed","true");
+  await expect(turnChip).toHaveAttribute("aria-expanded","true");
   running=false;
   await expect(details.locator(".turn-working-indicator")).toHaveCount(0);
   expect(writes.filter(p=>/\/(timer|messages|approval)$/.test(p))).toEqual([]);
   expect(harness.inputBodies).toHaveLength(0);
-  await details.getByRole("button",{name:"Chat only",exact:true}).click();
-  await expect(details.getByRole("textbox",{name:"Chat message"})).toHaveValue("Draft across modes");
+  await turnChip.click();
+  await expect(turnChip).toHaveAttribute("aria-expanded","false");
+  await expect(details.getByRole("textbox",{name:"Chat message"})).toHaveValue("Draft across Turn details");
   await page.getByRole("button",{name:"Chat options",exact:true}).click();
   await page.getByRole("button",{name:"Close chat",exact:true}).click();
   await expect(page.getByText("Public conversation remains separate",{exact:true})).toBeVisible();
-  await expect(details.locator(".channel-timeline")).toHaveCount(0);
+  await expect(details.getByRole("textbox",{name:"Chat message"})).toHaveCount(0);
+  await turnChip.click();
+  await expect(details.locator(".expanded-history")).toBeVisible();
   await page.getByRole("button",{name:"Reopen chat",exact:true}).click();
   await expect(page.getByText("Public conversation remains separate",{exact:true})).toBeVisible();
+});
+
+test("unifies mixed Turn icons, Generation markers, shared messages and waiting previews", async ({ page }, testInfo) => {
+  await installMockApi(page);
+  const epoch = (offset: number) => new Date(Date.parse(now) + offset * 1000).toISOString();
+  const generation = (number: number) => ({
+    generation: number, generationId: `mixed-${number}`, status: "idle", agentName: "Test Agent",
+    provider: "Fixture Provider", model: "Fixture Model", createdAt: epoch(number * 100),
+  });
+  const gen1 = generation(1), gen2 = generation(2), gen3 = generation(3);
+  const turn = (label: string, offset: number, type: string | undefined, sender: string | undefined, gen = gen2) => ({
+    reference: `ref-${label}`, turnId: label, closed: true, status: "completed", startedAt: epoch(offset),
+    triggerRole: type, triggerSender: sender ? { id: sender } : undefined,
+    triggerMessageId: `mail-${label}`, triggerPreview: label === "agent" ? "Long request ".repeat(120) : `${label} body`,
+    eventCount: 3, startEventId: offset, lastEventId: offset + 2, generation: gen,
+  });
+  const agent = turn("agent", 201, "agent", "project1.task2");
+  const system = turn("system", 202, "system", "PUA");
+  const scheduler = { ...turn("schedule", 203, "system", undefined), triggerType: "schedule_exact_due" };
+  const user = turn("user", 221, "user", "User");
+  const lost = turn("unknown", 222, undefined, undefined);
+  const older = turn("older", 101, "system", "Older generation", gen1);
+  const delivered = turn("delivered", 320, "agent", "project1.task2", gen3);
+  const next = turn("next", 321, "system", undefined, gen3);
+  const mixed = [agent, system, scheduler, ...Array.from({ length: 8 }, (_, index) => turn(`extra-${index}`, 204 + index, "system", `Worker ${index}`)), user, lost];
+  const input = { id: "visible-input", role: "user", sender: "User", text: "Visible user message", createdAt: epoch(220), inputMessageIds: [user.triggerMessageId] };
+  const output = { id: "visible-output", role: "agent", sender: "Test Agent", text: "Visible reply", createdAt: epoch(223), turnId: user.turnId, startEventId: 222 };
+  const waiting = [
+    { messageId: delivered.triggerMessageId, role: "agent", sender: { id: "project1.task2" }, text: "Waiting request preview" },
+    { messageId: "mail-scheduled-next", type: "scheduler_tick", text: "Upcoming schedule preview" },
+  ];
+  let open = false, chatEpoch = 0, current = gen2, historyDenied = false;
+  let pending = waiting.slice();
+  const historyRequests: string[] = [];
+  await page.route("**/api/workspaces/ws-test/resources/project1.task1/**", async route => {
+    const request = route.request(), url = new URL(request.url());
+    const op = url.pathname.split("/project1.task1/")[1];
+    if (op === "status") return json(route, { generation: current, sessionState: "idle", waitingMessages: pending, messages: { waiting: pending.length } });
+    if (op === "chat/open") { open = true; chatEpoch++; }
+    if (op === "chat/close") open = false;
+    if (op === "chat" || op === "chat/open" || op === "chat/close") return json(route, {
+      id: "mixed-chat", open, epoch: chatEpoch, unreadCount: 0, messages: chatEpoch ? [input, output] : [],
+    });
+    if (!op.startsWith("history/")) return route.fallback();
+    historyRequests.push(`${op}:${request.headers()["x-pua-user"]}`);
+    if (historyDenied) return route.fulfill({ status: 403, contentType: "application/json", body: '{"error":"Denied"}' });
+    if (op === "history/turns") {
+      const before = url.searchParams.has("cursor");
+      const segments = before
+        ? [{ generation: gen1, turns: [older] }, { generation: gen2, turns: [agent] }]
+        : [{ generation: gen2, turns: mixed }, ...(current === gen3 ? [{ generation: gen3, turns: [delivered, next] }] : [])];
+      return json(route, { segments, page: { hasMore: !before, nextCursor: before ? undefined : "earlier" } });
+    }
+    const selected = [...mixed, older, delivered, next].find(candidate => op.endsWith(`/${candidate.reference}`));
+    if (!selected) return route.fallback();
+    const items = selected === user ? [
+      { type: "message", role: "user", messageId: user.triggerMessageId, text: input.text, startEventId: 221 },
+      { type: "message", role: "assistant", text: output.text, startEventId: 222 },
+      { type: "message", role: "assistant", text: "Unpublished detail", startEventId: 223 },
+    ] : [{ type: "message", role: "assistant", text: `${selected.turnId} detail [Project spec](/project1/spec.md)`, startEventId: selected.lastEventId }];
+    return json(route, { turn: selected, latestEventId: selected.lastEventId, items });
+  });
+
+  await page.goto("/w/ws-test/r/project1.task1");
+  const chat = page.locator("#chatTimeline"), gen2Marker = chat.locator('[data-generation-id="mixed-2"]');
+  const chips = chat.locator(".history-chip[data-chat-row] button"), allDetails = chat.locator(".expanded-history");
+  const agentChip = chat.getByRole("button", { name: "Turn · Agent · project1.task2" });
+  const schedulerChip = chat.getByRole("button", { name: "Turn · Scheduler" });
+  await expect(chips).toHaveCount(13);
+  await expect(chat.getByRole("button", { name: "Open chat", exact: true })).toBeVisible();
+  await expect(chat.getByRole("textbox", { name: "Chat message" })).toHaveCount(0);
+  await expect(chat.getByRole("button", { name: "Turn · Unknown source" })).toBeVisible();
+  expect(await agentChip.boundingBox()).toMatchObject({ y: (await schedulerChip.boundingBox())!.y });
+  await agentChip.hover();
+  await expect(chat.getByRole("tooltip")).toContainText("Long request");
+  await expect(chat.getByRole("tooltip")).toHaveCSS("position", "fixed");
+  expect((await chat.getByRole("tooltip").textContent())!.length).toBeLessThan(550);
+  await agentChip.click();
+  await expect(allDetails).toContainText("agent detail");
+  await expect(allDetails.getByText("Project spec", { exact: true })).toBeVisible();
+  await allDetails.getByRole("button", { name: "Collapse turn" }).click();
+  await expect(agentChip).toBeFocused();
+  await expect(agentChip).toHaveAttribute("aria-expanded", "false");
+
+  await chat.getByRole("button", { name: "Load older Turns", exact: true }).click();
+  await expect(chat.locator("[data-generation-id]")).toHaveCount(2);
+  await expect(gen2Marker).toHaveCount(1);
+  await expect(chat.getByRole("button", { name: "Load older Turns", exact: true })).toHaveCount(0);
+  await chat.getByRole("button", { name: "Open chat", exact: true }).click();
+  await expect(chat.getByRole("textbox", { name: "Chat message" })).toBeVisible();
+  await expect(chat.locator("article")).toHaveText([/Visible user message/, /Visible reply/]);
+  await chat.getByRole("button", { name: "Turn · User", exact: true }).click();
+  await expect(allDetails).toContainText("Unpublished detail");
+  await expect(allDetails).not.toContainText("Visible user message");
+  await expect(allDetails).not.toContainText("Visible reply");
+  await allDetails.getByRole("button", { name: "Collapse turn" }).click();
+  await chat.getByRole("button", { name: "Chat options" }).click();
+  await chat.getByRole("button", { name: "Close chat", exact: true }).click();
+  await expect(chat.getByRole("button", { name: "Reopen chat" })).toBeFocused();
+  await expect(chat.getByRole("textbox", { name: "Chat message" })).toHaveCount(0);
+
+  await expect(chat.getByRole("group", { name: "Waiting messages" }).locator("button")).toHaveCount(2);
+  current = gen3;
+  await expect(chat.locator('[data-generation-id="mixed-3"]')).toBeVisible();
+  await expect(chat.locator('[data-generation-id="mixed-1"]')).toHaveCount(1);
+  await expect(gen2Marker).toHaveCount(1);
+  await expect(chat.getByRole("button", { name: "Waiting · Agent · project1.task2" })).toHaveCount(0);
+  await expect(chat.getByRole("button", { name: "Load older Turns", exact: true })).toHaveCount(0);
+  pending = [...waiting.slice(1), { messageId: "mail-new", role: "system", sender: { id: "PUA" }, text: "New waiting preview" }];
+  await expect(chat.getByRole("button", { name: "Waiting · System · PUA" })).toBeVisible();
+  await chat.getByRole("button", { name: "Turn · System", exact: true }).last().click();
+  await expect(allDetails).toContainText("next detail");
+  await allDetails.getByRole("button", { name: "Collapse turn" }).click();
+  await chat.getByRole("button", { name: "Reopen chat" }).click();
+  await expect(chat.getByRole("textbox", { name: "Chat message" })).toBeFocused();
+
+  await page.setViewportSize({ width: 370, height: 780 });
+  const session = await page.context().newCDPSession(page);
+  await session.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 1 });
+  const scheduled = chat.getByRole("button", { name: "Waiting · Scheduler" });
+  await scheduled.scrollIntoViewIfNeeded();
+  const waitBox = (await scheduled.boundingBox())!;
+  expect(waitBox.width).toBeGreaterThanOrEqual(44);
+  const tap = async (box: { x: number; y: number; width: number; height: number }) => {
+    await session.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: box.x + box.width / 2, y: box.y + box.height / 2 }] });
+    await session.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  };
+  await tap(waitBox);
+  await expect(chat.getByRole("tooltip")).toContainText("Upcoming schedule preview");
+  await tap(waitBox);
+  await expect(chat.getByRole("tooltip")).toHaveCount(0);
+  await schedulerChip.scrollIntoViewIfNeeded();
+  await tap((await schedulerChip.boundingBox())!);
+  await expect(allDetails).toContainText("schedule detail");
+  await expect(chat.locator("[data-generation-id]")).toHaveCount(3);
+  expect(await gen2Marker.evaluate(element => Math.abs(element.clientWidth - element.parentElement!.clientWidth))).toBeLessThan(3);
+  const chipRows = await chat.locator(".history-chip").evaluateAll(elements => new Set(elements.slice(1, 12).map(element => element.getBoundingClientRect().top)).size);
+  expect(chipRows).toBeGreaterThan(1);
+  await page.screenshot({ path: testInfo.outputPath("unified-chat-touch.png") });
+
+  await session.send("Emulation.setTouchEmulationEnabled", { enabled: false });
+  await allDetails.getByRole("button", { name: "Collapse turn" }).click();
+  await page.keyboard.press("Shift+Tab");
+  await expect(chat.getByRole("tooltip")).toContainText("system body");
+  await page.keyboard.press("Escape");
+  await expect(chat.getByRole("tooltip")).toHaveCount(0);
+  await page.keyboard.press("Enter");
+  await expect(allDetails).toContainText("system detail");
+  expect(historyRequests.every(request => request.endsWith(":User"))).toBe(true);
+
+  historyDenied = true;
+  await page.reload();
+  await expect(chat.getByText("Execution history unavailable.", { exact: false })).toBeVisible();
+  await expect(chips).toHaveCount(0);
+  await expect(chat.locator("article")).toHaveCount(2);
+  await expect(chat.getByRole("textbox", { name: "Chat message" })).toBeVisible();
 });
 
 for (const width of [280, 220, 320]) {
@@ -3358,7 +3519,7 @@ test("Unread follows public Chat badges and keeps the selected detail after read
   await expect(page).toHaveURL(/\/r\/project1\.task1$/);
   const details = page.locator("#detailsPanel");
   await expect(details).toContainText("Infrastructure task");
-  await expect(details.getByRole("button", { name: /^All turns/ })).toContainText("3");
+  await expect(details.getByRole("button", { name: "3 unread execution Turns" })).toBeVisible();
   expect(writes.filter((entry) => entry.op.endsWith("-read"))).toHaveLength(0);
 
   state("User", "project1.task2").unread = 1;

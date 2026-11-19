@@ -46,14 +46,20 @@ it("shows saved agent names and keeps unknown historical senders generic across 
  await tick();
  await vi.waitFor(() => expect(headings()).toEqual(["Original Agent", "reasoning", "Agent", "Agent", "Other User", "User"]));
 });
-it("shows queued input counts without copying internal message content into Chat", async () => {
+it("shows waiting previews separately from shared Chat messages", async () => {
  vi.stubGlobal("fetch", vi.fn(async (input) => {
-  if (pathname(input).endsWith("/status")) return response({ sessionState: "working", messages: { waiting: 2 }, waitingMessages: [{ text: "private background request" }] });
+  if (pathname(input).endsWith("/status")) return response({ sessionState: "working", waitingMessages: [
+   { messageId: "m", role: "agent", sender: { id: "project1" }, text: "background request" },
+   { messageId: "n", type: "scheduler_tick", text: "scheduled request" },
+  ] });
+  if (pathname(input).endsWith("/history/turns")) return response({ segments: [], page: { hasMore: false } });
   return response({ id: "c", open: true, epoch: 1, messages: [] });
  }));
  const { target } = setup();
- await vi.waitFor(() => expect(target.textContent).toContain("Queued inputs: 2"));
- expect(target.textContent).not.toContain("private background request");
+ await vi.waitFor(() => expect(target.querySelector(".queued-inputs")?.textContent).toContain("Waiting · 2"));
+ expect([...target.querySelectorAll(".queued-inputs button")].map(button => button.getAttribute("aria-label"))).toEqual(["Waiting · Agent · project1", "Waiting · Scheduler"]);
+ expect(target.querySelector(".queued-inputs [role=tooltip]")?.textContent).toContain("background request");
+ expect(target.querySelector("article, .chat-input [role=tooltip]")).toBeNull();
 });
 it("keeps archived chat history visible without input or execution controls", async () => {
  const fetch = vi.fn(async (input) => {

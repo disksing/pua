@@ -3,6 +3,7 @@ package app_test
 import (
 	"errors"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -175,5 +176,52 @@ func TestExactScheduleConcurrentOneTimeDispatch(t *testing.T) {
 	config, err := workspace.Scheduler()
 	if err != nil || accepted != 1 || len(config.Schedules) != 0 {
 		t.Fatalf("one-time accepted %d; config %#v; error %v", accepted, config, err)
+	}
+	if _, err := workspace.AddSchedule(app.CreateScheduleInput{Description: "Review", Condition: "when ready", Target: "workspace"}); err != nil {
+		t.Fatalf("register after one-time dispatch removed the prior schedule: %v", err)
+	}
+}
+
+func TestExactScheduleTargetRemainsReservedUntilRemoval(t *testing.T) {
+	workspace, err := app.Initialize(t.TempDir(), "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	tomorrow := now.AddDate(0, 0, 1)
+	lastOccurrence := time.Date(tomorrow.Year(), tomorrow.Month(), tomorrow.Day(), 9, 0, 0, 0, time.UTC)
+	replacement := app.CreateScheduleInput{Description: "Review", Condition: "when ready", Target: "workspace"}
+	daily, err := workspace.AddSchedule(app.CreateScheduleInput{Description: "Daily", Target: replacement.Target,
+		ExactTime: &app.ScheduleExactTimeSpec{TimeOfDay: "09:00", TimeZone: "UTC", ExpiresAt: lastOccurrence.Format(time.RFC3339)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspace.AddSchedule(replacement); err == nil || !strings.Contains(err.Error(), daily.ID) {
+		t.Fatalf("register before final dispatch: %v", err)
+	}
+	dispatched := 0
+	err = workspace.DispatchExactTimeSchedules(lastOccurrence.Add(time.Hour), func(schedule app.Schedule) error {
+		dispatched++
+		if schedule.ID != daily.ID {
+			t.Errorf("dispatched schedule = %#v", schedule)
+		}
+		return nil
+	})
+	if err != nil || dispatched != 1 {
+		t.Fatalf("final dispatch count %d, error %v", dispatched, err)
+	}
+	expired, err := workspace.AddSchedule(app.CreateScheduleInput{Description: "Already expired", Target: replacement.Target,
+		ExactTime: &app.ScheduleExactTimeSpec{TimeOfDay: "09:00", TimeZone: "UTC", ExpiresAt: now.AddDate(0, 0, -1).Format(time.RFC3339)}})
+	if err != nil {
+		t.Fatalf("register after final dispatch removed the prior schedule: %v", err)
+	}
+	if _, err := workspace.AddSchedule(replacement); err == nil || !strings.Contains(err.Error(), expired.ID) {
+		t.Fatalf("register while the expired schedule is still stored: %v", err)
+	}
+	if _, err := workspace.RemoveSchedule(expired.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspace.AddSchedule(replacement); err != nil {
+		t.Fatalf("register after removing an expired schedule: %v", err)
 	}
 }

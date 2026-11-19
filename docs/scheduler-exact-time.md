@@ -7,13 +7,15 @@
 ```sh
 pua scheduler add --description="一次提醒" --target=project1.task1 \
   --at=2026-11-12T09:00 --timezone=Asia/Shanghai
-pua scheduler add --description="每日检查" --target=project1.task1 \
+pua scheduler add --description="每日检查" --target=project1.task2 \
   --daily=09:00 --timezone=Asia/Shanghai
 pua scheduler update --id=schedule-... --daily=10:00
 pua scheduler update --id=schedule-... --condition=
 pua scheduler update --id=schedule-... --expires=
 pua scheduler update --id=schedule-... --condition="条件满足时" --no-exact-time
 ```
+
+每个 Workspace 内，每个目标资源只能登记一条调度。自然语言、一次性与每日调度共用这个限制。新增或改目标遇到冲突时，错误会显示目标和已有调度的 ID。升级前已存在的重复项可按 ID 查看、编辑、移到空闲目标或移除。目标上的登记全部移除后，可重新添加。
 
 `--at` 和 `--daily` 互斥。`--at`、`--expires` 接受带 offset 的 RFC3339 或本地 `YYYY-MM-DDTHH:MM[:SS]`。本地输入按照 `--timezone` 解释；带 offset 的输入定义绝对时刻，不受时区字段二次偏移。
 

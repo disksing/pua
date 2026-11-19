@@ -47,3 +47,21 @@ func TestSchedulerExactTimeCLI(t *testing.T) {
 		}
 	})
 }
+
+func TestSchedulerCLITargetConflict(t *testing.T) {
+	withTempCwd(t, func(root string) {
+		run(t, "init")
+		output := run(t, "scheduler", "add", "--description=Review", "--target=workspace", "--condition=ready")
+		var created app.Schedule
+		if err := json.Unmarshal([]byte(output), &created); err != nil || created.ID == "" {
+			t.Fatalf("created schedule %s, error %v", output, err)
+		}
+		daily := []string{"scheduler", "add", "--description=Daily", "--target=workspace", "--daily=09:00", "--timezone=UTC"}
+		if _, err := runErr(t, daily...); err == nil || !strings.Contains(err.Error(), `target "workspace" already has schedule `+created.ID) {
+			t.Fatalf("duplicate target error = %v", err)
+		}
+		run(t, "scheduler", "update", "--id="+created.ID, "--target=workspace", "--description=Updated")
+		run(t, "scheduler", "remove", "--id="+created.ID)
+		run(t, daily...)
+	})
+}

@@ -416,6 +416,9 @@ func (w *Workspace) AddSchedule(input CreateScheduleInput) (Schedule, error) {
 		if err := validateScheduleDescription(description, config.DescriptionMaxChars); err != nil {
 			return err
 		}
+		if err := checkScheduleTargetAvailable(config.Schedules, target); err != nil {
+			return err
+		}
 		id, err := newScheduleID()
 		if err != nil {
 			return err
@@ -464,7 +467,8 @@ func (w *Workspace) UpdateSchedule(input UpdateScheduleInput) (Schedule, error) 
 		if input.Target != nil {
 			target = *input.Target
 		}
-		exact, err := updatedScheduleExactTime(updated.ExactTime, input.ExactTime, time.Now(), strings.TrimSpace(target) != updated.Target)
+		targetChanged := strings.TrimSpace(target) != strings.TrimSpace(updated.Target)
+		exact, err := updatedScheduleExactTime(updated.ExactTime, input.ExactTime, time.Now(), targetChanged)
 		if err != nil {
 			return err
 		}
@@ -479,6 +483,11 @@ func (w *Workspace) UpdateSchedule(input UpdateScheduleInput) (Schedule, error) 
 		}
 		if input.Description != nil {
 			if err := validateScheduleDescription(description, config.DescriptionMaxChars); err != nil {
+				return err
+			}
+		}
+		if targetChanged {
+			if err := checkScheduleTargetAvailable(config.Schedules, target); err != nil {
 				return err
 			}
 		}
@@ -606,6 +615,15 @@ func validateDescriptionMaxChars(limit int) error {
 func validateScheduleDescription(description string, limit int) error {
 	if count := utf8.RuneCountInString(description); count > limit {
 		return fmt.Errorf("description must be at most %d characters (got %d)", limit, count)
+	}
+	return nil
+}
+
+func checkScheduleTargetAvailable(schedules []Schedule, target string) error {
+	for _, schedule := range schedules {
+		if strings.TrimSpace(schedule.Target) == target {
+			return fmt.Errorf("target %q already has schedule %s", target, schedule.ID)
+		}
 	}
 	return nil
 }

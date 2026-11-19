@@ -198,39 +198,42 @@ func TestSchedulerSettingsAndConcurrentScheduleWrites(t *testing.T) {
 	}
 	const count = 16
 	var wait sync.WaitGroup
-	errors := make(chan error, count)
+	results := make(chan error, count)
+	start := make(chan struct{})
 	for index := 0; index < count; index++ {
 		wait.Add(1)
 		go func(index int) {
 			defer wait.Done()
+			<-start
 			_, addErr := workspace.AddSchedule(app.CreateScheduleInput{
 				Description: fmt.Sprintf("Concurrent schedule %d", index),
 				Condition:   "when appropriate",
-				Target:      "workspace",
+				Target:      " workspace ",
 			})
-			if addErr != nil {
-				errors <- addErr
-			}
+			results <- addErr
 		}(index)
 	}
+	close(start)
 	wait.Wait()
-	close(errors)
-	for err := range errors {
-		t.Error(err)
-	}
+	close(results)
 	config, err = workspace.Scheduler()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(config.Schedules) != count {
-		t.Fatalf("got %d schedules, want %d", len(config.Schedules), count)
+	if len(config.Schedules) != 1 || config.Schedules[0].Target != "workspace" {
+		t.Fatalf("concurrent registrations = %#v", config.Schedules)
 	}
-	seen := make(map[string]bool, count)
-	for _, schedule := range config.Schedules {
-		if seen[schedule.ID] {
-			t.Fatalf("duplicate schedule id %q", schedule.ID)
+	conflict := `target "workspace" already has schedule ` + config.Schedules[0].ID
+	successes := 0
+	for err := range results {
+		if err == nil {
+			successes++
+		} else if !strings.Contains(err.Error(), conflict) {
+			t.Error(err)
 		}
-		seen[schedule.ID] = true
+	}
+	if successes != 1 {
+		t.Fatalf("successful registrations = %d, want 1", successes)
 	}
 	data, err := os.ReadFile(filepath.Join(workspace.Root(), "scheduler", "scheduler.json"))
 	if err != nil {
@@ -239,6 +242,119 @@ func TestSchedulerSettingsAndConcurrentScheduleWrites(t *testing.T) {
 	var raw map[string]any
 	if json.Unmarshal(data, &raw) != nil || !strings.HasSuffix(string(data), "\n") {
 		t.Fatalf("scheduler.json is not formatted valid JSON:\n%s", data)
+	}
+}
+
+func TestScheduleConcurrentAddAndRetarget(t *testing.T) {
+	workspace, err := app.Initialize(t.TempDir(), "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherHandle, err := app.OpenWorkspace(workspace.Root())
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := workspace.AddSchedule(app.CreateScheduleInput{Description: "Original", Condition: "when ready", Target: "scheduler"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, description := "workspace", "Moved"
+	start := make(chan struct{})
+	added, moved := make(chan error, 1), make(chan error, 1)
+	go func() {
+		<-start
+		_, err := workspace.AddSchedule(app.CreateScheduleInput{Description: "New", Condition: "when ready", Target: target})
+		added <- err
+	}()
+	go func() {
+		<-start
+		_, err := otherHandle.UpdateSchedule(app.UpdateScheduleInput{ID: source.ID, Target: &target, Description: &description})
+		moved <- err
+	}()
+	close(start)
+	addErr, moveErr := <-added, <-moved
+	config, err := workspace.Scheduler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	switch {
+	case addErr == nil && moveErr != nil:
+		if len(config.Schedules) != 2 || config.Schedules[0] != source || config.Schedules[1].Target != target ||
+			!strings.Contains(moveErr.Error(), `target "workspace" already has schedule `+config.Schedules[1].ID) {
+			t.Fatalf("add won: schedules %#v, move error %v", config.Schedules, moveErr)
+		}
+	case moveErr == nil && addErr != nil:
+		if len(config.Schedules) != 1 || config.Schedules[0].ID != source.ID || config.Schedules[0].Target != target ||
+			config.Schedules[0].Description != description || !strings.Contains(addErr.Error(), `target "workspace" already has schedule `+source.ID) {
+			t.Fatalf("move won: schedules %#v, add error %v", config.Schedules, addErr)
+		}
+	default:
+		t.Fatalf("expected one successful mutation: add %v, move %v", addErr, moveErr)
+	}
+
+	isolated, err := app.Initialize(t.TempDir(), "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := isolated.AddSchedule(app.CreateScheduleInput{Description: "Independent", Condition: "when ready", Target: target}); err != nil {
+		t.Fatalf("same target in a separate Workspace: %v", err)
+	}
+}
+
+func TestScheduleLegacyDuplicateTargetsRemainManageable(t *testing.T) {
+	workspace, err := app.Initialize(t.TempDir(), "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := app.CreateScheduleInput{Description: "Original", Condition: "when ready", Target: "workspace"}
+	original, err := workspace.AddSchedule(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := workspace.Scheduler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original.Target = " workspace "
+	config.Schedules[0] = original
+	legacy := original
+	legacy.ID = "schedule-0123456789abcdef01234567"
+	config.Schedules = append(config.Schedules, legacy)
+	data, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(workspace.Root(), "scheduler", "scheduler.json")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	config, err = workspace.Scheduler()
+	if err != nil || len(config.Schedules) != 2 || config.Schedules[1] != legacy {
+		t.Fatalf("legacy entries = %#v, %v", config.Schedules, err)
+	}
+	if _, err := workspace.AddSchedule(input); err == nil || !strings.Contains(err.Error(), `target "workspace" already has schedule `+original.ID) {
+		t.Fatalf("add while the target has legacy registrations: %v", err)
+	}
+	description := "Edited"
+	if _, err := workspace.UpdateSchedule(app.UpdateScheduleInput{ID: legacy.ID, Description: &description, Target: &input.Target}); err != nil {
+		t.Fatalf("edit while keeping the same normalized target: %v", err)
+	}
+	condition := "tomorrow"
+	if _, err := workspace.UpdateSchedule(app.UpdateScheduleInput{ID: original.ID, Condition: &condition}); err != nil {
+		t.Fatalf("edit without supplying a target: %v", err)
+	}
+	if _, err := workspace.RemoveSchedule(legacy.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspace.AddSchedule(input); err == nil || !strings.Contains(err.Error(), `target "workspace" already has schedule `+original.ID) {
+		t.Fatalf("add while the target still has a legacy schedule: %v", err)
+	}
+	freeTarget := "scheduler"
+	if _, err := workspace.UpdateSchedule(app.UpdateScheduleInput{ID: original.ID, Target: &freeTarget}); err != nil {
+		t.Fatalf("move legacy schedule to a free target: %v", err)
+	}
+	if _, err := workspace.AddSchedule(input); err != nil {
+		t.Fatalf("register the freed target: %v", err)
 	}
 }
 
@@ -309,6 +425,11 @@ func TestScheduleConditionCharacterLimit(t *testing.T) {
 			if err != nil || created.Condition != condition {
 				t.Fatalf("128-character condition = %#v, %v", created, err)
 			}
+			t.Cleanup(func() {
+				if _, err := workspace.RemoveSchedule(created.ID); err != nil {
+					t.Error(err)
+				}
+			})
 			before, err := os.ReadFile(filepath.Join(workspace.Root(), "scheduler", "scheduler.json"))
 			if err != nil {
 				t.Fatal(err)
@@ -374,7 +495,7 @@ func TestSchedulerConditionLimitSettingsAndLegacySchedules(t *testing.T) {
 	if _, err := setLimit(65536); err != nil {
 		t.Fatal(err)
 	}
-	created, err = workspace.AddSchedule(app.CreateScheduleInput{Description: "Maximum", Condition: strings.Repeat("😀", 65536), Target: "workspace"})
+	created, err = workspace.AddSchedule(app.CreateScheduleInput{Description: "Maximum", Condition: strings.Repeat("😀", 65536), Target: "scheduler"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -431,6 +552,11 @@ func TestScheduleDescriptionCharacterLimit(t *testing.T) {
 			if err != nil || created.Description != description {
 				t.Fatalf("32-character description = %#v, %v", created, err)
 			}
+			t.Cleanup(func() {
+				if _, err := workspace.RemoveSchedule(created.ID); err != nil {
+					t.Error(err)
+				}
+			})
 			before, err := os.ReadFile(filepath.Join(workspace.Root(), "scheduler", "scheduler.json"))
 			if err != nil {
 				t.Fatal(err)

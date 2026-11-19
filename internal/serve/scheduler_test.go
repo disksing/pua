@@ -40,6 +40,34 @@ func TestSchedulerHTTPAPIUsesApplicationStore(t *testing.T) {
 	if request := s.agents.takeReconcileRequests(); request&reconcileScheduler == 0 {
 		t.Fatalf("create schedule did not wake Scheduler reconciliation: %08b", request)
 	}
+	path := "/api/workspaces/workspace-scheduler/scheduler"
+	assertConflict := func(response *httptest.ResponseRecorder, want string) {
+		t.Helper()
+		var body struct{ Error string }
+		if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || response.Code != http.StatusBadRequest || !strings.Contains(body.Error, want) {
+			t.Fatalf("target conflict = %d %s", response.Code, response.Body.String())
+		}
+		if requests := s.agents.takeReconcileRequests(); requests&reconcileScheduler != 0 {
+			t.Fatalf("rejected mutation woke reconciliation: %08b", requests)
+		}
+	}
+	assertConflict(request(http.MethodPost, path, `{"description":"Daily","target":" workspace ","exactTime":{"timeOfDay":"09:00","timeZone":"UTC"}}`),
+		`target "workspace" already has schedule `+created.ID)
+	occupiedResponse := request(http.MethodPost, path, `{"description":"Another","condition":"tomorrow","target":"scheduler"}`)
+	var occupied app.Schedule
+	if err := json.Unmarshal(occupiedResponse.Body.Bytes(), &occupied); err != nil || occupiedResponse.Code != http.StatusOK || occupied.ID == "" {
+		t.Fatalf("create schedule for another target = %d %s", occupiedResponse.Code, occupiedResponse.Body.String())
+	}
+	s.agents.takeReconcileRequests()
+	beforeConflict := request(http.MethodGet, path, "").Body.String()
+	assertConflict(request(http.MethodPut, path+"/"+created.ID, `{"condition":"should not persist","target":"scheduler"}`),
+		`target "scheduler" already has schedule `+occupied.ID)
+	if response := request(http.MethodGet, path, ""); response.Code != http.StatusOK || response.Body.String() != beforeConflict {
+		t.Fatalf("failed retarget changed Scheduler = %d %s", response.Code, response.Body.String())
+	}
+	if response := request(http.MethodDelete, path+"/"+occupied.ID, ""); response.Code != http.StatusOK {
+		t.Fatalf("remove occupying schedule = %d %s", response.Code, response.Body.String())
+	}
 	updatedResponse := request(http.MethodPut, "/api/workspaces/workspace-scheduler/scheduler/"+created.ID, `{"condition":"next week","target":"scheduler"}`)
 	var updated app.Schedule
 	updatedErr := json.Unmarshal(updatedResponse.Body.Bytes(), &updated)

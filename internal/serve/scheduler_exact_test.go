@@ -111,7 +111,7 @@ func TestExactSchedulesDoNotWakeSchedulerAgent(t *testing.T) {
 	if ticks := schedulerMessages(t, workspace.Path); len(ticks) != 0 {
 		t.Fatalf("exact schedule created LLM tick %#v", ticks)
 	}
-	if _, err := store.AddSchedule(app.CreateScheduleInput{Description: "Review", Condition: "when ready", Target: "workspace"}); err != nil {
+	if _, err := store.AddSchedule(app.CreateScheduleInput{Description: "Review", Condition: "when ready", Target: "scheduler"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := manager.reconcileSchedulerLocked(context.Background(), workspace, client); err != nil {

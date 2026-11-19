@@ -218,8 +218,9 @@
 }
 
 :where([data-component-owner="app-shell"]) .chat-timeline {
-  background: var(--bg);
-  padding: 10px 12px;
+  container: shared-chat / inline-size;
+  background: color-mix(in srgb, var(--green-line) 28%, var(--bg));
+  padding: 0;
 }
 
 /* Two-column mode gives all space beside the sidebar to resource details. */

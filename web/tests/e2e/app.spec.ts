@@ -1239,6 +1239,36 @@ for (const viewport of [{ width: 1500, height: 800 }, { width: 440, height: 844 
   });
 }
 
+test("fits shared chat bubbles to the panel and caps long replies", async ({ page }) => {
+  await installMockApi(page);
+  const messages = [
+    { id: "own", role: "user", sender: "User", text: "Okay." },
+    { id: "peer", role: "user", sender: "Other", text: "Thanks." },
+    { id: "reply", role: "agent", sender: "Agent", text: "Long reply. ".repeat(180) + "\n\n```\n" + "sample ".repeat(180) + "\n```" },
+  ].map(message => ({ ...message, createdAt: now }));
+  await page.route("**/resources/project1.task1/chat?*", route =>
+    json(route, { id: "shared", open: true, epoch: 1, unreadCount: 0, messages }));
+  await page.goto("/w/ws-test/r/project1.task1");
+  const panel = page.locator("#chatTimeline");
+  const articles = panel.locator("article");
+  await expect(articles).toHaveCount(3);
+  for (const width of [390, 799, 800, 1200]) {
+    await panel.evaluate((element, size) => { element.style.width = `${size}px`; }, width);
+    const [own, peer, reply] = await articles.evaluateAll(items => items.map(item => {
+      const { x, width } = item.getBoundingClientRect();
+      return { x, width };
+    }));
+    expect(peer.x).toBe(reply.x);
+    if (width < 800) expect(own.x).toBeGreaterThan(peer.x);
+    else expect(own.x).toBe(peer.x);
+    expect(own.width).toBeLessThan(reply.width);
+    expect(reply.width).toBeLessThan(width);
+    if (width === 1200) expect(reply.width).toBe(720);
+    expect(await panel.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+    expect(await panel.locator("pre").evaluate(element => element.scrollWidth > element.clientWidth)).toBe(true);
+  }
+});
+
 test("keeps public chat unread and both event cursors independent in the resource tree", async ({ page }, testInfo) => {
   test.setTimeout(60_000);
   await installMockApi(page, "project1.task2");

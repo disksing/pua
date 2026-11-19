@@ -235,8 +235,8 @@
       </div>
     {/if}
     {#each messages as message (message.id)}
-      <article class:user-message={message.role === "user"}>
-        <small>{message.role === "user" ? (message.sender || "User") : (message.sender?.trim() || "Agent")} · {new Date(message.createdAt).toLocaleString()}</small>
+      <article class:own-message={message.role === "user" && message.sender === userName}>
+        <small class="message-meta"><strong>{message.role === "user" ? (message.sender || "User") : (message.sender?.trim() || "Agent")}</strong> <time datetime={message.createdAt}>{new Date(message.createdAt).toLocaleString()}</time></small>
         <div class="markdown-rendered" use:markdownResourceNavigation={{ resolveResourceTitle: model.resolveResourceTitle, onNavigate: model.onNavigate, onOpenFile: openLinkedFile }}>{@html markdownHTML(message.text, { resolveResourceTitle: model.resolveResourceTitle, workspaceId: model.workspaceId })}</div>
       </article>
     {/each}
@@ -259,10 +259,31 @@
   .persistent-chat :global(.chat-heading)::before { content:""; position:absolute; left:0; right:0; top:-10px; height:10px; background:var(--panel); }
   header { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
   header span { flex:1; opacity:.65; }
-  .public-messages { flex:1; display:flex; flex-direction:column; gap:16px; }
+  .public-messages { flex:1; min-width:0; display:flex; flex-direction:column; gap:10px; }
   .older-messages { display:flex; flex-direction:column; align-items:center; gap:4px; }
-  article { padding:12px; border:1px solid var(--border-color, #8883); border-radius:10px; overflow-wrap:anywhere; }
-  .user-message { margin-left:24px; background:var(--surface-hover, #8881); }
+  article {
+    align-self:flex-start;
+    min-width:0;
+    max-width:min(86%, 720px);
+    padding:10px 14px;
+    background:var(--panel);
+    border:1px solid var(--line-soft);
+    border-radius:14px 14px 14px 4px;
+    overflow-wrap:anywhere;
+  }
+  .own-message {
+    align-self:flex-end;
+    background:color-mix(in srgb, var(--green-line) 70%, var(--panel));
+    border-color:var(--green-line);
+    border-radius:14px 14px 4px 14px;
+  }
+  @container shared-chat (min-width:800px) {
+    .own-message { align-self:flex-start; }
+  }
+  .message-meta { display:flex; flex-wrap:wrap; align-items:baseline; gap:0 8px; margin-bottom:3px; color:var(--muted-strong); opacity:1; }
+  article .markdown-rendered { overflow-wrap:anywhere; font-size:calc(14px * var(--chat-font-scale, 1)); }
+  article :global(.markdown-rendered img) { max-width:100%; height:auto; }
+  article :global(.markdown-rendered table) { display:block; overflow-x:auto; table-layout:auto; }
   small,.chat-hint { opacity:.7; }
   .public-chat-composer { position:sticky; bottom:0; background:var(--panel); margin:0 -16px -16px; padding-bottom:6px; }
   button { padding:7px 12px; cursor:pointer; }

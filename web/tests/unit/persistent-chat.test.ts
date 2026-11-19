@@ -40,7 +40,7 @@ it("shows saved agent names and keeps unknown historical senders generic across 
   ] });
  }));
  const { channel, target } = setup();
- const headings = () => [...target.querySelectorAll("article > small")].map(element => element.textContent?.split(" · ")[0]);
+ const headings = () => [...target.querySelectorAll(".message-meta strong")].map(element => element.textContent);
  await vi.waitFor(() => expect(headings()).toEqual(["Original Agent", "reasoning", "Agent", "Agent", "Other User", "User"]));
  channel.publish({ ...channel.current(), currentUserName: "other", agentBinding: { kind: "agent", name: "Next Agent" } });
  await tick();
@@ -142,6 +142,8 @@ it("shows the same chat and actual senders after switching user", async () => {
  await vi.waitFor(() => expect(target.querySelectorAll("article")).toHaveLength(2));
  expect(target.querySelectorAll("article")[0].textContent).toContain("disksing");
  expect(target.querySelectorAll("article")[1].textContent).toContain("other");
+ expect(target.querySelectorAll("article.own-message")).toHaveLength(1);
+ expect(target.querySelector("article.own-message")?.textContent).toContain("First input");
  channel.publish({ ...channel.current(), currentUserName: "other" });
  await vi.waitFor(() => expect(users).toContain("other"));
  await vi.waitFor(() => expect(target.querySelectorAll("article")).toHaveLength(2));
@@ -149,6 +151,8 @@ it("shows the same chat and actual senders after switching user", async () => {
  expect(target.querySelectorAll("article")[1].textContent).toContain("other");
  expect(target.textContent).toContain("First input");
  expect(target.textContent).toContain("Second input");
+ expect(target.querySelectorAll("article.own-message")).toHaveLength(1);
+ expect(target.querySelector("article.own-message")?.textContent).toContain("Second input");
 });
 
 it("keeps approval content outside the fixed heading and permits a response", async () => {

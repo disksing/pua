@@ -1,6 +1,6 @@
 export const RESOURCE_DOCUMENTS = [
   { id: "spec", name: "spec.md", label: "Spec", icon: "file-text" },
-  { id: "memory", name: "memory.md", label: "Memory", icon: "book-open" },
+  { id: "memory", name: "memory.md", label: "Memory", icon: "notebook-pen" },
 ] as const;
 
 export function resourceDocumentSavePath(workspaceId: string, resourceId: string, path: string): string {

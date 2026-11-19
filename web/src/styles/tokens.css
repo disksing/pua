@@ -156,6 +156,7 @@
   --chat-output-text: var(--line);
   --chat-output-radius: 4px;
   /* Composer card. */
+  --shared-chat-canvas: color-mix(in srgb, var(--green-line) 28%, var(--bg));
   --chat-composer-bg: var(--bg);
   --chat-composer-text: var(--ink);
   --chat-composer-border-width: 1px;

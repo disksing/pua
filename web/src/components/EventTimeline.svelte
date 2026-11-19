@@ -7,7 +7,7 @@
   import ActivityGroup from "./ActivityGroup.svelte";
   import ApprovalCard from "./ApprovalCard.svelte";
   import { ChatSessionController, turnIsCollapsedByPolicy, type ChatSessionControllerOptions } from "./chat-state";
-  import { effectiveGenerationStatus } from "./generation-status";
+  import { effectiveGenerationStatus, turnIsWorking } from "./generation-status";
   import FilePreviewModal from "./FilePreviewModal.svelte";
   import LifecycleNotice from "./LifecycleNotice.svelte";
   import type { ModelChannel } from "./model-channel";
@@ -15,6 +15,7 @@
   import type { ChatContextSnapshot, ConversationBlock, EventTimelineModel, FilePreviewModel, ResourceHistoryTurnSummary, TimelineItem } from "./models";
   import TimelineMessage from "./TimelineMessage.svelte";
   import TimelineNotice from "./TimelineNotice.svelte";
+  import TurnWorkingIndicator from "./TurnWorkingIndicator.svelte";
   import { formatClock, groupTimelineActivities, markTurnAgentRuns, markTurnFinalAssistant } from "./timeline-events";
   import UnknownEvent from "./UnknownEvent.svelte";
 
@@ -368,10 +369,6 @@
     return Boolean(scroll && scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight <= 32);
   }
 
-  function turnIsWorking(status: EventTimelineModel["status"]): boolean {
-    return status?.session?.state === "running" && Boolean(status.session.currentTurnId);
-  }
-
   function scrollToBottom(): void {
     const scroll = scroller();
     if (scroll) scroll.scrollTop = scroll.scrollHeight;
@@ -498,9 +495,7 @@
     {/each}
     {#if snapshot.error}<TimelineNotice title="Timeline error" text={snapshot.error} error alert />{/if}
     {#if turnIsWorking(model.status)}
-      <div class="turn-working-indicator" role="status" aria-live="polite" data-timeline-key="turn-working">
-        <Icon name="loader-circle" /><span>working...</span>
-      </div>
+      <TurnWorkingIndicator />
     {/if}
     {#if snapshot.loading && !snapshot.blocks.length}<div class="chat-timeline-empty"><Icon name="loader-circle" /><strong>Loading resource history</strong></div>{/if}
     {#if snapshot.loaded && !snapshot.loading && !snapshot.blocks.length && !snapshot.notices.length && !turnIsWorking(model.status)}<div class="chat-timeline-empty"><Icon name="bot" /><strong>{readOnly ? "No session events yet" : "No conversation yet"}</strong>{#if !readOnly}<span>Send a message to start this resource's conversation.</span>{/if}</div>{/if}

@@ -226,18 +226,7 @@
   background: var(--panel-sunken);
 }
 
-:where([data-component-owner="event-timeline"]) .turn-working-indicator {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  margin: 10px 0;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-:where([data-component-owner="event-timeline"]) .conversation-session-starting svg,
-:where([data-component-owner="event-timeline"]) .turn-working-indicator svg {
+:where([data-component-owner="event-timeline"]) .conversation-session-starting svg {
   width: 14px;
   height: 14px;
   animation: turn-working-spin 1s linear infinite;
@@ -248,8 +237,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  :where([data-component-owner="event-timeline"]) .conversation-session-starting svg,
-  :where([data-component-owner="event-timeline"]) .turn-working-indicator svg {
+  :where([data-component-owner="event-timeline"]) .conversation-session-starting svg {
     animation: none;
   }
 }

@@ -215,7 +215,8 @@
 
 :where([data-component-owner="app-shell"]) .chat-timeline {
   container: shared-chat / inline-size;
-  background: color-mix(in srgb, var(--green-line) 28%, var(--bg));
+  background: var(--shared-chat-canvas);
+  overflow-anchor: none;
   padding: 0;
 }
 

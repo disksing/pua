@@ -4,7 +4,7 @@ import type {
   ResourceHistoryGeneration, ResourceHistoryPage, ResourceHistorySegment,
   ResourceHistoryTurnDetail, ResourceHistoryTurnSummary, ResourceMessageStatus, TimelineItem,
 } from "./models";
-import { applyPUAMessagePayload, compactTimelineEvents, isHiddenConversationLifecycleText, mergeCanonicalEventBatch, mergeCanonicalEvents } from "./timeline-events";
+import { applyPUAMessagePayload, compactTimelineEvents, eventsFromSemanticFrame, isHiddenConversationLifecycleText, mergeCanonicalEventBatch, mergeCanonicalEvents } from "./timeline-events";
 import { formatToolCallCount, normalizeToolCallCount } from "./tool-group";
 
 // A small summary page keeps the initial history read cheap: the Chat view
@@ -1005,24 +1005,6 @@ function statusGeneration(context: ResourceChatContext): ResourceHistoryGenerati
 
 function normalizeEvents(events?: AgentEvent[]): AgentEvent[] {
   return Array.isArray(events) ? events.filter((event) => Number(event?.id) > 0) : [];
-}
-
-function eventsFromSemanticFrame(frame: AgentSemanticFrame): AgentEvent[] {
-  if (frame?.schema !== "agenthub.semantic-events.v1" || !Number(frame.cursor)) throw new Error("An Agent semantic frame could not be decoded.");
-  const events = Array.isArray(frame.events) ? frame.events : [];
-  if (!events.length) {
-    return [{
-      id: Number(frame.cursor), semanticId: `empty:${frame.cursor}`, semanticIndex: -1,
-      type: "semantic.empty", time: frame.source?.time, startTime: frame.source?.startTime,
-      sessionId: frame.source?.sessionId, turnId: frame.source?.turnId, data: {},
-    }];
-  }
-  return events.map((event) => ({
-    id: Number(event.sourceEventId || frame.cursor), semanticId: String(event.id || ""), semanticIndex: Number(event.index) || 0,
-    type: String(event.type || "unknown"), time: event.time || frame.source?.time, startTime: event.startTime || frame.source?.startTime,
-    sessionId: event.sessionId || frame.source?.sessionId, turnId: event.turnId || frame.source?.turnId,
-    data: frame.mode === "append" ? { ...(event.data || {}), append: true } : event.data,
-  }));
 }
 
 function latestEventId(events: AgentEvent[]): number {

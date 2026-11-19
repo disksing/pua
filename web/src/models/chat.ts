@@ -97,6 +97,7 @@ export interface ResourceSessionStatus {
   state?: string;
   stopReason?: string;
   currentTurnId?: string;
+  pendingApprovalIds?: string[];
   inputCapabilities?: { prompt?: boolean; steer?: boolean };
 }
 

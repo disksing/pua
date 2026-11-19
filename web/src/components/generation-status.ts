@@ -20,6 +20,10 @@ function normalized(value: string | undefined): string {
   return String(value || "").trim();
 }
 
+export function turnIsWorking(status: ResourceMessageStatus | null): boolean {
+  return status?.session?.state === "running" && Boolean(status.session.currentTurnId);
+}
+
 /**
  * Projects one Generation's status for the live conversation.
  *

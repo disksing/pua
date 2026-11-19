@@ -55,6 +55,25 @@ it("shows queued input counts without copying internal message content into Chat
  await vi.waitFor(() => expect(target.textContent).toContain("Queued inputs: 2"));
  expect(target.textContent).not.toContain("private background request");
 });
+it("keeps archived chat history visible without input or execution controls", async () => {
+ const fetch = vi.fn(async (input) => {
+  if (pathname(input).endsWith("/status")) return response({ sessionState: "working" });
+  return response({ id: "c", open: true, epoch: 1, messages: [
+   { id: "m", role: "agent", text: "Archived reply", createdAt: "2026-10-13T00:00:00Z" },
+  ] });
+ });
+ vi.stubGlobal("fetch", fetch);
+ const { channel, target } = setup();
+ channel.publish({
+  ...channel.current(),
+  detail: { id: "project1.task1", type: "task", title: "Task 1", path: "project1/archive/task1", archived: true },
+ });
+ await vi.waitFor(() => expect(target.querySelector(".chat-closed")).not.toBeNull());
+ expect(target.querySelector(".chat-closed")?.textContent).toContain("Archived · Read only");
+ expect(target.querySelector("article")?.textContent).toContain("Archived reply");
+ expect(target.querySelector("textarea, .public-chat-execution, [aria-label='Chat options']")).toBeNull();
+ expect(fetch.mock.calls.some(([input]) => pathname(input).endsWith("/status"))).toBe(false);
+});
 it("keeps history on close and reopen and retains drafts across parent refreshes", async () => {
  let chat = { id: "c", open: true, epoch: 1, messages: [{ id: "m", role: "agent", text: "Public reply", createdAt: "2026-10-13T00:00:00Z" }] };
  vi.stubGlobal("fetch", vi.fn(async (input, init) => {
@@ -69,9 +88,13 @@ it("keeps history on close and reopen and retains drafts across parent refreshes
  const input = target.querySelector("textarea")!; input.value = "unfinished thought"; input.dispatchEvent(new Event("input", { bubbles: true })); await tick();
  channel.publish({ ...channel.current(), resourceTitle: "Updated title" }); await tick();
  expect(target.querySelector("textarea")?.value).toBe("unfinished thought");
+ target.querySelector<HTMLButtonElement>('[aria-label="Chat options"]')!.click();
+ await tick();
  button(target, "Close chat").click(); await vi.waitFor(() => expect(target.querySelector("textarea")).toBeNull());
+ await vi.waitFor(() => expect(document.activeElement).toBe(button(target, "Reopen chat")));
  expect(target.textContent).toContain("Public reply");
  button(target, "Reopen chat").click(); await vi.waitFor(() => expect(target.querySelector("textarea")).not.toBeNull());
+ await vi.waitFor(() => expect(document.activeElement).toBe(target.querySelector("textarea")));
  expect(target.textContent).toContain("Public reply");
 });
 it("retries an uncertain send with the same id and never uses the execution mailbox", async () => {
@@ -155,21 +178,93 @@ it("shows the same chat and actual senders after switching user", async () => {
  expect(target.querySelector("article.own-message")?.textContent).toContain("Second input");
 });
 
-it("keeps approval content outside the fixed heading and permits a response", async () => {
+it("finds older pending approvals and focuses the card from the dock", async () => {
  let approvalBody: unknown;
+ const eventRequests: URL[] = [];
  vi.stubGlobal("fetch", vi.fn(async (input, init) => {
   const path = pathname(input);
-  if (path.endsWith("/status")) return response({ sessionState: "attention_required", generation: { generationId: "gen" }, session: { pendingApprovalIds: ["approval-1"] } });
-  if (path.endsWith("/events")) return response({ events: [{ id: 1, type: "approval.requested", data: { approvalId: "approval-1", title: "Approval requested", question: "Continue?" } }] });
+  if (path.endsWith("/status")) return response({ sessionState: "attention_required", generation: { generationId: "gen" }, session: { id: "hub", state: "waiting_approval", currentTurnId: "turn", pendingApprovalIds: ["approval-1", "approval-1"] } });
+  if (path.endsWith("/events")) {
+    const url = new URL(String(input), "http://localhost");
+    eventRequests.push(url);
+    if (url.searchParams.has("latest")) return response({ frames: [], page: { hasMoreBefore: true, nextBefore: 100 } });
+    const data = { approvalId: "approval-1", title: "Approval requested", question: "Continue?" };
+    return response({ frames: [{
+     schema: "agenthub.semantic-events.v1", cursor: 1, mode: "replace",
+     events: [{ id: "sem_1_0", sourceEventId: 1, index: 0, type: "approval.requested", data }],
+    }], page: { hasMoreBefore: false } });
+  }
   if (path.endsWith("/approval")) { approvalBody = JSON.parse(String(init?.body)); return response({}); }
   return response({ id: "c", open: true, epoch: 1, unreadCount: 0, messages: [] });
  }));
  const { target } = setup();
  await vi.waitFor(() => expect(target.querySelector(".approval")).not.toBeNull());
- expect(target.querySelector(".chat-heading .approval")).toBeNull();
- expect(target.querySelector(".chat-heading .session-controls")?.textContent).toContain("attention_required");
+ expect(eventRequests.map(url => url.searchParams.get("before"))).toEqual([null, "100"]);
+ expect(target.querySelectorAll(".public-chat-approvals .approval")).toHaveLength(1);
+ expect(target.querySelector(".public-chat-execution")?.textContent).toContain("Waiting for approval");
+ expect(target.querySelector(".turn-working-indicator")).toBeNull();
+ expect(button(target, "Stop execution").disabled).toBe(false);
+ button(target, "View pending approval").click();
+ expect(document.activeElement).toBe(target.querySelector(".public-chat-approvals"));
  button(target, "Allow once").click();
  await vi.waitFor(() => expect(approvalBody).toEqual({ requestId: "approval-1", decision: "accept" }));
+ await vi.waitFor(() => expect(target.querySelector(".approval")).toBeNull());
+});
+
+it("stops a live Turn from closed Chat and preserves partial-success feedback", async () => {
+ const stopRequests: URL[] = [];
+ let stopped = false;
+ vi.stubGlobal("fetch", vi.fn(async (input) => {
+  const url = new URL(String(input), "http://localhost");
+  if (url.pathname.endsWith("/status")) {
+   return response(stopped ? { sessionState: "idle" } : {
+    sessionState: "working", generation: { generationId: "gen" }, session: { id: "hub", state: "running", currentTurnId: "turn" },
+   });
+  }
+  if (url.pathname.endsWith("/turn/end")) {
+   stopRequests.push(url);
+   stopped = true;
+   return response({ status: "interrupted", taskStateError: "write unavailable" });
+  }
+  return response({ id: "c", open: false, epoch: 2, messages: [] });
+ }));
+ const { target } = setup();
+ await vi.waitFor(() => expect(target.querySelector(".turn-working-indicator")?.textContent).toContain("Agent is working"));
+ expect(target.querySelector("textarea")).toBeNull();
+ const stop = button(target, "Stop execution");
+ stop.click();
+ stop.click();
+ await vi.waitFor(() => expect(target.querySelector(".public-chat-execution")).toBeNull());
+ expect(stopRequests.map(url => url.searchParams.get("generationId"))).toEqual(["gen"]);
+ expect(target.querySelector('[role="alert"]')?.textContent).toContain("Execution stopped. Could not pause the task. write unavailable");
+ expect(button(target, "Reopen chat")).toBeTruthy();
+});
+
+it("keeps a failed close visible after Chat refresh and restores focus to its options", async () => {
+ vi.stubGlobal("fetch", vi.fn(async input => {
+  const path = pathname(input);
+  if (path.endsWith("/status")) return response({ sessionState: "idle" });
+  if (path.endsWith("/close")) return response({ error: "unavailable" }, 503);
+  return response({ id: "c", open: true, epoch: 1, messages: [] });
+ }));
+ const { target } = setup();
+ const trigger = await vi.waitFor(() => {
+  const value = target.querySelector<HTMLButtonElement>('[aria-label="Chat options"]');
+  expect(value).not.toBeNull();
+  return value!;
+ });
+ trigger.click();
+ await vi.waitFor(() => expect(document.activeElement).toBe(button(target, "Close chat")));
+ button(target, "Close chat").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+ await vi.waitFor(() => expect(document.activeElement).toBe(trigger));
+ expect(trigger.getAttribute("aria-expanded")).toBe("false");
+ trigger.click();
+ await tick();
+ button(target, "Close chat").click();
+ await vi.waitFor(() => expect(target.querySelector('[role="alert"]')?.textContent).toContain("Could not close chat. unavailable"));
+ expect(target.querySelector(".public-chat-execution")).toBeNull();
+ await vi.waitFor(() => expect(document.activeElement).toBe(trigger));
+ expect(target.querySelector("textarea")).not.toBeNull();
 });
 
 it("opens a workspace file link from a chat message in a read-only preview", async () => {

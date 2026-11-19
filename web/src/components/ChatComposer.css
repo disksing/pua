@@ -276,6 +276,10 @@
   margin-left: 6px;
 }
 
+:where([data-component-owner="chat-composer"]) .chat-options + .chat-send-button {
+  margin-left: 0;
+}
+
 :where([data-component-owner="chat-composer"]) .chat-send-button {
   padding: 0;
 }

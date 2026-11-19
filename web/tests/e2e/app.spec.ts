@@ -1220,14 +1220,14 @@ for (const viewport of [{ width: 1500, height: 800 }, { width: 440, height: 844 
     await expect(page.locator("#agentPanel > *")).toHaveCount(0);
     if (viewport.width < 980) await expect(page.locator("#agentPanel")).toBeHidden();
     else await expect(page.locator("#agentPanel")).toBeVisible();
-    const heading = scroller.locator(".chat-heading");
+    const dock = scroller.locator(".public-chat-dock");
     const articles = scroller.locator(".public-messages article");
     await expect(articles).toHaveCount(40);
     await expect(articles.first()).toContainText("Paginated message 80:");
     expect(requests[0].searchParams.get("limit")).toBe("40");
     await expect.poll(() => scroller.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
-    await expect(scroller.getByLabel("Execution controls")).toBeVisible();
-    const bottomHeadingY = (await heading.boundingBox())!.y;
+    await expect(scroller.locator(".chat-heading")).toHaveCount(0);
+    const bottomDockY = (await dock.boundingBox())!.y;
     const beforeY = await scroller.evaluate(element => {
       element.scrollTop = 0;
       return [...element.querySelectorAll("article")].find(article => article.textContent?.includes("Paginated message 80:"))!.getBoundingClientRect().top;
@@ -1235,8 +1235,9 @@ for (const viewport of [{ width: 1500, height: 800 }, { width: 440, height: 844 
     await expect(articles).toHaveCount(80);
     const afterY = await articles.filter({ hasText: "Paginated message 80:" }).evaluate(element => element.getBoundingClientRect().top);
     expect(Math.abs(afterY - beforeY)).toBeLessThan(2);
-    expect(Math.abs((await heading.boundingBox())!.y - bottomHeadingY)).toBeLessThan(2);
+    expect(Math.abs((await dock.boundingBox())!.y - bottomDockY)).toBeLessThan(2);
     expect(requests.some(url => url.searchParams.get("before") === "m80")).toBe(true);
+    await scroller.getByRole("button", { name: "Chat options" }).click();
     await scroller.getByRole("button", { name: "Close chat" }).click();
     await expect(scroller.getByRole("button", { name: "Reopen chat" })).toBeVisible();
     await expect(articles).toHaveCount(80);
@@ -1342,6 +1343,7 @@ test("keeps public chat unread and both event cursors independent in the resourc
   await expect(execution).toContainText('1',{timeout:10_000});
   expect(state('User','project1.task1').readExecution).toBe(3);
   expect(state('User','project1.task1').readDialogue).toBe(0);
+  await page.getByRole('button',{name:'Chat options',exact:true}).click();
   await page.getByRole('button',{name:'Close chat',exact:true}).click();
   await expect(row.locator('.chat-open-icon')).toHaveCount(0);
   await expect(page.locator('#chatTimeline')).toContainText('Public history preserved');
@@ -3071,6 +3073,7 @@ test("execution events stay live and read-only without a dialogue runtime", asyn
   expect(harness.inputBodies).toHaveLength(0);
   await details.getByRole("button",{name:"Chat only",exact:true}).click();
   await expect(details.getByRole("textbox",{name:"Chat message"})).toHaveValue("Draft across modes");
+  await page.getByRole("button",{name:"Chat options",exact:true}).click();
   await page.getByRole("button",{name:"Close chat",exact:true}).click();
   await expect(page.getByText("Public conversation remains separate",{exact:true})).toBeVisible();
   await expect(details.locator(".channel-timeline")).toHaveCount(0);
@@ -3361,11 +3364,15 @@ test("public Chat restores the upload dialog, send card and execution model sele
     await input.fill("A draft in the restored composer");
     const bounds = await page.locator(".public-chat-composer").evaluate(element => {
       const form = element.querySelector("form")!, send = element.querySelector(".chat-send-button")!;
-      return { overflow: form.scrollWidth - form.clientWidth, right: send.getBoundingClientRect().right, edge: element.getBoundingClientRect().right };
+      const options = element.querySelector(".chat-options-trigger")!;
+      return { overflow: form.scrollWidth - form.clientWidth, right: send.getBoundingClientRect().right, edge: element.getBoundingClientRect().right,
+        overlap: options.getBoundingClientRect().right - send.getBoundingClientRect().left };
     });
     expect(bounds.overflow).toBeLessThanOrEqual(1); expect(bounds.right).toBeLessThanOrEqual(bounds.edge);
+    expect(bounds.overlap).toBeLessThanOrEqual(0);
     await page.screenshot({ path: testInfo.outputPath(`composer-${theme}-narrow.png`) });
   }
+  await page.getByRole("button", { name: "Chat options", exact: true }).click();
   await page.getByRole("button", { name: "Close chat", exact: true }).click();
   await expect(input).toHaveCount(0); await expect(page.getByText("Second message", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Reopen chat", exact: true }).click(); await expect(input).toBeVisible();

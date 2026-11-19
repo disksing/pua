@@ -1,6 +1,6 @@
 import { buildTimeline } from "./timeline-projector";
 
-import type { AgentEvent, TimelineItem } from "./models";
+import type { AgentEvent, AgentSemanticFrame, TimelineItem } from "./models";
 
 const HIDDEN_CONVERSATION_EVENT_TYPES = new Set([
   "session.created",
@@ -16,6 +16,24 @@ const HIDDEN_CONVERSATION_LIFECYCLE_TEXT = new Set([
   "Turn started",
   "Turn completed",
 ]);
+
+export function eventsFromSemanticFrame(frame: AgentSemanticFrame): AgentEvent[] {
+  if (frame?.schema !== "agenthub.semantic-events.v1" || !Number(frame.cursor)) throw new Error("An Agent semantic frame could not be decoded.");
+  const events = Array.isArray(frame.events) ? frame.events : [];
+  if (!events.length) {
+    return [{
+      id: Number(frame.cursor), semanticId: `empty:${frame.cursor}`, semanticIndex: -1,
+      type: "semantic.empty", time: frame.source?.time, startTime: frame.source?.startTime,
+      sessionId: frame.source?.sessionId, turnId: frame.source?.turnId, data: {},
+    }];
+  }
+  return events.map((event) => ({
+    id: Number(event.sourceEventId || frame.cursor), semanticId: String(event.id || ""), semanticIndex: Number(event.index) || 0,
+    type: String(event.type || "unknown"), time: event.time || frame.source?.time, startTime: event.startTime || frame.source?.startTime,
+    sessionId: event.sessionId || frame.source?.sessionId, turnId: event.turnId || frame.source?.turnId,
+    data: frame.mode === "append" ? { ...(event.data || {}), append: true } : event.data,
+  }));
+}
 
 export function visibleConversationTimelineItems(events: AgentEvent[], items: TimelineItem[]): TimelineItem[] {
   const hiddenKeys = new Set(

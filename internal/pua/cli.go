@@ -292,7 +292,7 @@ Usage:
   pua user <command>
   pua workspace <command>
   pua chat show|notes|publish|dispatch|timer
-  pua turn status|yield|notify|finish|cancel-resume
+  pua turn status|switch|finish|cancel-resume
   pua message <command>
   pua history <command>
   pua serve [--addr=<address>] [--workspace=<path>] [--version]
@@ -661,8 +661,8 @@ Commands:
       pua message send --to=project1.task2 - <<'EOF'
 
     User Inbox delivery has been removed. New Chat Turns publish ordinary
-    assistant text automatically. Internal Turns can request a visible
-    notification with pua turn notify. Only legacy inputs use chat publish.
+    assistant text automatically. To contact the user from internal work,
+    run pua turn switch --to=chat --context="<topic>" and reply in the new Turn.
 
   pua message show --id=<message-id> [--server=<url>]
     Query the current delivery record for a stable mailbox message id. Status

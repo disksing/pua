@@ -223,7 +223,7 @@ Ordinary Agent inputs already handled inside the current Turn may be inspected a
 
 Each resource has one Chat shared by all Workspace users, with sender attribution and separate unread positions. User input goes directly to the resource's execution Agent. Chat shows ordinary progress and final text from execution Turns with a shared Chat audience. Handle the request and normal Task state hooks in the same Turn.
 
-Turn openers fix the audience and Chat visibility for the entire Turn and carry a stable work ID. Read the current AGENTS.md when a new Turn starts. User Chat Turns automatically publish ordinary progress and final text to shared Chat; reasoning and tool events remain private execution history. For lengthy work, first give a brief, truthful response. Internal Agent, Scheduler and system Turns stay internal. Never use an internal Turn to address users directly; Agent messages remain one-way.
+Turn openers fix the audience and Chat visibility for the entire Turn and carry a stable work ID. Read the current AGENTS.md when a new Turn starts. When the opener says shared Chat is the audience, ordinary progress and final replies automatically appear in Chat. Reasoning and tool events stay in execution history. For lengthy work, first give a brief, truthful response. Internal Turn output stays in execution history. Agent messages remain one-way.
 
 Control commands verify the active formal work. If a notice opens a standalone advisory Turn, end it and await the queued input. Check `currentControl` in `pua turn status` when the Turn is unclear.
 
@@ -231,11 +231,13 @@ In an internal Turn, use the preview's read command to read a related Agent mess
 
 New queued messages may arrive as a preview. A preview does not consume the original message, change the audience or authorize responding in the wrong Turn. It may inform whether to continue or end the current work. Choose deliberately:
 - Continue the current work if no switch is needed.
-- To return later, first reach a safe point, finish or account for outstanding operations and approvals, then call `pua turn yield --work=<work-id> --message=<queued-id> --checkpoint="done; next; external operation IDs and unknown results"`. After acceptance, immediately end this Turn. Do not set the whole Task to paused or completed for a yield. The server waits for the terminal Turn, handles the selected input, and creates a new Turn with the original audience and history to resume. Only one level of yield is supported.
+- To answer a queued user message first, run `pua turn switch --message=<queued-id>`. The original message opens its own Turn. Reply to the user there.
 - If the current work is done, end normally. If a verified user message clearly cancels it, safely stop and call `pua turn finish --work=<work-id> --reason=cancelled`, then end. No resume is created. The queued user message still receives its own Turn and reply. Do not confuse cancellation with successful completion.
 - When an input cancels its suspended parent, use `pua turn cancel-resume --work=<work-id> --reason="user cancelled"` before ending. Do not guess the target of an ambiguous cancellation.
 
-Internal work may request a visible notification Turn with `pua turn notify --work=<work-id> --text="what the user needs to know"`; add `--checkpoint="..."` to resume afterward, otherwise end the work normally. The text is an instruction for a subsequent visible Turn, not a direct Chat publication. Finish the current Turn after acceptance. A visible notification Turn must not recursively request another notification.
+To contact the user proactively from internal work, run `pua turn switch --to=chat --context="what to discuss"`. The new Chat Turn receives that context. Address the user there in an ordinary reply. If already in the user's Chat Turn, reply directly.
+
+For either switch, reach a safe point and resolve pending approvals. Optionally add `--checkpoint="..."` for next steps or external operation IDs. Once accepted, end this Turn immediately without changing Task state. After the selected Turn completes successfully, the server resumes the work with its original audience and references to both Turns. Only one level of suspension is supported.
 
 For internal formal work, prefer a separate visible notification when Chat is open. When it is closed, send necessary business progress to the stable parent shown in status; keep delegation reports regardless of Chat notification. A Chat snapshot or state-change advisory does not change the fixed audience, restore revoked publication rights, or authorize redirecting an expired user reply across epochs or resources. Idle Chat toggles do not wake the Agent; the next opener/status carries the latest snapshot. Recheck current status before notifying and confirm actual publication.
 

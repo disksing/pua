@@ -23,7 +23,8 @@ func TestRefreshTurnGuidancePreservesCustomInstructions(t *testing.T) {
 	}
 	data, _ := os.ReadFile(path)
 	if !strings.HasPrefix(string(data), "Custom instructions.") ||
-		strings.Count(string(data), puaPromptStart) != 1 || !strings.Contains(string(data), "pua turn yield") {
+		strings.Count(string(data), puaPromptStart) != 1 || !strings.Contains(string(data), "pua turn switch --message=") ||
+		!strings.Contains(string(data), "pua turn switch --to=chat") {
 		t.Fatalf("bad guidance refresh: %s", data)
 	}
 }

@@ -1,4 +1,4 @@
-恢复原工作，从检查点继续：
-{{.Checkpoint}}
+继续原工作。{{if .Checkpoint}}上次的检查点：
+{{.Checkpoint}}{{end}}
 先核对插话期间的变更和未决操作结果：`pua history turn show --ref={{.ChildHistory}}`
 原任务：`pua history turn show --ref={{.ParentHistory}}`

@@ -1,2 +1,2 @@
-Shared Chat {{if .Chat.Open}}opened{{else}}closed{{end}}. Finish this work for its original audience.{{if not .Visible}}{{if .Chat.Open}} Use `pua turn notify` for necessary user updates.{{else}} Send necessary progress to {{.Chat.ParentID}}.{{end}}{{end}}
+Shared Chat {{if .Chat.Open}}opened{{else}}closed{{end}}. Finish this work for its original audience.{{if not .Visible}}{{if .Chat.Open}} To contact the user, run `pua turn switch --to=chat --context="<topic>"`.{{else}} Send necessary progress to {{.Chat.ParentID}}.{{end}}{{end}}
 {{.Hint -}}

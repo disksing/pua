@@ -187,10 +187,10 @@ func providerMessageTextWithContext(message resourceMailboxMessage, steer bool) 
 		}
 		if c.Chat != nil && c.OpenerRole != "user" && !c.Concise {
 			if c.Language == localize.SimplifiedChinese {
-				context += fmt.Sprintf("\nChat 状态快照：open=%t，epoch=%d，revision=%d，observedAt=%s；上层=%s。本轮固定可见性不随开关变化；内部工作需用户获知时，开启则用 turn notify 请求独立可见通知，关闭则向上层发必要业务摘要。委派回报义务保留；快照不授予发布资格。",
+				context += fmt.Sprintf("\nChat 状态快照：open=%t，epoch=%d，revision=%d，observedAt=%s；上层=%s。内部工作要主动联系用户，Chat 开启时用 `pua turn switch --to=chat --context=\"要沟通的事\"`，关闭时向上层发必要业务摘要。委派回报义务保留。",
 					c.Chat.Open, c.Chat.Epoch, c.Chat.Revision, c.Chat.ObservedAt, c.Chat.ParentID)
 			} else {
-				context += fmt.Sprintf("\nChat snapshot: open=%t, epoch=%d, revision=%d, observedAt=%s; parent=%s. This does not change the fixed audience. Internal work uses turn notify for a separate visible notification when Chat is open; when closed, report necessary business progress to the parent. Delegation reports remain required. A snapshot grants no publication rights.",
+				context += fmt.Sprintf("\nChat snapshot: open=%t, epoch=%d, revision=%d, observedAt=%s; parent=%s. To contact the user from internal work, use `pua turn switch --to=chat --context=\"topic\"` when open. When closed, send necessary progress to the parent. Delegation reports remain required.",
 					c.Chat.Open, c.Chat.Epoch, c.Chat.Revision, c.Chat.ObservedAt, c.Chat.ParentID)
 			}
 		}

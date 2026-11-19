@@ -204,11 +204,12 @@ func TestChatStateAdvisoryCoversFormalAudiencesAndProviders(t *testing.T) {
 					file.find(work.ID).Context.ChatEpoch != work.Context.ChatEpoch {
 					t.Fatalf("missing notices or changed audience: %+v", file)
 				}
-				for _, advisory := range file.Advisories {
+				for index, advisory := range file.Advisories {
 					if advisory.Type != "chat_state" || advisory.TurnID != work.TurnID ||
 						(advisory.Input.ExpectedTurnID != "") != (provider == "codex") ||
 						!strings.Contains(advisory.Input.Text, "pua turn status") ||
-						!strings.Contains(advisory.Input.Text, "audit only") {
+						!strings.Contains(advisory.Input.Text, "original audience") ||
+						strings.Contains(advisory.Input.Text, "pua turn switch --to=chat") != (!visible && index == 1) {
 						t.Fatalf("invalid Chat notice: %+v", advisory)
 					}
 				}

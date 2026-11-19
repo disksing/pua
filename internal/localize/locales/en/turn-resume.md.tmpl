@@ -1,4 +1,4 @@
-Resume the original work from this checkpoint:
-{{.Checkpoint}}
+Resume the original work.{{if .Checkpoint}} Checkpoint:
+{{.Checkpoint}}{{end}}
 Check intervening changes and outstanding operation results: `pua history turn show --ref={{.ChildHistory}}`
 Original task: `pua history turn show --ref={{.ParentHistory}}`

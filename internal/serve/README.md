@@ -170,11 +170,11 @@ Telegram 接入位于 `telegram_*.go`：每 Workspace 独立配置、私聊话�
 
 `GET/POST .../resources/{resourceId}/turn-work` 提供持久工作查询与控制。`GET ?chat=true&work=<id>` 读取该可见工作所属开启周期的最近共享消息。控制必须引用开场 work ID，并匹配当前 generation、Session 和 Turn；拒绝未决审批、过期 work、重复但不同的控制请求。
 
-- `pua turn yield --work=<id> --message=<queued-id> --checkpoint="已完成；下一步；待核对副作用"`：先保存让出请求，再要求 Agent 立即自然结束当前 Turn；服务端确认 canonical terminal 后才开启选定输入。仅支持一层挂起，B 不能再次挂起。
+- `pua turn switch --message=<queued-id>` 在当前 Turn 结束后投递所选原消息。`pua turn switch --to=chat --context="要沟通的事"` 从内部 Turn 安排新的可见 Turn。两种切换都默认恢复，可加 `--checkpoint="下一步或未决操作"`。仅支持一层挂起。
 - B 成功结束后，服务端用稳定 mailbox ID 创建 A2；保留 A 的受众和 Chat epoch，开场携带 A 的检查点及 A、B 的 History 查询引用。A2 完成后收口原工作。
 - `pua turn finish --work=<id> --reason=cancelled`：安全收尾后直接结束，不建立续接；原排队消息仍正式处理，获得之前取消的 History。普通结束同样不自动建立续接，不解析 final 猜测意图。
 - `pua turn cancel-resume --work=<id> --reason="用户取消"`：B 明确取消挂起的 A。手动停止、Task paused 和资源归档同样取消待恢复安排；失败或结果不明的 B 使 A blocked。
-- `pua turn notify --work=<id> --text="通知意图" [--checkpoint="..."]`：内部工作请求单独可见通知 Turn；有检查点时通知后恢复，没有时原工作正常结束。不能从可见轮递归通知。
+- 旧版 `turn yield` 仍要求检查点。旧版 `turn notify` 仅在附带检查点时恢复原工作。
 
 工作状态保存在 `<control-dir>/turn-work/{resource-chat-id}.json`，所有写入由资源 controller 串行，采用原子持久提交。它只保存续接与输出收据，AgentHub canonical Turn 历史仍是执行事实源。新输入的工作记录先于投递落盘；重启后从 mailbox 和 Turn 历史核对。选定输入、恢复输入与通知使用稳定 ID；正在投递/中断的项和显式 interrupt 保持优先。
 

@@ -223,7 +223,7 @@ Agent 消息是单向的，无论其开启 Turn 还是作为 steer 插入，PUA 
 
 每个资源有一条 Workspace 用户共享的 Chat，用户消息标明发送者，各用户的未读进度独立。用户输入直接交给资源的执行 Agent。Chat 从受众为共享 Chat 的执行轮读取普通进度和最终答复。执行 Agent 在同一轮处理用户请求并完成正常的 Task 状态收口。
 
-Turn 开头固定本轮的对话对象及 Chat 可见性，并提供稳定的 work ID。新 Turn 开始时读取当前 AGENTS.md。用户 Chat Turn 的普通阶段回复及最终回复自动进入共享 Chat；推理和工具事件留在执行历史。耗时工作先简短、真实地回应。内部 Agent、Scheduler 和系统 Turn 的输出保持内部可见，不在内部轮直接对用户发言；Agent 消息仍是单向消息。
+Turn 开头固定本轮的对话对象及 Chat 可见性，并提供稳定的 work ID。新 Turn 开始时读取当前 AGENTS.md。开头标为共享 Chat 可见的 Turn，其普通进度和最终回复会自动进入 Chat；推理和工具事件留在执行历史。耗时工作先简短、真实地回应。内部 Turn 的输出仅在执行历史可见。Agent 消息仍是单向消息。
 
 控制命令自动核对当前正式 work。独立提示轮没有正式工作，结束本轮等系统投递原消息即可。需要辨别轮次时查 `pua turn status` 的 `currentControl`。
 
@@ -231,11 +231,13 @@ Turn 开头固定本轮的对话对象及 Chat 可见性，并提供稳定的 wo
 
 排队中的新消息可以作为预告提前出现。预告不消费原消息、不改变受众，也不代表可以在错误的 Turn 中回复；但可以影响是否继续当前工作。明确选择：
 - 无须切换时继续当前工作。
-- 原工作仍需继续时，先到安全点，完成或记录未决操作及审批，再执行 `pua turn yield --work=<work-id> --message=<queued-id> --checkpoint="已完成事项；下一步；外部操作 ID 与未知结果"`。接受后立即结束当前 Turn；不要为挂起把整个 Task 标成 paused 或 completed。服务端等待 Turn 终态，再处理选定消息，随后创建新 Turn 携带原受众和历史恢复；第一版支持一层挂起。
+- 要先回复排队的用户消息，执行 `pua turn switch --message=<queued-id>`。原消息会开启自己的 Turn，在那里回复用户。
 - 当前工作已完成时正常结束。如果可靠的用户原文明确取消当前工作，安全收尾后执行 `pua turn finish --work=<work-id> --reason=cancelled` 并结束，不建立恢复安排。原用户消息仍会正式开启 Turn 获得回复。取消不等于原目标成功完成。
 - 当前输入取消了它挂起的父工作时，结束前执行 `pua turn cancel-resume --work=<work-id> --reason="用户取消"`。取消对象含糊时先澄清，不自行猜测。
 
-内部工作可执行 `pua turn notify --work=<work-id> --text="用户需要知道的更新"` 请求可见通知 Turn；附加 `--checkpoint="..."` 表示通知后恢复，否则原工作正常结束。text 是下一可见 Turn 的通知意图，不是直接发布正文。接受后结束当前轮；可见通知 Turn 不递归请求新通知。
+内部工作要主动联系用户时，执行 `pua turn switch --to=chat --context="要和用户沟通的事"`。context 供新的 Chat Turn 参考，在新轮用普通回复告诉用户。已经在用户的 Chat Turn 里时直接回复。
+
+两种切换都在安全点执行，先处理未决审批。需要交接下一步或外部操作 ID 时可加 `--checkpoint="..."`。命令接受后立即结束本轮，无须修改 Task 状态。新轮成功结束后，服务端按原受众自动恢复工作，并附上两轮的 History。一次只挂起一层工作。
 
 内部正式工作需要用户获知时，Chat 开启则优先请求独立可见通知；关闭则向 status 所示稳定上层发必要业务摘要，委派回报义务保留。Chat 快照或开关提醒不改变固定受众、不恢复已撤销资格，也不允许失效用户回复跨周期或跨资源转投。空闲开关不唤醒 Agent，下轮 opener/status 读取最新快照；通知前重查当前状态，输出后核对发布事实。
 

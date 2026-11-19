@@ -484,7 +484,7 @@ func (manager *agentManager) currentTurnControl(ctx context.Context, workspace s
 	}
 	control.Available = []string{"finish"}
 	if work.ParentID == "" {
-		control.Available = append(control.Available, "yield")
+		control.Available = append(control.Available, "switch", "yield")
 		if !work.Context.ChatVisible {
 			snapshot, err := readTurnChatSnapshot(workspace.Path, resource)
 			if err == nil && snapshot.Open {

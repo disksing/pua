@@ -1,2 +1,2 @@
-共享 Chat 已{{if .Chat.Open}}开启{{else}}关闭{{end}}。本轮仍按原受众收尾。{{if not .Visible}}{{if .Chat.Open}}必要的用户更新可通过 `pua turn notify` 请求。{{else}}必要进展发给 {{.Chat.ParentID}}。{{end}}{{end}}
+共享 Chat 已{{if .Chat.Open}}开启{{else}}关闭{{end}}。本轮仍按原受众收尾。{{if not .Visible}}{{if .Chat.Open}}要主动联系用户，执行 `pua turn switch --to=chat --context="要沟通的事"`。{{else}}必要进展发给 {{.Chat.ParentID}}。{{end}}{{end}}
 {{.Hint -}}

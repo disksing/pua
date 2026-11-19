@@ -1,4 +1,4 @@
 {{.Party}}有 {{.Count}} 条消息排队。{{if .Read}}无关消息可留待下一轮。{{else}}继续当前工作即可。{{end}}{{if .Standalone}}先查 `pua turn status`，若为独立提示轮，请结束本轮等正式消息。{{end}}{{if .Read}}
 要在本轮处理，先用 `pua message read --ids={{.IDs}}` 读全文。每办完一条，执行该条的 `pua message ack` 命令并填写实际结果。只读会继续排队。{{end}}{{if .Yield}}
-若要先处理此消息再回来，在安全点执行 `pua turn yield --work={{.WorkID}} --message={{.MessageID}} --checkpoint='已完成事项、下一步和未决操作'`，接受后结束本轮。{{end}}
+要先处理这条消息，在安全点执行 `pua turn switch --message={{.MessageID}} --work={{.WorkID}}`。接受后结束本轮，处理完会恢复原工作。{{end}}
 {{.Body -}}

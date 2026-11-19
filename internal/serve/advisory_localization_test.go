@@ -100,7 +100,7 @@ func TestWorkspaceAdvisoryGuidanceGateAndIdentity(t *testing.T) {
 				if language == "zh-CN" {
 					party = `用户 "disksing"`
 				}
-				for _, fact := range []string{party, "pua turn yield --work=active --message=" + message.ID, "pua turn status"} {
+				for _, fact := range []string{party, "pua turn switch --message=" + message.ID, "pua turn status"} {
 					if !strings.Contains(text, fact) {
 						t.Fatalf("missing fact %q in %q", fact, text)
 					}

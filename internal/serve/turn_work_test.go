@@ -99,7 +99,7 @@ func queueWorkflowUser(t *testing.T, m *agentManager, w serveWorkspace, id, text
 	return msg
 }
 
-func TestTurnWorkYieldPreviewResumeAndReplay(t *testing.T) {
+func TestTurnWorkSwitchPreviewResumeAndReplay(t *testing.T) {
 	m, w, fake, client := workflowFixture(t)
 	original := acceptTestResourceMessage(t, m, w, "project1.task1", "background task", resourceMessageModeSteer,
 		&agentHubMessageSender{ID: "project1"})
@@ -116,10 +116,10 @@ func TestTurnWorkYieldPreviewResumeAndReplay(t *testing.T) {
 	fake.mu.Lock()
 	preview := fake.messageInputs["preview-"+chatID(a.ID, user.ID)]
 	fake.mu.Unlock()
-	if preview.ExpectedTurnID != a.TurnID || !preview.Steer || !strings.Contains(preview.Text, "pua turn yield --work="+a.ID+" --message="+user.ID) {
+	if preview.ExpectedTurnID != a.TurnID || !preview.Steer || !strings.Contains(preview.Text, "pua turn switch --message="+user.ID) {
 		t.Fatalf("preview not scoped: %+v", preview)
 	}
-	command := turnWorkCommand{Action: "yield", WorkID: a.ID, MessageID: user.ID, Checkpoint: "file changed; test next"}
+	command := turnWorkCommand{Action: "switch", WorkID: a.ID, MessageID: user.ID}
 	workCommand(t, m, w, command)
 	workCommand(t, m, w, command)
 	reconcileWorkflow(t, m, w, client)
@@ -493,7 +493,9 @@ func TestTurnWorkNotificationAndFailedChild(t *testing.T) {
 			m, w, fake, client := workflowFixture(t)
 			msg := acceptTestResourceMessage(t, m, w, "project1.task1", "background", resourceMessageModeEnqueue, nil)
 			a := *workFile(t, w).find(msg.ID)
-			workCommand(t, m, w, turnWorkCommand{Action: "notify", WorkID: a.ID, Text: "The report is ready", Checkpoint: "next task"})
+			command := turnWorkCommand{Action: "switch", WorkID: a.ID, Text: "The report is ready"}
+			workCommand(t, m, w, command)
+			workCommand(t, m, w, command)
 			closeWorkflowTurn(fake, a, "completed", "")
 			reconcileWorkflow(t, m, w, client)
 			file := workFile(t, w)

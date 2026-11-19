@@ -721,21 +721,36 @@ func (m *agentManager) controlTurnWork(ctx context.Context, workspace serveWorks
 	if err != nil || turn.Closed {
 		return nil, errors.New("work is not a verified active Turn")
 	}
+	action := command.Action
+	next := "End this Turn now; the server will schedule the next input."
+	if action == "switch" {
+		hasMessage := strings.TrimSpace(command.MessageID) != ""
+		if hasMessage == (strings.TrimSpace(command.Text) != "") || command.Reason != "" {
+			return nil, errors.New("switch requires one queued message or one Chat context")
+		}
+		if hasMessage {
+			action = "yield"
+		} else {
+			action = "notify"
+		}
+		next = strings.TrimSpace(localize.MustRender(work.Context.Language, "turn-switch-accepted.md", hasMessage))
+	}
+	accepted := map[string]string{"status": "accepted", "next": next}
 	if work.Command != nil {
 		if reflect.DeepEqual(*work.Command, command) {
-			return map[string]string{"status": "accepted", "next": "End this Turn now; the server will schedule the next input."}, nil
+			return accepted, nil
 		}
 		return nil, errors.New("this Turn already has a different control request")
 	}
 	if len(session.PendingApprovalIDs) != 0 {
 		return nil, errors.New("resolve outstanding approvals before ending this work")
 	}
-	switch command.Action {
+	switch action {
 	case "yield":
 		if work.ParentID != "" {
-			return nil, errors.New("nested yields are not supported; finish this input before returning to suspended work")
+			return nil, errors.New("finish this input before returning to the suspended work")
 		}
-		if strings.TrimSpace(command.Checkpoint) == "" {
+		if command.Action == "yield" && strings.TrimSpace(command.Checkpoint) == "" {
 			return nil, errors.New("yield requires a checkpoint")
 		}
 		message, exists, e := mailboxMessageByID(workspace.Path, command.MessageID)
@@ -752,7 +767,7 @@ func (m *agentManager) controlTurnWork(ctx context.Context, workspace serveWorks
 		work.State, work.TargetID, work.Checkpoint = "yield_requested", message.ID, command.Checkpoint
 	case "notify":
 		if work.Context.ChatVisible || work.ParentID != "" || strings.TrimSpace(command.Text) == "" {
-			return nil, errors.New("notify requires an internal root Turn and a notification intent")
+			return nil, errors.New("starting a Chat reply Turn requires internal work with no suspended parent and a topic for the user")
 		}
 		chatMu.Lock()
 		chat, e := loadChatLocked(workspace.Path, sharedChatID(resource))
@@ -766,10 +781,10 @@ func (m *agentManager) controlTurnWork(ctx context.Context, workspace serveWorks
 		id := "notify-" + chatID(work.ID, "notify")
 		c := providerMessageContext{Protocol: 1, WorkID: id, Language: work.Context.Language, OpenerRole: "system", ChatVisible: true, ChatEpoch: chat.Epoch}
 		work.Notification = &resourceMailboxMessage{ID: id, ResourceID: resource, Type: "chat_notification",
-			Text:          "Proactive notification to the shared Chat. Explain this update:\n" + command.Text,
+			Text:          strings.TrimSpace(localize.MustRender(c.Language, "turn-chat-reply.md", command.Text)),
 			RequestedMode: resourceMessageModeEnqueue, ProviderContext: &c,
 			Causation: &resourceMessageCausation{Type: "chat_notification", SourceResourceID: resource, MessageID: work.ID, ChatEpoch: chat.Epoch, AutomaticChat: true}}
-		if strings.TrimSpace(command.Checkpoint) != "" {
+		if command.Action == "switch" || strings.TrimSpace(command.Checkpoint) != "" {
 			work.State, work.TargetID, work.Checkpoint = "yield_requested", id, command.Checkpoint
 		}
 	case "finish":
@@ -793,7 +808,7 @@ func (m *agentManager) controlTurnWork(ctx context.Context, workspace serveWorks
 	if err := saveTurnWork(workspace.Path, resource, *file); err != nil {
 		return nil, err
 	}
-	return map[string]string{"status": "accepted", "next": "End this Turn now; the server will schedule the next input."}, nil
+	return accepted, nil
 }
 
 // Poll work independently of the hot mailbox: a running Turn may have consumed

@@ -543,9 +543,9 @@
   color: var(--sidebar-text);
 }
 
-:where([data-component-owner="project-tree"]) .resource-actions button:hover,
-:where([data-component-owner="project-tree"]) .resource-actions button:focus-visible,
-:where([data-component-owner="project-tree"]) .resource-actions button[aria-expanded="true"] {
+:where([data-component-owner="project-tree"]) .resource-actions > .resource-actions-toggle:hover,
+:where([data-component-owner="project-tree"]) .resource-actions > .resource-actions-toggle:focus-visible,
+:where([data-component-owner="project-tree"]) .resource-actions > .resource-actions-toggle[aria-expanded="true"] {
   background: var(--sidebar-row);
   color: var(--sidebar-text);
 }
@@ -591,6 +591,10 @@
   min-height: 44px;
   gap: 8px;
   padding-inline: 10px;
+}
+
+:where([data-component-owner="project-tree"]) .resource-actions-popover button:hover {
+  background: var(--line);
 }
 
 @container project-tree (max-width: 220px) {

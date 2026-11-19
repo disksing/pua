@@ -1903,6 +1903,38 @@ test("keeps the Create task wizard usable across desktop and mobile layouts", as
   expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(844);
 });
 
+test("highlights only the hovered resource action and clears it when the pointer leaves", async ({ page }) => {
+  await installMockApi(page, "project1.task2");
+  await page.goto("/w/ws-test/r/project1.task2");
+
+  const projectActions = page.locator("#projectTree > .resource-row .resource-actions-toggle").first();
+  const taskActions = page.locator('[data-task-id="project1.task2"] .resource-actions-toggle');
+  const menu = page.locator("#tree-resource-actions");
+  const create = menu.getByRole("button", { name: "New Task" });
+  const archive = menu.getByRole("button", { name: "Archive" });
+  const outside = page.locator(".tree-section .section-label");
+  const highlight = "rgb(220, 223, 228)";
+  const transparent = "rgba(0, 0, 0, 0)";
+
+  await projectActions.click();
+  await create.hover({ position: { x: 150, y: 22 } });
+  await expect(create).toHaveCSS("background-color", highlight);
+  await expect(archive).toHaveCSS("background-color", transparent);
+  await archive.hover({ position: { x: 150, y: 22 } });
+  await expect(archive).toHaveCSS("background-color", highlight);
+  await expect(create).toHaveCSS("background-color", transparent);
+  await outside.hover();
+  await expect(archive).toHaveCSS("background-color", transparent);
+  await outside.click();
+  await expect(menu).toHaveCount(0);
+
+  await taskActions.click();
+  await archive.hover({ position: { x: 150, y: 22 } });
+  await expect(archive).toHaveCSS("background-color", highlight);
+  await outside.hover();
+  await expect(archive).toHaveCSS("background-color", transparent);
+});
+
 test("opens touch row actions and separates archive cancellation from drawer dismissal", async ({ browser }) => {
   const page = await browser.newPage({ viewport: { width: 320, height: 670 }, hasTouch: true, isMobile: true });
   try {

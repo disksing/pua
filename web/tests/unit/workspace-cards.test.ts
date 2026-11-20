@@ -1,5 +1,5 @@
 import {describe, expect, it} from "vitest";
-import {project, summarize, type Card} from "../../src/components/workspace-cards";
+import {collapsedReadout, project, summarize, type Card} from "../../src/components/workspace-cards";
 
 describe("workspace card sources", () => {
   const tree = {projects:[{id:"project1",type:"project",children:[
@@ -19,5 +19,13 @@ describe("workspace card sources", () => {
     expect(project(card,null,[])).toBeNull();
     expect(project({...card,kind:"trend"},summary,[])?.points).toEqual([]);
     expect(project({...card,source:"agent",content:{value:9}},null,[])?.value).toBe(9);
+  });
+  it("shows a compact value when the card is collapsed", () => {
+    expect(collapsedReadout("stat", {value:0})).toBe("0");
+    expect(collapsedReadout("trend", null)).toBe("—");
+    expect(collapsedReadout("gauge", {value:1,max:4})).toBe("25%");
+    expect(collapsedReadout("list", {items:[]})).toBe("0");
+    expect(collapsedReadout("pie", {items:[{label:"Running",value:3}]})).toBe("3");
+    expect(collapsedReadout("html", {html:"<p>Ready</p>"})).toBe("");
   });
 });

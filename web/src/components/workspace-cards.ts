@@ -20,6 +20,17 @@ export interface Card {
   id: string; title: string; kind: Kind; source: string; version: number;
   collapsed: boolean; height?: number; content?: Content; updated?: string;
 }
+export function collapsedReadout(kind: Kind, data: Content | null) {
+  if (!data) return "—";
+  switch (kind) {
+    case "stat":
+    case "trend": return String(data.value ?? data.points?.at(-1)?.value ?? "—");
+    case "gauge": return data.max && data.value != null ? `${Math.round(100 * data.value / data.max)}%` : "—";
+    case "list": return String(data.items?.length ?? 0);
+    case "pie": return String(data.items?.reduce((sum, item) => sum + (item.value ?? 0), 0) ?? 0);
+    case "html": return "";
+  }
+}
 export function summarize(tree: WorkspaceTree) {
   const resources: ResourceRecord[] = [];
   function collect(item?: ResourceRecord) {

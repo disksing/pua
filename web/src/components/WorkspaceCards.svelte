@@ -2,7 +2,7 @@
   import {onMount, untrack} from "svelte";
   import type {WorkspaceTree} from "../models/workspace";
   import CardContent from "./CardContent.svelte";
-  import {cardObservation, labels, project, sources, styles, summarize, type Card, type Kind, type Sample, type Summary} from "./workspace-cards";
+  import {cardObservation, collapsedReadout, labels, project, sources, styles, summarize, type Card, type Kind, type Sample, type Summary} from "./workspace-cards";
 
   let {workspace,user,tree,treeError,onSelect,onClose}: {
     workspace:string; user:string; tree:WorkspaceTree|null; treeError:string;
@@ -83,7 +83,11 @@
 </script>
 
 <div class="board">
-  <header><h2>Workspace cards</h2><button class="primary" disabled={!loaded} onclick={()=>adding=!adding} aria-expanded={adding}>+ Add card</button><button class="cards-drawer-close" onclick={onClose} aria-label="Close cards">×</button></header>
+  <header>
+    <h2>Workspace cards</h2>
+    <button class="add" aria-label="Add card" title="Add card" disabled={!loaded} onclick={()=>adding=!adding} aria-expanded={adding}>+</button>
+    <button class="cards-drawer-close" onclick={onClose} aria-label="Close cards">×</button>
+  </header>
   {#if adding}
     <form onsubmit={(event)=>{event.preventDefault();void add();}}>
       <label>Style<select value={kind} onchange={(event)=>{kind=event.currentTarget.value as Kind;source=sources[kind][0];}}>
@@ -98,10 +102,14 @@
   <div class="stack">
     {#each cards as card,index (card.id)}
       {@const data=project(card,offline ? null:summary,samples)}
-      <article draggable="true" ondragstart={()=>dragging=card.id} ondragend={()=>dragging=""}
+      <article class:stat-card={card.kind === "stat"} draggable="true" ondragstart={()=>dragging=card.id} ondragend={()=>dragging=""}
         ondragover={(event)=>event.preventDefault()} ondrop={(event)=>{event.preventDefault();const item=cards.find(item=>item.id===dragging);if(item && item.id!==card.id) void layout(item,{before:card.id});dragging="";}}>
         <div class="heading">
-          <button class="name" aria-expanded={!card.collapsed} onclick={()=>layout(card,{collapsed:!card.collapsed})}><span aria-hidden="true">{card.collapsed ? "▸":"▾"}</span> {card.title}</button>
+          <button class="name" aria-expanded={!card.collapsed} onclick={()=>layout(card,{collapsed:!card.collapsed})}>
+            <strong>{card.title}</strong>
+            {#if card.collapsed}<span class="brief">{collapsedReadout(card.kind, data)}</span>{/if}
+            <span class="chevron" aria-hidden="true"></span>
+          </button>
           <details><summary aria-label={`Options for ${card.title}`}>···</summary><div class="menu">
             <button disabled={index===0||busy} onclick={()=>layout(card,{before:cards[index-1].id})}>Move up</button>
             <button disabled={index===cards.length-1||busy} onclick={()=>layout(card,{before:cards[index+2]?.id ?? ""})}>Move down</button>
@@ -111,24 +119,60 @@
         </div>
         {#if !card.collapsed}
           <div class="body" style:height={card.height ? `${card.height}px`:undefined}>
-            {#if data}<CardContent kind={card.kind} {data} onSelect={select}/>{:else}<small>Data unavailable</small>{/if}
+            {#if data}<CardContent kind={card.kind} source={card.source} {data} onSelect={select}/>{:else}<small>Data unavailable</small>{/if}
           </div>
-          <footer>{styles[card.kind]} · {labels[card.source]}{#if card.updated} · {new Date(card.updated).toLocaleTimeString()}{/if}</footer>
+          <footer>{card.source === "agent" ? "Agent" : `System · ${labels[card.source]}`}{#if card.updated} · {new Date(card.updated).toLocaleTimeString()}{/if}</footer>
         {/if}
       </article>
     {:else}{#if loaded}<p>Add a card to follow this workspace.</p>{/if}{/each}
   </div>
 </div>
 <style>
-  .board{min-width:0;overflow:auto;height:100%;padding:14px;background:var(--bg);color:var(--text)}
-  header,.heading{display:flex;align-items:center;gap:8px}header{margin-bottom:14px}h2{font-size:1rem;margin:0;flex:1}
-  button,summary{cursor:pointer}button:disabled{opacity:.5;cursor:default}
-  button,select,input{font:inherit;color:inherit}button,select,input,form,article,.menu{border:1px solid var(--border,#ccd3d8);border-radius:6px;background:var(--panel,#fff)}
-  button{padding:4px 8px}.primary{background:var(--text,#263746);color:var(--panel,#fff);border-color:transparent}
-  .stack{display:grid;gap:10px}form,article{padding:12px}form{display:grid;gap:10px;margin-bottom:12px}
-  label{display:grid;gap:4px;font-size:.8rem}select,input{padding:6px;width:100%;box-sizing:border-box}
-  .name{border:0;text-align:left;padding:0;font-weight:650;flex:1;overflow-wrap:anywhere}.name span{opacity:.6}
-  .heading{justify-content:space-between}.body{margin-top:12px;overflow:auto}.menu{position:absolute;right:0;top:100%;z-index:2;padding:4px;min-width:100px;box-shadow:0 5px 18px #0002}
-  details{position:relative}summary{list-style:none;padding:2px 6px;font-weight:bold}.menu button{display:block;border:0;width:100%;text-align:left}
-  footer,small,.stack>p{font-size:.75rem;color:var(--muted,#657481)}footer{margin-top:9px}p[role=alert]{overflow-wrap:anywhere}
+  .board {
+    --card-surface:#fffef8;
+    --card-line:#d6d9cc;
+    --card-accent:#35684a;
+    --card-muted:#60695b;
+    container-type:inline-size;
+    min-width:0;
+    height:100%;
+    overflow:auto;
+    color:#24392c;
+    color-scheme:light;
+    background:#f7f7ef;
+  }
+  header,.heading,.name { display:flex; align-items:center; gap:8px }
+  header { padding:15px 19px; border-bottom:1px solid var(--card-line) }
+  h2 { display:flex; align-items:center; gap:8px; flex:1; margin:0; font-size:1rem; letter-spacing:-.02em }
+  h2::before { content:""; width:13px; height:13px; border:1px solid var(--card-accent); background:repeating-linear-gradient(0deg,transparent 0 3px,#35684a88 3px 4px),repeating-linear-gradient(90deg,transparent 0 3px,#35684a88 3px 4px) }
+  button,summary { cursor:pointer }
+  button:disabled { opacity:.5; cursor:default }
+  button,select,input { font:inherit; color:inherit; border:1px solid var(--card-line); border-radius:6px; background:var(--card-surface) }
+  button { padding:5px 9px }
+  .add,.cards-drawer-close { width:30px; height:30px; padding:0; font-size:20px; line-height:1; background:transparent }
+  .primary { color:#fff; background:var(--card-accent); border-color:transparent }
+  .stack { display:grid; gap:9px; padding:15px }
+  form,article,.menu { border:1px solid var(--card-line); border-radius:12px; background:var(--card-surface) }
+  article { min-width:0 }
+  .stat-card { --card-surface:#e3eddc; border-color:#b8c9b0 }
+  form { display:grid; gap:10px; margin:15px 15px 0; padding:14px }
+  label { display:grid; gap:4px; font-size:.8rem }
+  select,input { width:100%; box-sizing:border-box; padding:6px }
+  .heading { padding:5px 8px 5px 14px; gap:2px }
+  .name { min-width:0; flex:1; text-align:left; padding:7px 4px 7px 0; border:0; background:transparent; font-size:14px }
+  .name strong { flex:1; overflow-wrap:anywhere }
+  .brief { font-variant-numeric:tabular-nums; color:var(--card-accent); overflow-wrap:anywhere }
+  .chevron { flex:none; width:6px; height:6px; border:solid var(--card-muted); border-width:0 1px 1px 0; transform:rotate(45deg) }
+  .name[aria-expanded="false"] .chevron { transform:rotate(-45deg) }
+  .body { padding:0 14px 4px; overflow:auto }
+  details { position:relative }
+  summary { list-style:none; padding:5px; color:var(--card-muted); border-radius:4px }
+  summary::-webkit-details-marker { display:none }
+  .menu { position:absolute; z-index:2; right:0; top:100%; min-width:110px; padding:4px; background:#fffef8; box-shadow:0 5px 18px #263b251c }
+  .menu button { display:block; width:100%; background:transparent; border:0; text-align:left }
+  .menu button:hover,summary:hover,.add:hover { background:#dce6d7 }
+  .name:hover strong { color:var(--card-accent) }
+  footer,small,.stack>p { font-size:11px; color:var(--card-muted) }
+  footer { padding:5px 14px 12px }
+  p[role=alert] { margin-inline:15px; overflow-wrap:anywhere }
 </style>

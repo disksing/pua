@@ -1246,6 +1246,81 @@ for (const viewport of [{ width: 1500, height: 800 }, { width: 440, height: 844 
 }
 
 for (const viewport of [{ width: 1500, height: 844 }, { width: 440, height: 820 }]) {
+  test(`quotes text from a single shared Chat message at ${viewport.width}px`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await installMockApi(page);
+    const messages = [
+      { id: "chat-user-stable", role: "user", sender: "User", text: "Please quote this sentence.", createdAt: now },
+      { id: "chat-agent-stable", role: "agent", sender: "Agent", text: "This agent reply includes a quote.", createdAt: now },
+    ];
+    const sendRequests: string[] = [];
+    page.on("request", request => {
+      if (request.method() === "POST" && new URL(request.url()).pathname.endsWith("/chat/messages")) {
+        sendRequests.push(request.url());
+      }
+    });
+    await page.route("**/resources/project1.task1/chat?*", route => json(route, {
+      id: "quote-chat", open: true, epoch: 1, unreadCount: 0,
+      messages: new URL(route.request().url()).searchParams.has("after") ? [] : messages,
+    }));
+    await page.goto("/w/ws-test/r/project1.task1");
+    const chat = page.locator("#chatTimeline");
+    const input = chat.getByRole("textbox", { name: "Chat message" });
+    const quote = chat.getByRole("button", { name: "引用", exact: true });
+    const paragraphs = messages.map(message => chat.locator("article p").filter({ hasText: message.text }));
+    await input.fill("Existing draft");
+
+    async function selectText(paragraph: Locator, text: string) {
+      await paragraph.scrollIntoViewIfNeeded();
+      const [start, end] = await paragraph.evaluate((element, text) => {
+        window.getSelection()?.removeAllRanges();
+        const node = element.firstChild!;
+        const offset = node.textContent!.indexOf(text);
+        const range = document.createRange();
+        return [offset, offset + text.length].map(position => {
+          range.setStart(node, position);
+          range.collapse(true);
+          const rect = range.getBoundingClientRect();
+          return { x: rect.left, y: rect.top + rect.height / 2 };
+        });
+      }, text);
+      await page.mouse.move(start.x, start.y);
+      await page.mouse.down();
+      await page.mouse.move(end.x, end.y, { steps: 6 });
+      await page.mouse.up();
+      await expect.poll(() => page.evaluate(() => window.getSelection()?.toString())).toBe(text);
+    }
+
+    await selectText(paragraphs[0], "quote this");
+    await expect(quote).toBeVisible();
+    await page.evaluate(() => {
+      const paragraphs = document.querySelectorAll("#chatTimeline article p");
+      window.getSelection()!.setBaseAndExtent(paragraphs[0].firstChild!, 1, paragraphs[1].firstChild!, 4);
+    });
+    await expect(quote).toHaveCount(0);
+
+    let expected = "Existing draft";
+    for (const [index, text] of ["quote this", "agent reply"].entries()) {
+      await selectText(paragraphs[index], text);
+      await expect(quote).toBeVisible();
+      const box = (await quote.boundingBox())!;
+      expect(box.x).toBeGreaterThanOrEqual(0);
+      expect(box.x + box.width).toBeLessThanOrEqual(viewport.width);
+      await quote.click();
+      expected += `\n\n> ${text}\n来源消息：${messages[index].id}`;
+      await expect(input).toHaveValue(expected);
+      await expect(input).toBeFocused();
+      await expect(quote).toHaveCount(0);
+    }
+
+    await input.selectText();
+    await expect(quote).toHaveCount(0);
+    await expect(input).toHaveValue(expected);
+    expect(sendRequests).toEqual([]);
+  });
+}
+
+for (const viewport of [{ width: 1500, height: 844 }, { width: 440, height: 820 }]) {
   test(`keeps open Chat Turn controls clear of the dock at ${viewport.width}px`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await installMockApi(page);

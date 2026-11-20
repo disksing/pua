@@ -20,6 +20,8 @@
   type Message = SharedChatMessage;
   type Chat = { id: string; open: boolean; epoch: number; unreadCount: number; messages: Message[]; queuedMessages?: Message[]; timelineInputs?: Record<string, string>; hasOlder?: boolean; hasNewer?: boolean; reset?: boolean; endPosition?: number };
   const PAGE_SIZE = 40;
+  const QUOTE_WIDTH = 56;
+  const QUOTE_HEIGHT = 44;
   let chat = $state<Chat | null>(null);
   let echoes = $state<Message[]>([]);
   const messages = $derived.by(() => {
@@ -42,6 +44,7 @@
   let refreshNow: () => void = () => {};
   let draft = $state("");
   let draftResetVersion = $state(0);
+  let quote = $state<{ text: string; messageId: string; left: number; top: number } | null>(null);
   let uploadOpen = $state(false);
   let uploadCycle = $state(0);
   let bindingSaving = $state(false);
@@ -58,6 +61,7 @@
   const canLoad = $derived(Boolean(model.workspaceId && model.resourceId && model.currentUserName));
   const archived = $derived(Boolean(model.detail?.archived));
   const canClose = $derived(Boolean(chat?.open) && model.resourceId !== "workspace" && !archived);
+  const canQuote = $derived(visible && Boolean(chat?.open) && !archived && !pending);
   const firstOpen = $derived(Boolean(chat && !chat.open && !chat.epoch && !messages.length && !archived));
   const headers = $derived({ "Content-Type": "application/json", "X-PUA-User": userName });
   onMount(() => channel.subscribe(next => model = next));
@@ -166,11 +170,13 @@
       movePreview();
       followTail = container.scrollHeight - container.scrollTop - container.clientHeight < 120;
       if (container.scrollTop < 120) loadOlder();
+      updateQuote();
     };
     const resize = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => {
       updateScrollPadding();
       movePreview();
       if (visible && followTail && window.getSelection()?.isCollapsed !== false) pinToTail();
+      updateQuote();
     });
     updateScrollPadding();
     resize?.observe(container);
@@ -183,6 +189,59 @@
       container.style.scrollPaddingBlockStart = "";
       container.removeEventListener("scroll", onScroll);
     } };
+  }
+  function selectedQuote() {
+    if (!canQuote || !root) return null;
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || selection.rangeCount !== 1) return null;
+    const range = selection.getRangeAt(0);
+    const start = range.startContainer;
+    const body = (start instanceof Element ? start : start.parentElement)?.closest<HTMLElement>("[data-chat-message-body]");
+    const messageId = body?.dataset.chatMessageBody;
+    if (!body || !messageId || !root.contains(body) || !body.contains(range.endContainer)) return null;
+    const text = selection.toString();
+    if (!text.trim()) return null;
+
+    const scroll = root.closest<HTMLElement>("#chatTimeline");
+    if (!scroll) return null;
+    const bounds = scroll.getBoundingClientRect();
+    const dock = root.querySelector(".public-chat-dock")?.getBoundingClientRect();
+    const left = Math.max(0, bounds.left);
+    const right = Math.min(document.documentElement.clientWidth, bounds.left + scroll.clientLeft + scroll.clientWidth);
+    const top = Math.max(0, bounds.top + (parseFloat(scroll.style.scrollPaddingBlockStart) || 0));
+    const bottom = Math.min(bounds.bottom, document.documentElement.clientHeight, dock?.top ?? Infinity);
+    const gap = 6;
+    if (right - left < QUOTE_WIDTH + 2 * gap || bottom - top < QUOTE_HEIGHT + 2 * gap) return null;
+    const rect = Array.from(range.getClientRects()).find(rect =>
+      rect.width > 0 && rect.right > left && rect.left < right && rect.bottom > top && rect.top < bottom);
+    if (!rect) return null;
+
+    const origin = root.getBoundingClientRect();
+    const center = (Math.max(left, rect.left) + Math.min(right, rect.right)) / 2;
+    const above = rect.top - QUOTE_HEIGHT - gap;
+    return {
+      text, messageId,
+      left: Math.max(left + gap, Math.min(center - QUOTE_WIDTH / 2, right - QUOTE_WIDTH - gap)) - origin.left,
+      top: (above >= top + gap ? above : Math.min(rect.bottom + gap, bottom - QUOTE_HEIGHT - gap)) - origin.top,
+    };
+  }
+  function updateQuote() {
+    quote = selectedQuote();
+  }
+  async function appendQuote() {
+    if (!canQuote || !quote) return;
+    const key = identity;
+    const { text, messageId } = quote;
+    const separator = !draft || draft.endsWith("\n\n") ? "" : draft.endsWith("\n") ? "\n" : "\n\n";
+    draft += `${separator}> ${text.replaceAll("\n", "\n> ")}\n来源消息：${messageId}`;
+    draftResetVersion++;
+    quote = null;
+    window.getSelection()?.removeAllRanges();
+    await tick();
+    if (!canQuote || key !== identity) return;
+    const input = root?.querySelector("textarea");
+    input?.focus({ preventScroll: true });
+    input?.setSelectionRange(input.value.length, input.value.length);
   }
   function pinToTail() {
     const container = root?.closest<HTMLElement>("#chatTimeline");
@@ -290,9 +349,11 @@
   $effect(() => { const next = composerModel(); untrack(() => composer.publish(next)); });
   $effect(() => { const next = uploadModel(); untrack(() => upload.publish(next)); });
   $effect(() => { if (!chat?.open) uploadOpen = false; });
+  $effect(() => { if (!canQuote) quote = null; });
 
 </script>
-<section tabindex="-1" use:trackScroll class="persistent-chat" aria-label="Resource chat">
+<svelte:document onselectionchange={updateQuote} />
+<section tabindex="-1" use:trackScroll class="persistent-chat" class:quoting={canQuote && quote !== null} aria-label="Resource chat">
   <SessionControls {model} enabled={visible && canLoad && !archived && Boolean(chat || model.detail || model.resourceType === "workspace")} {followTail} onLatest={jumpToLatest}>
     {#snippet children(execution, notices, status)}
       {#if hasOlder}
@@ -307,7 +368,7 @@
           {#snippet bubble(message)}
           <article class:own-message={message.role === "user" && message.sender === userName}>
             <small class="message-meta"><strong>{message.role === "user" ? (message.sender || "User") : (message.sender?.trim() || "Agent")}</strong> <time datetime={message.createdAt}>{new Date(message.createdAt).toLocaleString()}</time></small>
-            <div class="markdown-rendered" use:markdownResourceNavigation={{ resolveResourceTitle: model.resolveResourceTitle, onNavigate: model.onNavigate, onOpenFile: openLinkedFile }}>{@html markdownHTML(message.text, { resolveResourceTitle: model.resolveResourceTitle, workspaceId: model.workspaceId })}</div>
+            <div class="markdown-rendered" data-chat-message-body={message.id} use:markdownResourceNavigation={{ resolveResourceTitle: model.resolveResourceTitle, onNavigate: model.onNavigate, onOpenFile: openLinkedFile }}>{@html markdownHTML(message.text, { resolveResourceTitle: model.resolveResourceTitle, workspaceId: model.workspaceId })}</div>
           </article>
           {/snippet}
           {#snippet empty()}
@@ -349,11 +410,18 @@
       </div>
     {/snippet}
   </SessionControls>
+  {#if canQuote && quote}
+    <button type="button" class="chat-quote secondary-button" style:left={`${quote.left}px`} style:top={`${quote.top}px`}
+      style:width={`${QUOTE_WIDTH}px`} style:height={`${QUOTE_HEIGHT}px`}
+      onpointerdown={(event) => event.preventDefault()} onclick={appendQuote}>引用</button>
+  {/if}
 </section>
 <div data-component-owner="upload-dialog" style="display: contents"><UploadDialog channel={upload} /></div>
 <FilePreviewModal {client} workspaceId={model.workspaceId} resourceId={model.resourceId} selection={preview} editable={false} resolveResourceTitle={model.resolveResourceTitle} onNavigate={model.onNavigate} onOpenFile={openLinkedFile} onSaveMarkdown={rejectReadOnlySave} onClose={() => preview = null} onError={model.onToast} />
 <style>
   .persistent-chat { display:flex; flex-direction:column; min-height:100%; gap:8px; padding:12px 16px 0; }
+  .quoting { position:relative; }
+  .chat-quote { position:absolute; z-index:3; padding:0; user-select:none; background:var(--panel); }
   .older-messages { display:flex; flex-direction:column; align-items:center; gap:4px; }
   article {
     align-self:flex-start;

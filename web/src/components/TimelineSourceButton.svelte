@@ -92,6 +92,7 @@
 >
   <Icon name={source.icon} />
   {#if source.resumed}<span class="resume-marker"><Icon name="rotate-ccw" /></span>{/if}
+  {#if source.role === "user"}<span class="reply-marker"><Icon name="reply" /></span>{/if}
   {#if queued}<span class="waiting-marker"></span>{/if}
 </button>
 <div bind:this={preview} popover="auto" role="tooltip" id={id} class="timeline-preview" onpointerenter={() => clearTimeout(linger)} onpointerleave={leave}>
@@ -120,7 +121,8 @@
   .timeline-source-button:is(:hover, [aria-expanded="true"]) { border-color: currentColor; }
   .timeline-source-button:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
   .timeline-source-button :global(svg) { width: 17px; height: 17px; }
-  .resume-marker {
+  .resume-marker,
+  .reply-marker {
     position: absolute;
     top: 1px;
     right: 1px;
@@ -131,7 +133,8 @@
     border-radius: 50%;
     background: inherit;
   }
-  .timeline-source-button .resume-marker :global(svg) { width: 10px; height: 10px; stroke-width: 2.5; }
+  .resume-marker + .reply-marker { right: auto; left: 1px; }
+  .timeline-source-button :is(.resume-marker, .reply-marker) :global(svg) { width: 10px; height: 10px; stroke-width: 2.5; }
   .queued { border-style: dashed; }
   .waiting-marker {
     position: absolute;

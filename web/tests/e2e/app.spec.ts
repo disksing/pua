@@ -3626,6 +3626,7 @@ test("moves active Turn icons and durable pending user bubbles through the unifi
     await expect(chat.locator("[data-queued-chat-message]").last()).toContainText(text.split(" [")[0]);
   }
   await expect(queue.getByRole("button")).toHaveCount(2);
+  await expect(queue.getByRole("button").first().locator(".reply-marker svg")).toHaveAttribute("data-lucide", "reply");
   await queue.getByRole("button").first().hover();
   await expect(chat.getByRole("tooltip")).toContainText("First queued");
   await expect(chat.locator("[data-queued-chat-message] a")).toHaveText("attachment");
@@ -3638,7 +3639,15 @@ test("moves active Turn icons and durable pending user bubbles through the unifi
   begin("user", "user_chat_input", inputs[0]);
   await expect(controls).toContainText("Agent is replying");
   await expect(controls.getByRole("button", { name: "Turn · User · active", exact: true })).toHaveCount(1);
-  await expect(chip("source-2").locator("svg")).toHaveAttribute("data-lucide", "user");
+  const userChip = chip("source-2");
+  const replyMarker = userChip.locator(".reply-marker");
+  await expect(userChip).toHaveCSS("width", "34px");
+  await expect(userChip.locator(":scope > svg")).toHaveAttribute("data-lucide", "user");
+  await expect(userChip.locator(":scope > svg")).toHaveCSS("width", "17px");
+  await expect(replyMarker).toHaveCSS("right", "1px");
+  await expect(replyMarker.locator("svg")).toHaveAttribute("data-lucide", "reply");
+  await expect(replyMarker.locator("svg")).toHaveCSS("width", "10px");
+  await expect(replyMarker.locator("polyline")).toHaveCount(1);
   await expect(chip("source-2")).toHaveCount(1);
   await expect(chip("source-1")).toHaveCount(1);
   await expect(chat.locator("[data-queued-chat-message]")).toHaveText([/Second queued/]);
@@ -3674,9 +3683,9 @@ test("moves active Turn icons and durable pending user bubbles through the unifi
   await expect(chat.locator("[data-turn-chip]")).toHaveCount(6);
 
   const agentSources = [
-    { id: "workspace", name: "Workspace lead", kind: "Workspace", icon: "globe" },
-    { id: "project7", name: "Project lead", kind: "Project", icon: "folder" },
-    { id: "project7.task2", name: "Reviewer", kind: "Task", icon: "list-todo" },
+    { id: "workspace", name: "Workspace lead", kind: "Workspace", icon: "building-2" },
+    { id: "project7", name: "Project lead", kind: "Project", icon: "folder-kanban" },
+    { id: "project7.task2", name: "Reviewer", kind: "Task", icon: "target" },
   ];
   waitingSources = agentSources.map(sender => ({ messageId: sender.id, role: "agent", sender, text: `Message from ${sender.name}` }));
   waitingSources.push({ messageId: "resume-review", role: "system", type: "turn_resume",
@@ -3704,7 +3713,7 @@ test("moves active Turn icons and durable pending user bubbles through the unifi
   await expect(tooltip).toContainText("Resume the review");
 
   for (const [resumeSource, name, icon] of [
-    [{ role: "agent", sender: agentSources[2] }, "Task Agent · Reviewer", "list-todo"],
+    [{ role: "agent", sender: agentSources[2] }, "Task Agent · Reviewer", "target"],
     [{ role: "user", type: "user_chat_input", sender: { name: "User" } }, "User", "user"],
     [{ role: "user", type: "user_chat_input", sender: { name: "User" } }, "User", "user"],
   ] as const) {
@@ -3715,6 +3724,11 @@ test("moves active Turn icons and durable pending user bubbles through the unifi
     await expect(button).toHaveAccessibleName(`Turn · ${name} · Resumed · active`);
     await expect(button.locator("svg").first()).toHaveAttribute("data-lucide", icon);
     await expect(button.locator(".resume-marker svg")).toHaveAttribute("data-lucide", "rotate-ccw");
+    await expect(button.locator(".resume-marker")).toHaveCSS("right", "1px");
+    if (resumeSource.role === "user") {
+      await expect(button.locator(".reply-marker svg")).toHaveAttribute("data-lucide", "reply");
+      await expect(button.locator(".reply-marker")).toHaveCSS("left", "1px");
+    }
     finish();
     await page.reload();
     await expect(button).toHaveAccessibleName(`Turn · ${name} · Resumed`);
@@ -3733,6 +3747,12 @@ test("moves active Turn icons and durable pending user bubbles through the unifi
   await page.keyboard.press("Escape");
   await expect(tooltip).toHaveCount(0);
   expect(await chat.evaluate(element => element.scrollWidth)).toBeLessThanOrEqual(440);
+
+  const session = await page.context().newCDPSession(page);
+  await session.send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 1 });
+  await expect(userChip).toHaveCSS("width", "44px");
+  await expect(replyMarker.locator("svg")).toHaveCSS("width", "10px");
+  await session.detach();
 });
 
 for (const { mode, width } of [{ mode: "recovering", width: 1500 }, { mode: "starting", width: 440 }]) {

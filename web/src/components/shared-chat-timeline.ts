@@ -48,9 +48,9 @@ function source(trigger: TurnResumeSource, text: string, resumeSource?: TurnResu
     return { role: "scheduler", label: "Scheduler", icon: "calendar-clock", ...details };
   }
   if (role === "agent") {
-    if (id === "workspace") return { role, label: "Workspace Agent", icon: "globe", ...details };
-    if (/^project\d+$/.test(id)) return { role, label: "Project Agent", icon: "folder", ...details };
-    if (/^project\d+\.task\d+$/.test(id)) return { role, label: "Task Agent", icon: "list-todo", ...details };
+    if (id === "workspace") return { role, label: "Workspace Agent", icon: "building-2", ...details };
+    if (/^project\d+$/.test(id)) return { role, label: "Project Agent", icon: "folder-kanban", ...details };
+    if (/^project\d+\.task\d+$/.test(id)) return { role, label: "Task Agent", icon: "target", ...details };
     return { role, label: "Agent", icon: "bot", ...details };
   }
   if (role === "system") return { role, label: "System", icon: "bell", ...details };

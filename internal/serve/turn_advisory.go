@@ -497,16 +497,11 @@ func (manager *agentManager) currentTurnControl(ctx context.Context, workspace s
 	return control
 }
 
-func annotateHistoryAdvisories(root, resource string, summary *resourceHistoryTurnSummary) error {
-	file, err := loadTurnWork(root, resource)
-	if err != nil {
-		return err
-	}
+func (file turnWorkFile) annotateHistoryAdvisories(summary *resourceHistoryTurnSummary) {
 	for _, advisory := range file.Advisories {
 		if advisory.TurnID == summary.TurnID && advisory.GenerationID == summary.Generation.GenerationID {
 			advisory.Input = nil
 			summary.Advisories = append(summary.Advisories, advisory)
 		}
 	}
-	return nil
 }

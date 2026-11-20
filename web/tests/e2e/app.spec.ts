@@ -1285,7 +1285,7 @@ for (const viewport of [{ width: 1500, height: 844 }, { width: 440, height: 820 
     const articles = scroller.locator(".public-messages article");
     const dock = scroller.locator(".public-chat-dock");
     const composer = dock.getByRole("textbox", { name: "Chat message" });
-    const chip = scroller.getByRole("button", { name: "Turn · Agent · project1.task2" });
+    const chip = scroller.getByRole("button", { name: "Turn · Task Agent · project1.task2" });
     const jump = dock.getByRole("button", { name: "Jump to latest" });
     const dockHeight = () => dock.evaluate(element => element.getBoundingClientRect().height);
     const expectDockPadding = async (height: number) => {
@@ -3434,7 +3434,7 @@ test("unifies mixed Turn icons, Generation markers, shared messages and waiting 
   await page.goto("/w/ws-test/r/project1.task1");
   const chat = page.locator("#chatTimeline"), gen2Marker = chat.locator('[data-generation-id="mixed-2"]');
   const chips = chat.locator(".history-chip[data-chat-row] button"), allDetails = chat.locator(".expanded-history");
-  const agentChip = chat.getByRole("button", { name: "Turn · Agent · project1.task2" });
+  const agentChip = chat.getByRole("button", { name: "Turn · Task Agent · project1.task2" });
   const schedulerChip = chat.getByRole("button", { name: "Turn · Scheduler" });
   await expect(chips).toHaveCount(13);
   await expect(chat.getByRole("button", { name: "Open chat", exact: true })).toBeVisible();
@@ -3476,7 +3476,7 @@ test("unifies mixed Turn icons, Generation markers, shared messages and waiting 
   await expect(chat.locator('[data-generation-id="mixed-3"]')).toBeVisible();
   await expect(chat.locator('[data-generation-id="mixed-1"]')).toHaveCount(1);
   await expect(gen2Marker).toHaveCount(1);
-  await expect(chat.getByRole("button", { name: "Waiting · Agent · project1.task2" })).toHaveCount(0);
+  await expect(chat.getByRole("button", { name: "Waiting · Task Agent · project1.task2" })).toHaveCount(0);
   await expect(chat.getByRole("button", { name: "Load older Turns", exact: true })).toHaveCount(0);
   pending = [...waiting.slice(1), { messageId: "mail-new", role: "system", sender: { id: "PUA" }, text: "New waiting preview" }];
   await expect(chat.getByRole("button", { name: "Waiting · System · PUA" })).toBeVisible();
@@ -3529,19 +3529,25 @@ test("unifies mixed Turn icons, Generation markers, shared messages and waiting 
 });
 
 test("moves active Turn icons and durable pending user bubbles through the unified Chat", async ({ page }) => {
-  test.setTimeout(90_000);
+  test.setTimeout(120_000);
   await installMockApi(page);
   const start = Date.now() - 3000;
   const generation = { generation: 1, generationId: "active-queue", status: "running", createdAt: new Date(start - 1000).toISOString() };
   type Input = { id: string; role: "user"; sender: string; text: string; createdAt: string; inputMessageIds: string[] };
   const inputs: Input[] = [];
   let pending: Input[] = [];
-  const turns: Array<{ reference: string; turnId: string; closed: boolean; status: string; startedAt: string; triggerRole: string; triggerType?: string; triggerMessageId: string; triggerPreview: string; eventCount: number; startEventId: number; lastEventId: number }> = [];
-  const begin = (role: string, type?: string, input?: Input) => {
+  type Sender = { id?: string; name?: string };
+  type ResumeSource = { role?: string; type?: string; sender?: Sender };
+  type WaitingSource = { messageId: string; role: string; type?: string; sender?: Sender; resumeSource?: ResumeSource; text: string };
+  let waitingSources: WaitingSource[] = [];
+  let olderSourcesAvailable = false;
+  const turns: Array<{ reference: string; turnId: string; closed: boolean; status: string; startedAt: string; triggerRole: string; triggerType?: string; triggerSender?: Sender; resumeSource?: ResumeSource; triggerMessageId: string; triggerPreview: string; eventCount: number; startEventId: number; lastEventId: number }> = [];
+  const begin = (role: string, type?: string, input?: Input, sender?: Sender, resumeSource?: ResumeSource) => {
     const index = turns.length + 1;
     turns.push({
       reference: `source-${index}`, turnId: `source-${index}`, closed: false, status: "active", startedAt: new Date(Date.now() + index).toISOString(),
-      triggerRole: role, triggerType: type, triggerMessageId: input?.inputMessageIds[0] || `mail-${index}`, triggerPreview: input?.text || "Source preview",
+      triggerRole: role, triggerType: type, triggerSender: sender, resumeSource,
+      triggerMessageId: input?.inputMessageIds[0] || `mail-${index}`, triggerPreview: input?.text || "Source preview",
       eventCount: 2, startEventId: 10 * index, lastEventId: 10 * index + 1,
     });
     if (input) pending = pending.filter(message => message !== input);
@@ -3566,9 +3572,9 @@ test("moves active Turn icons and durable pending user bubbles through the unifi
     if (op === "status") return json(route, {
       generation: gen, sessionState: current ? "working" : "idle",
       session: { id: "active-queue-session", state, currentTurnId: current?.turnId },
-      waitingMessages: pending.map(message => ({
+      waitingMessages: [...pending.map(message => ({
         messageId: message.inputMessageIds[0], type: "user_chat_input", role: "user", sender: { name: message.sender }, text: message.text,
-      })),
+      })), ...waitingSources],
     });
     if (op === "chat/messages") {
       const body = request.postDataJSON();
@@ -3581,7 +3587,17 @@ test("moves active Turn icons and durable pending user bubbles through the unifi
       id: "active-queue-chat", open: true, epoch: 1, unreadCount: 0, queuedMessages: pending,
       messages: op === "chat/messages" ? inputs.slice(-1) : inputs,
     });
-    if (op === "history/turns") return json(route, { segments: [{ generation: gen, turns: turns.map(turn => ({ ...turn, generation: gen })) }], page: { hasMore: false } });
+    if (op === "history/turns") {
+      const older = url.searchParams.get("cursor") === "older-sources";
+      const entries = turns.map(turn => ({ ...turn, generation: gen }));
+      if (older) entries.unshift({
+        ...entries[0], turnId: "old-resume", reference: "old-resume", triggerType: "turn_resume",
+        triggerMessageId: "old-resume-input", triggerPreview: "Legacy resume without retained opener", startedAt: gen.createdAt,
+        startEventId: 1, lastEventId: 2, closed: true, status: "completed",
+      });
+      return json(route, { segments: [{ generation: gen, turns: entries }],
+        page: { hasMore: olderSourcesAvailable && !older, nextCursor: olderSourcesAvailable && !older ? "older-sources" : "" } });
+    }
     if (op.startsWith("history/turns/")) {
       const turn = turns.find(candidate => op.endsWith(`/${candidate.reference}`));
       if (turn) return json(route, { turn: { ...turn, generation: gen }, latestEventId: turn.lastEventId, items: [
@@ -3600,6 +3616,7 @@ test("moves active Turn icons and durable pending user bubbles through the unifi
   const chip = (turn: string) => chat.locator(`[data-turn-chip="active-queue:${turn}"] button`);
   await expect(controls).toContainText("Agent is handling a system message", { timeout: 15_000 });
   await expect(controls.getByRole("button", { name: "Turn · System · active", exact: true })).toHaveCount(1);
+  await expect(chip("source-1").locator("svg")).toHaveAttribute("data-lucide", "bell");
   await expect(controls.getByRole("button", { name: "Stop execution" })).toBeVisible();
 
   const first = "First queued [attachment](/project1/task1/files/notes.md)", second = "Second queued";
@@ -3621,6 +3638,7 @@ test("moves active Turn icons and durable pending user bubbles through the unifi
   begin("user", "user_chat_input", inputs[0]);
   await expect(controls).toContainText("Agent is replying");
   await expect(controls.getByRole("button", { name: "Turn · User · active", exact: true })).toHaveCount(1);
+  await expect(chip("source-2").locator("svg")).toHaveAttribute("data-lucide", "user");
   await expect(chip("source-2")).toHaveCount(1);
   await expect(chip("source-1")).toHaveCount(1);
   await expect(chat.locator("[data-queued-chat-message]")).toHaveText([/Second queued/]);
@@ -3638,22 +3656,83 @@ test("moves active Turn icons and durable pending user bubbles through the unifi
   await expect(queue).toHaveCount(0);
   await expect(chat.locator("[data-queued-chat-message]")).toHaveCount(0);
   await expect(chat.locator("article").getByText("Second queued", { exact: true })).toHaveCount(1);
-  for (const [role, type, label, accessibleName] of [
-    ["system", "chat_notification", "Agent is updating you", "Turn · User notification"],
-    ["agent", undefined, "Agent is handling an agent message", "Turn · Agent"],
-    ["system", "schedule_exact_due", "Agent is running scheduled work", "Turn · Scheduler"],
+  for (const [role, type, label, accessibleName, icon] of [
+    ["system", "chat_notification", "Agent is updating you", "Turn · User notification", "message-square-dot"],
+    ["agent", undefined, "Agent is handling an agent message", "Turn · Agent", "bot"],
+    ["system", "schedule_exact_due", "Agent is running scheduled work", "Turn · Scheduler", "calendar-clock"],
   ] as const) {
     finish();
     begin(role, type);
     await expect(controls).toContainText(label);
     await expect(controls.getByRole("button", { name: `${accessibleName} · active`, exact: true })).toHaveCount(1);
-    await expect(chip(turns.at(-1)!.turnId)).toHaveCount(1);
+    await expect(chip(turns.at(-1)!.turnId).locator("svg")).toHaveAttribute("data-lucide", icon);
   }
   await expect(chat.locator("[data-generation-turn-count]")).toHaveText("6 Turns");
   await expect(chat.locator("[data-generation-duration]")).toHaveText(/1[1-9]s execution/);
   finish();
   await expect(chat.locator("[data-generation-duration]")).toHaveText("12s execution");
   await expect(chat.locator("[data-turn-chip]")).toHaveCount(6);
+
+  const agentSources = [
+    { id: "workspace", name: "Workspace lead", kind: "Workspace", icon: "globe" },
+    { id: "project7", name: "Project lead", kind: "Project", icon: "folder" },
+    { id: "project7.task2", name: "Reviewer", kind: "Task", icon: "list-todo" },
+  ];
+  waitingSources = agentSources.map(sender => ({ messageId: sender.id, role: "agent", sender, text: `Message from ${sender.name}` }));
+  waitingSources.push({ messageId: "resume-review", role: "system", type: "turn_resume",
+    resumeSource: { role: "agent", sender: agentSources[2] }, text: "Resume the review" });
+  await page.setViewportSize({ width: 440, height: 800 });
+  await page.reload();
+  for (const sender of agentSources) {
+    const waiting = queue.getByRole("button", { name: `Waiting · ${sender.kind} Agent · ${sender.name}`, exact: true });
+    await expect(waiting.locator("svg")).toHaveAttribute("data-lucide", sender.icon);
+    begin("agent", undefined, undefined, sender);
+    await page.reload();
+    const button = chip(turns.at(-1)!.turnId);
+    const sourceLabel = `Turn · ${sender.kind} Agent · ${sender.name}`;
+    await expect(button).toHaveAccessibleName(`${sourceLabel} · active`);
+    await expect(button.locator("svg")).toHaveAttribute("data-lucide", sender.icon);
+    finish();
+    await page.reload();
+    await expect(button).toHaveAccessibleName(sourceLabel);
+  }
+  const queuedResume = queue.getByRole("button", { name: "Waiting · Task Agent · Reviewer · Resumed" });
+  await expect(queuedResume.locator("svg")).toHaveCount(2);
+  await queuedResume.hover();
+  const tooltip = chat.getByRole("tooltip");
+  await expect(tooltip).toContainText("Task Agent · Reviewer · Resumed");
+  await expect(tooltip).toContainText("Resume the review");
+
+  for (const [resumeSource, name, icon] of [
+    [{ role: "agent", sender: agentSources[2] }, "Task Agent · Reviewer", "list-todo"],
+    [{ role: "user", type: "user_chat_input", sender: { name: "User" } }, "User", "user"],
+    [{ role: "user", type: "user_chat_input", sender: { name: "User" } }, "User", "user"],
+  ] as const) {
+    begin("system", "turn_resume", undefined, undefined, resumeSource);
+    await page.reload();
+    const button = chip(turns.at(-1)!.turnId);
+    await expect(controls).toContainText("Agent is resuming work");
+    await expect(button).toHaveAccessibleName(`Turn · ${name} · Resumed · active`);
+    await expect(button.locator("svg").first()).toHaveAttribute("data-lucide", icon);
+    await expect(button.locator(".resume-marker svg")).toHaveAttribute("data-lucide", "rotate-ccw");
+    finish();
+    await page.reload();
+    await expect(button).toHaveAccessibleName(`Turn · ${name} · Resumed`);
+  }
+
+  olderSourcesAvailable = true;
+  await page.reload();
+  await chat.getByRole("button", { name: "Load older Turns", exact: true }).click();
+  const olderResume = chip("old-resume");
+  await expect(olderResume).toHaveAccessibleName("Turn · Unknown source · Resumed");
+  await expect(olderResume.locator("svg").first()).toHaveAttribute("data-lucide", "circle-help");
+  await olderResume.scrollIntoViewIfNeeded();
+  await page.keyboard.press("Tab");
+  await olderResume.focus();
+  await expect(tooltip).toContainText("Unknown source · Resumed");
+  await page.keyboard.press("Escape");
+  await expect(tooltip).toHaveCount(0);
+  expect(await chat.evaluate(element => element.scrollWidth)).toBeLessThanOrEqual(440);
 });
 
 for (const { mode, width } of [{ mode: "recovering", width: 1500 }, { mode: "starting", width: 440 }]) {

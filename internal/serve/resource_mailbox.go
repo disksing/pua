@@ -80,6 +80,7 @@ type providerMessageContext struct {
 	Language       string                 `json:"language"`
 	TurnID         string                 `json:"turnId,omitempty"`
 	OpenerRole     string                 `json:"openerRole"`
+	OpenerType     string                 `json:"openerType,omitempty"`
 	OpenerSender   *agentHubMessageSender `json:"openerSender,omitempty"`
 	OpenerResponse string                 `json:"openerResponse"`
 	OpenerUnknown  bool                   `json:"openerUnknown,omitempty"`
@@ -263,6 +264,7 @@ type resourceMessageResponse struct {
 	Type                      string                       `json:"type,omitempty"`
 	Causation                 *resourceMessageCausation    `json:"causation,omitempty"`
 	Notification              *resourceNotificationReceipt `json:"notification,omitempty"`
+	ResumeSource              *turnResumeSource            `json:"resumeSource,omitempty"`
 }
 
 type resourceAPIError struct {
@@ -642,12 +644,24 @@ func resourceExistsAndArchived(workspacePath, resourceID string) (bool, bool, ap
 	return true, value.Archived, binding, nil
 }
 
-func waitingMailboxMessages(mailbox resourceMailbox, resourceID string) []resourceMessageResponse {
+func waitingMailboxMessages(mailbox resourceMailbox, workspacePath, resourceID string) []resourceMessageResponse {
 	resourceID = normalizedResourceID(resourceID)
 	messages := make([]resourceMessageResponse, 0)
+	var works *turnWorkFile
 	for _, message := range mailbox.Messages {
 		if normalizedResourceID(message.ResourceID) == resourceID && message.Status == resourceMessageQueued {
-			messages = append(messages, mailboxMessageResponse(message))
+			response := mailboxMessageResponse(message)
+			if message.Type == "turn_resume" {
+				if works == nil {
+					file, err := loadTurnWork(workspacePath, resourceID)
+					if err != nil {
+						file = turnWorkFile{}
+					}
+					works = &file
+				}
+				response.ResumeSource = resumedTurnSource(resourceID, message, mailbox, *works)
+			}
+			messages = append(messages, response)
 		}
 	}
 	return messages
@@ -702,7 +716,7 @@ func (m *agentManager) resourceStatus(ctx context.Context, workspace serveWorksp
 	}
 	status.Messages, status.LastError, status.LastErrorCode = mailboxCounts(mailbox, resourceID)
 	terminalRuntimeError := terminalMailboxRuntimeError(status.LastErrorCode, status.LastError)
-	status.WaitingMessages = waitingMailboxMessages(mailbox, resourceID)
+	status.WaitingMessages = waitingMailboxMessages(mailbox, workspace.Path, resourceID)
 	cfg, client, cfgErr := m.agentHubRuntimeConfig()
 	unavailableReason := ""
 	if cfgErr == nil {

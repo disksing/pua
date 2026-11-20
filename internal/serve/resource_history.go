@@ -89,6 +89,9 @@ type resourceHistoryTurnSummary struct {
 	EndEventID        int64                     `json:"endEventId,omitempty"`
 	TriggerDelivery   *resourceHistoryDelivery  `json:"triggerDelivery,omitempty"`
 	Generation        resourceHistoryGeneration `json:"generation"`
+
+	TriggerSourceResourceID string            `json:"triggerSourceResourceId,omitempty"`
+	ResumeSource            *turnResumeSource `json:"resumeSource,omitempty"`
 }
 
 type resourceHistoryTurnItem struct {
@@ -251,7 +254,7 @@ func historyDeliveries(mailbox resourceMailbox, generationID, turnID string) []r
 	return result
 }
 
-func historyTurnSummary(instanceID, resourceID string, record generationRecord, turn agentHubTurn, mailbox resourceMailbox) (resourceHistoryTurnSummary, error) {
+func historyTurnSummary(instanceID, resourceID string, record generationRecord, turn agentHubTurn, mailbox resourceMailbox, works turnWorkFile) (resourceHistoryTurnSummary, error) {
 	turnID := strings.TrimSpace(turn.TurnID)
 	if turnID == "" {
 		turnID = strings.TrimSpace(turn.ID)
@@ -270,10 +273,12 @@ func historyTurnSummary(instanceID, resourceID string, record generationRecord, 
 	}
 	triggerPreview, triggerRole, triggerSender := turn.TriggerPreview, turn.TriggerRole, turn.TriggerSender
 	var triggerType string
+	var triggerCause *resourceMessageCausation
 	for _, delivery := range deliveries {
 		if delivery.MessageID == turn.TriggerMessageID {
 			trigger = &delivery
 			triggerType = delivery.Type
+			triggerCause = delivery.Causation
 			break
 		}
 	}
@@ -282,17 +287,27 @@ func historyTurnSummary(instanceID, resourceID string, record generationRecord, 
 		triggerPreview = resourceMessagePreview(triggerPreview)
 		if decoded, ok := decodePUAMessagePayload(turn.TriggerPayload); ok {
 			triggerType = firstNonEmpty(decoded.Type, triggerType)
+			if decoded.Causation != nil {
+				triggerCause = decoded.Causation
+			}
 		}
 	}
-	return resourceHistoryTurnSummary{
+	summary := resourceHistoryTurnSummary{
 		Reference: reference, TurnID: turnID, Status: turn.Status, Closed: turn.Closed,
 		StartedAt: turn.StartedAt, EndedAt: turn.EndedAt, DurationMS: turn.DurationMS,
 		TriggerPreview: triggerPreview, TriggerRole: triggerRole, TriggerSender: triggerSender,
-		TriggerMessageID: turn.TriggerMessageID, TriggerType: triggerType,
+		TriggerMessageID: turn.TriggerMessageID, TriggerType: triggerType, TriggerSourceResourceID: turnSourceResourceID(triggerCause),
 		FinalReplyPreview: turn.FinalReplyPreview, EventCount: turn.EventCount, ToolEventCount: turn.ToolEventCount,
 		StartEventID: turn.StartEventID, LastEventID: turn.LastEventID, EndEventID: turn.EndEventID,
 		TriggerDelivery: trigger, Generation: historyGeneration(record),
-	}, nil
+	}
+	if triggerType == "turn_resume" {
+		message := turnSourceMessage(mailbox, turn.TriggerMessageID)
+		message.Type, message.Causation = triggerType, triggerCause
+		summary.ResumeSource = resumedTurnSource(resourceID, message, mailbox, works)
+	}
+	works.annotateHistoryAdvisories(&summary)
+	return summary, nil
 }
 
 func resourceMessagePreview(value string) string {
@@ -401,6 +416,7 @@ func (m *agentManager) resourceHistoryPage(ctx context.Context, workspace serveW
 		return resourceHistoryPage{}, &resourceAPIError{Code: "history_unavailable", Message: err.Error()}
 	}
 	remaining := limit
+	var works *turnWorkFile
 	setNext := func(record generationRecord, nextBefore int64) error {
 		encoded, encodeErr := encodeResourceHistoryReference(resourceHistoryReference{
 			Kind: "cursor", InstanceID: instanceID, ResourceID: resourceID, GenerationID: record.GenerationID, Before: nextBefore,
@@ -454,12 +470,16 @@ func (m *agentManager) resourceHistoryPage(ctx context.Context, workspace serveW
 		}
 		segment.Generation.TurnTotals = turnPage.Totals
 		for _, turn := range turnPage.Turns {
-			summary, summaryErr := historyTurnSummary(instanceID, resourceID, record, turn, mailbox)
+			if works == nil {
+				file, err := loadTurnWork(workspace.Path, resourceID)
+				if err != nil {
+					return resourceHistoryPage{}, err
+				}
+				works = &file
+			}
+			summary, summaryErr := historyTurnSummary(instanceID, resourceID, record, turn, mailbox, *works)
 			if summaryErr != nil {
 				return resourceHistoryPage{}, summaryErr
-			}
-			if err := annotateHistoryAdvisories(workspace.Path, resourceID, &summary); err != nil {
-				return resourceHistoryPage{}, err
 			}
 			segment.Turns = append(segment.Turns, summary)
 			remaining--
@@ -584,11 +604,12 @@ func (m *agentManager) resourceHistoryTurnForRecord(ctx context.Context, workspa
 	if err != nil {
 		return resourceHistoryTurnDetail{}, err
 	}
-	summary, err := historyTurnSummary(instanceID, resourceID, record, turn, mailbox)
+	works, err := loadTurnWork(workspace.Path, resourceID)
 	if err != nil {
 		return resourceHistoryTurnDetail{}, err
 	}
-	if err := annotateHistoryAdvisories(workspace.Path, resourceID, &summary); err != nil {
+	summary, err := historyTurnSummary(instanceID, resourceID, record, turn, mailbox, works)
+	if err != nil {
 		return resourceHistoryTurnDetail{}, err
 	}
 	if summary.TurnID != turnID {

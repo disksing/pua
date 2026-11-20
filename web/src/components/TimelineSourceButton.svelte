@@ -19,7 +19,8 @@
   let pinned = false;
   const queued = $derived(expanded === undefined);
   const sender = $derived(source.sender && source.sender.toLowerCase() !== source.label.toLowerCase() ? source.sender : "");
-  const name = $derived(`${queued ? "Waiting" : "Turn"} · ${source.label}${sender ? ` · ${sender}` : ""}${status ? ` · ${status}` : ""}`);
+  const heading = $derived([source.label, sender, source.resumed && "Resumed"].filter(Boolean).join(" · "));
+  const name = $derived(`${queued ? "Waiting" : "Turn"} · ${heading}${status ? ` · ${status}` : ""}`);
   const previewText = $derived(source.text.length > 480 ? `${source.text.slice(0, 479)}…` : source.text);
   const supportsPopover = typeof HTMLElement !== "undefined" && "showPopover" in HTMLElement.prototype;
 
@@ -29,7 +30,7 @@
 
   function show() {
     clearTimeout(linger);
-    if (!supportsPopover || !preview || isPreviewOpen()) return;
+    if (expanded || !supportsPopover || !preview || isPreviewOpen()) return;
     preview.showPopover();
     positionTimelinePreview(preview);
   }
@@ -90,10 +91,11 @@
   }}
 >
   <Icon name={source.icon} />
+  {#if source.resumed}<span class="resume-marker"><Icon name="rotate-ccw" /></span>{/if}
   {#if queued}<span class="waiting-marker"></span>{/if}
 </button>
 <div bind:this={preview} popover="auto" role="tooltip" id={id} class="timeline-preview" onpointerenter={() => clearTimeout(linger)} onpointerleave={leave}>
-  <strong>{source.label}{sender ? ` · ${sender}` : ""}</strong>
+  <strong>{heading}</strong>
   <p>{previewText || "No message preview available."}</p>
 </div>
 
@@ -111,12 +113,25 @@
     background: var(--panel);
     color: var(--muted-strong);
   }
-  .timeline-source-button[data-source="agent"] { color: var(--blue-deep); background: var(--blue-soft); }
+  .timeline-source-button[data-source="agent"],
+  .timeline-source-button[data-source="notification"] { color: var(--blue-deep); background: var(--blue-soft); }
   .timeline-source-button[data-source="system"] { color: var(--amber-deep); background: var(--amber-soft); }
   .timeline-source-button[data-source="scheduler"] { color: var(--green-deep); background: var(--green-soft); }
   .timeline-source-button:is(:hover, [aria-expanded="true"]) { border-color: currentColor; }
   .timeline-source-button:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
   .timeline-source-button :global(svg) { width: 17px; height: 17px; }
+  .resume-marker {
+    position: absolute;
+    top: 1px;
+    right: 1px;
+    display: grid;
+    place-items: center;
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    background: inherit;
+  }
+  .timeline-source-button .resume-marker :global(svg) { width: 10px; height: 10px; stroke-width: 2.5; }
   .queued { border-style: dashed; }
   .waiting-marker {
     position: absolute;

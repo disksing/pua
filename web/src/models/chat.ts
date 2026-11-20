@@ -41,6 +41,13 @@ export interface ComposerModel {
   onSaveAgentBinding: (binding: ResourceAgentBindingModel) => Promise<void>;
 }
 
+export interface TurnResumeSource {
+  role?: string;
+  type?: string;
+  sender?: { name?: string; id?: string };
+  sourceResourceId?: string;
+}
+
 export interface WaitingMessage {
   messageId: string;
   text: string;
@@ -52,6 +59,7 @@ export interface WaitingMessage {
   sender?: { name?: string; id?: string };
   type?: string;
   causation?: { sourceResourceId?: string };
+  resumeSource?: TurnResumeSource;
 }
 
 export interface ResourceMessageStatus {
@@ -193,6 +201,8 @@ export interface ResourceHistoryTurnSummary {
   triggerSender?: { name?: string; id?: string; sessionId?: string };
   triggerMessageId?: string;
   triggerType?: string;
+  triggerSourceResourceId?: string;
+  resumeSource?: TurnResumeSource;
   finalReplyPreview?: string;
   eventCount: number;
   toolEventCount: number;

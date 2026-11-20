@@ -132,7 +132,7 @@ func TestTurnWorkSwitchPreviewResumeAndReplay(t *testing.T) {
 	closeWorkflowTurn(fake, a, "completed", "internal checkpoint")
 	reconcileWorkflow(t, m, w, client)
 	b := *workFile(t, w).find(user.ID)
-	if !b.Context.ChatVisible || b.ParentID != a.ID || b.Context.ParentHistory == "" {
+	if !b.Context.ChatVisible || b.Context.OpenerType != "user_chat_input" || b.ParentID != a.ID || b.Context.ParentHistory == "" {
 		t.Fatalf("bad child: %+v", b)
 	}
 	// Reload the manager to verify durable recovery without in-memory frames.
@@ -146,6 +146,15 @@ func TestTurnWorkSwitchPreviewResumeAndReplay(t *testing.T) {
 	resumed := file.find(parent.ResumeID)
 	if parent.State != "resuming" || resumed == nil || resumed.Context.ChatVisible || resumed.Context.OpenerSender.ID != "project1" {
 		t.Fatalf("lost original audience: %+v", file)
+	}
+	history, err := m.resourceHistoryTurnByID(context.Background(), w, "project1.task1", resumed.GenerationID, resumed.TurnID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := history.Turn.ResumeSource
+	if history.Turn.TriggerRole != "system" || history.Turn.TriggerType != "turn_resume" || source == nil ||
+		source.Role != "agent" || source.Sender == nil || source.Sender.ID != "project1" {
+		t.Fatalf("resume history did not preserve delivery and opener source: %+v, source %+v", history.Turn, source)
 	}
 	chat, _ := workflowChat(m, w)
 	if len(chat.Messages) != 2 || chat.Messages[1].Text != "I have changed the file." {

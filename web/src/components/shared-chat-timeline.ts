@@ -1,4 +1,4 @@
-import type { ConversationBlock, ResourceHistoryGeneration, TimelineItem, WaitingMessage } from "./models";
+import type { ConversationBlock, ResourceHistoryGeneration, TimelineItem, TurnResumeSource, WaitingMessage } from "./models";
 import { projectConversationEvents } from "./timeline-events";
 
 export interface SharedChatMessage {
@@ -30,36 +30,52 @@ export interface TimelineSource {
   icon: string;
   sender: string;
   text: string;
+  resumed: boolean;
 }
 
-function source(role = "", type = "", sender?: WaitingMessage["sender"], text = "", sourceResourceId = ""): TimelineSource {
-  role = role.trim().toLowerCase();
-  const id = sender?.id?.trim() || (role === "user" ? "" : sourceResourceId);
-  const name = sender?.name?.trim() || id;
-  if (type === "chat_notification") return { role: "user", label: "User notification", icon: "user", sender: name, text };
-  if (id === "scheduler" || type === "scheduler_tick" || type === "schedule_exact_due" || role === "scheduler") {
-    return { role: "scheduler", label: "Scheduler", icon: "calendar-clock", sender: name, text };
+function source(trigger: TurnResumeSource, text: string, resumeSource?: TurnResumeSource): TimelineSource {
+  const resumed = trigger.type === "turn_resume" || resumeSource !== undefined;
+  const { role: rawRole = "", type, sender, sourceResourceId } = resumed ? resumeSource || {} : trigger;
+  const role = type === "user_chat_input" ? "user" : rawRole.trim().toLowerCase();
+  const senderId = sender?.id?.trim();
+  const id = senderId || sourceResourceId?.trim() || "";
+  const details = { sender: sender?.name?.trim() || senderId || (role === "agent" ? id : ""), text, resumed };
+  if (type === "chat_notification") return { role: "notification", label: "User notification", icon: "message-square-dot", ...details };
+  if (role === "scheduler" || type === "scheduler_tick" || type === "schedule_exact_due" ||
+      (id === "scheduler" && (role === "agent" || role === "system"))) {
+    return { role: "scheduler", label: "Scheduler", icon: "calendar-clock", ...details };
   }
-  if (role === "agent") return { role, label: "Agent", icon: "bot", sender: name, text };
-  if (role === "system") return { role, label: "System", icon: "bell", sender: name, text };
-  if (role === "user") return { role, label: "User", icon: "user", sender: name, text };
-  return { role: "unknown", label: "Unknown source", icon: "circle-help", sender: name, text };
+  if (role === "agent") {
+    if (id === "workspace") return { role, label: "Workspace Agent", icon: "globe", ...details };
+    if (/^project\d+$/.test(id)) return { role, label: "Project Agent", icon: "folder", ...details };
+    if (/^project\d+\.task\d+$/.test(id)) return { role, label: "Task Agent", icon: "list-todo", ...details };
+    return { role, label: "Agent", icon: "bot", ...details };
+  }
+  if (role === "system") return { role, label: "System", icon: "bell", ...details };
+  if (role === "user") return { role, label: "User", icon: "user", ...details };
+  return { role: "unknown", label: "Unknown source", icon: "circle-help", ...details };
 }
 
 export function turnSource(block: ConversationBlock, input?: SharedChatMessage): TimelineSource {
   const turn = block.turn;
   return turn
-    ? source(input ? "user" : turn.triggerRole, turn.triggerType, turn.triggerSender || (input ? { name: input.sender } : undefined), input?.text || legacyInputText(turn.triggerPreview))
-    : source("system", "", undefined, "Session events");
+    ? source({
+        role: input ? "user" : turn.triggerRole, type: turn.triggerType,
+        sender: turn.triggerSender || (input ? { name: input.sender } : undefined), sourceResourceId: turn.triggerSourceResourceId,
+      }, input?.text || legacyInputText(turn.triggerPreview), turn.resumeSource)
+    : source({ role: "system" }, "Session events");
 }
 
 export function queueSource(message: WaitingMessage): TimelineSource {
-  return source(message.type === "user_chat_input" ? "user" : message.role, message.type, message.sender, legacyInputText(message.text), message.causation?.sourceResourceId);
+  return source({ role: message.role, type: message.type, sender: message.sender, sourceResourceId: message.causation?.sourceResourceId },
+    legacyInputText(message.text), message.resumeSource);
 }
 
 export function turnWorkingLabel(row: HistoryRow): string {
-  if (row.block.turn?.triggerType === "chat_notification") return "Agent is updating you";
-  switch (turnSource(row.block, row.input).role) {
+  const source = turnSource(row.block, row.input);
+  if (source.resumed) return "Agent is resuming work";
+  switch (source.role) {
+    case "notification": return "Agent is updating you";
     case "user": return "Agent is replying";
     case "agent": return "Agent is handling an agent message";
     case "scheduler": return "Agent is running scheduled work";

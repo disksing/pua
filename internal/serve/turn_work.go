@@ -779,7 +779,8 @@ func (m *agentManager) controlTurnWork(ctx context.Context, workspace serveWorks
 			return nil, errors.New("Chat is closed")
 		}
 		id := "notify-" + chatID(work.ID, "notify")
-		c := providerMessageContext{Protocol: 1, WorkID: id, Language: work.Context.Language, OpenerRole: "system", ChatVisible: true, ChatEpoch: chat.Epoch}
+		c := providerMessageContext{Protocol: 1, WorkID: id, Language: work.Context.Language, OpenerRole: "system",
+			OpenerType: "chat_notification", ChatVisible: true, ChatEpoch: chat.Epoch}
 		work.Notification = &resourceMailboxMessage{ID: id, ResourceID: resource, Type: "chat_notification",
 			Text:          strings.TrimSpace(localize.MustRender(c.Language, "turn-chat-reply.md", command.Text)),
 			RequestedMode: resourceMessageModeEnqueue, ProviderContext: &c,

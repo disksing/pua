@@ -245,7 +245,7 @@ func TestPUAMessagePresentationCorrectsHistoricalQueueAndChatRoles(t *testing.T)
 				t.Fatalf("presentation = %q %q", text, role)
 			}
 			summary, err := historyTurnSummary("ws", "project1", generationRecord{GenerationID: "gen"},
-				agentHubTurn{ID: "turn", TriggerPreview: "queue notice", TriggerRole: "user", TriggerPayload: json.RawMessage(tt.payload)}, resourceMailbox{})
+				agentHubTurn{ID: "turn", TriggerPreview: "queue notice", TriggerRole: "user", TriggerPayload: json.RawMessage(tt.payload)}, resourceMailbox{}, turnWorkFile{})
 			if err != nil || summary.TriggerRole != tt.role || summary.TriggerPreview != tt.text {
 				t.Fatalf("history summary = %+v %v", summary, err)
 			}

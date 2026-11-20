@@ -57,7 +57,7 @@ it("shows waiting previews separately from shared Chat messages", async () => {
  }));
  const { target } = setup();
  await vi.waitFor(() => expect(target.querySelector(".queued-inputs")?.textContent).toContain("Waiting · 2"));
- expect([...target.querySelectorAll(".queued-inputs button")].map(button => button.getAttribute("aria-label"))).toEqual(["Waiting · Agent · project1", "Waiting · Scheduler"]);
+ expect([...target.querySelectorAll(".queued-inputs button")].map(button => button.getAttribute("aria-label"))).toEqual(["Waiting · Project Agent · project1", "Waiting · Scheduler"]);
  expect(target.querySelector(".queued-inputs [role=tooltip]")?.textContent).toContain("background request");
  expect(target.querySelector("article, .chat-input [role=tooltip]")).toBeNull();
 });

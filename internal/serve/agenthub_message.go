@@ -352,6 +352,7 @@ func (m *agentManager) ensureProviderMessageContext(ctx context.Context, workspa
 	if message.ActualMode != resourceMessageModeSteer &&
 		(message.Type != "user_chat_input" || (message.Causation != nil && message.Causation.AutomaticChat)) {
 		contextValue.Protocol, contextValue.WorkID, contextValue.Concise = 1, message.ID, true
+		contextValue.OpenerType = message.Type
 		if message.Causation != nil {
 			contextValue.ChatEpoch = message.Causation.ChatEpoch
 			contextValue.ChatVisible = message.Causation.AutomaticChat

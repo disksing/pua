@@ -14,8 +14,14 @@ import (
 type chatTurnKey struct{ root, resource, session, turn, work string }
 
 type chatHistoryEntry struct {
-	key      chatTurnKey
+	key  chatTurnKey
+	view chatTurnProjection
+}
+
+type chatTurnProjection struct {
 	messages []chatMessage
+	previews map[string]string
+	retry    bool
 }
 
 type chatHistoryCache struct {
@@ -24,18 +30,18 @@ type chatHistoryCache struct {
 	recent  list.List
 }
 
-func (cache *chatHistoryCache) get(key chatTurnKey) ([]chatMessage, bool) {
+func (cache *chatHistoryCache) get(key chatTurnKey) (chatTurnProjection, bool) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	entry := cache.entries[key]
 	if entry == nil {
-		return nil, false
+		return chatTurnProjection{}, false
 	}
 	cache.recent.MoveToFront(entry)
-	return entry.Value.(chatHistoryEntry).messages, true
+	return entry.Value.(chatHistoryEntry).view, true
 }
 
-func (cache *chatHistoryCache) put(key chatTurnKey, messages []chatMessage) {
+func (cache *chatHistoryCache) put(key chatTurnKey, view chatTurnProjection) {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	if cache.entries == nil {
@@ -44,7 +50,7 @@ func (cache *chatHistoryCache) put(key chatTurnKey, messages []chatMessage) {
 	if cache.entries[key] != nil {
 		return
 	}
-	cache.entries[key] = cache.recent.PushFront(chatHistoryEntry{key, messages})
+	cache.entries[key] = cache.recent.PushFront(chatHistoryEntry{key, view})
 	if cache.recent.Len() > 512 {
 		last := cache.recent.Back()
 		delete(cache.entries, last.Value.(chatHistoryEntry).key)
@@ -69,11 +75,111 @@ func historyChatTexts(work turnWork, turn agentHubTurn, sender string) []chatMes
 	return messages
 }
 
-func (m *agentManager) chatHistory(ctx context.Context, root string, chat resourceChat) (resourceChat, error) {
-	return m.chatHistoryWindow(ctx, root, chat, 0, "")
+func projectChatTurn(work turnWork, turn agentHubTurn, streamContinues func(int64, int64) (bool, error)) chatTurnProjection {
+	view := chatTurnProjection{messages: historyChatTexts(work, turn, work.ChatSender)}
+	if len(view.messages) == 0 {
+		return view
+	}
+	var first chatMessage
+	var text strings.Builder
+	var unfinished bool
+	var previewStart, previewCount int64
+	next := 0
+	for _, item := range turn.Items {
+		if id := chatQueuePreview(item); id != "" {
+			if view.previews == nil {
+				view.previews = make(map[string]string)
+			}
+			if _, exists := view.previews[id]; !exists {
+				view.previews[id] = firstNonEmpty(item.StartedAt, item.EndedAt)
+			}
+			if unfinished {
+				if previewCount == 0 {
+					previewStart = item.StartEventID
+				}
+				previewCount++
+			}
+			continue
+		}
+		if next == len(view.messages) || item.StartEventID != view.messages[next].startEventID {
+			if previewCount > 0 && item.Type == "message" && item.Role == "assistant" && !item.Complete {
+				text.WriteString(item.Text)
+				continue
+			}
+			unfinished, previewCount = false, 0
+			continue
+		}
+		message := &view.messages[next]
+		next++
+		continuing := previewCount > 0
+		if continuing && item.StartEventID > previewStart+previewCount {
+			continuing = false
+			if streamContinues != nil {
+				var err error
+				continuing, err = streamContinues(previewStart, item.StartEventID)
+				view.retry = view.retry || err != nil
+			}
+		}
+		if continuing {
+			text.WriteString(message.Text)
+			message.timelineAt = first.CreatedAt
+			message.continuation = &chatContinuation{ID: first.ID, Text: text.String()}
+		} else {
+			first = *message
+			text.Reset()
+			text.WriteString(message.Text)
+		}
+		unfinished, previewCount = !item.Complete, 0
+	}
+	return view
 }
 
-func (m *agentManager) chatHistoryWindow(ctx context.Context, root string, chat resourceChat, limit int, user string) (resourceChat, error) {
+func chatStreamContinues(ctx context.Context, client *agentHubClient, work turnWork, after, before int64) (bool, error) {
+	for after+1 < before {
+		frames, _, err := client.SessionFrames(ctx, work.SessionID, after, int(min(100, before-after-1)))
+		if err != nil {
+			return false, err
+		}
+		if len(frames) == 0 {
+			return false, nil
+		}
+		for _, frame := range frames {
+			if frame.Cursor != after+1 || frame.Cursor >= before {
+				return false, nil
+			}
+			if frame.Source.Type == "message.assistant.completed" && (frame.Source.TurnID == "" || frame.Source.TurnID == work.TurnID) {
+				return false, nil
+			}
+			after = frame.Cursor
+		}
+	}
+	return true, nil
+}
+
+func chatQueuePreview(item agentHubTurnItem) string {
+	if item.Type != "message" || !item.Steer {
+		return ""
+	}
+	payload, ok := decodePUAMessagePayload(item.Payload)
+	if !ok || payload.Role != "system" || payload.Type != "queue_preview" ||
+		payload.Causation == nil || payload.Causation.Type != "queue_preview" {
+		return ""
+	}
+	return payload.Causation.MessageID
+}
+
+func (m *agentManager) chatHistory(ctx context.Context, root string, chat resourceChat) (resourceChat, error) {
+	return m.chatHistoryWindow(ctx, root, chat, 0, "", false)
+}
+
+func chatMessageTime(message chatMessage, timeline bool) time.Time {
+	if timeline && message.timelineAt != "" {
+		return generationTime(message.timelineAt)
+	}
+	return generationTime(message.CreatedAt)
+}
+
+func (m *agentManager) chatHistoryWindow(ctx context.Context, root string, chat resourceChat, limit int, user string, timeline bool) (resourceChat, error) {
 	file, err := loadTurnWork(root, chat.ResourceID)
 	if err != nil {
 		return chat, err
@@ -97,7 +203,7 @@ func (m *agentManager) chatHistoryWindow(ctx context.Context, root string, chat 
 			return
 		}
 		for _, message := range messages {
-			when := generationTime(message.CreatedAt)
+			when := chatMessageTime(message, timeline)
 			index := sort.Search(len(newest), func(i int) bool { return !newest[i].After(when) })
 			if index == limit {
 				continue
@@ -109,7 +215,7 @@ func (m *agentManager) chatHistoryWindow(ctx context.Context, root string, chat 
 		}
 	}
 	remember(view.Messages)
-	projected := make([][]chatMessage, len(file.Works))
+	projected := make([]chatTurnProjection, len(file.Works))
 	for index := len(file.Works) - 1; index >= 0; index-- {
 		work := file.Works[index]
 		if !work.HistoryChat || !work.Context.ChatVisible || work.SessionID == "" || (archived && work.ChatTextCount == 0) {
@@ -122,12 +228,12 @@ func (m *agentManager) chatHistoryWindow(ctx context.Context, root string, chat 
 			continue
 		}
 		key := chatTurnKey{root, chat.ResourceID, work.SessionID, work.TurnID, work.ID}
-		if messages, ok := m.chatHistoryCache.get(key); ok {
+		if projection, ok := m.chatHistoryCache.get(key); ok {
 			if archived {
-				messages = messages[:min(work.ChatTextCount, len(messages))]
+				projection.messages = projection.messages[:min(work.ChatTextCount, len(projection.messages))]
 			}
-			projected[index] = messages
-			remember(messages)
+			projected[index] = projection
+			remember(projection.messages)
 			continue
 		}
 		if client == nil {
@@ -153,25 +259,77 @@ func (m *agentManager) chatHistoryWindow(ctx context.Context, root string, chat 
 		if firstNonEmpty(turn.TurnID, turn.ID) != work.TurnID || (turn.TriggerMessageID != "" && turn.TriggerMessageID != work.ID) {
 			return chat, errors.New("Chat Turn does not match its work")
 		}
-		messages := historyChatTexts(work, turn, work.ChatSender)
-		if turn.Closed && work.OutputDone {
-			m.chatHistoryCache.put(key, messages)
+		projection := projectChatTurn(work, turn, func(after, before int64) (bool, error) {
+			return chatStreamContinues(ctx, client, work, after, before)
+		})
+		if turn.Closed && work.OutputDone && !projection.retry {
+			m.chatHistoryCache.put(key, projection)
 		}
 		if archived {
-			messages = messages[:min(work.ChatTextCount, len(messages))]
+			projection.messages = projection.messages[:min(work.ChatTextCount, len(projection.messages))]
 		}
-		projected[index] = messages
-		remember(messages)
+		projected[index] = projection
+		remember(projection.messages)
 	}
-	for _, messages := range projected {
-		view.Messages = append(view.Messages, messages...)
+	if timeline {
+		view.placePreviewedInputs(file.Works, projected)
+	}
+	for _, projection := range projected {
+		view.Messages = append(view.Messages, projection.messages...)
 	}
 	if len(view.Messages) != len(chat.Messages) {
 		sort.SliceStable(view.Messages, func(left, right int) bool {
-			return generationTime(view.Messages[left].CreatedAt).Before(generationTime(view.Messages[right].CreatedAt))
+			first, second := view.Messages[left], view.Messages[right]
+			firstTime, secondTime := chatMessageTime(first, timeline), chatMessageTime(second, timeline)
+			if timeline && firstTime.Equal(secondTime) {
+				return !(first.Role == "user" && first.timelineAt != "") && second.Role == "user" && second.timelineAt != ""
+			}
+			return firstTime.Before(secondTime)
 		})
 	}
 	return view, nil
+}
+
+func (view *resourceChat) placePreviewedInputs(works []turnWork, projected []chatTurnProjection) {
+	previews := make(map[string]string)
+	for index, projection := range projected {
+		if len(projection.messages) == 0 || len(projection.previews) == 0 {
+			continue
+		}
+		latest := projection.messages[len(projection.messages)-1].CreatedAt
+		for id, at := range projection.previews {
+			if generationTime(at).After(generationTime(latest)) {
+				at = latest
+			}
+			if _, exists := previews[id]; !exists {
+				previews[id] = at
+			}
+		}
+		for id, parent := range works[index].GroupedPreviews {
+			if at, ok := previews[parent]; ok {
+				previews[id] = at
+			}
+		}
+	}
+	if len(previews) == 0 {
+		return
+	}
+	view.timelineInputs = make(map[string]string)
+	for index := range view.Messages {
+		message := &view.Messages[index]
+		for _, id := range view.executionInputIDs(*message) {
+			at := previews[id]
+			if generationTime(at).IsZero() {
+				continue
+			}
+			if generationTime(at).Before(generationTime(message.CreatedAt)) {
+				at = message.CreatedAt
+			}
+			message.timelineAt = at
+			view.timelineInputs[message.ID] = at
+			break
+		}
+	}
 }
 
 func (m *agentManager) historyPublicPage(ctx context.Context, root string, chat resourceChat, limit int, before, after, user string) (publicChat, error) {
@@ -179,7 +337,7 @@ func (m *agentManager) historyPublicPage(ctx context.Context, root string, chat 
 	if before != "" {
 		window = 0
 	}
-	view, err := m.chatHistoryWindow(ctx, root, chat, window, user)
+	view, err := m.chatHistoryWindow(ctx, root, chat, window, user, true)
 	if err != nil {
 		return publicChat{}, err
 	}
@@ -190,7 +348,7 @@ func (m *agentManager) historyPublicPage(ctx context.Context, root string, chat 
 			found = found || message.ID == after
 		}
 		if !found {
-			view, err = m.chatHistory(ctx, root, chat)
+			view, err = m.chatHistoryWindow(ctx, root, chat, 0, user, true)
 			if err != nil {
 				return publicChat{}, err
 			}

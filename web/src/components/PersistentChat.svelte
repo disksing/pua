@@ -18,14 +18,19 @@
   // svelte-ignore state_referenced_locally
   let model = $state(channel.current());
   type Message = SharedChatMessage;
-  type Chat = { id: string; open: boolean; epoch: number; unreadCount: number; messages: Message[]; queuedMessages?: Message[]; hasOlder?: boolean; hasNewer?: boolean; reset?: boolean; endPosition?: number };
+  type Chat = { id: string; open: boolean; epoch: number; unreadCount: number; messages: Message[]; queuedMessages?: Message[]; timelineInputs?: Record<string, string>; hasOlder?: boolean; hasNewer?: boolean; reset?: boolean; endPosition?: number };
   const PAGE_SIZE = 40;
   let chat = $state<Chat | null>(null);
   let echoes = $state<Message[]>([]);
   const messages = $derived.by(() => {
     const confirmed = chat?.messages || [];
-    if (!echoes.length && !chat?.queuedMessages?.length) return confirmed;
-    return [...new Map([...confirmed, ...echoes, ...(chat?.queuedMessages || [])].map(message => [message.id, message])).values()];
+    const combined = echoes.length || chat?.queuedMessages?.length
+      ? [...new Map([...confirmed, ...echoes, ...(chat?.queuedMessages || [])].map(message => [message.id, message])).values()]
+      : confirmed;
+    return combined.map(message => {
+      const at = chat?.timelineInputs?.[message.id];
+      return at ? { ...message, timelineAt: at } : message;
+    });
   });
   let root: HTMLElement;
   let followTail = $state(true);
@@ -80,13 +85,18 @@
           next = await client.request<Chat>(`${path}?${query}`, { headers: userHeaders });
           if (disposed || key !== identity || revision !== mutationRevision || untrack(() => pending)) return;
           const current = untrack(() => chat);
+          const known = new Set(current?.messages.map(message => message.id));
+          if (after && !next.reset && next.endPosition && next.messages.some(message => known.has(message.id))) {
+            next = await client.request<Chat>(`${path}?limit=${PAGE_SIZE}`, { headers: userHeaders });
+            if (disposed || key !== identity || revision !== mutationRevision || untrack(() => pending)) return;
+            after = undefined;
+          }
           error = "";
           if (!current || !after || next.reset) {
             chat = next;
             hasOlder = Boolean(next.hasOlder);
           } else {
-            const known = new Set(current.messages.map(message => message.id));
-            chat = { ...next, messages: [...current.messages, ...next.messages.filter(message => !known.has(message.id))] };
+            chat = { ...next, timelineInputs: { ...current.timelineInputs, ...next.timelineInputs }, messages: [...current.messages, ...next.messages.filter(message => !known.has(message.id))] };
           }
           model.onChatState?.({ open: next.open, unreadCount: next.unreadCount || 0 });
           const received = new Set(chat.messages.map(message => message.id));
@@ -123,7 +133,7 @@
         const restore = container ? captureChatAnchor(container, root) : undefined;
         const known = new Set(active.messages.map(message => message.id));
         followTail = false;
-        chat = { ...active, messages: [...next.messages.filter(message => !known.has(message.id)), ...active.messages] };
+        chat = { ...active, timelineInputs: { ...next.timelineInputs, ...active.timelineInputs }, messages: [...next.messages.filter(message => !known.has(message.id)), ...active.messages] };
         hasOlder = Boolean(next.hasOlder);
         await tick();
         if (!disposed && key === identity) restore?.();
@@ -197,7 +207,7 @@
     try {
       const next = await client.request<Chat>(`${base}/${operation}?limit=1`, { method: "POST", headers, body: JSON.stringify(body) });
       if (key !== identity || revision !== mutationRevision) return false;
-      chat = chat ? { ...next, endPosition: chat.endPosition, messages: chat.messages } : next;
+      chat = chat ? { ...next, timelineInputs: chat.timelineInputs, endPosition: chat.endPosition, messages: chat.messages } : next;
       model.onChatState?.({ open: next.open, unreadCount: next.unreadCount || 0 });
       if (operation === "messages") {
         const accepted = next.messages.find(message => message.role === "user" && message.text === sentText);

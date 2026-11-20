@@ -10,6 +10,8 @@ export interface SharedChatMessage {
   inputMessageIds?: string[];
   turnId?: string;
   startEventId?: number;
+  timelineAt?: string;
+  continuation?: { id: string; text: string };
 }
 
 export interface HistoryRow {
@@ -94,7 +96,18 @@ export function legacyInputText(text?: string): string {
 export function timelineSections(messages: SharedChatMessage[], blocks: ConversationBlock[]): TimelineSection[] {
   const byInput = new Map(messages.flatMap(message => (message.inputMessageIds || []).map(id => [id, message] as const)));
   const generations = new Map<string, GenerationBoundary>();
-  const rows: (TimelineRow | GenerationBoundary)[] = messages.map(message => ({ kind: "message", key: `message:${message.id}`, time: timestamp(message.createdAt), message }));
+  const bubbles = new Map<string, SharedChatMessage>();
+  for (const message of messages) {
+    const key = message.continuation?.id || message.id;
+    const previous = bubbles.get(key);
+    if (!previous || (message.startEventId || 0) > (previous.startEventId || 0)) {
+      bubbles.set(key, message);
+    }
+  }
+  const rows: (TimelineRow | GenerationBoundary)[] = [...bubbles].map(([id, message]) => ({
+    kind: "message", key: `message:${id}`, time: timestamp(message.timelineAt || message.createdAt),
+    message: message.continuation ? { ...message, text: message.continuation.text } : message,
+  }));
   for (const block of blocks) {
     const events = block.events || [];
     const firstEvent = events[0];

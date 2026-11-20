@@ -41,8 +41,11 @@
   const historyIDs = $derived(new Set(snapshot.blocks.map(block => block.turn?.triggerMessageId).filter(Boolean)));
   const queue = $derived((status?.waitingMessages || []).filter(message => message.messageId && !historyIDs.has(message.messageId)));
   const pendingBubbles = $derived.by(() => {
-    if (queuedMessages) return queuedMessages.filter(message => !message.inputMessageIds?.some(id => historyIDs.has(id)));
-    const byInput = new Map(messages.flatMap(message => (message.inputMessageIds || []).map(id => [id, message] as const)));
+    if (queuedMessages) {
+      const placed = new Set(messages.filter(message => message.timelineAt).map(message => message.id));
+      return queuedMessages.filter(message => !placed.has(message.id) && !message.inputMessageIds?.some(id => historyIDs.has(id)));
+    }
+    const byInput = new Map(messages.flatMap(message => message.timelineAt ? [] : (message.inputMessageIds || []).map(id => [id, message] as const)));
     return [...new Set(queue.flatMap(message => byInput.get(message.messageId) || []))];
   });
   const pendingBubbleIds = $derived(new Set(pendingBubbles.map(message => message.id)));

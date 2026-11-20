@@ -39,6 +39,8 @@ type chatMessage struct {
 	rawPosition   int
 	turnID        string
 	startEventID  int64
+	timelineAt    string
+	continuation  *chatContinuation
 	ID            string `json:"id"`
 	Role          string `json:"role"`
 	Text          string `json:"text"`
@@ -73,6 +75,7 @@ func (d chatDelivery) userInput() bool {
 type resourceChat struct {
 	omitted         int
 	omittedUnread   int
+	timelineInputs  map[string]string
 	HistoryReads    map[string]map[string]int64 `json:"historyReads,omitempty"`
 	ReadThrough     int                         `json:"readThrough"`
 	ReadCursors     map[string]int              `json:"readCursors,omitempty"`
@@ -263,6 +266,7 @@ type publicChat struct {
 	Binding         app.AgentBinding     `json:"binding"`
 	Messages        []publicChatMessage  `json:"messages"`
 	QueuedMessages  *[]publicChatMessage `json:"queuedMessages,omitempty"`
+	TimelineInputs  map[string]string    `json:"timelineInputs,omitempty"`
 	IntervalSeconds int                  `json:"intervalSeconds"`
 	NextCheckAt     string               `json:"nextCheckAt,omitempty"`
 	TimerMode       string               `json:"timerMode"`
@@ -274,14 +278,21 @@ type publicChat struct {
 }
 
 type publicChatMessage struct {
-	ID              string   `json:"id"`
-	Role            string   `json:"role"`
-	Text            string   `json:"text"`
-	CreatedAt       string   `json:"createdAt"`
-	Sender          string   `json:"sender,omitempty"`
-	InputMessageIDs []string `json:"inputMessageIds,omitempty"`
-	TurnID          string   `json:"turnId,omitempty"`
-	StartEventID    int64    `json:"startEventId,omitempty"`
+	ID              string            `json:"id"`
+	Role            string            `json:"role"`
+	Text            string            `json:"text"`
+	CreatedAt       string            `json:"createdAt"`
+	Sender          string            `json:"sender,omitempty"`
+	InputMessageIDs []string          `json:"inputMessageIds,omitempty"`
+	TurnID          string            `json:"turnId,omitempty"`
+	StartEventID    int64             `json:"startEventId,omitempty"`
+	TimelineAt      string            `json:"timelineAt,omitempty"`
+	Continuation    *chatContinuation `json:"continuation,omitempty"`
+}
+
+type chatContinuation struct {
+	ID   string `json:"id"`
+	Text string `json:"text"`
 }
 
 func (c resourceChat) public(users ...string) publicChat {
@@ -295,7 +306,7 @@ func (c resourceChat) publicRange(start, end int, users ...string) publicChat {
 	}
 	return publicChat{
 		ID: c.ID, ResourceID: c.ResourceID, Open: c.Open, Epoch: c.Epoch,
-		Binding: c.Binding, Messages: messages, IntervalSeconds: c.IntervalSeconds,
+		Binding: c.Binding, Messages: messages, TimelineInputs: c.timelineInputs, IntervalSeconds: c.IntervalSeconds,
 		NextCheckAt: c.NextCheckAt, TimerMode: "once", UnreadCount: c.snapshot(users...).UnreadCount,
 	}
 }
@@ -305,6 +316,7 @@ func (c resourceChat) publicMessage(message chatMessage) publicChatMessage {
 		ID: message.ID, Role: message.Role, Text: message.Text,
 		CreatedAt: message.CreatedAt, Sender: message.Sender,
 		InputMessageIDs: c.executionInputIDs(message), TurnID: message.turnID, StartEventID: message.startEventID,
+		TimelineAt: message.timelineAt, Continuation: message.continuation,
 	}
 }
 

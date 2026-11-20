@@ -2,6 +2,7 @@ import { mount, tick, unmount } from "svelte";
 import { afterEach, expect, it, vi } from "vitest";
 import PersistentChat from "../../src/components/PersistentChat.svelte";
 import { createPUAAppChannels } from "../../src/app-channels";
+import type { SharedChatMessage } from "../../src/components/shared-chat-timeline";
 
 type Message = { id: string; role: string; text: string; createdAt: string };
 const cleanups: Array<() => Promise<void>> = [];
@@ -112,3 +113,46 @@ it("discards an older page when the selected user changes", async () => {
   expect(target.textContent).not.toContain("Message 0");
   expect(target.querySelectorAll("article")).toHaveLength(1);
 });
+
+it("moves a previewed user bubble between whole replies while delivery is still queued", async () => {
+  const firstAt = "2026-11-20T02:52:03.458Z";
+  const input: SharedChatMessage = {
+    id: "input", role: "user", text: "Distinguish Turn icons", createdAt: "2026-11-20T02:52:02.829Z",
+    inputMessageIds: ["execution-input"],
+  };
+  const head: SharedChatMessage = {
+    id: "head", role: "agent", text: "The empty Session car", createdAt: firstAt, startEventId: 1266,
+  };
+  const tail: SharedChatMessage = {
+    id: "tail", role: "agent", text: "ds match the report.", createdAt: "2026-11-20T02:52:04.310Z",
+    startEventId: 1268, timelineAt: firstAt, continuation: { id: head.id, text: "The empty Session cards match the report." },
+  };
+  const progress: SharedChatMessage = {
+    id: "progress", role: "agent", text: "I will check delivery first.", createdAt: "2026-11-20T02:52:10.729Z",
+    startEventId: 1282,
+  };
+  let delivered = false;
+  let queriedDelivery = false;
+  let projected = false;
+  vi.stubGlobal("fetch", vi.fn(async (request) => {
+    const url = new URL(String(request), "http://localhost");
+    if (url.pathname.endsWith("/history/turns")) return response({ segments: [] });
+    queriedDelivery = delivered;
+    const messages = projected ? [head, tail, input, progress] : [input, head];
+    return response({
+      ...page(messages, url.searchParams), queuedMessages: delivered ? [] : [input],
+      timelineInputs: projected ? { [input.id]: "2026-11-20T02:52:03.483Z" } : undefined,
+    });
+  }));
+  const { target } = setup();
+  const texts = () => [...target.querySelectorAll("article .markdown-rendered")].map(node => node.textContent?.trim());
+  await vi.waitFor(() => expect(target.querySelectorAll("[data-queued-chat-message]")).toHaveLength(1));
+  projected = true;
+  const expected = ["The empty Session cards match the report.", input.text, progress.text];
+  await vi.waitFor(() => expect(texts()).toEqual(expected), { timeout: 4000 });
+  expect(target.querySelectorAll("[data-queued-chat-message]")).toHaveLength(0);
+  expect(target.querySelector("[data-chat-row='message:input'] time")?.getAttribute("datetime")).toBe(input.createdAt);
+  delivered = true;
+  await vi.waitFor(() => expect(queriedDelivery).toBe(true), { timeout: 4000 });
+  expect(texts()).toEqual(expected);
+}, 10000);

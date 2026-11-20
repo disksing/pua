@@ -275,7 +275,7 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 		}
 	case "read":
 		chatMu.Unlock()
-		view, readErr := m.chatHistory(r.Context(), workspace.Path, c)
+		view, readErr := m.chatHistoryWindow(r.Context(), workspace.Path, c, 0, user, true)
 		if readErr != nil {
 			writeError(w, readErr, http.StatusServiceUnavailable)
 			return

@@ -1707,8 +1707,8 @@ func (s *server) ensureConfiguredResourceRuntimes() error {
 		if err != nil {
 			return fmt.Errorf("open Workspace %s for resource runtime: %w", workspace.ID, err)
 		}
-		if err := puaWorkspace.RemoveLegacyTaskTemplates(); err != nil {
-			return fmt.Errorf("clean up legacy task templates in Workspace %s: %w", workspace.ID, err)
+		if err := puaWorkspace.RefreshWorkspaceGuidance(); err != nil {
+			return fmt.Errorf("refresh guidance in Workspace %s: %w", workspace.ID, err)
 		}
 		if _, err := puaWorkspace.EnsureResourceRuntime(); err != nil {
 			return fmt.Errorf("initialize Workspace %s resource runtime: %w", workspace.ID, err)

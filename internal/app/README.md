@@ -23,16 +23,16 @@ project, err := workspace.CreateProjectWithInput(app.CreateProjectInput{
 - `Tree`、`Resource`、`Projects`、`Tasks`：读取 Workspace 资源视图；
 - `EnsureScheduler`、`Scheduler`、`AddSchedule`、`UpdateSchedule`、`RemoveSchedule`、`SetSchedulerSettings`：创建、读取和原子修改特殊 Scheduler 资源；
 - `PreviewTask`：无副作用地计算标题、Markdown、slug 和 Agent 绑定；
-- `RemoveLegacyTaskTemplates`：新版 Server 清理受管 Workspace 中开放及归档资源的旧模板目录和任务来源字段，并刷新 Workspace 托管指引；
+- `RefreshWorkspaceGuidance`：Server 启动时刷新已取得所有权的 Workspace 根 `AGENTS.md` 托管块，保留用户自定义内容；
 - `CreateProject`、`CreateProjectWithInput`、`CreateTask`、`ArchiveResource`：资源生命周期。`ArchiveResource` 以可恢复目录移动为唯一提交点；Project 归档级联移动完整子树，Git 预检、开放子任务和移动后 worktree 修复问题通过 `ArchiveResult.Warnings` 返回，不会修改源码或阻断移动；
 - `ResourceAgentBinding`、`SetResourceAgentBinding`、`SetResourceAgentDefaults`、`SetProjectTaskDefault`：读取或修改 Workspace、Project、Task 的 Agent/Profile binding，并保持新建 Task 的显式值、Project 默认值和 Workspace 默认值的继承顺序；
 - `GenerationDiagnostics`、`GenerationDiagnostic`：从 `<control-dir>/runtime/resources/<resource-key>/` 的 resource-scoped generation store 派生只读 generation 诊断；不创建、修改或访问 AgentHub Session；
-- `Repositories`、`CloneRepository` 及 Task repository 方法：仓库数据。资源对话历史由 `pua serve` 的 Resource History API 提供；旧资源的 `log.jsonl` 仅由 `pua migrate` 迁移为 `artifacts/legacy-log.md`。
+- `Repositories`、`CloneRepository` 及 Task repository 方法：仓库数据。资源对话历史由 `pua serve` 的 Resource History API 提供。
 
 跨进程写入使用 Workspace mutation lock。CLI 和 HTTP handler 将普通任务创建或预览的输入交给应用层，使用简述生成规格骨架，或保存调用者传入的完整 Markdown。
 
 Workspace、Project 和 Task 的新建接口把 ID 分配、全部资源文件一起放在 mutation lock 的同一提交边界内。Project/Task 先写同文件系统 staging 目录，再原子 rename；Workspace 初始化使用 `.pua/initializing.json` 作为可恢复标记。旧 resource JSON 中的 creator/createdBy 字段只由一次性迁移清理，正常 API 不读取或写入这些字段。
 
-Workspace、Project、Task 使用 `spec.md` 保存资源规格，使用 `memory.md` 保存 Agent 上下文和对话事项。Task 预览与写入的 Spec 一致，Memory 独立初始化。`Migrate` 将旧正文和事项按来源导入 Memory，覆盖归档资源。新 Turn 指引刷新也处理 Workspace 和当前资源的晚到旧文件。迁移与文档保存共享 Workspace 写锁。[迁移与回退说明](../../docs/resource-documents-migration.md)
+Workspace、Project、Task 使用 `spec.md` 保存资源规格，使用 `memory.md` 保存 Agent 上下文和对话事项。Task 预览与写入的 Spec 一致，Memory 独立初始化。`Migrate` 刷新包含归档资源在内的托管指引并补齐缺失文档。新 Turn 的指引刷新为 Workspace 和当前资源补齐缺失文档。指引刷新与文档保存共享 Workspace 写锁。[资源文档说明](../../docs/resource-documents-migration.md)
 
 Scheduler 是固定 ID `scheduler` 的 Workspace 特殊资源，工作目录为 `scheduler/`。初始化和迁移创建缺失文件、校验冲突并刷新 `AGENTS.md` 的 PUA managed block，保留 `scheduler.md` 正文和已有调度项；存在旧 `chat.md` 时将其合入 `scheduler.md`。`scheduler.json` 使用严格 schema 和格式化 JSON；所有修改与其他 Workspace 写入共享 mutation lock，并通过同目录临时文件、fsync、rename 和目录 fsync 原子提交。应用层只校验同 Workspace 的开放目标资源，不解释自然语言条件或 generation 执行状态。`conditionMaxChars` 默认 128，`descriptionMaxChars` 默认 32，均可配置为 1–65536；仅在新增或显式修改对应字段时按去除首尾空白后的 Unicode 码点校验。已有超长内容保留可读、可删除，降低上限不会截断既有内容。调度备忘写入目标资源的 `memory.md`。

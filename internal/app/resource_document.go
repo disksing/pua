@@ -1,7 +1,6 @@
 package app
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +10,13 @@ import (
 
 const workspaceMarkdownFile = "workspace.md"
 const legacyChatMarkdownFile = "chat.md"
+const legacyDocumentStage = ".pua-legacy-documents"
+const SpecMarkdownFile = "spec.md"
+const MemoryMarkdownFile = "memory.md"
+
+func (w *Workspace) WithResourceDocumentMutation(update func() error) error {
+	return withWorkspaceMutationLock(w.root, update)
+}
 
 func followupMarkdown(language string) string {
 	return localize.MustRender(language, "followups.md", nil)
@@ -28,21 +34,20 @@ func readRegularDocument(path string) ([]byte, os.FileMode, error) {
 	return content, info.Mode().Perm(), err
 }
 
-func writeDocumentAtomic(path string, content []byte, mode os.FileMode) error {
-	return writeDocumentAtomicChecked(path, content, mode, nil)
-}
-
-func writeDocumentAtomicChecked(path string, content []byte, mode os.FileMode, check func() error) error {
+func createDocumentIfMissing(path, initial string) error {
+	if _, _, err := readRegularDocument(path); !os.IsNotExist(err) {
+		return err
+	}
 	temp, err := os.CreateTemp(filepath.Dir(path), ".pua-document-*.tmp")
 	if err != nil {
 		return err
 	}
 	defer os.Remove(temp.Name())
 	defer temp.Close()
-	if err := temp.Chmod(mode); err != nil {
+	if err := temp.Chmod(0o644); err != nil {
 		return err
 	}
-	if _, err := temp.Write(content); err != nil {
+	if _, err := temp.WriteString(initial); err != nil {
 		return err
 	}
 	if err := temp.Sync(); err != nil {
@@ -51,10 +56,11 @@ func writeDocumentAtomicChecked(path string, content []byte, mode os.FileMode, c
 	if err := temp.Close(); err != nil {
 		return err
 	}
-	if check != nil {
-		if err := check(); err != nil {
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		if err != nil {
 			return err
 		}
+		return fmt.Errorf("resource document appeared during initialization: %s", path)
 	}
 	if err := os.Rename(temp.Name(), path); err != nil {
 		return err
@@ -62,68 +68,31 @@ func writeDocumentAtomicChecked(path string, content []byte, mode os.FileMode, c
 	return syncDirectory(filepath.Dir(path))
 }
 
-func ensureResourceDocument(dir, name, initial string) error {
-	target := filepath.Join(dir, name)
-	content, mode, err := readRegularDocument(target)
-	missing := os.IsNotExist(err)
-	if err != nil && !missing {
-		return err
-	}
-	if missing {
-		content, mode = []byte(initial), 0o644
-	}
-	source := filepath.Join(dir, legacyChatMarkdownFile)
-	legacy, _, err := readRegularDocument(source)
-	if os.IsNotExist(err) {
-		if missing {
-			return writeDocumentAtomic(target, content, mode)
-		}
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	block := mergedChatBlock(legacy)
-	if !bytes.Contains(content, block) {
-		content = append(content, []byte("\n\n")...)
-		content = append(content, block...)
-		content = append(content, '\n')
-		if err := writeDocumentAtomic(target, content, mode); err != nil {
-			return err
-		}
-	}
-	persisted, _, err := readRegularDocument(target)
-	if err != nil {
-		return err
-	}
-	if !bytes.Equal(persisted, content) {
-		return fmt.Errorf("resource document changed during migration: %s", target)
-	}
-	latest, _, err := readRegularDocument(source)
-	if err != nil {
-		return err
-	}
-	if !bytes.Equal(latest, legacy) {
-		return fmt.Errorf("legacy chat document changed during migration: %s", source)
-	}
-	if err := os.Remove(source); err != nil {
-		return err
-	}
-	return syncDirectory(dir)
-}
-
-func mergedChatBlock(legacy []byte) []byte {
-	return []byte(fmt.Sprintf("<!-- pua:merged-chat:%s -->\n%s\n<!-- pua:merged-chat:end -->", markdownContentHash(legacy), legacy))
-}
-
 func ensureWorkspaceDocument(root, language string) error {
-	return ensureSplitDocuments(root, workspaceMarkdownFile, localize.MustRender(language, workspaceMarkdownFile, nil), language)
+	return ensureSplitDocuments(root, localize.MustRender(language, workspaceMarkdownFile, nil), language)
 }
 
-func migrateResourceDocuments(root, language string) error {
-	if err := ensureWorkspaceDocument(root, language); err != nil {
+func ensureSplitDocuments(dir, spec, language string) error {
+	if err := createDocumentIfMissing(filepath.Join(dir, SpecMarkdownFile), spec); err != nil {
 		return err
 	}
+	return createDocumentIfMissing(filepath.Join(dir, MemoryMarkdownFile), followupMarkdown(language))
+}
+
+func LegacyResourceDocument(root, path string) bool {
+	dir, name := filepath.Split(path)
+	dir = filepath.Clean(dir)
+	if dir == filepath.Clean(root) {
+		return name == workspaceMarkdownFile
+	}
+	if name != projectMDFile && name != taskMDFile {
+		return false
+	}
+	resource, err := readResourceAtDir(dir)
+	return err == nil && resourceDirNameMatches(filepath.Base(dir), resource) && name == markdownFileName(resource)
+}
+
+func refreshResourceGuidance(root, language string) error {
 	return filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -145,11 +114,8 @@ func migrateResourceDocuments(root, language string) error {
 		}
 		resource, err := readResourceAtDir(path)
 		if err != nil {
-			return fmt.Errorf("read resource for document migration: %s: %w", path, err)
+			return fmt.Errorf("read resource for guidance refresh: %s: %w", path, err)
 		}
-		if err := updateTaskAgentsMD(root, path, resource, language); err != nil {
-			return err
-		}
-		return nil
+		return updateTaskAgentsMD(root, path, resource, language)
 	})
 }

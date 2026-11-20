@@ -294,7 +294,7 @@ Usage:
   pua user <command>
   pua card list|create|update --help
   pua workspace <command>
-  pua chat show|notes|publish|dispatch|timer
+  pua chat show|notes|publish
   pua turn status|switch|finish|cancel-resume
   pua message <command>
   pua history <command>
@@ -310,8 +310,7 @@ Commands:
     from inside an existing workspace. Supported languages: en, zh-CN.
 
   pua migrate [--language=<language>]
-    Refresh pua-managed AGENTS.md blocks and migrate legacy task/resource
-    history and chat.md into resource documents before removing obsolete files.
+    Refresh pua-managed AGENTS.md blocks and initialize missing resource documents.
     Pass --language to switch between en and zh-CN.
 
   pua doctor [--json] [--server=<url>]
@@ -426,8 +425,7 @@ func printMigrateHelp() {
 
 Commands:
   pua migrate [--language=<language>]
-    Refresh pua-managed AGENTS.md blocks and migrate legacy task/resource
-    history and chat.md into resource documents before removing obsolete files.
+    Refresh pua-managed AGENTS.md blocks and initialize missing resource documents.
     Pass --language to switch between en and zh-CN.
 `)
 }

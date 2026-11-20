@@ -2,7 +2,7 @@
 //
 // The store deliberately knows nothing about Serve or AgentHub. Callers give
 // it a JSON payload and stable generation metadata, while this package owns
-// resource addressing, migration, atomic file replacement, and the current vs
+// resource addressing, initialization, atomic file replacement, and the current vs
 // retired state transition.
 package generation
 
@@ -31,8 +31,6 @@ const (
 	resourcesDirName = "resources"
 	currentFileName  = "current.json"
 	retiredDirName   = "generations"
-	legacyDirName    = "legacy"
-	stagingDirName   = ".generation-store-staging-v2"
 )
 
 var (
@@ -40,8 +38,8 @@ var (
 	ErrImmutable            = errors.New("generation store retired manifest is immutable")
 	ErrGenerationIDRequired = errors.New("generation store record requires a generation id")
 
-	workspaceMigrationLocks sync.Map
-	resourceLocks           sync.Map
+	workspaceInitLocks sync.Map
+	resourceLocks      sync.Map
 )
 
 // Record is the storage-neutral representation of one PUA generation. The
@@ -73,9 +71,7 @@ type marker struct {
 	Version             int    `json:"version"`
 	State               string `json:"state"`
 	WorkspaceInstanceID string `json:"workspaceInstanceId"`
-	StartedAt                string `json:"startedAt,omitempty"`
-	CompletedAt              string `json:"completedAt,omitempty"`
-	LegacyCleanupCompletedAt string `json:"legacyCleanupCompletedAt,omitempty"`
+	CompletedAt         string `json:"completedAt,omitempty"`
 }
 
 type fileRecord struct {
@@ -151,7 +147,7 @@ func (s *Store) EnsureReady() error {
 		return errors.New("generation store is nil")
 	}
 	key := s.workspaceRoot
-	lock := workspaceMigrationLock(key)
+	lock := workspaceInitLock(key)
 	lock.Lock()
 	defer lock.Unlock()
 
@@ -160,16 +156,7 @@ func (s *Store) EnsureReady() error {
 		return err
 	}
 	if current == nil || current.State != "ready" {
-		if err := s.initializeLocked(current); err != nil {
-			return err
-		}
-		if current, err = readMarker(s.workspaceRoot); err != nil {
-			return err
-		}
-	}
-	_ = os.RemoveAll(filepath.Join(s.runtimeRoot(), stagingDirName))
-	if current != nil && strings.TrimSpace(current.LegacyCleanupCompletedAt) == "" {
-		return s.cleanupLegacyDirsLocked(current)
+		return s.initializeLocked()
 	}
 	return nil
 }
@@ -556,22 +543,11 @@ func (s *Store) runtimeRoot() string {
 	return filepath.Join(s.controlRoot, "runtime")
 }
 
-// initializeLocked prepares the runtime store layout for a Workspace without
-// a ready marker. The historical legacy index migration was removed after all
-// supported Workspaces completed it. The returned marker deliberately leaves
-// the legacy cleanup timestamp empty so EnsureReady still sweeps any pre-existing
-// legacy/ record directories before serving reads.
-func (s *Store) initializeLocked(existing *marker) error {
-	if existing != nil && existing.Version != 0 && existing.Version != SchemaVersion {
-		return fmt.Errorf("unsupported generation store marker version %d; expected %d", existing.Version, SchemaVersion)
-	}
+func (s *Store) initializeLocked() error {
 	if err := os.MkdirAll(s.runtimeRoot(), 0o700); err != nil {
 		return err
 	}
-	if err := os.RemoveAll(filepath.Join(s.runtimeRoot(), stagingDirName)); err != nil {
-		return err
-	}
-	if err := atomicWriteJSON(filepath.Join(s.runtimeRoot(), markerFileName), marker{
+	if err := atomicWriteJSON(s.markerPath(), marker{
 		Version: SchemaVersion, State: "ready", WorkspaceInstanceID: s.instanceID,
 		CompletedAt: time.Now().UTC().Format(time.RFC3339Nano),
 	}); err != nil {
@@ -710,8 +686,8 @@ func syncDir(path string) error {
 	return directory.Sync()
 }
 
-func workspaceMigrationLock(key string) *sync.Mutex {
-	value, _ := workspaceMigrationLocks.LoadOrStore(key, &sync.Mutex{})
+func workspaceInitLock(key string) *sync.Mutex {
+	value, _ := workspaceInitLocks.LoadOrStore(key, &sync.Mutex{})
 	return value.(*sync.Mutex)
 }
 
@@ -733,4 +709,3 @@ func shortHash(data []byte) string {
 	digest := sha256.Sum256(data)
 	return hex.EncodeToString(digest[:8])
 }
-

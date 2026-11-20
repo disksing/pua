@@ -22,11 +22,6 @@ type Provider struct {
 	Name    string `json:"name"`
 	Type    string `json:"type"`
 	Command string `json:"command,omitempty"`
-	// LegacyEnabled accepts the removed "enabled" flag written by older
-	// versions. Providers are no longer toggled by the user: a provider is
-	// available whenever its executable resolves. WithDefaults clears the
-	// field so the daemon never writes it again.
-	LegacyEnabled json.RawMessage `json:"enabled,omitempty"`
 }
 
 type Agent struct {
@@ -40,7 +35,6 @@ type Magpie struct {
 	Enabled                bool   `json:"enabled"`
 	ServerURL              string `json:"serverUrl"`
 	RefreshIntervalSeconds int    `json:"refreshIntervalSeconds"`
-	MigratedFromOnWatch    bool   `json:"migratedFromOnWatch,omitempty"`
 }
 
 // AgentNameMaxLength bounds the length of an agent name (counted in runes
@@ -57,12 +51,10 @@ func NormalizeAgentName(name string) string {
 }
 
 type Config struct {
-	Version         int             `json:"version"`
-	AgentProviders  []Provider      `json:"agentProviders"`
-	Agents          []Agent         `json:"agents"`
-	Magpie          Magpie          `json:"magpie"`
-	LegacyOnWatch   json.RawMessage `json:"onWatch,omitempty"`
-	LegacyCompanion json.RawMessage `json:"companion,omitempty"`
+	Version        int        `json:"version"`
+	AgentProviders []Provider `json:"agentProviders"`
+	Agents         []Agent    `json:"agents"`
+	Magpie         Magpie     `json:"magpie"`
 }
 
 type Probe struct {
@@ -297,32 +289,10 @@ func validQuotaInterval(seconds int) bool {
 	return seconds == 30 || seconds == 60 || seconds == 300
 }
 
-// WithDefaults fills fields absent from configurations written by older
-// AgentHub versions. Companion preferences moved to browser-local storage and
-// provider enable/disable switches were removed in favor of executable
-// probing; accepting and clearing the legacy fields keeps existing config
-// files loadable while ensuring the daemon never returns or writes them again.
+// WithDefaults fills the default Magpie settings if they are omitted.
 func (c Config) WithDefaults() Config {
 	if c.Magpie == (Magpie{}) {
 		c.Magpie = Defaults().Magpie
-		var legacy struct {
-			Enabled                bool `json:"enabled"`
-			RefreshIntervalSeconds int  `json:"refreshIntervalSeconds"`
-		}
-		if len(c.LegacyOnWatch) > 0 && json.Unmarshal(c.LegacyOnWatch, &legacy) == nil {
-			if validQuotaInterval(legacy.RefreshIntervalSeconds) {
-				c.Magpie.RefreshIntervalSeconds = legacy.RefreshIntervalSeconds
-			}
-			c.Magpie.MigratedFromOnWatch = legacy.Enabled
-		}
-	}
-	if c.Magpie.Enabled {
-		c.Magpie.MigratedFromOnWatch = false
-	}
-	c.LegacyOnWatch = nil
-	c.LegacyCompanion = nil
-	for i := range c.AgentProviders {
-		c.AgentProviders[i].LegacyEnabled = nil
 	}
 	return c
 }

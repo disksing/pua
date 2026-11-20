@@ -210,7 +210,7 @@ func initializeWorkspaceLocked(root, language string) error {
 	if _, err := ensureSchedulerLocked(root, language); err != nil {
 		return err
 	}
-	return migrateResourceDocuments(root, language)
+	return refreshResourceGuidance(root, language)
 }
 
 func syncDirectory(path string) error {
@@ -259,7 +259,7 @@ func (w *Workspace) migrate(language string) error {
 	if err := updateAgentsMD(filepath.Join(w.root, "AGENTS.md"), language); err != nil {
 		return &APIError{Operation: "migrate Workspace", Kind: "workspace", Workspace: w.root, Err: err}
 	}
-	if err := migrateResourceDocuments(w.root, language); err != nil {
+	if err := refreshResourceGuidance(w.root, language); err != nil {
 		return &APIError{Operation: "migrate Workspace", Kind: "workspace", Workspace: w.root, Err: err}
 	}
 	if _, err := ensureSchedulerLocked(w.root, language); err != nil {

@@ -53,7 +53,6 @@ export const DEFAULT_MAGPIE = {
   enabled: false,
   serverUrl: "http://127.0.0.1:3425",
   refreshIntervalSeconds: 60,
-  migratedFromOnWatch: false,
 };
 
 // The model option is not a free-text field: the settings UI loads the
@@ -137,7 +136,6 @@ export function normalizeConfig(config = {}) {
     enabled: Boolean(rawMagpie.enabled),
     serverUrl: String(rawMagpie.serverUrl ?? DEFAULT_MAGPIE.serverUrl).trim(),
     refreshIntervalSeconds: Number(rawMagpie.refreshIntervalSeconds) || DEFAULT_MAGPIE.refreshIntervalSeconds,
-    migratedFromOnWatch: Boolean(rawMagpie.migratedFromOnWatch && !rawMagpie.enabled),
   };
   return {
     version: Number(config.version) || 1,

@@ -68,14 +68,12 @@ afterEach(async () => {
 });
 
 describe("AgentHub settings agent and provider controls", () => {
-  it("tests a migrated Magpie connection before the user enables and saves it", async () => {
-    config.magpie.migratedFromOnWatch = true;
+  it("tests a Magpie connection before the user enables and saves it", async () => {
     config.magpie.refreshIntervalSeconds = 300;
     await render("General");
     const enable = target.querySelector<HTMLInputElement>('input[aria-label="Enable Magpie"]')!;
     expect(enable.disabled).toBe(true);
     expect(enable.checked).toBe(false);
-    expect(target.textContent).toContain("OnWatch refresh interval");
     expect(target.querySelector<HTMLSelectElement>(".settings-content select")?.value).toBe("300");
     await click("Test connection");
     await vi.waitFor(() => expect(target.textContent).toContain("Connected · 3 quota cards"));
@@ -87,7 +85,6 @@ describe("AgentHub settings agent and provider controls", () => {
     await click("Save all");
     await vi.waitFor(() => expect(config.magpie.enabled).toBe(true));
     await vi.waitFor(() => expect(target.textContent).toContain("Saved"));
-    expect(config.magpie.migratedFromOnWatch).toBe(false);
 
     const url = target.querySelector<HTMLInputElement>(".settings-content label input:not([type])")!;
     expect(url.value).toBe("http://127.0.0.1:3425");

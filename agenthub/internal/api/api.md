@@ -317,8 +317,7 @@ Read the effective configuration.
 
 - **Success `200`:** `{"config": {...}}` — the configuration object
   (`version`, `agentProviders`, `agents`, `magpie`; see
-  `PUT /v1/config` for the schema and constraints). Legacy OnWatch settings
-  are omitted from the response.
+  `PUT /v1/config` for the schema and constraints).
 - **Errors:** `503 runtime_unavailable`.
 
 ```bash
@@ -362,14 +361,10 @@ only writer) and applies it in memory.
   fields are rejected.
 - **Magpie constraints:** `serverUrl` uses HTTP(S) with a loopback IP literal
   and an optional port. Snapshot refresh is 30, 60 or 300 seconds. The
-  daemon sends anonymous requests with redirects disabled. When a legacy
-  config lacks `magpie`, it adopts the valid OnWatch interval and starts
-  disabled. `migratedFromOnWatch` indicates that a previously enabled OnWatch
-  integration needs setup. Saving enabled Magpie settings clears the marker.
+  daemon sends anonymous requests with redirects disabled. When `magpie` is
+  omitted, it defaults to disabled with a 60-second refresh.
 - **Browser preferences:** Activity Monitor controls are stored only in the
-  browser's `localStorage` and are absent from this API. For upgrade
-  compatibility, a legacy top-level `companion` object is accepted and
-  discarded; it is omitted from responses and from the next config-file write.
+  browser's `localStorage` and are absent from this API.
 - **Rename semantics:** if an agent disappears while exactly one new agent
   with an identical provider, options and environment appears, the change is
   treated as a rename and active sessions referencing the old name are

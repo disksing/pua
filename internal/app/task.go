@@ -372,7 +372,7 @@ func isArchivedPath(root, path string) bool {
 }
 
 func updateTaskAgentsMD(root, dir string, resource Resource, language string) error {
-	if err := ensureSplitDocuments(dir, markdownFileName(resource), defaultTaskMD(resource, language), language); err != nil {
+	if err := ensureSplitDocuments(dir, defaultTaskMD(resource, language), language); err != nil {
 		return err
 	}
 	path := filepath.Join(dir, "AGENTS.md")

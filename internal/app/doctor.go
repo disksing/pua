@@ -491,7 +491,7 @@ func (s *doctorScanner) checkSplitDocuments(path, rel, resourceID, legacyName st
 	}
 	for _, name := range []string{legacyName, legacyChatMarkdownFile, legacyDocumentStage} {
 		if _, err := os.Lstat(filepath.Join(path, name)); err == nil {
-			s.issue(DoctorSeverityWarning, "legacy_document_pending", filepath.Join(rel, name), resourceID, "Legacy document migration is pending", "Stop legacy writers and run pua migrate.")
+			s.issue(DoctorSeverityWarning, "legacy_document_pending", filepath.Join(rel, name), resourceID, "Legacy document requires review", "Review the legacy document before manually incorporating it into the current resource documents.")
 		}
 	}
 }

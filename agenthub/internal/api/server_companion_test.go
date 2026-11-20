@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -40,71 +41,43 @@ func companionTestServer(t *testing.T, cfg config.Config, upstream *httptest.Ser
 	return server, configPath, store
 }
 
-func TestConfigAPIDropsLegacyCompanionAndOnWatchCredentials(t *testing.T) {
+func TestConfigAPIRejectsRetiredCompanionAndOnWatchFields(t *testing.T) {
 	cfg := config.Defaults()
-	cfg.Magpie = config.Magpie{}
-	cfg.LegacyOnWatch = json.RawMessage(`{"enabled":true,"refreshIntervalSeconds":30,"password":"secret"}`)
 	server, configPath, _ := companionTestServer(t, cfg, nil)
-
-	response, err := http.Get(server.URL + "/v1/config")
+	before, err := os.ReadFile(configPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var fetched struct {
-		Config config.Config `json:"config"`
-	}
-	if err := json.NewDecoder(response.Body).Decode(&fetched); err != nil {
-		t.Fatal(err)
-	}
-	response.Body.Close()
-	if fetched.Config.LegacyOnWatch != nil || fetched.Config.Magpie.Enabled || !fetched.Config.Magpie.MigratedFromOnWatch || fetched.Config.Magpie.RefreshIntervalSeconds != 30 {
-		t.Fatalf("GET /v1/config did not migrate the legacy configuration: %+v", fetched)
-	}
-	if fetched.Config.LegacyCompanion != nil {
-		t.Fatal("GET /v1/config exposed legacy companion settings")
-	}
-	// Old clients may still submit this field during a rolling upgrade. Accept
-	// it for compatibility, but discard it before updating runtime or disk.
-	fetched.Config.LegacyCompanion = json.RawMessage(`{"enableBeeping":false,"beepChord":"a-minor"}`)
-	fetched.Config.LegacyOnWatch = cfg.LegacyOnWatch
-	body, _ := json.Marshal(map[string]any{"config": fetched.Config})
-	request, _ := http.NewRequest(http.MethodPut, server.URL+"/v1/config", bytes.NewReader(body))
-	request.Header.Set("Content-Type", "application/json")
-	response, err = http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("PUT config status = %s", response.Status)
-	}
-	var savedResponse struct {
-		Config config.Config `json:"config"`
-	}
-	if err := json.NewDecoder(response.Body).Decode(&savedResponse); err != nil {
-		t.Fatal(err)
-	}
-	if savedResponse.Config.LegacyOnWatch != nil {
-		t.Fatal("PUT /v1/config response exposed the legacy OnWatch config")
-	}
-	if savedResponse.Config.LegacyCompanion != nil {
-		t.Fatal("PUT /v1/config response exposed legacy companion settings")
-	}
-	stored, err := config.Load(configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stored.LegacyOnWatch != nil || stored.LegacyCompanion != nil || stored.Magpie != fetched.Config.Magpie {
-		t.Fatalf("stored config = %+v", stored)
-	}
-	written, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, value := range []string{`"companion"`, `"onWatch"`, "secret"} {
-		if bytes.Contains(written, []byte(value)) {
-			t.Errorf("stored config retained %q", value)
+	for field, value := range map[string]json.RawMessage{
+		"companion": json.RawMessage(`{"enableBeeping":false}`),
+		"onWatch":   json.RawMessage(`{"enabled":true,"password":"secret"}`),
+	} {
+		var payload map[string]json.RawMessage
+		if err := json.Unmarshal(before, &payload); err != nil {
+			t.Fatal(err)
 		}
+		payload[field] = value
+		body, err := json.Marshal(map[string]any{"config": payload})
+		if err != nil {
+			t.Fatal(err)
+		}
+		request, err := http.NewRequest(http.MethodPut, server.URL+"/v1/config", bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Content-Type", "application/json")
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := io.ReadAll(response.Body)
+		response.Body.Close()
+		if err != nil || response.StatusCode != http.StatusBadRequest || bytes.Contains(data, []byte("secret")) {
+			t.Fatalf("PUT with retired %s field returned status %d, response %s (%v)", field, response.StatusCode, data, err)
+		}
+	}
+	if after, err := os.ReadFile(configPath); err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("rejected config changed the stored file: %v", err)
 	}
 }
 

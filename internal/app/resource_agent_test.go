@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/disksing/pua/internal/app"
@@ -121,7 +120,7 @@ func TestGenerationPolicyDefaultsAndPersistsWorkspaceOverride(t *testing.T) {
 	}
 }
 
-func TestGenerationPolicyMigratesLegacyEnabledToBothIndependentSwitches(t *testing.T) {
+func TestGenerationPolicyCompletesMissingFieldsPreservingExplicitSwitch(t *testing.T) {
 	for _, enabled := range []bool{false, true} {
 		t.Run(fmt.Sprintf("enabled=%v", enabled), func(t *testing.T) {
 			workspace, err := app.Initialize(t.TempDir(), "en")
@@ -137,7 +136,7 @@ func TestGenerationPolicyMigratesLegacyEnabledToBothIndependentSwitches(t *testi
 			if err := json.Unmarshal(data, &config); err != nil {
 				t.Fatal(err)
 			}
-			config["generationPolicy"] = json.RawMessage(fmt.Sprintf(`{"enabled":%v,"maxTurns":25,"maxAccumulatedTurnMinutes":150}`, enabled))
+			config["generationPolicy"] = json.RawMessage(fmt.Sprintf(`{"budgetEnabled":%v,"maxTurns":25,"maxAccumulatedTurnMinutes":150}`, enabled))
 			data, err = json.MarshalIndent(config, "", "  ")
 			if err != nil {
 				t.Fatal(err)
@@ -152,7 +151,7 @@ func TestGenerationPolicyMigratesLegacyEnabledToBothIndependentSwitches(t *testi
 			}
 			want := app.GenerationPolicy{
 				BudgetEnabled: enabled, MaxTurns: 25, MaxAccumulatedTurnMinutes: 150,
-				InactivityEnabled: enabled, MaxInactivityMinutes: app.DefaultGenerationMaxInactivityMinutes,
+				InactivityEnabled: true, MaxInactivityMinutes: app.DefaultGenerationMaxInactivityMinutes,
 			}
 			if runtime.GenerationPolicy != want {
 				t.Fatalf("migrated policy = %#v, want %#v", runtime.GenerationPolicy, want)
@@ -167,11 +166,10 @@ func TestGenerationPolicyMigratesLegacyEnabledToBothIndependentSwitches(t *testi
 			if err := json.Unmarshal(persisted, &persistedConfig); err != nil {
 				t.Fatal(err)
 			}
-			_, hasLegacyEnabled := persistedConfig.GenerationPolicy["enabled"]
 			_, hasBudgetEnabled := persistedConfig.GenerationPolicy["budgetEnabled"]
 			_, hasInactivityEnabled := persistedConfig.GenerationPolicy["inactivityEnabled"]
-			if hasLegacyEnabled || !hasBudgetEnabled || !hasInactivityEnabled {
-				t.Fatalf("legacy policy was not rewritten: %s", persisted)
+			if !hasBudgetEnabled || !hasInactivityEnabled {
+				t.Fatalf("missing current policy fields: %s", persisted)
 			}
 		})
 	}
@@ -238,8 +236,8 @@ func TestResourceDefaultsAcceptDirectAgentBindings(t *testing.T) {
 	}
 }
 
-func TestLegacyStringResourceDefaultsDecodeAsProfiles(t *testing.T) {
-	data := []byte(`{"version":1,"language":"en","resourceDefaults":{"workspace":"Fast","project":{"kind":"agent","name":"Kimi-K3"},"task":"default"}}`)
+func TestStructuredResourceDefaults(t *testing.T) {
+	data := []byte(`{"version":1,"language":"en","resourceDefaults":{"project":{"kind":"agent","name":"Kimi-K3"},"task":{"kind":"profile","name":"default"}}}`)
 	var cfg app.Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		t.Fatal(err)
@@ -248,14 +246,7 @@ func TestLegacyStringResourceDefaultsDecodeAsProfiles(t *testing.T) {
 		t.Fatalf("structured Project default decoded as %#v", cfg.ResourceDefaults.Project)
 	}
 	if cfg.ResourceDefaults.Task != (app.AgentBinding{Kind: "profile", Name: "default"}) {
-		t.Fatalf("legacy Task default decoded as %#v", cfg.ResourceDefaults.Task)
-	}
-	out, err := json.Marshal(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(out), "\"workspace\"") {
-		t.Fatalf("removed Workspace default survived re-encoding: %s", out)
+		t.Fatalf("structured Task default decoded as %#v", cfg.ResourceDefaults.Task)
 	}
 }
 

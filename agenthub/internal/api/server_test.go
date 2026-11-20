@@ -766,9 +766,9 @@ func TestPutConfigRoundTrip(t *testing.T) {
 func TestPutConfigRejectsRemovedProfileFields(t *testing.T) {
 	server := newConfigTestServer(t)
 	cases := map[string]string{
-		"agentProfiles": `{"config":{"agentProviders":[{"id":"p","type":"pi","enabled":true}],
+		"agentProfiles": `{"config":{"agentProviders":[{"id":"p","type":"pi"}],
 			"agentProfiles":[{"key":"fast","agentId":"a"}]}}`,
-		"defaultChatAgentId": `{"config":{"agentProviders":[{"id":"p","type":"pi","enabled":true}],
+		"defaultChatAgentId": `{"config":{"agentProviders":[{"id":"p","type":"pi"}],
 			"defaultChatAgentId":"a"}}`,
 	}
 	for name, body := range cases {
@@ -783,18 +783,18 @@ func TestPutConfigRejectsInvalidConfig(t *testing.T) {
 	server := newConfigTestServer(t)
 	cases := map[string]string{
 		"duplicate provider id": `{"config":{"agentProviders":[
-			{"id":"p","type":"pi","enabled":true},
-			{"id":"p","type":"kimi","enabled":true}]}}`,
+			{"id":"p","type":"pi"},
+			{"id":"p","type":"kimi"}]}}`,
 		"unsupported provider type": `{"config":{"agentProviders":[
-			{"id":"p","type":"bogus","enabled":true}]}}`,
+			{"id":"p","type":"bogus"}]}}`,
 		"dangling agent provider": `{"config":{"agentProviders":[
-			{"id":"p","type":"pi","enabled":true}],
+			{"id":"p","type":"pi"}],
 			"agents":[{"name":"A","providerId":"ghost"}]}}`,
 		"duplicate agent names": `{"config":{"agentProviders":[
-			{"id":"p","type":"pi","enabled":true}],
+			{"id":"p","type":"pi"}],
 			"agents":[{"name":"Codex","providerId":"p"},{"name":" codex ","providerId":"p"}]}}`,
 		"blank agent name": `{"config":{"agentProviders":[
-			{"id":"p","type":"pi","enabled":true}],
+			{"id":"p","type":"pi"}],
 			"agents":[{"name":"  ","providerId":"p"}]}}`,
 	}
 	for name, body := range cases {
@@ -827,7 +827,7 @@ func TestPutConfigRejectsInvalidRequest(t *testing.T) {
 		"wrong config type":            `{"config":"nope"}`,
 		"unknown field without config": `{"conf":{}}`,
 		// The removed agent id must never be written back through the API.
-		"legacy agent id field": `{"config":{"agentProviders":[{"id":"p","type":"pi","enabled":true}],
+		"legacy agent id field": `{"config":{"agentProviders":[{"id":"p","type":"pi"}],
 			"agents":[{"id":"a","name":"A","providerId":"p"}]}}`,
 	}
 	for name, body := range cases {
@@ -2164,7 +2164,7 @@ func TestPutConfigRenameMigratesSessionReferences(t *testing.T) {
 	renamed := `{"config":{
 		"version": 1,
 		"agentProviders": [
-			{"id": "provider", "name": "Pi", "type": "pi", "enabled": true, "command": "missing-test-command"}
+			{"id": "provider", "name": "Pi", "type": "pi", "command": "missing-test-command"}
 		],
 		"agents": [{"name": "Pi Agent X", "providerId": "provider"}]
 	}}`
@@ -2208,7 +2208,7 @@ func TestPutConfigRejectsAmbiguousRename(t *testing.T) {
 	ambiguous := `{"config":{
 		"version": 1,
 		"agentProviders": [
-			{"id": "provider", "name": "Pi", "type": "pi", "enabled": true, "command": "missing-test-command"}
+			{"id": "provider", "name": "Pi", "type": "pi", "command": "missing-test-command"}
 		],
 		"agents": [
 			{"name": "Pi Agent X", "providerId": "provider"},

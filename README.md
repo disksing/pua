@@ -390,7 +390,7 @@ pua serve [--addr=<address>] [--workspace=<path>]
 
 `pua agent list` queries the owning `pua serve` process for the configured PUA Agent Profiles and the read-only AgentHub agent catalog. The default output lists profiles (key, agent, description) followed by agents (name, provider, availability); pass `--json` for the complete structured result including profiles, providers, and probes.
 
-`pua user list` lists the users registered in the current Workspace together with their free-text preferences. User profiles, preferences, UI/read state, and Inbox data live in the Workspace control directory under `.pua/users/<name>/`. Agents can address a registered user with `pua message send --to=<name>`. Running `pua init`, `pua migrate`, or `pua user list` never creates a user implicitly; an empty Workspace receives its first user through the Web identity flow, while Web-created Workspaces require that initial name during creation.
+`pua user list` lists the users registered in the current Workspace together with their free-text preferences. User profiles, preferences, and UI/read state live in the Workspace control directory under `.pua/users/<name>/`. Agents can address a registered user with `pua message send --to=<name>`. Running `pua init`, `pua migrate`, or `pua user list` never creates a user implicitly; an empty Workspace receives its first user through the Web identity flow, while Web-created Workspaces require that initial name during creation.
 
 `pua init` and `pua migrate` accept `--language=en` or `--language=zh-CN`.
 The selected language is stored in `workspace.json` and controls generated Markdown
@@ -407,13 +407,11 @@ Workspace、Project 和 Task 通过 `internal/app` 在本地创建，不保存�
 
 跨资源投递失败时仍可通过可恢复 outbox 发送带 `type`、`causation` 和 receipt 的系统通知，可用 `pua message show` 查询。旧结果订阅和遗留 outbox 操作不再发送结果；目标 mailbox 中尚未投递的旧结果会取消，已经开始投递的项标为 `delivery_unknown`，因为 AgentHub 可能已经接受。历史 receipt 按既有保留期保存。AgentHub 已接受的结果无法撤回；回退旧版 Server 可能重新启用其仍能读取的旧订阅。
 
-`pua migrate` upgrades supported resource metadata, generation/mailbox stores,
-legacy task history, Scheduler resources, and PUA-managed `AGENTS.md` blocks.
-It moves legacy `workspace.md`, `project.md`, `task.md` and `chat.md` content to
-`memory.md`, including archived resources. If missing, `spec.md` receives a
-migration notice pointing to Memory. Old resource document URLs remain readable
-in the Web UI. Scheduler retains `scheduler.md`. See the
-[迁移预检与回退说明](docs/resource-documents-migration.md).
+`pua migrate` refreshes PUA-managed `AGENTS.md` blocks, initializes missing
+resource documents and Scheduler files, and fills in current Workspace
+configuration defaults. Existing document content is preserved. Old
+Workspace, Project and Task document URLs still open Memory in the Web UI.
+See the [资源文档说明](docs/resource-documents-migration.md).
 
 ```markdown
 <!-- managed by pua cli -->

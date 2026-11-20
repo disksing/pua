@@ -145,7 +145,7 @@ Provider 封装一个本地 Agent 运行时或协议；Agent 引用一个 Provid
 
 Magpie 默认关闭。在 **Settings → General → Magpie Integration** 配置本机回环地址，点击 **Test connection**，然后启用并保存。daemon 定时取回 Magpie 已缓存的读数，通过 `GET /v1/quota` 提供配额。卡片逐账户显示额度与余额，连接故障时保留上次快照并标记陈旧。如需触发供应商更新，请在 Magpie 的 Usage 页刷新。
 
-从 OnWatch 升级时自动沿用轮询间隔。保存新设置前备份原配置。回滚时同时恢复旧二进制和原配置。**Activity** 区块的活动、音效和额度可见性偏好只保存在当前浏览器来源。隐藏某条额度后，展开列表和折叠轮播都会过滤该条。
+**Activity** 区块的活动、音效和额度可见性偏好只保存在当前浏览器来源。隐藏某条额度后，展开列表和折叠轮播都会过滤该条。
 
 Session 活动只来自 AgentHub 自身持久化追加且用户可感知的 Turn 事件，并在 `GET /v1/activity/events` 中按 Session 聚合为一秒一帧。消息、思考、工具、审批、Turn 错误与 Turn 终态计为活动；Session/进程生命周期记账、消息投递记账、原始 Provider 通知、后台 metadata 和 stderr 不计为活动，避免 daemon 重启或空闲 Provider 维护动作让旧 Session 重新显示为活跃。浏览器只保持一条全局 EventSource，并通过 Web Audio 合成可选的运行蜂鸣。每个活跃 Session 按第 5、4、6、3、7 八度带的顺序领取所选大三和弦或小三和弦中的第一个可用音高，优先使用较低八度后再到最高音位；该音高保持稳定，直到当前 Turn 结束 10 秒后或 Session 退出活跃窗口，前 15 个并发 Session 使用互不重复的音位。结束态行继续保留 5 分钟：成功为黄色，失败或取消为红色；新 Turn 会清除旧结束态并重新领取音高。播放量化到四个固定的 250ms subdivision，并使用确定性节奏型和轮换；超过四个 Session 后，和弦音以归一化音量共享 subdivision，不再产生不规则的一秒分数间隔。用户选择的本地 MP3 完成提示音与活动和弦相互独立。此功能不会扫描 Codex 或其他 Provider 的原生 Session 文件。
 

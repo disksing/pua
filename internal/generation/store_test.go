@@ -190,6 +190,23 @@ func TestStoreKeepsRetiredHistoryWithoutRewritingIt(t *testing.T) {
 	}
 }
 
+func TestStoreRejectsRecordsWithoutGenerationID(t *testing.T) {
+	store, err := Open(t.TempDir(), "instance-strict")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := testRecord("project1", "run-no-id", "", 0, `{"status":"running"}`)
+	if err := store.SaveCurrent(record); !errors.Is(err, ErrGenerationIDRequired) {
+		t.Fatalf("SaveCurrent without generation id = %v, want ErrGenerationIDRequired", err)
+	}
+	if err := store.SaveRetired(record, "cold"); !errors.Is(err, ErrGenerationIDRequired) {
+		t.Fatalf("SaveRetired without generation id = %v, want ErrGenerationIDRequired", err)
+	}
+	if err := store.RetireCurrent(record, "replaced"); !errors.Is(err, ErrGenerationIDRequired) {
+		t.Fatalf("RetireCurrent without generation id = %v, want ErrGenerationIDRequired", err)
+	}
+}
+
 func TestStoreSerializesOnlyEachResourceKey(t *testing.T) {
 	store, err := Open(t.TempDir(), "instance-concurrent")
 	if err != nil {

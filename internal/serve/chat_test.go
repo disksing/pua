@@ -255,14 +255,9 @@ func TestChatAgentReplyCapabilityAndIsolation(t *testing.T) {
 	if len(current.Messages) != 1 {
 		t.Fatal("reply duplicated or history lost")
 	}
-	for _, op := range []string{"dispatch", "timer", "binding"} {
-		if got := chatCall(t, m, w, resource, "disksing", op, chatRequest{ID: "legacy", Text: "do work"}, op != "binding"); got.Code != 409 {
-			t.Fatalf("%s: %d", op, got.Code)
-		}
-	}
 }
 
-func TestChatBindingDoesNotOpenAndInboxDiscarded(t *testing.T) {
+func TestChatBindingDoesNotOpenAndInboxEndpointIsGone(t *testing.T) {
 	m, w := chatTestManager(t)
 	if got := chatCall(t, m, w, "project1.task1", "disksing", "binding", chatRequest{Binding: app.AgentBinding{Kind: "agent", Name: "example"}}, false); got.Code != 409 {
 		t.Fatal(got.Code)
@@ -281,8 +276,8 @@ func TestChatBindingDoesNotOpenAndInboxDiscarded(t *testing.T) {
 	if err := m.reconcileWorkspaceChats(context.Background(), w); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatal("Inbox not discarded")
+	if data, err := os.ReadFile(path); err != nil || string(data) != `{"messages":[{"text":"legacy"}]}` {
+		t.Fatalf("reconciliation changed the retired inbox file: %s (%v)", data, err)
 	}
 	req := httptest.NewRequest("GET", "/api/workspaces/"+w.ID+"/users/disksing/messages", nil)
 	out := httptest.NewRecorder()
@@ -386,19 +381,11 @@ func TestLegacyChatUsesExecutionRuntimeWhileBusyAndAfterReopen(t *testing.T) {
 	}
 }
 
-func TestChatNotesAndReadCursorWithoutTimer(t *testing.T) {
+func TestChatNotesAndReadCursor(t *testing.T) {
 	m, w := chatTestManager(t)
 	resource := "project1.task1"
 	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "open", chatRequest{}, false))
-	c, _ := loadDialogue(w.Path, dialoguePrefix+sharedChatID(resource))
-	rec := generationRecord{ID: "timer-gen", GenerationID: "timer-gen", Generation: 1, WorkspaceID: w.ID, ResourceID: c.address(), OwnerResourceID: resource, ChatEpoch: c.Epoch, Status: "idle"}
-	if err := saveGenerationRecord(w.Path, rec); err != nil {
-		t.Fatal(err)
-	}
 	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "notes", chatRequest{Text: "Follow project1.task1; nothing published yet."}, true))
-	if got := chatCall(t, m, w, resource, "disksing", "timer", chatRequest{Seconds: 60}, true); got.Code != 409 {
-		t.Fatal(got.Code)
-	}
 
 	for _, id := range []string{"first", "second"} {
 		mustChatOK(t, chatCall(t, m, w, resource, "disksing", "publish", chatRequest{ID: id, Text: id}, true))
@@ -428,7 +415,10 @@ func TestChatNotesAndReadCursorWithoutTimer(t *testing.T) {
 	}
 
 	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "close", chatRequest{}, false))
-	current, _ := loadDialogue(w.Path, c.address())
+	current, err := loadDialogue(w.Path, dialoguePrefix+sharedChatID(resource))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if current.IntervalSeconds != 0 || current.Notes == "" || current.ReadCursors["disksing"] != 1 {
 		t.Fatal("closure lost notes/read state or retained timer")
 	}

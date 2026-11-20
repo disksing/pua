@@ -1,8 +1,6 @@
 package config
 
 import (
-	"bytes"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -141,10 +139,9 @@ func TestLoadCreatesIndependentDefaults(t *testing.T) {
 	}
 }
 
-func TestLoadAcceptsAndDropsLegacyCompanionConfig(t *testing.T) {
+func TestLoadFillsOmittedMagpieDefaults(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	legacy := `{"version":1,"agentProviders":[{"id":"codex","name":"Codex","type":"codex","enabled":true}],"agents":[{"name":"Codex","providerId":"codex"}],"companion":{"showActivity":false,"enableBeeping":false,"beepVolume":0,"beepChord":"a-minor","beepProgression":"canon-in-c","completionSound":"smile"}}`
-	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"version":1,"agentProviders":[],"agents":[]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := Load(path)
@@ -153,51 +150,6 @@ func TestLoadAcceptsAndDropsLegacyCompanionConfig(t *testing.T) {
 	}
 	if loaded.Magpie.ServerURL != "http://127.0.0.1:3425" || loaded.Magpie.RefreshIntervalSeconds != 60 || loaded.Magpie.Enabled {
 		t.Fatalf("Magpie defaults = %+v", loaded.Magpie)
-	}
-	if loaded.LegacyCompanion != nil {
-		t.Fatalf("legacy companion config survived normalization: %s", loaded.LegacyCompanion)
-	}
-	if err := Save(path, loaded); err != nil {
-		t.Fatal(err)
-	}
-	written, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Contains(written, []byte(`"companion"`)) {
-		t.Fatalf("legacy companion config was written back: %s", written)
-	}
-}
-
-func TestMagpieMigratesOnlyOnWatchInterval(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.json")
-	legacy := []byte(`{"version":1,"agentProviders":[],"agents":[],"onWatch":{"enabled":true,"refreshIntervalSeconds":300,"serverUrl":"https://old.example","authMode":"basic","username":"alice","password":"secret"}}`)
-	if err := os.WriteFile(path, legacy, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	loaded, err := Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := Magpie{ServerURL: "http://127.0.0.1:3425", RefreshIntervalSeconds: 300, MigratedFromOnWatch: true}
-	if loaded.Magpie != want || loaded.LegacyOnWatch != nil {
-		t.Fatalf("migrated config = %+v", loaded)
-	}
-	original, err := os.ReadFile(path)
-	if err != nil || !bytes.Equal(original, legacy) {
-		t.Fatalf("load modified original config: %v", err)
-	}
-	loaded.Magpie.Enabled = true
-	if err := Save(path, loaded); err != nil {
-		t.Fatal(err)
-	}
-	written, err := os.ReadFile(path)
-	if err != nil || bytes.Contains(written, []byte(`"onWatch"`)) || bytes.Contains(written, []byte("secret")) {
-		t.Fatalf("legacy settings were copied into the new file: %v", err)
-	}
-	reloaded, err := Load(path)
-	if err != nil || !reloaded.Magpie.Enabled || reloaded.Magpie.MigratedFromOnWatch {
-		t.Fatalf("reloaded config = %+v, err = %v", reloaded, err)
 	}
 }
 
@@ -347,7 +299,7 @@ func TestLoadRejectsDuplicateAgentNames(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	legacy := `{
 		"version": 1,
-		"agentProviders": [{"id": "p", "name": "Pi", "type": "pi", "enabled": true}],
+		"agentProviders": [{"id": "p", "name": "Pi", "type": "pi"}],
 		"agents": [
 			{"name": "Codex", "providerId": "p"},
 			{"name": " codex ", "providerId": "p"}
@@ -421,38 +373,13 @@ func TestDetectRenames(t *testing.T) {
 	}
 }
 
-// The removed "enabled" flag of older configs stays loadable; it is ignored
-// and never written back.
-func TestLoadDropsLegacyProviderEnabled(t *testing.T) {
+func TestLoadRejectsRetiredProviderEnabled(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	legacy := `{"version":1,"agentProviders":[{"id":"pi","name":"Pi Coding Agent","type":"pi","enabled":false}],"agents":[{"name":"Pi","providerId":"pi"}]}`
 	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("legacy enabled flag must stay loadable: %v", err)
-	}
-	if len(cfg.AgentProviders) != 1 || cfg.AgentProviders[0].LegacyEnabled != nil {
-		t.Fatalf("legacy flag must be cleared after load: %+v", cfg.AgentProviders)
-	}
-	if err := Save(path, cfg); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var saved struct {
-		AgentProviders []map[string]any `json:"agentProviders"`
-	}
-	if err := json.Unmarshal(data, &saved); err != nil {
-		t.Fatal(err)
-	}
-	if len(saved.AgentProviders) != 1 {
-		t.Fatalf("saved providers = %s", data)
-	}
-	if _, exists := saved.AgentProviders[0]["enabled"]; exists {
-		t.Fatalf("saved config must not contain the removed enabled flag: %s", data)
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), `unknown field "enabled"`) {
+		t.Fatalf("expected retired provider field to be rejected, got %v", err)
 	}
 }

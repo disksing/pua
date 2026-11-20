@@ -59,12 +59,6 @@ func defaultStallWatchdogPolicy() StallWatchdogPolicy {
 
 func resolveGenerationPolicy(value GenerationPolicyConfig) (GenerationPolicy, error) {
 	policy := defaultGenerationPolicy()
-	legacyEnabled := true
-	if value.Enabled != nil {
-		legacyEnabled = *value.Enabled
-	}
-	policy.BudgetEnabled = legacyEnabled
-	policy.InactivityEnabled = legacyEnabled
 	if value.BudgetEnabled != nil {
 		policy.BudgetEnabled = *value.BudgetEnabled
 	}
@@ -195,7 +189,7 @@ func (w *Workspace) EnsureResourceRuntime() (WorkspaceRuntimeConfig, error) {
 		if err != nil {
 			return err
 		}
-		if cfg.GenerationPolicy.Enabled != nil || cfg.GenerationPolicy.BudgetEnabled == nil || cfg.GenerationPolicy.MaxTurns == nil ||
+		if cfg.GenerationPolicy.BudgetEnabled == nil || cfg.GenerationPolicy.MaxTurns == nil ||
 			cfg.GenerationPolicy.MaxAccumulatedTurnMinutes == nil || cfg.GenerationPolicy.InactivityEnabled == nil ||
 			cfg.GenerationPolicy.MaxInactivityMinutes == nil {
 			cfg.GenerationPolicy = generationPolicyConfig(generationPolicy)

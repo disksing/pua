@@ -27,6 +27,23 @@ func (w *Workspace) HasCurrentTurnGuidance() (bool, error) {
 	return current, err
 }
 
+func (w *Workspace) RefreshWorkspaceGuidance() error {
+	if err := w.require(); err != nil {
+		return err
+	}
+	return withWorkspaceMutationLock(w.root, func() error {
+		path := filepath.Join(w.root, "AGENTS.md")
+		if err := requireRegularOrMissing(path); err != nil {
+			return err
+		}
+		language, err := workspaceLanguage(w.root)
+		if err != nil {
+			return err
+		}
+		return updateAgentsMDWithBlock(path, puaPromptBlock(language))
+	})
+}
+
 // RefreshTurnGuidance updates only managed instructions, preserving custom text.
 // It is called at new-protocol input boundaries, never to change an active Turn.
 func (w *Workspace) RefreshTurnGuidance(resourceID string) error {

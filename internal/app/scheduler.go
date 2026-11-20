@@ -187,7 +187,7 @@ func ensureSchedulerLocked(root, language string) (SchedulerConfig, error) {
 		}
 	}
 
-	if err := ensureResourceDocument(dir, schedulerMarkdownFile, defaultSchedulerMarkdown(language)); err != nil {
+	if err := createDocumentIfMissing(filepath.Join(dir, schedulerMarkdownFile), defaultSchedulerMarkdown(language)); err != nil {
 		return SchedulerConfig{}, err
 	}
 	agentsPath := filepath.Join(dir, "AGENTS.md")

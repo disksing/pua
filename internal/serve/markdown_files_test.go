@@ -165,13 +165,10 @@ func TestSpecSaveRequiresExplicitRouteAndEditorContext(t *testing.T) {
 func TestLegacyDocumentLinksReadMemoryAfterRetirement(t *testing.T) {
 	fixture := newMarkdownFileTestFixture(t)
 	body := "Historical brief\n\nHistory: source-123"
-	for dir, name := range map[string]string{fixture.root: "workspace.md", fixture.projectPath: "project.md", fixture.taskPath: "task.md"} {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+	for _, dir := range []string{fixture.root, fixture.projectPath, fixture.taskPath} {
+		if err := os.WriteFile(filepath.Join(dir, app.MemoryMarkdownFile), []byte(body), 0o644); err != nil {
 			t.Fatal(err)
 		}
-	}
-	if err := fixture.workspace.Migrate("en"); err != nil {
-		t.Fatal(err)
 	}
 	check := func(id, path, alias string) {
 		t.Helper()

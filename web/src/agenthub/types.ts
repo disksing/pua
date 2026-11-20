@@ -81,7 +81,6 @@ export interface MagpieConfig {
   enabled: boolean;
   serverUrl: string;
   refreshIntervalSeconds: number;
-  migratedFromOnWatch?: boolean;
 }
 
 export interface AgentHubConfig {

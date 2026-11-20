@@ -223,7 +223,6 @@
             {#if section === "general"}
               <section class="settings-card">
                 <header><div><h3>Magpie Integration</h3><p>Read cached quotas from Magpie on this computer.</p></div><label class="switch"><input type="checkbox" aria-label="Enable Magpie" disabled={!testedCurrentURL && !draft.magpie.enabled} checked={draft.magpie.enabled} onchange={(event) => mutate((next) => next.magpie.enabled = event.currentTarget.checked)} /><span></span></label></header>
-                {#if draft.magpie.migratedFromOnWatch}<p>The OnWatch refresh interval was carried over. Test the Magpie connection, then enable it.</p>{/if}
                 <label><span>Server URL</span><input value={draft.magpie.serverUrl} aria-invalid={Boolean(fieldError("serverUrl"))} oninput={(event) => {
                   testMessage = ""; testedURL = "";
                   mutate((next) => { next.magpie.serverUrl = event.currentTarget.value; next.magpie.enabled = false; });

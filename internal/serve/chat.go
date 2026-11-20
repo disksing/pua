@@ -8,7 +8,6 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -23,8 +22,6 @@ type chatRequest struct {
 	Position int              `json:"position,omitempty"`
 	ID       string           `json:"id"`
 	Text     string           `json:"text"`
-	Target   string           `json:"target"`
-	Seconds  int              `json:"seconds"`
 	Binding  app.AgentBinding `json:"binding"`
 }
 
@@ -247,7 +244,7 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 		writeError(w, err, 400)
 		return
 	}
-	agentOperation := operation == "publish" || operation == "dispatch" || operation == "notes" || operation == "timer"
+	agentOperation := operation == "publish" || operation == "notes"
 	if agentOperation != agent {
 		chatMu.Unlock()
 		writeError(w, errors.New("operation not available to this caller"), 403)
@@ -351,7 +348,7 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 		}
 	case "notes":
 		c.Notes = body.Text
-	case "dispatch", "timer", "binding":
+	case "binding":
 		err = errors.New("independent dialogue runtime has been retired")
 
 	default:
@@ -390,11 +387,6 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 }
 
 func (m *agentManager) reconcileWorkspaceChats(ctx context.Context, workspace serveWorkspace) error {
-	// Explicit migration policy: old Inbox contents are discarded, never
-	// interpreted as public chat or used to reconstruct a conversation.
-	if err := discardLegacyInbox(workspace.Path); err != nil {
-		return err
-	}
 	ws, err := app.OpenWorkspace(workspace.Path)
 	if err != nil {
 		return err
@@ -610,17 +602,4 @@ func (m *agentManager) handleChats(w http.ResponseWriter, r *http.Request, works
 	}
 	sort.SliceStable(entries, func(i, j int) bool { return entries[i].UpdatedAt > entries[j].UpdatedAt })
 	writeJSON(w, map[string]any{"chats": entries})
-}
-
-func discardLegacyInbox(root string) error {
-	paths, err := filepath.Glob(filepath.Join(workspacepath.ControlDir(root), "users", "*", "inbox.json"))
-	if err != nil {
-		return err
-	}
-	for _, path := range paths {
-		if err = os.Remove(path); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-	}
-	return nil
 }

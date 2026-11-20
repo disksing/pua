@@ -129,8 +129,9 @@ func TestAgentHubSettingsRoundTripsAgentHubConfigAndProviderCommand(t *testing.T
 		Version:        1,
 		AgentProviders: []agentHubConfiguredProvider{{ID: "codex", Name: "Codex", Type: "codex", Command: "codex"}},
 		Agents:         []agentHubConfiguredAgent{{Name: "Default", ProviderID: "codex", Options: map[string]string{"model": "gpt-test"}, Environment: map[string]string{"MODE": "test"}}},
-		OnWatch:        agentHubConfiguredOnWatch{ServerURL: "http://127.0.0.1:9211", AuthMode: "trusted_proxy", RefreshIntervalSeconds: 60},
+		Magpie:         agentHubConfiguredMagpie{Enabled: true, ServerURL: "http://127.0.0.1:9211", RefreshIntervalSeconds: 300},
 	}
+	wantMagpie := configured.Magpie
 	var saved agentHubConfiguredConfig
 	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -191,6 +192,9 @@ func TestAgentHubSettingsRoundTripsAgentHubConfigAndProviderCommand(t *testing.T
 	}
 	if len(saved.Agents) != 1 || saved.Agents[0].Name != "Worker" || saved.AgentProviders[0].Command != "/opt/homebrew/bin/codex" {
 		t.Fatalf("PUA did not save AgentHub config through the API: %+v", saved)
+	}
+	if saved.Magpie != wantMagpie {
+		t.Fatalf("saving agents changed Magpie settings: got %+v, want %+v", saved.Magpie, wantMagpie)
 	}
 
 	command := httptest.NewRequest(http.MethodPut, "/api/settings/agenthub/providers/codex", strings.NewReader(`{"command":"/usr/local/bin/codex"}`))

@@ -127,21 +127,17 @@ type agentHubConfiguredAgent struct {
 	Environment map[string]string `json:"environment,omitempty"`
 }
 
-type agentHubConfiguredOnWatch struct {
+type agentHubConfiguredMagpie struct {
 	Enabled                bool   `json:"enabled"`
 	ServerURL              string `json:"serverUrl"`
-	AuthMode               string `json:"authMode"`
-	Username               string `json:"username,omitempty"`
-	Password               string `json:"password"`
 	RefreshIntervalSeconds int    `json:"refreshIntervalSeconds"`
 }
 
 type agentHubConfiguredConfig struct {
-	Version         int                          `json:"version"`
-	AgentProviders  []agentHubConfiguredProvider `json:"agentProviders"`
-	Agents          []agentHubConfiguredAgent    `json:"agents"`
-	OnWatch         agentHubConfiguredOnWatch    `json:"onWatch"`
-	LegacyCompanion json.RawMessage              `json:"companion,omitempty"`
+	Version        int                          `json:"version"`
+	AgentProviders []agentHubConfiguredProvider `json:"agentProviders"`
+	Agents         []agentHubConfiguredAgent    `json:"agents"`
+	Magpie         agentHubConfiguredMagpie     `json:"magpie"`
 }
 
 type agentHubSource struct {

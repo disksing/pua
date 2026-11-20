@@ -252,6 +252,7 @@
     </div>
   {/if}
   {@render execution(activeRow ? runningChip : undefined, activeRow ? turnWorkingLabel(activeRow) : "", Boolean(statusRow?.block.turn?.closed))}
+  {#if activeRow}{@render turnDetails(activeRow)}{/if}
   {#if queue.length}
     <div class="queued-inputs" role="group" aria-label="Waiting messages">
       <span>Waiting · {queue.length}</span>
@@ -263,7 +264,6 @@
   {#each pendingBubbles as message (message.id)}
     <div class="chat-bubble-row" data-chat-row={`message:${message.id}`} data-queued-chat-message>{@render bubble(message)}</div>
   {/each}
-  {#if activeRow}{@render turnDetails(activeRow)}{/if}
 {/snippet}
 
 <div bind:this={root} class="shared-chat-stream public-messages" data-component-owner="event-timeline">

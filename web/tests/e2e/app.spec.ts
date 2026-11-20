@@ -3712,6 +3712,69 @@ for (const width of [1500, 440]) {
   });
 }
 
+for (const width of [1500, 440]) {
+  test(`expands the active Turn above Waiting at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 844 });
+    await installMockApi(page);
+    const generation = { ...resourceGeneration, status: "running" };
+    const [completed] = resourceTurnSummaries();
+    const running = {
+      reference: "ref-turn-stream", turnId: "turn-stream", closed: false, status: "active", triggerRole: "agent",
+      startedAt: new Date(Date.parse(now) + 60_000).toISOString(), eventCount: 2, startEventId: 101, lastEventId: 102, generation,
+    };
+    let waitingMessages = [{ messageId: "msg-waiting", role: "agent", text: "Queued work" }];
+    const resourceApi = "**/api/workspaces/ws-test/resources/project1.task1";
+    await page.route(`${resourceApi}/status`, route => json(route, {
+      generation, sessionState: "working", session: { id: "session-1", state: "running", currentTurnId: running.turnId },
+      waitingMessages,
+    }));
+    await page.route(`${resourceApi}/chat?*`, route => json(route, { id: "test-chat", open: true, epoch: 1, unreadCount: 0, messages: [] }));
+    await page.route(`${resourceApi}/history/turns?*`, route => json(route, {
+      segments: [{ generation, turns: [completed, running] }], page: { hasMore: false },
+    }));
+    await page.route(`${resourceApi}/history/turns/${running.reference}`, route => json(route, {
+      turn: running, latestEventId: running.lastEventId, items: [],
+    }));
+    const schema = "agenthub.semantic-events.v1";
+    const source = { eventId: running.lastEventId, time: running.startedAt, type: "message.assistant.delta", sessionId: "session-1", turnId: running.turnId };
+    await page.route(`${resourceApi}/events?*`, route => json(route, { schema, frames: [{
+      schema, cursor: source.eventId, mode: "replace", source, events: [
+        { ...source, id: "event-running", sourceEventId: source.eventId, index: 0, data: { text: "Running Turn output" } },
+      ],
+    }], page: { hasMore: false } }));
+    await page.route(`${resourceApi}/stream?*`, route => route.fulfill({ status: 204 }));
+    await page.goto("/w/ws-test/r/project1.task1");
+    const chat = page.locator("#chatTimeline");
+    const controls = chat.getByRole("group", { name: "Execution controls" });
+    const queue = chat.getByRole("group", { name: "Waiting messages" });
+    const activeChip = controls.getByRole("button", { name: "Turn · Agent · active", exact: true });
+    const activeDetails = chat.locator('[aria-label="Execution controls"] + .expanded-history');
+    const historyChip = chat.locator(`[data-turn-chip="gen-1:${completed.turnId}"]`);
+    const historyDetails = chat.locator(`[data-turn-chip="gen-1:${completed.turnId}"] + .expanded-history`);
+    await historyChip.getByRole("button").click();
+    await expect(historyDetails).toContainText("gen-1 baseline message 1");
+    await activeChip.click();
+    await expect(activeDetails).toContainText("Running Turn output");
+    await expect(chat.locator('.expanded-history + [aria-label="Waiting messages"]')).toBeVisible();
+    const [controlsBox, detailsBox, queueBox] = await Promise.all([
+      controls.boundingBox(), activeDetails.boundingBox(), queue.boundingBox(),
+    ]);
+    expect(controlsBox!.y + controlsBox!.height).toBeLessThanOrEqual(detailsBox!.y);
+    expect(detailsBox!.y + detailsBox!.height).toBeLessThanOrEqual(queueBox!.y);
+    await activeDetails.getByRole("button", { name: "Collapse turn" }).click();
+    await expect(activeChip).toHaveAttribute("aria-expanded", "false");
+    await expect(activeDetails).toHaveCount(0);
+    await expect(chat.locator('[aria-label="Execution controls"] + [aria-label="Waiting messages"]')).toBeVisible();
+    await expect(historyDetails).toBeVisible();
+
+    waitingMessages = [];
+    await page.reload();
+    await expect(queue).toHaveCount(0);
+    await activeChip.click();
+    await expect(activeDetails).toContainText("Running Turn output");
+  });
+}
+
 test("moves active Turn icons and durable pending user bubbles through the unified Chat", async ({ page }) => {
   test.setTimeout(120_000);
   await installMockApi(page);

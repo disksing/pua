@@ -55,6 +55,33 @@ func TestDoctorAcceptsHealthyOpenWorkspace(t *testing.T) {
 	}
 }
 
+func TestDoctorReportsMissingInvalidAndLegacyResourceDocuments(t *testing.T) {
+	_, root, _, _ := doctorTestWorkspace(t)
+	if err := os.Remove(filepath.Join(root, SpecMarkdownFile)); err != nil {
+		t.Fatal(err)
+	}
+	memoryPath := filepath.Join(root, MemoryMarkdownFile)
+	if err := os.Remove(memoryPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(memoryPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "workspace.md"), []byte("Old context"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	report, err := CheckWorkspace(root, DoctorOptions{BindingCatalog: healthyDoctorCatalog()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	codes := issueCodes(report)
+	for _, code := range []string{"markdown_file_missing", "markdown_file_invalid", "legacy_document_pending"} {
+		if codes[code] != 1 {
+			t.Fatalf("expected one %s issue, got %#v", code, codes)
+		}
+	}
+}
+
 func TestDoctorLocalizesHumanReadableIssuesWithoutChangingCodes(t *testing.T) {
 	root := t.TempDir()
 	if _, err := Initialize(root, "zh-CN"); err != nil {

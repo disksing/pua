@@ -227,7 +227,7 @@ func (w *Workspace) Migrate(language string) error {
 	if err := w.require(); err != nil {
 		return err
 	}
-	err := withWorkspaceMutationLock(w.root, func() error { return w.migrate(language) })
+	err := withWorkspaceMutationLock(w.root, func() error { return w.refreshWorkspaceMaintenance(language) })
 	if err != nil {
 		var apiErr *APIError
 		if errors.As(err, &apiErr) {
@@ -238,29 +238,26 @@ func (w *Workspace) Migrate(language string) error {
 	return nil
 }
 
-func (w *Workspace) migrate(language string) error {
-	if err := w.require(); err != nil {
-		return err
-	}
+func (w *Workspace) refreshWorkspaceMaintenance(language string) error {
 	config, err := readWorkspaceConfig(w.root)
 	if err != nil {
-		return &APIError{Operation: "migrate Workspace", Kind: "workspace", Workspace: w.root, Err: err}
+		return err
 	}
 	if strings.TrimSpace(language) == "" {
 		language = config.Language
 	}
 	language, err = normalizeLanguage(language)
 	if err != nil {
-		return &APIError{Operation: "migrate Workspace", Kind: "workspace", Workspace: w.root, Err: err}
+		return err
 	}
 	if err := ensureWorkspaceWiki(w.root, language); err != nil {
-		return &APIError{Operation: "migrate Workspace", Kind: "workspace", Workspace: w.root, Err: err}
+		return err
 	}
 	if err := updateAgentsMD(filepath.Join(w.root, "AGENTS.md"), language); err != nil {
-		return &APIError{Operation: "migrate Workspace", Kind: "workspace", Workspace: w.root, Err: err}
+		return err
 	}
 	if err := refreshResourceGuidance(w.root, language); err != nil {
-		return &APIError{Operation: "migrate Workspace", Kind: "workspace", Workspace: w.root, Err: err}
+		return err
 	}
 	if _, err := ensureSchedulerLocked(w.root, language); err != nil {
 		return &APIError{Operation: "migrate Workspace", Kind: "scheduler", Workspace: w.root, Err: err}
@@ -269,7 +266,7 @@ func (w *Workspace) migrate(language string) error {
 	if strings.TrimSpace(config.InstanceID) == "" {
 		config.InstanceID, err = newWorkspaceInstanceID()
 		if err != nil {
-			return &APIError{Operation: "migrate Workspace", Kind: "workspace", Workspace: w.root, Err: err}
+			return err
 		}
 	}
 	if strings.TrimSpace(config.AgentBinding.Name) == "" {
@@ -277,21 +274,18 @@ func (w *Workspace) migrate(language string) error {
 	}
 	generationPolicy, err := resolveGenerationPolicy(config.GenerationPolicy)
 	if err != nil {
-		return &APIError{Operation: "migrate Workspace", Kind: "workspace", Workspace: w.root, Err: err}
+		return err
 	}
 	config.GenerationPolicy = generationPolicyConfig(generationPolicy)
 	stallWatchdogPolicy, err := resolveStallWatchdogPolicy(config.StallWatchdogPolicy)
 	if err != nil {
-		return &APIError{Operation: "migrate Workspace", Kind: "workspace", Workspace: w.root, Err: err}
+		return err
 	}
 	config.StallWatchdogPolicy = stallWatchdogPolicyConfig(stallWatchdogPolicy)
 	if err := writeWorkspaceConfig(w.root, config); err != nil {
-		return &APIError{Operation: "migrate Workspace", Kind: "workspace", Workspace: w.root, Err: err}
+		return err
 	}
-	if err := ensureOpenResourceBindings(w.root, normalizeResourceDefaults(config.ResourceDefaults)); err != nil {
-		return &APIError{Operation: "migrate Workspace", Kind: "workspace", Workspace: w.root, Err: err}
-	}
-	return nil
+	return ensureOpenResourceBindings(w.root, normalizeResourceDefaults(config.ResourceDefaults))
 }
 
 // Root returns the canonical absolute root selected when the handle was

@@ -4,7 +4,7 @@ Workspace、Project、Task 的创建输入写入 `spec.md`，Agent 的上下文�
 
 ## 已迁移的数据
 
-旧正文导入已从日常维护命令移除。若 `pua doctor` 报告 `legacy_document_pending`，先在副本检查旧文档、暂存文件和现有 Memory 来源块，再按需手动合并。旧版迁移流程可从对应旧版本的本文查阅。
+`pua doctor` 用 `markdown_file_missing` 提示文档缺失，用 `markdown_file_invalid` 提示文档路径不合法。若报告 `legacy_document_pending`，先在副本检查旧文档、暂存文件和现有 Memory 来源块，再按需手动合并。旧正文导入流程可从 Git 历史查阅。
 
 Web 预览和原文下载将旧 `workspace.md`、`project.md` 和 `task.md` 路径只读映射至当前 Memory。命令行应直接读取 `memory.md`。
 

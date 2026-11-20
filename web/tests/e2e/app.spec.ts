@@ -3656,6 +3656,104 @@ test("moves active Turn icons and durable pending user bubbles through the unifi
   await expect(chat.locator("[data-turn-chip]")).toHaveCount(6);
 });
 
+for (const { mode, width } of [{ mode: "recovering", width: 1500 }, { mode: "starting", width: 440 }]) {
+  test(`hides empty Session event rows while ${mode} in unified Chat at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 820 });
+    await installMockApi(page);
+    const stamp = (second: number) => new Date(Date.parse(now) + second * 1000).toISOString();
+    const generation = {
+      generation: 34, generationId: "startup-34", status: mode, createdAt: stamp(0),
+      turnTotals: { count: 2, executionMs: 61000, latestEventId: 25 },
+    };
+    const firstTurn = {
+      reference: "startup-first", turnId: "first", triggerRole: "system", triggerPreview: "System task",
+      startedAt: stamp(13), startEventId: 13, lastEventId: 14, closed: true, status: "completed", eventCount: 2,
+    };
+    const notification = {
+      reference: "startup-notify", turnId: "notification", triggerRole: "system", triggerType: "chat_notification",
+      startedAt: stamp(20), startEventId: 20, lastEventId: 25, closed: false, status: "active", eventCount: 6,
+    };
+    const prefix: Array<[number, string?, Record<string, unknown>?]> = [
+      [1, "session.created"], [2, "session.state", { state: "starting" }], [3],
+      [4], [5], [6], [7], [8], [9, "session.provider"], [10, "session.state", { state: "ready" }], [11], [12],
+    ];
+    const diagnostics: typeof prefix = [
+      [15, "provider.metadata"],
+      [16, "session.state", { state: "stopped", reason: "startup_error" }],
+      [17, "provider.error", { message: "Fixture provider diagnostic" }],
+      [19, "provider.metadata"],
+    ];
+    const schema = "agenthub.semantic-events.v1";
+    const frame = ([id, type, data]: typeof prefix[number]) => {
+      const source = { sessionId: "startup-session", time: stamp(id) };
+      const events = type ? [{ ...source, id: `event-${id}`, sourceEventId: id, index: 0, type, data }] : [];
+      return `id: ${id}\ndata: ${JSON.stringify({ schema, cursor: id, source, events })}\n\n`;
+    };
+    let published = false;
+    const cursors: string[] = [];
+    const head = () => ({ ...generation, status: published ? "running" : mode });
+    await page.route("**/api/workspaces/ws-test/resources/project1.task1/**", async route => {
+      const request = route.request();
+      const url = new URL(request.url());
+      const op = url.pathname.split("/project1.task1/")[1];
+      if (op === "status") return json(route, {
+        generation: head(), sessionState: published ? "working" : mode,
+        session: { id: "startup-session", state: published ? "running" : "starting", currentTurnId: published ? notification.turnId : undefined },
+        waitingMessages: [],
+      });
+      if (op === "chat") return json(route, { id: "startup-chat", open: true, epoch: 1, unreadCount: 0, messages: [] });
+      if (op === "history/turns") {
+        const cursor = url.searchParams.get("cursor");
+        if (cursor) cursors.push(cursor);
+        const turns = [{ ...(cursor ? firstTurn : notification), generation: head() }];
+        return json(route, { segments: published ? [{ generation: head(), turns }] : [],
+          page: { hasMore: published && !cursor, nextCursor: published && !cursor ? "startup-before" : "" } });
+      }
+      if (op === "history/turns/startup-first") return json(route, {
+        turn: { ...firstTurn, generation: head() }, latestEventId: firstTurn.lastEventId,
+        items: [{ type: "message", role: "system", text: "Real System Turn detail", startEventId: 13 }],
+      });
+      if (op === "stream") {
+        const body = published ? diagnostics.map(frame).join("") : prefix.map(frame).join("") +
+          `event: pua.notice\ndata: ${JSON.stringify({ data: { text: "Startup frames received" } })}\n\n`;
+        return route.fulfill({ status: 200, contentType: "text/event-stream", body: `retry: 1000\n\n${body}` });
+      }
+      return route.fallback();
+    });
+
+    await page.goto("/w/ws-test/r/project1.task1");
+    const chat = page.locator("#chatTimeline");
+    const chips = chat.locator("[data-turn-chip]");
+    await expect(chat.getByText("Startup frames received")).toBeVisible();
+    await expect(chips).toHaveCount(0);
+
+    published = true;
+    const marker = chat.locator('[data-generation-id="startup-34"]');
+    const controls = chat.getByRole("group", { name: "Execution controls" });
+    const system = chat.getByRole("button", { name: "Turn · System", exact: true });
+    await expect(controls.getByRole("button", { name: "Turn · User notification · active", exact: true })).toBeVisible();
+    await expect(controls).toContainText("Agent is updating you");
+    await expect(chips).toHaveCount(2);
+    await system.click();
+    const details = chat.getByRole("region", { name: "System Turn details" });
+    await expect(details).toContainText("Session stopped · startup error");
+    await expect(details).toContainText("Fixture provider diagnostic");
+    await details.getByRole("button", { name: "Collapse turn" }).click();
+
+    await expect(marker.locator("[data-generation-turn-count]")).toHaveText("2 Turns");
+    await expect(marker.locator("[data-generation-duration]")).toHaveText("1m 1s execution");
+    await chat.getByRole("button", { name: "Load older Turns", exact: true }).click();
+    await expect.poll(() => cursors).toEqual(["startup-before"]);
+    await expect(marker).toHaveCount(1);
+    await expect(marker.locator("[data-generation-turn-count]")).toHaveText("2 Turns");
+    await expect(marker.locator("[data-generation-duration]")).toHaveText("1m 1s execution");
+    await expect(chips).toHaveCount(3);
+    await expect(chips.first()).toHaveAttribute("data-turn-chip", "startup-34:first");
+    await system.first().click();
+    await expect(details).toContainText("Real System Turn detail");
+  });
+}
+
 test("keeps whole-Generation statistics and hands the sticky marker across three paged sections", async ({ page }) => {
   test.setTimeout(60_000);
   await installMockApi(page);

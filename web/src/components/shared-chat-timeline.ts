@@ -1,4 +1,5 @@
 import type { ConversationBlock, ResourceHistoryGeneration, TimelineItem, WaitingMessage } from "./models";
+import { projectConversationEvents } from "./timeline-events";
 
 export interface SharedChatMessage {
   id: string;
@@ -79,8 +80,9 @@ export function timelineSections(messages: SharedChatMessage[], blocks: Conversa
   const generations = new Map<string, GenerationBoundary>();
   const rows: (TimelineRow | GenerationBoundary)[] = messages.map(message => ({ kind: "message", key: `message:${message.id}`, time: timestamp(message.createdAt), message }));
   for (const block of blocks) {
-    const firstEvent = block.events?.[0];
-    if (!block.turn && block.kind !== "gap" && (!firstEvent || firstEvent.turnId)) continue;
+    const events = block.events || [];
+    const firstEvent = events[0];
+    if (!block.turn && block.kind !== "gap" && (!firstEvent || firstEvent.turnId || !projectConversationEvents(events).length)) continue;
     const input = byInput.get(block.turn?.triggerMessageId || "");
     const time = timestamp(block.turn?.startedAt || firstEvent?.time || block.generation.createdAt);
     const id = block.generation.generationId;

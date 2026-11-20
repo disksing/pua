@@ -3361,7 +3361,7 @@ test("expanded execution Turns stay live and read-only alongside the Chat compos
   await page.getByRole("button",{name:"Close chat",exact:true}).click();
   await expect(page.getByText("Public conversation remains separate",{exact:true})).toBeVisible();
   await expect(details.getByRole("textbox",{name:"Chat message"})).toHaveCount(0);
-  await turnChip.click();
+  await expect(turnChip).toHaveAttribute("aria-expanded","true");
   await expect(details.locator(".expanded-history")).toBeVisible();
   await page.getByRole("button",{name:"Reopen chat",exact:true}).click();
   await expect(page.getByText("Public conversation remains separate",{exact:true})).toBeVisible();
@@ -3446,9 +3446,9 @@ test("unifies mixed Turn icons, Generation markers, shared messages and waiting 
   await expect(chat.getByRole("tooltip")).toHaveCSS("position", "fixed");
   expect((await chat.getByRole("tooltip").textContent())!.length).toBeLessThan(550);
   await agentChip.click();
-  await expect(allDetails).toContainText("agent detail");
-  await expect(allDetails.getByText("Project spec", { exact: true })).toBeVisible();
-  await allDetails.getByRole("button", { name: "Collapse turn" }).click();
+  const agentDetails = allDetails.filter({ hasText: "agent detail" });
+  await expect(agentDetails.getByText("Project spec", { exact: true })).toBeVisible();
+  await agentDetails.getByRole("button", { name: "Collapse turn" }).click();
   await expect(agentChip).toBeFocused();
   await expect(agentChip).toHaveAttribute("aria-expanded", "false");
 
@@ -3480,7 +3480,7 @@ test("unifies mixed Turn icons, Generation markers, shared messages and waiting 
   await expect(chat.getByRole("button", { name: "Load older Turns", exact: true })).toHaveCount(0);
   pending = [...waiting.slice(1), { messageId: "mail-new", role: "system", sender: { id: "PUA" }, text: "New waiting preview" }];
   await expect(chat.getByRole("button", { name: "Waiting · System · PUA" })).toBeVisible();
-  await chat.getByRole("button", { name: "Turn · System", exact: true }).last().click();
+  await expect(chat.getByRole("button", { name: "Turn · System", exact: true }).last()).toHaveAttribute("aria-expanded", "true");
   await expect(allDetails).toContainText("next detail");
   await allDetails.getByRole("button", { name: "Collapse turn" }).click();
   await chat.getByRole("button", { name: "Reopen chat" }).click();
@@ -3527,6 +3527,101 @@ test("unifies mixed Turn icons, Generation markers, shared messages and waiting 
   await expect(chat.locator("article")).toHaveCount(3);
   await expect(chat.getByRole("textbox", { name: "Chat message" })).toBeVisible();
 });
+
+for (const width of [1500, 440]) {
+  test(`follows the latest Turn with Chat closed at ${width}px`, async ({ page }) => {
+    test.setTimeout(90_000);
+    await page.setViewportSize({ width, height: 844 });
+    await installMockApi(page);
+    const generation = { generation: 1, generationId: "follow", status: "idle", createdAt: now };
+    const sessionId = "follow-session";
+    const makeTurn = (turnId: string, startEventId: number, closed: boolean) => ({
+      reference: `ref-${turnId}`, turnId, closed, status: closed ? "completed" : "active",
+      startedAt: new Date(Date.parse(now) + startEventId * 1000).toISOString(),
+      startEventId, lastEventId: startEventId + 1, eventCount: 2, triggerRole: "system", generation,
+    });
+    const turns = [makeTurn("older", 1, true), makeTurn("initial", 10, true)];
+    const schema = "agenthub.semantic-events.v1";
+    let open = false;
+    let liveEventId = 0;
+    let streamedEventId = 0;
+    const frame = (turn: typeof turns[number], eventId: number, text: string) => {
+      const type = "message.assistant.delta";
+      const source = { eventId, type, sessionId, turnId: turn.turnId, time: turn.startedAt };
+      return { schema, cursor: eventId, mode: "replace", source, events: [
+        { ...source, id: `event-${eventId}`, sourceEventId: eventId, index: 0, data: { role: "assistant", text } },
+      ] };
+    };
+    await page.route("**/api/workspaces/ws-test/resources/project1.task1/**", async route => {
+      const request = route.request(), url = new URL(request.url());
+      const op = url.pathname.split("/project1.task1/")[1];
+      const latest = turns.at(-1)!;
+      const state = latest.closed ? "idle" : "running";
+      if (op === "status") return json(route, {
+        generation: { ...generation, status: state, turnNumber: turns.length },
+        sessionState: latest.closed ? "idle" : "working",
+        session: { id: sessionId, state, currentTurnId: latest.closed ? undefined : latest.turnId },
+        waitingMessages: [],
+      });
+      if (op === "chat/open") open = true;
+      if (op === "chat" || op === "chat/open") return json(route, {
+        id: "follow-chat", open, epoch: open ? 1 : 0, unreadCount: 0, messages: [],
+      });
+      if (op === "history/turns") return json(route, { segments: [{ generation, turns }], page: { hasMore: false } });
+      const turn = turns.find(candidate => op === `history/turns/${candidate.reference}`);
+      if (turn) return json(route, { turn, latestEventId: turn.lastEventId, items: [
+        { type: "message", role: "assistant", text: `${turn.turnId} detail`, startEventId: turn.lastEventId },
+      ] });
+      if (op === "events") return json(route, { schema, frames: [frame(latest, latest.startEventId + 1, `${latest.turnId} detail`)], page: { hasMore: false } });
+      if (op === "stream") {
+        let data = "";
+        if (liveEventId > streamedEventId) {
+          streamedEventId = liveEventId;
+          data = `id: ${liveEventId}\ndata: ${JSON.stringify(frame(latest, liveEventId, `Live update ${liveEventId}`))}\n\n`;
+        }
+        return route.fulfill({ status: 200, contentType: "text/event-stream", body: `retry: 200\n\n${data}` });
+      }
+      return route.fallback();
+    });
+    await page.goto("/w/ws-test/r/project1.task1");
+    const chat = page.locator("#chatTimeline");
+    const details = chat.locator(".expanded-history");
+    const chip = (turnId: string) => chat.locator(`[data-turn-chip="follow:${turnId}"] button`);
+    await expect(details).toHaveText([/initial detail/], { timeout: 15_000 });
+    await expect(chip("older")).toHaveAttribute("aria-expanded", "false");
+    await chip("older").click();
+    await expect(details).toHaveText([/older detail/, /initial detail/]);
+
+    const running = makeTurn("running", 20, false);
+    turns.push(running);
+    await expect(details).toHaveText([/older detail/, /running detail/]);
+    await expect(chip("initial")).toHaveAttribute("aria-expanded", "false");
+    liveEventId = 22;
+    await expect(details.last()).toContainText("Live update 22");
+    expect(await chat.evaluate(element => element.scrollWidth)).toBeLessThanOrEqual(width);
+
+    await details.last().getByRole("button", { name: "Collapse turn" }).click();
+    running.closed = true;
+    running.status = "completed";
+    await expect(chip("running")).toHaveAccessibleName("Turn · System");
+    await expect(chip("running")).toHaveAttribute("aria-expanded", "false");
+    await expect(details).toHaveText([/older detail/]);
+
+    turns.push(makeTurn("next", 30, true));
+    await expect(details).toHaveText([/older detail/, /next detail/]);
+    await chip("next").click();
+    await expect(details).toHaveText([/older detail/]);
+    await page.getByRole("tab", { name: "Spec", exact: true }).click();
+    await page.getByRole("tab", { name: "Chat", exact: true }).click();
+    await expect(details).toHaveText([/older detail/, /next detail/]);
+
+    await chat.getByRole("button", { name: "Open chat", exact: true }).click();
+    await expect(chat.getByRole("textbox", { name: "Chat message" })).toBeVisible();
+    turns.push(makeTurn("chat-open", 40, true));
+    await expect(chip("chat-open")).toHaveAttribute("aria-expanded", "false");
+    await expect(details).toHaveText([/older detail/]);
+  });
+}
 
 test("moves active Turn icons and durable pending user bubbles through the unified Chat", async ({ page }) => {
   test.setTimeout(120_000);

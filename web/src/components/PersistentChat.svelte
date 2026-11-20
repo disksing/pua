@@ -302,7 +302,8 @@
         </div>
       {/if}
       {#key identity}
-        <SharedChatTimeline {model} {visible} {status} {messages} queuedMessages={chat?.queuedMessages} {execution} {followTail} onOpenFile={openLinkedFile} onInspect={() => followTail = false}>
+        <SharedChatTimeline {model} {visible} {status} {messages} queuedMessages={chat?.queuedMessages}
+          followLatestTurn={chat?.open === false} {execution} {followTail} onOpenFile={openLinkedFile} onInspect={() => followTail = false}>
           {#snippet bubble(message)}
           <article class:own-message={message.role === "user" && message.sender === userName}>
             <small class="message-meta"><strong>{message.role === "user" ? (message.sender || "User") : (message.sender?.trim() || "Agent")}</strong> <time datetime={message.createdAt}>{new Date(message.createdAt).toLocaleString()}</time></small>

@@ -13,12 +13,13 @@
   import { captureChatAnchor, historyItem, queueSource, timelineSections, turnSource, turnWorkingLabel, type HistoryRow, type SharedChatMessage } from "./shared-chat-timeline";
   import type { ConversationBlock, DetailPanelModel, FileTreeModel, ResourceMessageStatus, TimelineItem } from "./models";
 
-  let { model, visible, status, messages, queuedMessages, execution, followTail, bubble, empty, onOpenFile, onInspect }: {
+  let { model, visible, status, messages, queuedMessages, followLatestTurn, execution, followTail, bubble, empty, onOpenFile, onInspect }: {
     model: DetailPanelModel;
     visible: boolean;
     status: ResourceMessageStatus | null;
     messages: SharedChatMessage[];
     queuedMessages?: SharedChatMessage[];
+    followLatestTurn: boolean;
     execution: Snippet<[Snippet | undefined, string, boolean]>;
     followTail: boolean;
     bubble: Snippet<[SharedChatMessage]>;
@@ -59,6 +60,9 @@
   const legacy = $derived(findLegacy(model.detail?.artifacts || []));
   const uid = $props.id();
   let expanded = $state(new Set<string>());
+  let autoExpanded = $state.raw<{ key: string; reference: string } | null>(null);
+  let lastFollowedKey = "";
+  const latestTurn = $derived(snapshot.blocks.filter(block => block.turn).at(-1));
   let root: HTMLDivElement;
   let previousPending = new Set<string>();
 
@@ -67,6 +71,8 @@
     const next = status;
     untrack(() => {
       if (!available) {
+        lastFollowedKey = "";
+        collapseAutoExpanded();
         controller.activate("", "", null);
         return;
       }
@@ -74,6 +80,24 @@
       controller.activate(model.workspaceId, model.resourceId, next);
       if (!wasActive && snapshot.loaded && !model.detail?.archived) void controller.refresh();
     });
+  });
+
+  $effect(() => {
+    if (!visible) return;
+    const latest = followLatestTurn ? latestTurn : undefined;
+    if (!followLatestTurn) {
+      lastFollowedKey = "";
+      untrack(collapseAutoExpanded);
+    } else if (latest?.turn && latest.key !== lastFollowedKey) {
+      const { key, turn } = latest;
+      lastFollowedKey = key;
+      untrack(() => {
+        collapseAutoExpanded();
+        if (expanded.has(key)) return;
+        autoExpanded = { key, reference: turn.reference };
+        void controller.expandTurn(turn.reference);
+      });
+    }
   });
 
   $effect.pre(() => {
@@ -130,17 +154,31 @@
     if (root.isConnected) restore();
   }
 
+  function isExpanded(key: string): boolean {
+    return autoExpanded?.key === key || expanded.has(key);
+  }
+
+  function collapseAutoExpanded() {
+    const reference = autoExpanded?.reference;
+    autoExpanded = null;
+    if (reference) controller.collapseTurn(reference);
+  }
+
   function toggle(block: ConversationBlock, button: HTMLButtonElement) {
     onInspect();
-    const next = new Set(expanded);
-    if (expanded.has(block.key)) {
-      next.delete(block.key);
-      if (block.turn) controller.collapseTurn(block.turn.reference);
+    if (autoExpanded?.key === block.key) {
+      collapseAutoExpanded();
     } else {
-      next.add(block.key);
-      if (block.turn) void controller.expandTurn(block.turn.reference);
+      const next = new Set(expanded);
+      if (expanded.has(block.key)) {
+        next.delete(block.key);
+        if (block.turn) controller.collapseTurn(block.turn.reference);
+      } else {
+        next.add(block.key);
+        if (block.turn) void controller.expandTurn(block.turn.reference);
+      }
+      expanded = next;
     }
-    expanded = next;
     button.focus({ preventScroll: true });
   }
 
@@ -162,7 +200,7 @@
 {#snippet turnChip(row: HistoryRow)}
   {@const block = row.block}
   {@const detailsId = `${uid}-${block.key}`}
-  {@const open = expanded.has(row.key)}
+  {@const open = isExpanded(row.key)}
   <div class="history-chip" data-timeline-key={row.key} data-turn-chip={row.key} data-history-input={block.turn?.triggerMessageId} data-chat-row={row.key}>
     <TimelineSourceButton source={turnSource(block, row.input)} {onInspect}
       status={activeRow?.key === row.key ? block.turn?.status : undefined}
@@ -171,7 +209,7 @@
 {/snippet}
 
 {#snippet turnDetails(row: HistoryRow)}
-  {#if expanded.has(row.key)}
+  {#if isExpanded(row.key)}
     {@const block = row.block}
     {@const detailsId = `${uid}-${block.key}`}
     {@const source = turnSource(block, row.input)}

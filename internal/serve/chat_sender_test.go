@@ -162,7 +162,7 @@ func TestChatSenderFollowsExplicitAndInheritedBindings(t *testing.T) {
 				if _, err := ws.SetResourceAgentBinding(task.ID, app.AgentBinding{Kind: "agent", Name: "Next Agent"}); err != nil {
 					t.Fatal(err)
 				}
-				chat, err := ensureChatLocked(workspace.Path, task.ID, "reader")
+				chat, err := ensureChatLocked(workspace.Path, task.ID)
 				if err != nil {
 					t.Fatal(err)
 				}

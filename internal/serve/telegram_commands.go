@@ -313,7 +313,7 @@ func (rt *telegramRuntime) openTopic(ctx context.Context, st *telegramState, use
 	lifecycle := chatLifecycleLock(rt.workspace.Path, sharedChatID(resource))
 	lifecycle.Lock()
 	chatMu.Lock()
-	c, err := ensureChatLocked(rt.workspace.Path, resource, user)
+	c, err := ensureChatLocked(rt.workspace.Path, resource)
 	if err == nil {
 		if !c.Open {
 			if !initial && !rebind && !explicitResume {

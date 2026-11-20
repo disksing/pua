@@ -3,19 +3,16 @@ package serve
 import (
 	"bytes"
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
-	"path/filepath"
+	"os"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/disksing/pua/internal/app"
-	"github.com/disksing/pua/internal/workspacepath"
 )
 
 type chatRequest struct {
@@ -44,61 +41,33 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 	if len(parts) > 0 {
 		operation = parts[0]
 	}
+	if operation == "publish" || operation == "notes" || r.Header.Get("X-PUA-Chat-Token") != "" ||
+		r.Header.Get("X-PUA-Chat-Generation") != "" || r.Header.Get("X-PUA-Chat") != "" {
+		writeError(w, errors.New("explicit Chat replies and Notes have been retired"), http.StatusGone)
+		return
+	}
+	if operation == "runtime" {
+		m.handleLegacyChatRuntime(w, r, workspace, resourceID, parts[1:])
+		return
+	}
 	var pageLimit int
-	var before, after string
-	if operation != "runtime" {
-		before, after = r.URL.Query().Get("before"), r.URL.Query().Get("after")
-		if rawLimit := r.URL.Query().Get("limit"); rawLimit != "" {
-			pageLimit, err = strconv.Atoi(rawLimit)
-			if err != nil || pageLimit < 1 || pageLimit > 100 {
-				writeError(w, errors.New("chat limit must be between 1 and 100"), 400)
-				return
-			}
-		}
-		if (before != "" && after != "") || (pageLimit == 0 && (before != "" || after != "")) ||
-			(r.Method != http.MethodGet && (before != "" || after != "")) {
-			writeError(w, errors.New("invalid chat page cursor"), 400)
+	before, after := r.URL.Query().Get("before"), r.URL.Query().Get("after")
+	if rawLimit := r.URL.Query().Get("limit"); rawLimit != "" {
+		pageLimit, err = strconv.Atoi(rawLimit)
+		if err != nil || pageLimit < 1 || pageLimit > 100 {
+			writeError(w, errors.New("chat limit must be between 1 and 100"), 400)
 			return
 		}
 	}
-	agent := r.Header.Get("X-PUA-Chat-Token") != ""
-	var user string
-	var identity resourceChat
-	if agent {
-		chatID := r.Header.Get("X-PUA-Chat")
-		if chatID == "" {
-			chatID = sharedChatID(resourceID)
-		}
-		c, loadErr := loadDialogue(workspace.Path, dialoguePrefix+chatID)
-		if loadErr != nil || c.ResourceID != normalizedResourceID(resourceID) {
-			writeError(w, errors.New("invalid chat identity"), 403)
-			return
-		}
-		identity = c
-		if c.Version < 4 {
-			user = c.User
-			ws, openErr := app.OpenWorkspace(workspace.Path)
-			if openErr != nil {
-				writeError(w, openErr, 500)
-				return
-			}
-			if _, userErr := ws.User(user); userErr != nil {
-				writeError(w, errors.New("chat user no longer exists"), 403)
-				return
-			}
-		}
-	} else {
-		// Native EventSource cannot set X-PUA-User. Accept the selected user
-		// only on this read-only stream, with the same validation as headers.
-		if r.Method == http.MethodGet && len(parts) == 2 && parts[0] == "runtime" && parts[1] == "stream" && r.Header.Get(workspaceUserHeader) == "" {
-			r = r.Clone(r.Context())
-			r.Header.Set(workspaceUserHeader, r.URL.Query().Get("user"))
-		}
-		user, err = m.server.workspaceUserName(r, workspace.Path)
-		if err != nil {
-			writeError(w, err, 400)
-			return
-		}
+	if (before != "" && after != "") || (pageLimit == 0 && (before != "" || after != "")) ||
+		(r.Method != http.MethodGet && (before != "" || after != "")) {
+		writeError(w, errors.New("invalid chat page cursor"), 400)
+		return
+	}
+	user, err := m.server.workspaceUserName(r, workspace.Path)
+	if err != nil {
+		writeError(w, err, 400)
+		return
 	}
 	noticeWorkID := ""
 	noticeBoundary := false
@@ -111,38 +80,20 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 		defer lifecycle.Unlock()
 	}
 	chatMu.Lock()
-	if !agent {
-		ws, openErr := app.OpenWorkspace(workspace.Path)
-		if openErr == nil {
-			_, openErr = ws.User(user)
-		}
-		if openErr != nil {
-			chatMu.Unlock()
-			writeError(w, errors.New("chat user no longer exists"), 400)
-			return
-		}
+	ws, openErr := app.OpenWorkspace(workspace.Path)
+	if openErr == nil {
+		_, openErr = ws.User(user)
 	}
-	c, err := ensureChatLocked(workspace.Path, resourceID, user)
+	if openErr != nil {
+		chatMu.Unlock()
+		writeError(w, errors.New("chat user no longer exists"), 400)
+		return
+	}
+	c, err := ensureChatLocked(workspace.Path, resourceID)
 	if err != nil {
 		chatMu.Unlock()
 		writeError(w, err, 500)
 		return
-	}
-	if agent {
-		token := c.Token
-		if identity.ID != c.ID {
-			source, found := c.LegacySources[identity.ID]
-			if !found || !source.Open || source.User != user {
-				token = ""
-			} else {
-				token = source.Token
-			}
-		}
-		if !c.Open || archived || token == "" || r.Header.Get("X-PUA-Chat-Generation") != "" || subtle.ConstantTimeCompare([]byte(token), []byte(r.Header.Get("X-PUA-Chat-Token"))) != 1 {
-			chatMu.Unlock()
-			writeError(w, errors.New("chat is closed or reply capability has expired"), 409)
-			return
-		}
 	}
 	if resourceID == "workspace" && !c.Open {
 		c.open()
@@ -153,51 +104,8 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 		writeError(w, err, 500)
 		return
 	}
-	if operation == "runtime" {
-		chatMu.Unlock()
-		if r.Method != http.MethodGet && !(len(parts) == 2 && parts[1] == "read") {
-			writeError(w, errors.New("legacy dialogue runtime is read-only"), 403)
-			return
-		}
-		if len(parts) < 2 {
-			http.NotFound(w, r)
-			return
-		}
-		legacyAddress := c.address()
-		legacyID := chatID(resourceID, user)
-		if _, found := c.LegacySources[legacyID]; found {
-			legacyAddress = dialoguePrefix + legacyID
-		}
-		switch parts[1] {
-		case "read":
-			m.server.handleSessionRead(w, r, workspace.Path, legacyAddress)
-		case "history":
-			m.handleResourceHistory(w, r, workspaceID, legacyAddress, parts[2:])
-		case "status":
-			m.handleResourceStatus(w, r, workspaceID, legacyAddress)
-		case "events":
-			m.handleResourceEvents(w, r, workspaceID, legacyAddress)
-		case "stream":
-			m.handleResourceStream(w, r, workspaceID, legacyAddress)
-		case "approval":
-			m.handleResourceApproval(w, r, workspaceID, legacyAddress)
-		case "turn":
-			if len(parts) == 3 && parts[2] == "end" {
-				m.handleResourceEndTurn(w, r, workspaceID, legacyAddress)
-			} else {
-				http.NotFound(w, r)
-			}
-		default:
-			http.NotFound(w, r)
-		}
-		return
-	}
 	if r.Method == http.MethodGet {
 		chatMu.Unlock()
-		if operation == "notes" && agent {
-			writeJSON(w, map[string]string{"text": c.Notes})
-			return
-		}
 		if operation != "" {
 			http.NotFound(w, r)
 			return
@@ -242,12 +150,6 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 	if err = decoder.Decode(&body); err != nil {
 		chatMu.Unlock()
 		writeError(w, err, 400)
-		return
-	}
-	agentOperation := operation == "publish" || operation == "notes"
-	if agentOperation != agent {
-		chatMu.Unlock()
-		writeError(w, errors.New("operation not available to this caller"), 403)
 		return
 	}
 	previousOpen := c.Open
@@ -299,55 +201,6 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 		return
 	case "messages":
 		err = c.appendUserInput(body.ID, body.Text, user)
-	case "publish":
-		works, workErr := loadTurnWork(workspace.Path, resourceID)
-		if workErr != nil {
-			err = workErr
-			break
-		}
-		for _, work := range works.Works {
-			if work.Context.ChatVisible && work.Context.ChatEpoch == c.Epoch && work.TurnID != "" && !work.OutputDone {
-				err = errors.New("this Turn publishes ordinary text automatically; do not call chat publish")
-				break
-			}
-		}
-		if err != nil {
-			break
-		}
-		publishID := body.ID
-		if identity.ID != c.ID {
-			// Preserve retries from a pre-migration capability even when IDs
-			// from different users collided during the merge.
-			matched := false
-			for _, message := range c.Messages {
-				if (message.LegacyChatID == identity.ID && message.LegacyID == body.ID) ||
-					(message.PublishOrigin == identity.ID && message.ClientID == body.ID) {
-					body.ID = message.ID
-					matched = true
-					break
-				}
-			}
-			if !matched {
-				for _, message := range c.Messages {
-					if message.ID == body.ID && message.LegacyChatID != identity.ID {
-						body.ID = "legacy-" + chatID(identity.ID, body.ID)
-						break
-					}
-				}
-			}
-		}
-		previousLength := len(c.Messages)
-		if strings.HasPrefix(body.ID, "auto-") {
-			err = errors.New("auto- message IDs are reserved for Turn output")
-			break
-		}
-		err = c.appendMessage(body.ID, "agent", body.Text)
-		if err == nil && identity.ID != c.ID && len(c.Messages) > previousLength {
-			c.Messages[len(c.Messages)-1].PublishOrigin = identity.ID
-			c.Messages[len(c.Messages)-1].ClientID = publishID
-		}
-	case "notes":
-		c.Notes = body.Text
 	case "binding":
 		err = errors.New("independent dialogue runtime has been retired")
 
@@ -386,6 +239,54 @@ func (m *agentManager) handleChat(w http.ResponseWriter, r *http.Request, worksp
 	writeJSON(w, page)
 }
 
+func (m *agentManager) handleLegacyChatRuntime(w http.ResponseWriter, r *http.Request, workspace serveWorkspace, resourceID string, parts []string) {
+	if len(parts) == 0 {
+		http.NotFound(w, r)
+		return
+	}
+	operation := parts[0]
+	if r.Method != http.MethodGet && !(operation == "read" && len(parts) == 1 && r.Method == http.MethodPut) {
+		writeError(w, errors.New("legacy dialogue runtime is read-only"), 403)
+		return
+	}
+	if r.Method == http.MethodGet && operation == "stream" && len(parts) == 1 && r.Header.Get(workspaceUserHeader) == "" {
+		r = r.Clone(r.Context())
+		r.Header.Set(workspaceUserHeader, r.URL.Query().Get("user"))
+	}
+	user, err := m.server.workspaceUserName(r, workspace.Path)
+	if err != nil {
+		writeError(w, err, 400)
+		return
+	}
+	sharedID := sharedChatID(resourceID)
+	address := dialoguePrefix + sharedID
+	legacyID := chatID(resourceID, user)
+	shared, err := loadDialogue(workspace.Path, address)
+	if err != nil && !os.IsNotExist(err) {
+		writeError(w, err, 500)
+		return
+	}
+	if _, found := shared.LegacySources[legacyID]; found {
+		address = dialoguePrefix + legacyID
+	} else if _, err := loadDialogue(workspace.Path, dialoguePrefix+legacyID); err == nil {
+		address = dialoguePrefix + legacyID
+	}
+	switch operation {
+	case "read":
+		m.server.handleSessionRead(w, r, workspace.Path, address)
+	case "history":
+		m.handleResourceHistory(w, r, workspace.ID, address, parts[1:])
+	case "status":
+		m.handleResourceStatus(w, r, workspace.ID, address)
+	case "events":
+		m.handleResourceEvents(w, r, workspace.ID, address)
+	case "stream":
+		m.handleResourceStream(w, r, workspace.ID, address)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
 func (m *agentManager) reconcileWorkspaceChats(ctx context.Context, workspace serveWorkspace) error {
 	ws, err := app.OpenWorkspace(workspace.Path)
 	if err != nil {
@@ -400,11 +301,7 @@ func (m *agentManager) reconcileWorkspaceChats(ctx context.Context, workspace se
 		registered[user.Name] = true
 	}
 	chatMu.Lock()
-	if err = migrateExistingChatsLocked(workspace.Path); err != nil {
-		chatMu.Unlock()
-		return err
-	}
-	c, e := ensureChatLocked(workspace.Path, "workspace", "")
+	c, e := ensureChatLocked(workspace.Path, "workspace")
 	if e != nil {
 		chatMu.Unlock()
 		return e
@@ -417,7 +314,7 @@ func (m *agentManager) reconcileWorkspaceChats(ctx context.Context, workspace se
 		}
 	}
 	chatMu.Unlock()
-	paths, err := filepath.Glob(filepath.Join(workspacepath.ControlDir(workspace.Path), "chats", "*.json"))
+	paths, err := chatPaths(workspace.Path)
 	if err != nil {
 		return err
 	}
@@ -425,7 +322,7 @@ func (m *agentManager) reconcileWorkspaceChats(ctx context.Context, workspace se
 		if err = ctx.Err(); err != nil {
 			return err
 		}
-		id := strings.TrimSuffix(filepath.Base(path), ".json")
+		id := chatIDFromPath(path)
 		_, loadErr := m.reconcileChatOutbox(ctx, workspace, id, registered)
 		if loadErr != nil {
 			return loadErr
@@ -556,25 +453,9 @@ func (m *agentManager) handleChats(w http.ResponseWriter, r *http.Request, works
 	}
 	entries := []entry{}
 	chatMu.Lock()
-	if err = migrateExistingChatsLocked(workspace.Path); err != nil {
-		chatMu.Unlock()
-		writeError(w, err, 500)
-		return
-	}
-	paths, err := filepath.Glob(filepath.Join(workspacepath.ControlDir(workspace.Path), "chats", "*.json"))
-	if err != nil {
-		chatMu.Unlock()
-		writeError(w, err, 500)
-		return
-	}
-	for _, path := range paths {
-		c, e := loadChatLocked(workspace.Path, strings.TrimSuffix(filepath.Base(path), ".json"))
-		if e != nil {
-			err = e
-			break
-		}
-		if c.Version < 4 || c.Epoch == 0 {
-			continue
+	err = visitSharedChatsLocked(workspace.Path, func(c resourceChat) error {
+		if c.Epoch == 0 {
+			return nil
 		}
 		item := entry{ResourceID: c.ResourceID, Open: c.Open}
 		legacyUnread := c.legacyUnreadSet(user)
@@ -586,15 +467,15 @@ func (m *agentManager) handleChats(w http.ResponseWriter, r *http.Request, works
 		}
 		unread, updated, activityErr := chatHistoryActivity(workspace.Path, c, user)
 		if activityErr != nil {
-			err = activityErr
-			break
+			return activityErr
 		}
 		item.Unread += unread
 		if generationTime(updated).After(generationTime(item.UpdatedAt)) {
 			item.UpdatedAt = updated
 		}
 		entries = append(entries, item)
-	}
+		return nil
+	})
 	chatMu.Unlock()
 	if err != nil {
 		writeError(w, err, 500)

@@ -130,7 +130,7 @@ func telegramOpen(t *testing.T, rt *telegramRuntime, st *telegramState, resource
 }
 func telegramPublish(t *testing.T, rt *telegramRuntime, resource, id, text string) {
 	t.Helper()
-	mustChatOK(t, chatCall(t, rt.server.agents, rt.workspace, resource, "disksing", "publish", chatRequest{ID: id, Text: text}, true))
+	saveTestPublicChatReply(t, rt.workspace.Path, resource, id, text)
 }
 func telegramFlush(t *testing.T, rt *telegramRuntime, st *telegramState) {
 	t.Helper()
@@ -607,7 +607,7 @@ func TestTelegramAndWebShareChatInBothDirections(t *testing.T) {
 	// Every user's inputs and public replies share the same topic.
 	web("other", "open", chatRequest{})
 	web("other", "messages", chatRequest{ID: "other-input", Text: "Other user's input"})
-	mustChatOK(t, chatCall(t, rt.server.agents, rt.workspace, resource, "other", "publish", chatRequest{ID: "other-reply", Text: "Other user's reply"}, true))
+	telegramPublish(t, rt, resource, "other-reply", "Other user's reply")
 	for range 5 {
 		rt.nextSend = map[int64]time.Time{}
 		telegramFlush(t, rt, &st)

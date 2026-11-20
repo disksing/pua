@@ -31,7 +31,6 @@ import (
 	agenthubapp "github.com/disksing/pua/agenthub/app"
 	"github.com/disksing/pua/internal/app"
 	"github.com/disksing/pua/internal/buildinfo"
-	"github.com/disksing/pua/internal/workspacepath"
 	"github.com/disksing/pua/web"
 )
 
@@ -172,15 +171,14 @@ type uiStateFolder struct {
 }
 
 type uiState struct {
-	Version          int                               `json:"version"`
-	ExpandedProjects []string                          `json:"expandedProjects"`
-	LastResourceID   string                            `json:"lastResourceId,omitempty"`
-	ProjectOrder     []string                          `json:"projectOrder,omitempty"`
-	TaskOrder        map[string][]string               `json:"taskOrder,omitempty"`
-	Folders          []uiStateFolder                   `json:"folders,omitempty"`
-	FolderOrder      map[string][]string               `json:"folderOrder,omitempty"`
-	ResourceStates   map[string]resourceUserState      `json:"resourceStates,omitempty"`
-	Attention        map[string]resourceAttentionState `json:"attention,omitempty"`
+	Version          int                          `json:"version"`
+	ExpandedProjects []string                     `json:"expandedProjects"`
+	LastResourceID   string                       `json:"lastResourceId,omitempty"`
+	ProjectOrder     []string                     `json:"projectOrder,omitempty"`
+	TaskOrder        map[string][]string          `json:"taskOrder,omitempty"`
+	Folders          []uiStateFolder              `json:"folders,omitempty"`
+	FolderOrder      map[string][]string          `json:"folderOrder,omitempty"`
+	ResourceStates   map[string]resourceUserState `json:"resourceStates,omitempty"`
 }
 
 type server struct {
@@ -1654,7 +1652,7 @@ func (s *server) addWorkspaceWithOptions(ctx context.Context, path string, creat
 	if err != nil {
 		return serveWorkspace{}, err
 	}
-	if err := s.ensureWorkspaceUsersAndMigrateUIState(tree.Root); err != nil {
+	if err := s.ensureWorkspaceUIState(tree.Root); err != nil {
 		return serveWorkspace{}, err
 	}
 	if create {
@@ -1984,7 +1982,6 @@ func (s *server) saveUIState(id string, state uiState, userNames ...string) erro
 		return err
 	}
 	state.ResourceStates = existing.ResourceStates
-	state.Attention = existing.Attention
 	return saveUIStateFile(statePath, state)
 }
 
@@ -2186,10 +2183,6 @@ func resolvedWorkspaceSummaries(workspaces []serveWorkspace) []serveWorkspace {
 		result[i] = workspace
 	}
 	return result
-}
-
-func uiStatePath(workspacePath string) string {
-	return filepath.Join(workspacepath.ControlDir(workspacePath), "ui-state.json")
 }
 
 func uniqueNonEmpty(values []string) []string {

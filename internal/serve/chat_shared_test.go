@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -25,7 +24,6 @@ func TestSharedChatConcurrentSendersReadCursorsAndEpoch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldToken := c.Token
 	var wg sync.WaitGroup
 	status := make(chan int, 4)
 	for _, user := range []string{"disksing", "other"} {
@@ -73,21 +71,7 @@ func TestSharedChatConcurrentSendersReadCursorsAndEpoch(t *testing.T) {
 			t.Fatal("execution input lost its authenticated sender")
 		}
 	}
-	publish := func(target, token string) int {
-		body := strings.NewReader(`{"id":"answer","text":"shared answer"}`)
-		req := httptest.NewRequest(http.MethodPost, "/api/workspaces/"+w.ID+"/resources/"+target+"/chat/publish", body)
-		req.Header.Set("X-PUA-Chat-Token", token)
-		out := httptest.NewRecorder()
-		m.server.handleWorkspace(out, req)
-		return out.Code
-	}
-	if publish(resource, oldToken) != 200 || publish(resource, oldToken) != 200 {
-		t.Fatal("token-only publication or retry failed")
-	}
-	mustChatOK(t, chatCall(t, m, w, "project1", "other", "open", chatRequest{}, false))
-	if publish("project1", oldToken) == 200 || publish(resource, "wrong") == 200 {
-		t.Fatal("cross-resource or incorrect capability accepted")
-	}
+	saveTestPublicChatReply(t, w.Path, resource, "answer", "shared answer")
 	other := chatCall(t, m, w, resource, "other", "", nil, false)
 	mustChatOK(t, other)
 	if strings.Contains(other.Body.String(), "originRoute") || strings.Contains(other.Body.String(), "clientId") ||
@@ -110,132 +94,73 @@ func TestSharedChatConcurrentSendersReadCursorsAndEpoch(t *testing.T) {
 		}
 	}
 	mustChatOK(t, chatCall(t, m, w, resource, "other", "close", chatRequest{}, false))
-	if publish(resource, oldToken) == 200 {
-		t.Fatal("closed capability accepted")
-	}
 	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "open", chatRequest{}, false))
-	if publish(resource, oldToken) == 200 {
-		t.Fatal("reopened capability accepted")
-	}
 	got := chatCall(t, m, w, resource, "other", "", nil, false)
-	if err := json.Unmarshal(got.Body.Bytes(), &page); err != nil || !page.Open {
+	if err := json.Unmarshal(got.Body.Bytes(), &page); err != nil || !page.Open || page.Epoch != c.Epoch+1 {
 		t.Fatal("reopen not shared")
 	}
 }
 
-func TestSharedChatMigrationPreservesHistoryOutboxAndLegacyCapabilities(t *testing.T) {
+func TestSharedChatKeepsMigratedHistoryAndCursorsOnRestart(t *testing.T) {
 	m, w := chatTestManager(t)
 	resource := "project1.task1"
-	original := map[string][]byte{}
-	for i, user := range []string{"disksing", "other"} {
-		old := resourceChat{
-			ID: chatID(resource, user), ResourceID: resource, User: user, Open: true,
-			Epoch: uint64(i + 1), Token: "old-token-" + user, ReadThrough: i + 1,
-			Messages: []chatMessage{
-				{ID: "same", Role: "user", Text: "input " + user, CreatedAt: fmt.Sprintf("2026-01-01T00:00:0%dZ", i)},
-				{ID: "reply", Role: "agent", Text: "answer " + user, CreatedAt: fmt.Sprintf("2026-01-01T00:00:0%dZ", i+2)},
-			},
-			Outbox: []chatDelivery{{ID: "input-same", Target: resource, Text: "pending " + user, Epoch: uint64(i + 1)}},
-		}
-		if err := saveChatLocked(w.Path, old); err != nil {
-			t.Fatal(err)
-		}
-		data, err := os.ReadFile(chatPath(w.Path, old.ID))
-		if err != nil {
-			t.Fatal(err)
-		}
-		original[old.ID] = data
-		if i == 0 {
-			_, err = acceptGeneratedMailboxMessage(w.Path, resourceMailboxMessage{
-				ID: "chat-" + chatID(old.ID, "input-same"), ResourceID: resource,
-				Text: old.Outbox[0].Text, Type: "user_chat_input", RequestedMode: resourceMessageModeSteer,
-				Causation: &resourceMessageCausation{Type: "chat", SourceResourceID: resource, MessageID: "input-same"},
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-		}
+	legacyID := chatID(resource, "disksing")
+	original := resourceChat{ID: legacyID, ResourceID: resource, User: "disksing",
+		Open: true, Epoch: 1, Token: "old-token",
+		Messages: []chatMessage{{ID: "answer", Role: "agent", Text: "old text"}}}
+	if err := saveChatLocked(w.Path, original); err != nil {
+		t.Fatal(err)
 	}
-	first := chatCall(t, m, w, resource, "disksing", "", nil, false)
-	mustChatOK(t, first)
-	c, err := loadDialogue(w.Path, dialoguePrefix+sharedChatID(resource))
-	if err != nil || !c.Open || len(c.Messages) != 4 || c.snapshot("disksing").UnreadCount != 1 || c.snapshot("other").UnreadCount != 0 {
-		t.Fatalf("migration content/unread: %#v %v", c, err)
-	}
-	seen := map[string]bool{}
-	for _, message := range c.Messages {
-		if seen[message.ID] {
-			t.Fatal("migration retained duplicate public IDs")
-		}
-		seen[message.ID] = true
-		if message.Role == "user" && message.Sender == "" {
-			t.Fatal("legacy sender lost")
-		}
-	}
-	for _, message := range c.Messages {
-		if message.LegacyChatID == chatID(resource, "disksing") && message.LegacyID == "reply" {
-			mustChatOK(t, chatCall(t, m, w, resource, "disksing", "read", chatRequest{ID: message.ID}, false))
-		}
-	}
-	c, _ = loadDialogue(w.Path, c.address())
-	if c.snapshot("disksing").UnreadCount != 0 || c.snapshot("other").UnreadCount != 0 {
-		t.Fatal("reading migrated history did not preserve independent cursors")
-	}
-	for id, want := range original {
-		for _, path := range []string{chatPath(w.Path, id), filepath.Join(workspacepath.ControlDir(w.Path), "chats-legacy-backup", id+".json")} {
-			got, err := os.ReadFile(path)
-			if err != nil || !bytes.Equal(got, want) {
-				t.Fatal("original or backup was changed")
-			}
-		}
-	}
-	for range 2 {
-		if err := m.reconcileWorkspaceChats(context.Background(), w); err != nil {
-			t.Fatal(err)
-		}
-	}
-	mailbox, err := loadResourceMailboxForResource(w.Path, resource)
-	if err != nil || len(mailbox.Messages) != 2 {
-		t.Fatalf("legacy outbox replay duplicated or lost a delivery: %d %v", len(mailbox.Messages), err)
-	}
-	legacyPublish := func(user, id, text string) int {
-		data, _ := json.Marshal(chatRequest{ID: id, Text: text})
-		req := httptest.NewRequest(http.MethodPost, "/api/workspaces/"+w.ID+"/resources/"+resource+"/chat/publish", bytes.NewReader(data))
-		req.Header.Set("X-PUA-Chat", chatID(resource, user))
-		req.Header.Set("X-PUA-Chat-Token", "old-token-"+user)
-		out := httptest.NewRecorder()
-		m.server.handleWorkspace(out, req)
-		return out.Code
-	}
-	for _, user := range []string{"disksing", "other"} {
-		if legacyPublish(user, "reply", "answer "+user) != 200 ||
-			legacyPublish(user, "future", "new "+user) != 200 ||
-			legacyPublish(user, "future", "new "+user) != 200 {
-			t.Fatalf("legacy retry/ID mapping failed for %s", user)
-		}
-	}
-	c, _ = loadDialogue(w.Path, c.address())
-	if len(c.Messages) != 6 {
-		t.Fatalf("legacy retries duplicated messages: %d", len(c.Messages))
-	}
-	ws, err := app.OpenWorkspace(w.Path)
+	before, err := os.ReadFile(chatPath(w.Path, legacyID))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ws.DeleteUser("disksing"); err != nil {
+	migrated := resourceChat{
+		ID: sharedChatID(resource), ResourceID: resource, Open: true, Epoch: 2,
+		Messages: []chatMessage{
+			{ID: "answer", Role: "agent", Text: "another user's reply"},
+			{ID: "legacy-remapped-answer", Role: "agent", Text: "old text", LegacyChatID: legacyID, LegacyID: "answer"},
+		},
+		ReadCursors:   map[string]int{"disksing": 2, "other": 2},
+		LegacyUnread:  map[string][]string{"disksing": {"legacy-remapped-answer"}},
+		LegacySources: map[string]legacyChatSource{legacyID: {User: "disksing", Open: true, Epoch: 1, Token: "old-token", MessageIDs: []string{"legacy-remapped-answer"}}},
+		MigrationEnd:  2,
+	}
+	if err := saveChatLocked(w.Path, migrated); err != nil {
 		t.Fatal(err)
 	}
-	if legacyPublish("disksing", "late", "late") != 403 || legacyPublish("other", "latest", "latest") != 200 {
-		t.Fatal("legacy deleted-user qualification incorrect")
+	for range 2 {
+		m.waitBackground()
+		m = newAgentManager(m.server)
+		m.server.agents = m
+		if err := m.reconcileWorkspaceChats(context.Background(), w); err != nil {
+			t.Fatal(err)
+		}
+		response := chatCall(t, m, w, resource, "disksing", "?limit=1&before=legacy-remapped-answer", nil, false)
+		if response.Code != http.StatusOK {
+			t.Fatalf("mapped cursor failed after restart: %s", response.Body)
+		}
+		var page publicChat
+		if err := json.Unmarshal(response.Body.Bytes(), &page); err != nil || len(page.Messages) != 1 ||
+			page.Messages[0].ID != "answer" || page.UnreadCount != 1 {
+			t.Fatalf("mapped history page = %#v (%v)", page, err)
+		}
 	}
-	mustChatOK(t, chatCall(t, m, w, resource, "other", "close", chatRequest{}, false))
-	mustChatOK(t, chatCall(t, m, w, resource, "other", "open", chatRequest{}, false))
-	if legacyPublish("other", "after", "after") == 200 {
-		t.Fatal("legacy capability survived close/reopen")
+	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "read", chatRequest{ID: "legacy-remapped-answer"}, false))
+	current, err := loadDialogue(w.Path, migrated.address())
+	if err != nil || current.snapshot("disksing").UnreadCount != 0 || current.snapshot("other").UnreadCount != 0 ||
+		current.Messages[1].LegacyID != "answer" || current.LegacySources[legacyID].MessageIDs[0] != "legacy-remapped-answer" {
+		t.Fatalf("read changed migrated history: %#v (%v)", current, err)
+	}
+	if after, err := os.ReadFile(chatPath(w.Path, legacyID)); err != nil || !bytes.Equal(after, before) {
+		t.Fatal("legacy file changed")
+	}
+	if _, err := os.Stat(filepath.Join(workspacepath.ControlDir(w.Path), "chats-legacy-backup")); !os.IsNotExist(err) {
+		t.Fatalf("obsolete backup created: %v", err)
 	}
 }
 
-func TestWorkspaceChatReopensAfterMigrationFromDeletedUser(t *testing.T) {
+func TestWorkspaceChatStartsOpenWithoutImportingPerUserChat(t *testing.T) {
 	m, w := chatTestManager(t)
 	old := resourceChat{ID: chatID("workspace", "disksing"), ResourceID: "workspace", User: "disksing",
 		Open: true, Epoch: 4, Token: "old-token"}
@@ -252,22 +177,26 @@ func TestWorkspaceChatReopensAfterMigrationFromDeletedUser(t *testing.T) {
 	response := chatCall(t, m, w, "workspace", "other", "", nil, false)
 	mustChatOK(t, response)
 	var chat publicChat
-	if err := json.Unmarshal(response.Body.Bytes(), &chat); err != nil || !chat.Open || chat.Epoch != 5 {
+	if err := json.Unmarshal(response.Body.Bytes(), &chat); err != nil || !chat.Open || chat.Epoch != 1 {
 		t.Fatalf("Workspace chat did not remain open: %+v %v", chat, err)
 	}
 }
 
-func TestDeletingUserRevokesLegacyCapabilityAndQueuedInput(t *testing.T) {
+func TestDeletingUserClearsSharedChatReadStateAndRevokesQueuedInput(t *testing.T) {
 	m, w := chatTestManager(t)
 	resource, user := "project1.task1", "disksing"
-	old := resourceChat{ID: chatID(resource, user), ResourceID: resource, User: user,
-		Open: true, Epoch: 1, Token: "old-token",
-		Messages: []chatMessage{{ID: "message", Role: "user", Text: "old input"}},
-		Outbox:   []chatDelivery{{ID: "input-message", Target: resource, Text: "old pending input", Epoch: 1}}}
-	if err := saveChatLocked(w.Path, old); err != nil {
+	legacyID := chatID(resource, user)
+	shared := resourceChat{ID: sharedChatID(resource), ResourceID: resource, Open: true, Epoch: 2,
+		Messages:      []chatMessage{{ID: "answer", Role: "agent", Text: "old reply", LegacyChatID: legacyID}},
+		Outbox:        []chatDelivery{{ID: "input-message", Target: resource, Text: "old pending input", Epoch: 2, SourceChatID: legacyID}},
+		LegacySources: map[string]legacyChatSource{legacyID: {User: user, Open: true, Token: "old-token"}},
+		ReadCursors:   map[string]int{user: 1, "other": 1},
+		HistoryReads:  map[string]map[string]int64{user: {"old-work": 2}},
+		LegacyUnread:  map[string][]string{user: {"answer"}},
+	}
+	if err := saveChatLocked(w.Path, shared); err != nil {
 		t.Fatal(err)
 	}
-	mustChatOK(t, chatCall(t, m, w, resource, "other", "", nil, false))
 	req := httptest.NewRequest(http.MethodDelete, "/api/workspaces/"+w.ID+"/users/"+user, nil)
 	result := httptest.NewRecorder()
 	m.server.handleWorkspace(result, req)
@@ -281,14 +210,11 @@ func TestDeletingUserRevokesLegacyCapabilityAndQueuedInput(t *testing.T) {
 	if _, err = ws.RegisterUser(user); err != nil {
 		t.Fatal(err)
 	}
-	req = httptest.NewRequest(http.MethodPost, "/api/workspaces/"+w.ID+"/resources/"+resource+"/chat/publish",
-		strings.NewReader(`{"id":"late","text":"late"}`))
-	req.Header.Set("X-PUA-Chat", old.ID)
-	req.Header.Set("X-PUA-Chat-Token", old.Token)
-	result = httptest.NewRecorder()
-	m.server.handleWorkspace(result, req)
-	if result.Code == http.StatusOK {
-		t.Fatal("recreated username revived an old capability")
+	current, err := loadDialogue(w.Path, shared.address())
+	if err != nil || current.LegacySources[legacyID].Open || current.LegacySources[legacyID].Token != "" ||
+		current.ReadCursors[user] != 0 || current.HistoryReads[user] != nil || current.LegacyUnread[user] != nil ||
+		!current.Open || current.ReadCursors["other"] != 1 {
+		t.Fatalf("deleted user retained shared chat state: %#v (%v)", current, err)
 	}
 	if err = m.reconcileWorkspaceChats(context.Background(), w); err != nil {
 		t.Fatal(err)

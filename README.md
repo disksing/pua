@@ -204,7 +204,7 @@ Agent messages queue in acceptance order. Older senders may still specify a mode
 
 Public work-subject state is `idle`, `working`, `attention_required`, `unavailable`, or `archived`. Waiting is a message state and count, never a Task state: the persisted internal `queued` value is exposed as `waiting`. Promoting a waiting message to the current Turn records `promotedAt` and changes its actual mode to steer on the same durable mailbox item.
 
-The Web sidebar has a server-owned Activity panel below the resource tree with independent tabs: Running, Unread, Problems, and Inbox. Every tab title always includes its item count, including zero. Running includes resources with an active Turn; Unread contains resources whose latest completed resource-wide Turn ordinal is newer than the current user's read cursor; Problems contains Tasks whose persisted workflow state is blocked or error. A resource may appear in multiple tabs. Unread Project/Task rows show their own non-aggregated unread count badge. Opening a resource marks only the latest completed Turn observed by that client as read. An active Turn does not count as unread and cannot be marked read; if it finishes while the resource stays selected, the completed Turn becomes unread until the row is clicked again. Read cursors are per-user state in `<workspace>/.pua/users/<name>/ui-state.json`; archiving a resource removes that state for every user. Version 1 Follow/Dismiss state and the pre-rename `gui-state.json` are migrated on startup, preserving tracked read cursors while baselining previously untracked resources at their current latest completed Turn; the legacy Follow flags and the later Favorite state have been dropped.
+Web 侧栏的活动列表显示运行中资源、当前共享 Chat 的未读情况、问题和待处理消息。共享 Chat 已读游标按用户保存在 Chat 记录内。用户界面偏好保存在 `<workspace>/.pua/users/<name>/ui-state.json`。资源 Turn 序号由 `.pua/resource-state.json` 和 Generation 记录维护。根目录旧 UI 状态文件仅留存供查阅。
 
 ### Scheduler
 
@@ -409,7 +409,8 @@ Workspace、Project 和 Task 通过 `internal/app` 在本地创建，不保存�
 
 `pua migrate` refreshes PUA-managed `AGENTS.md` blocks, initializes missing
 resource documents and Scheduler files, and fills in current Workspace
-configuration defaults. Existing document content is preserved. Old
+configuration defaults. Existing document content is preserved. `pua doctor`
+reports missing or invalid document paths and flags legacy files for review. Old
 Workspace, Project and Task document URLs still open Memory in the Web UI.
 See the [资源文档说明](docs/resource-documents-migration.md).
 

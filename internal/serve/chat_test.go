@@ -41,7 +41,9 @@ func chatCall(t *testing.T, m *agentManager, w serveWorkspace, resource, user, o
 		method = http.MethodGet
 	}
 	path := "/api/workspaces/" + w.ID + "/resources/" + resource + "/chat"
-	if op != "" {
+	if strings.HasPrefix(op, "?") {
+		path += op
+	} else if op != "" {
 		path += "/" + op
 	}
 	req := httptest.NewRequest(method, path, bytes.NewReader(data))
@@ -62,6 +64,22 @@ func mustChatOK(t *testing.T, r *httptest.ResponseRecorder) {
 	t.Helper()
 	if r.Code != 200 {
 		t.Fatalf("status=%d body=%s", r.Code, r.Body.String())
+	}
+}
+
+func saveTestPublicChatReply(t *testing.T, root, resource, id, text string) {
+	t.Helper()
+	chatMu.Lock()
+	defer chatMu.Unlock()
+	chat, err := loadChatLocked(root, sharedChatID(resource))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := chat.appendMessage(id, "agent", text); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveChatLocked(root, chat); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -120,7 +138,7 @@ func TestChatMessagePaginationAndLegacyResponses(t *testing.T) {
 	if ids(first.Messages) != "m0,m1" || *first.HasOlder {
 		t.Fatalf("unexpected first page: %+v", first)
 	}
-	mustChatOK(t, chatCall(t, m, w, resource, user, "publish", chatRequest{ID: "new", Text: "new message"}, true))
+	saveTestPublicChatReply(t, w.Path, resource, "new", "new message")
 	after := decode(call("GET", "", "?limit=1&after=m6", nil))
 	if ids(after.Messages) != "m7" || !*after.HasNewer {
 		t.Fatalf("unexpected forward page: %+v", after)
@@ -208,52 +226,27 @@ func TestChatLifecycleIsolationAndOutboxReplay(t *testing.T) {
 		t.Fatal("reopen lost history or reused authority")
 	}
 }
-func TestChatAgentReplyCapabilityAndIsolation(t *testing.T) {
+func TestChatExplicitPublicationAndNotesAreRetired(t *testing.T) {
 	m, w := chatTestManager(t)
 	resource := "project1.task1"
 	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "open", chatRequest{}, false))
 	c, _ := loadDialogue(w.Path, dialoguePrefix+sharedChatID(resource))
 	publish := chatRequest{ID: "reply-1", Text: "Work completed."}
-	if r := chatCall(t, m, w, resource, "disksing", "publish", publish, false); r.Code != 403 {
-		t.Fatal(r.Code)
+	for _, agent := range []bool{false, true} {
+		for _, operation := range []string{"publish", "notes"} {
+			if r := chatCall(t, m, w, resource, "disksing", operation, publish, agent); r.Code != http.StatusGone {
+				t.Fatalf("%s with legacy capability %v = %d", operation, agent, r.Code)
+			}
+		}
 	}
-	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "publish", publish, true))
-	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "publish", publish, true))
-	call := func(target, token, generation string) int {
-		data, _ := json.Marshal(chatRequest{ID: "new", Text: "answer"})
-		req := httptest.NewRequest("POST", "/api/workspaces/"+w.ID+"/resources/"+target+"/chat/publish", bytes.NewReader(data))
-		req.Header.Set("X-PUA-Chat", c.ID)
-		req.Header.Set("X-PUA-Chat-Token", token)
-		req.Header.Set("X-PUA-Chat-Generation", generation)
-		out := httptest.NewRecorder()
-		m.server.handleWorkspace(out, req)
-		return out.Code
-	}
-	if call("project1", c.Token, "") != 403 {
-		t.Fatal("cross-resource capability accepted")
-	}
-	if call(resource, "wrong", "") != 409 {
-		t.Fatal("wrong capability accepted")
-	}
-	if call(resource, c.Token, "legacy-dialogue-generation") != 409 {
-		t.Fatal("legacy dialogue published")
-	}
-	mustChatOK(t, chatCall(t, m, w, resource, "other", "open", chatRequest{}, false))
-	other := chatCall(t, m, w, resource, "other", "", nil, false)
-	if !strings.Contains(other.Body.String(), publish.Text) {
-		t.Fatal("shared reply missing for other user")
-	}
-	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "close", chatRequest{}, false))
-	if call(resource, c.Token, "") != 409 {
-		t.Fatal("closed publication")
-	}
-	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "open", chatRequest{}, false))
-	if call(resource, c.Token, "") != 409 {
-		t.Fatal("stale publication after reopen")
+	for _, operation := range []string{"notes", ""} {
+		if r := chatCall(t, m, w, resource, "disksing", operation, nil, true); r.Code != http.StatusGone {
+			t.Fatalf("GET %q with legacy capability = %d", operation, r.Code)
+		}
 	}
 	current, _ := loadDialogue(w.Path, c.address())
-	if len(current.Messages) != 1 {
-		t.Fatal("reply duplicated or history lost")
+	if len(current.Messages) != 0 || current.Notes != c.Notes {
+		t.Fatal("retired endpoint changed shared history")
 	}
 }
 
@@ -291,7 +284,7 @@ func TestChatBindingDoesNotOpenAndInboxEndpointIsGone(t *testing.T) {
 	}
 }
 
-func TestLegacyChatUsesExecutionRuntimeWhileBusyAndAfterReopen(t *testing.T) {
+func TestChatUsesExecutionRuntimeWhileBusyAndAfterReopen(t *testing.T) {
 	fake := newRuntimeFakeAgentHub()
 	fake.enforceMessageIDs = true
 	hub := httptest.NewServer(fake)
@@ -317,18 +310,6 @@ func TestLegacyChatUsesExecutionRuntimeWhileBusyAndAfterReopen(t *testing.T) {
 	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "open", chatRequest{}, false))
 	for _, id := range []string{"first", "second"} {
 		mustChatOK(t, chatCall(t, m, w, resource, "disksing", "messages", chatRequest{ID: id, Text: "User question " + id}, false))
-		chatMu.Lock()
-		legacy, _ := loadChatLocked(w.Path, sharedChatID(resource))
-		for i := range legacy.Outbox {
-			if !legacy.Outbox[i].Accepted && legacy.Outbox[i].Automatic {
-				legacy.Outbox[i].Text = legacy.prompt(legacy.Outbox[i].Text, "disksing")
-				legacy.Outbox[i].Automatic = false
-			}
-		}
-		if err := saveChatLocked(w.Path, legacy); err != nil {
-			t.Fatal(err)
-		}
-		chatMu.Unlock()
 		if err = m.reconcileWorkspaceChats(context.Background(), w); err != nil {
 			t.Fatal(err)
 		}
@@ -344,25 +325,21 @@ func TestLegacyChatUsesExecutionRuntimeWhileBusyAndAfterReopen(t *testing.T) {
 			t.Fatal("dialogue generation created")
 		}
 		mailbox, _ := loadResourceMailboxForResource(w.Path, resource)
-		delivered := false
+		queued := false
 		for _, message := range mailbox.Messages {
 			if message.Causation != nil && message.Causation.MessageID == "input-"+id {
-				delivered = message.Status == resourceMessageDelivered
+				queued = message.Status == resourceMessageQueued
 				fake.mu.Lock()
-				input := fake.messageInputs[message.ID]
+				_, sent := fake.messageInputs[message.ID]
 				fake.mu.Unlock()
-				if !strings.Contains(input.Text, "pua chat publish --reply-to="+c.Token) || !strings.Contains(input.Text, "NEVER automatic public replies") {
-					t.Fatal("reply instructions missing")
-				}
-				if message.ActualMode != resourceMessageModeSteer {
-					t.Fatalf("busy input not steered: %s", message.ActualMode)
+				if sent || message.Text != "User question "+id || !message.Causation.AutomaticChat {
+					t.Fatal("current Chat input joined an internal Turn or lost its original text")
 				}
 			}
 		}
-		if !delivered {
-			t.Fatal("user input not delivered")
+		if !queued {
+			t.Fatal("user input did not wait for a visible Turn")
 		}
-		mustChatOK(t, chatCall(t, m, w, resource, "disksing", "publish", chatRequest{ID: "answer-" + id, Text: "Answer " + id}, true))
 		mustChatOK(t, chatCall(t, m, w, resource, "disksing", "close", chatRequest{}, false))
 		if err = m.reconcileWorkspaceChats(context.Background(), w); err != nil {
 			t.Fatal(err)
@@ -376,19 +353,27 @@ func TestLegacyChatUsesExecutionRuntimeWhileBusyAndAfterReopen(t *testing.T) {
 		mustChatOK(t, chatCall(t, m, w, resource, "disksing", "open", chatRequest{}, false))
 	}
 	c, _ := loadDialogue(w.Path, dialoguePrefix+sharedChatID(resource))
-	if len(c.Messages) != 4 {
+	if len(c.Messages) != 2 {
 		t.Fatalf("internal work leaked into Chat: %d", len(c.Messages))
 	}
 }
 
-func TestChatNotesAndReadCursor(t *testing.T) {
+func TestChatReadCursorAndStoredNotes(t *testing.T) {
 	m, w := chatTestManager(t)
 	resource := "project1.task1"
 	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "open", chatRequest{}, false))
-	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "notes", chatRequest{Text: "Follow project1.task1; nothing published yet."}, true))
-
+	chatMu.Lock()
+	chat, err := loadChatLocked(w.Path, sharedChatID(resource))
+	if err == nil {
+		chat.Notes = "Follow project1.task1; nothing published yet."
+		err = saveChatLocked(w.Path, chat)
+	}
+	chatMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, id := range []string{"first", "second"} {
-		mustChatOK(t, chatCall(t, m, w, resource, "disksing", "publish", chatRequest{ID: id, Text: id}, true))
+		saveTestPublicChatReply(t, w.Path, resource, id, id)
 	}
 	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "read", chatRequest{ID: "first"}, false))
 	req := httptest.NewRequest(http.MethodGet, "/api/workspaces/"+w.ID+"/chats", nil)
@@ -434,10 +419,7 @@ func TestDeletingUserDoesNotCloseSharedChat(t *testing.T) {
 	if err = ws.DeleteUser("disksing"); err != nil {
 		t.Fatal(err)
 	}
-	denied := chatCall(t, m, w, "project1.task1", "disksing", "publish", chatRequest{ID: "late", Text: "late"}, true)
-	if denied.Code != 200 {
-		t.Fatalf("shared capability stopped after deletion: %d", denied.Code)
-	}
+	saveTestPublicChatReply(t, w.Path, "project1.task1", "late", "late")
 	if err = m.reconcileWorkspaceChats(context.Background(), w); err != nil {
 		t.Fatal(err)
 	}
@@ -457,7 +439,7 @@ func TestDeletingUserDoesNotCloseSharedChat(t *testing.T) {
 	}
 }
 
-func TestChatLegacyMigrationRetiresTimerAndPreservesDispatchedWork(t *testing.T) {
+func TestRetiredDialogueKeepsHistoryWithoutImportingOutbox(t *testing.T) {
 	m, w := chatTestManager(t)
 	resource := "project1.task1"
 	c := resourceChat{Version: 2, ID: chatID(resource, "disksing"), ResourceID: resource, User: "disksing",
@@ -519,22 +501,16 @@ func TestChatLegacyMigrationRetiresTimerAndPreservesDispatchedWork(t *testing.T)
 			t.Fatal(err)
 		}
 	}
-	next, _ := loadDialogue(w.Path, dialoguePrefix+sharedChatID(resource))
-	if next.Version != 4 || next.IntervalSeconds != 0 || next.NextCheckAt != "" || next.Token == c.Token || len(next.Messages) != 5 || next.ReadCursors["disksing"] != 5 || len(next.LegacyUnread["disksing"]) != 1 {
-		t.Fatal("migration lost history or retained old authority/timer")
+	if _, err := loadDialogue(w.Path, dialoguePrefix+sharedChatID(resource)); !os.IsNotExist(err) {
+		t.Fatalf("old Chat created a shared record: %v", err)
 	}
-	backup, err := os.ReadFile(filepath.Join(workspacepath.ControlDir(w.Path), "chats-legacy-backup", c.ID+".json"))
-	if err != nil || !bytes.Equal(backup, data) {
-		t.Fatal("migration did not preserve the original record and notes")
+	original, err := os.ReadFile(chatPath(w.Path, c.ID))
+	if err != nil || !bytes.Equal(original, data) {
+		t.Fatal("retirement changed the legacy record")
 	}
 	mailbox, _ := loadResourceMailboxForResource(w.Path, resource)
-	if len(mailbox.Messages) != 3 {
-		t.Fatalf("expected two safe inputs and one dispatch, got %d", len(mailbox.Messages))
-	}
-	for _, message := range mailbox.Messages {
-		if strings.Contains(message.Text, "legacy dialogue prompt") || strings.Contains(message.Text, "old timer") {
-			t.Fatal("obsolete prompt replayed")
-		}
+	if len(mailbox.Messages) != 0 {
+		t.Fatalf("retired outbox replayed %d messages", len(mailbox.Messages))
 	}
 	legacy, _ := loadResourceMailboxForResource(w.Path, c.address())
 	if len(legacy.Messages) != 3 {
@@ -563,12 +539,13 @@ func TestChatLegacyMigrationRetiresTimerAndPreservesDispatchedWork(t *testing.T)
 	if got := chatCall(t, m, w, resource, "disksing", "runtime/turn/end", chatRequest{}, false); got.Code != 403 {
 		t.Fatal("legacy controls remain enabled")
 	}
+	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "open", chatRequest{}, false))
 	mustChatOK(t, chatCall(t, m, w, resource, "disksing", "messages", chatRequest{ID: "after-restart", Text: "new question"}, false))
 	if err = m.reconcileWorkspaceChats(context.Background(), w); err != nil {
 		t.Fatal(err)
 	}
 	mailbox, _ = loadResourceMailboxForResource(w.Path, resource)
-	if len(mailbox.Messages) != 4 {
+	if len(mailbox.Messages) != 1 {
 		t.Fatal("new input did not route to execution after restart")
 	}
 }
@@ -600,6 +577,7 @@ func TestChatReadOpenAndReconcileNeverScheduleChecks(t *testing.T) {
 
 func TestChatStreamUserSelectionIsScopedAndValidated(t *testing.T) {
 	m, w := chatTestManager(t)
+	mustChatOK(t, chatCall(t, m, w, "project1.task1", "disksing", "", nil, false))
 	for _, test := range []struct {
 		path, header string
 		want         int
@@ -784,8 +762,7 @@ func TestChatRetiresOnlyLegacySessionAndNeverResumesIt(t *testing.T) {
 }
 
 func TestChatInputPresentationDoesNotPromiseAutomaticFinal(t *testing.T) {
-	c := resourceChat{ID: "chat-id", Token: "capability", ResourceID: "project1.task1", User: "Ada"}
-	text := c.prompt("User question")
+	text := "Reply: pua chat publish --reply-to=chat-id.capability\n\nUser question"
 	for _, steer := range []bool{false, true} {
 		got := providerMessageTextWithContext(resourceMailboxMessage{Role: "system", Type: "user_chat_input", Text: text, ProviderContext: &providerMessageContext{Language: "zh-CN", OpenerRole: "agent", OpenerResponse: providerResponseFinalOnly}}, steer)
 		if got != text || !strings.Contains(got, "pua chat publish --reply-to=chat-id.capability") {

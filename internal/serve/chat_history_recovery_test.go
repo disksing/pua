@@ -12,7 +12,7 @@ import (
 	"github.com/disksing/pua/internal/app"
 )
 
-func TestChatReplyRestoredFromRetiredGenerationHistory(t *testing.T) {
+func TestRetiredGenerationHistoryKeepsOldChatInputAndPublishedReply(t *testing.T) {
 	fake := newHistoryFakeAgentHub()
 	hub := httptest.NewServer(fake)
 	defer hub.Close()
@@ -39,7 +39,8 @@ func TestChatReplyRestoredFromRetiredGenerationHistory(t *testing.T) {
 	}
 	turn := historyTestTurn("turn-source", 1, true)
 	// The retired Turn predates automatic publication.
-	turn.Items[0].Text = c.prompt(c.Outbox[0].Text, "reader")
+	turn.Items[0].Text = "Reply: pua chat publish --reply-to=" + c.Token + " --id=result-stable '<answer>'\n\n" + c.Outbox[0].Text
+	saveTestPublicChatReply(t, w.Path, resource, "result-stable", "Result complete")
 	fake.mu.Lock()
 	fake.turns["ses-old"] = []agentHubTurn{turn}
 	fake.mu.Unlock()
@@ -81,15 +82,16 @@ func TestChatReplyRestoredFromRetiredGenerationHistory(t *testing.T) {
 		m.server.handleWorkspace(response, req)
 		return response
 	}
-	mustChatOK(t, publish())
-	mustChatOK(t, publish())
+	if result := publish(); result.Code != http.StatusGone {
+		t.Fatalf("retired capability returned %d", result.Code)
+	}
 	current, _ := loadDialogue(w.Path, c.address())
-	if len(current.Messages) != 2 {
-		t.Fatal("recovery duplicated publication")
+	if len(current.Messages) != 2 || current.Messages[1].ID != "result-stable" || current.Messages[1].Text != "Result complete" {
+		t.Fatal("historical public reply changed")
 	}
 	mustChatOK(t, chatCall(t, m, w, resource, "reader", "close", chatRequest{}, false))
 	mustChatOK(t, chatCall(t, m, w, resource, "reader", "open", chatRequest{}, false))
-	if result := publish(); result.Code != http.StatusConflict {
+	if result := publish(); result.Code != http.StatusGone {
 		t.Fatalf("stale recovered capability accepted: %d", result.Code)
 	}
 }

@@ -98,7 +98,7 @@ func TestWorkspaceUsersAPIPreventsDeletingLastUser(t *testing.T) {
 	}
 }
 
-func TestLegacyUIStateWaitsForFirstUserWhenWorkspaceHasNoUsers(t *testing.T) {
+func TestFirstUserStartsWithPersonalUIState(t *testing.T) {
 	workspace := t.TempDir()
 	if _, err := app.Initialize(workspace, "en"); err != nil {
 		t.Fatal(err)
@@ -107,26 +107,24 @@ func TestLegacyUIStateWaitsForFirstUserWhenWorkspaceHasNoUsers(t *testing.T) {
 	if err := server.saveConfig(config{Version: agentHubConfigVersion, Workspaces: []serveWorkspace{{ID: "workspace-one", Path: workspace}}}); err != nil {
 		t.Fatal(err)
 	}
-	legacy := uiState{Version: 1, ExpandedProjects: []string{"project1"}}
-	if err := saveJSONStateFile(uiStatePath(workspace), ".legacy-ui-*.tmp", legacy); err != nil {
+	legacyPath := filepath.Join(workspace, ".pua", "ui-state.json")
+	legacy := []byte(`{"version":1,"expandedProjects":["project1"]}`)
+	if err := os.WriteFile(legacyPath, legacy, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := server.ensureWorkspaceUsersAndMigrateUIState(workspace); err != nil {
+	if err := server.ensureWorkspaceUIState(workspace); err != nil {
 		t.Fatal(err)
-	}
-	if _, err := os.Stat(uiStatePath(workspace)); err != nil {
-		t.Fatalf("legacy state removed before an identity existed: %v", err)
 	}
 	recorder := userRequest(t, server, http.MethodPost, "/api/workspaces/workspace-one/users", `{"name":"Alice"}`, "")
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("create first user = %d %s", recorder.Code, recorder.Body.String())
 	}
-	migrated, err := loadUIStateFile(userUIStatePath(workspace, "Alice"))
-	if err != nil || len(migrated.ExpandedProjects) != 1 || migrated.ExpandedProjects[0] != "project1" {
-		t.Fatalf("first user legacy state = %#v, %v", migrated, err)
+	state, err := loadUIStateFile(userUIStatePath(workspace, "Alice"))
+	if err != nil || state.Version != 2 || len(state.ExpandedProjects) != 0 || len(state.ResourceStates) != 0 {
+		t.Fatalf("first user state = %#v, %v", state, err)
 	}
-	if _, err := os.Stat(uiStatePath(workspace)); !os.IsNotExist(err) {
-		t.Fatalf("legacy state remains after first-user migration: %v", err)
+	if after, err := os.ReadFile(legacyPath); err != nil || !bytes.Equal(after, legacy) {
+		t.Fatalf("historical UI state changed: %q, %v", after, err)
 	}
 }
 
@@ -169,53 +167,45 @@ func TestUIAndResourceStateAreIsolatedByUser(t *testing.T) {
 	}
 }
 
-func TestLegacyUIStateMigratesToDefaultUserAndResourceState(t *testing.T) {
+func TestReaddingWorkspaceKeepsCurrentUICursorsAndGenerationHighWater(t *testing.T) {
 	server, workspace := userTestServer(t)
 	read := 2
-	shared := resourceState{Version: 1, TurnNumbers: map[string]int{"project1": 4, "workspace": 3}}
+	shared := resourceState{Version: 1, TurnNumbers: map[string]int{"project1": 4, "workspace": 8}}
 	if err := saveResourceStateFile(resourceStatePath(workspace), shared); err != nil {
 		t.Fatal(err)
 	}
-	legacy := uiState{
-		Version: 1, ExpandedProjects: []string{"project1"},
-		Attention: map[string]resourceAttentionState{
-			"project1":  {DismissedTurn: &read, TurnNumber: 4},
-			"workspace": {TurnNumber: 3},
-		},
-	}
-	if err := saveJSONStateFile(uiStatePath(workspace), ".legacy-ui-*.tmp", legacy); err != nil {
+	if err := rewriteTestGenerationRecords(workspace, []generationRecord{{
+		ID: "gen-ui-high-water", WorkspaceID: "workspace-one", ResourceID: "project1",
+		Generation: 1, GenerationID: "gen-ui-high-water", AgentHubSessionID: "session-ui-high-water", TurnNumber: 6,
+	}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := server.ensureWorkspaceUsersAndMigrateUIState(workspace); err != nil {
+	statePath := userUIStatePath(workspace, app.DefaultUserName)
+	if err := saveUIStateFile(statePath, uiState{
+		ExpandedProjects: []string{"project1"},
+		ResourceStates:   map[string]resourceUserState{"project1": {ReadTurnNumber: &read}},
+	}); err != nil {
 		t.Fatal(err)
 	}
-	migrated, err := loadUIStateFile(userUIStatePath(workspace, app.DefaultUserName))
+	before, err := os.ReadFile(statePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resourceState := migrated.ResourceStates["project1"]
-	if resourceState.ReadTurnNumber == nil || *resourceState.ReadTurnNumber != 2 {
-		t.Fatalf("migrated resource state = %#v", resourceState)
+	legacyPath := filepath.Join(workspace, ".pua", "gui-state.json")
+	if err := os.WriteFile(legacyPath, []byte("unused legacy state"), 0600); err != nil {
+		t.Fatal(err)
 	}
-	workspaceState := migrated.ResourceStates["workspace"]
-	if workspaceState.ReadTurnNumber != nil {
-		t.Fatalf("migration created an execution cursor: %#v", workspaceState)
+	for range 2 {
+		if err := server.ensureWorkspaceUIState(workspace); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if after, err := os.ReadFile(statePath); err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("current UI state changed: %q, %v", after, err)
 	}
 	loadedShared, err := loadResourceStateFile(resourceStatePath(workspace))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if loadedShared.TurnNumbers["project1"] != 4 {
-		t.Fatalf("resource state = %#v", loadedShared)
-	}
-	if _, err := os.Stat(uiStatePath(workspace)); !os.IsNotExist(err) {
-		t.Fatalf("legacy UI state was not removed after migration: %v", err)
-	}
-	if err := server.ensureWorkspaceUsersAndMigrateUIState(workspace); err != nil {
-		t.Fatalf("repeat migration: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(workspace, ".pua", "users", "User", "profile.json")); err != nil {
-		t.Fatal(err)
+	if err != nil || loadedShared.TurnNumbers["project1"] != 6 || loadedShared.TurnNumbers["workspace"] != 8 {
+		t.Fatalf("resource state = %#v, %v", loadedShared, err)
 	}
 }
 

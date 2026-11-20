@@ -95,21 +95,21 @@ DELETE /api/workspaces/{workspaceId}/users/{name}
 
 用户聊天由 `<control-dir>/chats/{chatId}.json` 保存，与 AgentHub 事件独立。每个资源有一条 Workspace 用户共享的长期聊天，用户消息标明发送者，各用户的未读游标独立；输入直接进入资源执行 Agent 的 mailbox。独立交流运行时已停用，旧 `dialogue-{chatId}` 与 `/chat/runtime/...` 仍按原用户定位历史审计。
 
-`GET .../resources/{id}/chat` 读取资源共享聊天，`POST .../chat/open|close|messages|read` 管理聊天；`GET .../chats` 查询聊天列表和当前用户未读数。公开消息来自用户输入、新版可见 Turn 的普通 Agent 文本和兼容旧输入的显式发布。推理、工具调用及结果不进入 Chat。输入与 outbox 原子保存，后台按固定 mailbox ID 投递。关闭保留历史并撤销回复资格，不中断资源执行；重开增加 epoch 并产生新资格。Workspace 聊天始终开启。
+`GET .../resources/{id}/chat` 读取资源共享聊天，`POST .../chat/open|close|messages|read` 管理聊天。`GET .../chats` 查询聊天列表和当前用户未读数。公开消息来自用户输入和可见 Turn 的普通 Agent 文本。输入与 outbox 原子保存，后台按固定 mailbox ID 投递。关闭保留历史并撤销回复资格，资源继续执行。重开时增加 epoch。Workspace 聊天始终开启。
 
 公开聊天支持按消息 ID 分页：`GET .../chat?limit=40` 返回最新一页，`before` 或 `after` 分别返回指定消息之前或之后的一页（不含该消息）。`limit` 范围为 1–100，两个游标不能同时使用；分页结果中的 `hasOlder`、`hasNewer` 表示是否还有前后页面，`unreadCount` 始终针对整个聊天。未指定 `limit` 时保留完整历史响应以兼容现有客户端；聊天写操作也可指定 `limit` 来限制响应消息数。当前磁盘存储仍是整份 JSON，分页减少网络传输和浏览器渲染，不消除服务端读取及解析完整文件的开销。
 
-新版可见 Turn 使用 `pua chat show --work=<work-id>` 读取共享历史，通过普通输出自动发布。旧输入继续使用 `pua chat show|notes|publish --reply-to=<capability>`，资格由原输入携带，限定资源及聊天开启周期；共享 Chat 的新凭据无需再附加 Chat ID，旧版 `chat-id.token` 仍可在原周期内使用。publish 使用稳定 ID 去重，旧资格不能跨关闭/重开继续使用。旧 notes 保留在迁移备份，dispatch、timer、独立 binding 已停用；不创建新的交流 Session。这是可信本地 Workspace 内的生命周期约束，不是操作系统沙箱或新的用户认证系统。
+可见 Turn 使用 `pua chat show --work=<work-id>` 读取共享历史，通过普通输出自动发布。旧 `--reply-to`、显式发布和 Notes 已退役。已迁移消息的 ID、来源、已读游标和旧 Notes 留在现有记录。旧每用户 Chat 文件继续供只读历史访问，新共享 Chat 直接初始化。独立交流运行时继续隔离，旧执行事件可通过 `/chat/runtime/history/...` 查阅。
 
-读取旧数据时按资源合并原用户 Chat，保留各旧 Chat 内的顺序并按消息时间合并，碰撞的消息 ID 确定性改名；旧用户输入标注原发送者。原始文件保留在原位置，并在写入共享记录前复制到 `<control-dir>/chats-legacy-backup/`。历史消息对所有 Workspace 用户可见；原用户未读状态保留，新增用户从头计算未读。旧周期尚未确认的执行输入继续按原 mailbox ID 去重；关闭或周期失效的输入不重投。原笔记、旧 outbox 和历史事件可从备份和旧身份审计。旧版 Server 不支持共享记录或新版 Telegram 状态；旧文件与共享记录不会双向同步，旧版回退期间的新写入不会自动再次合并，回退需先保存新数据并制定恢复方案。
+共享记录保留原迁移确定的消息顺序、映射后的 ID 及原发送者。用户各自的未读状态继续沿用共享记录内的游标。共享 outbox 继续按原 mailbox ID 去重，并用 Chat 周期约束输入的投递资格。原笔记、旧 outbox 和历史事件仍可从原始文件、已有备份和旧身份审计。回退前保存最新的共享记录与 Telegram 状态。
 
 Workspace、Project、Task 的详情页提供独立的 Spec 和 Memory 页签。`PUT .../resources/{id}/spec?path=...` 只保存该资源的 `spec.md`，要求同源编辑请求和已选择的 Workspace 用户。`PUT .../resources/{id}/documents?path=...` 保存 `memory.md` 及该资源允许的模板和产物。两个入口分别校验内容哈希、资源归属和普通文件路径。归档资源只读。用户名选择属于本地产品上下文，认证和同 UID 文件权限的边界见迁移说明。
 
-对话事项在 Memory 中维护，保留来源消息和 History 引用。工作状态和通知状态分别记录，自动同步或旧 publish 成功后才标记已发布。预览和原文接口将已迁移的旧资源说明路径映射到 Memory，旧路径只读。[迁移预检与回退](../../docs/resource-documents-migration.md)
+对话事项在 Memory 中维护，保留来源消息和 History 引用。工作状态和通知状态分别记录，自动同步成功后标记已发布。预览和原文接口将已迁移的旧资源说明路径映射到 Memory，旧路径只读。[文档维护与回退](../../docs/resource-documents-migration.md)
 
 资源说明本身不触发工作，长时间等待使用 Scheduler 的真实条件。旧聊天 timer 在迁移和 reconcile 中清零，不恢复旧自动轮询。浏览器 SSE 与状态读取只刷新展示，不驱动模型。
 
-Inbox 路由统一返回 410，旧 `users/*/inbox.json` 在取得 Workspace 所有权后删除，后台也重试清理，不导入聊天。旧 CLI 用户目标明确报移除错误，不能成为内部 Agent 直接发言的旁路。原 History UI 被执行事件和交流事件两个只读 Tab 替代，历史 API/CLI 和已有引用保留。两个事件 Tab 复用原 EventTimeline 聊天式展示和 ChatSessionController SSE/状态同步；user、system、agent 发起的 Turn 一律直接展示，历史记录和实时结束的轮次均不按角色折叠，单个工具详情仍可点击展开。切换资源、用户或通道销毁旧控制器和请求。交流流使用 `/chat/runtime/stream?user=...` 选择用户（仅 GET stream 接受此参数，仍校验已注册用户，其他操作仍需用户头）；两通道事件只在本地投影，不能写入聊天或互相更新状态。两个事件 Tab 支持各自的模型绑定；审批和停止控件在聊天面板独立展示。
+旧 Inbox 路由统一返回 410，原始文件留在磁盘。历史 API、CLI 和已有引用继续使用。旧交流事件读取使用 `/chat/runtime/history/...`，交流流使用 `/chat/runtime/stream?user=...` 选择注册用户。其他旧交流读取入口使用 `X-PUA-User`。
 
 `PUT .../generation-policy` 更新 `workspace.json` 中统一覆盖 Workspace、Project、Task 和 Scheduler 的自动轮换策略。策略有两个独立开关：usage-based rotation 默认在 20 个已结束 Turn 或累计 120 分钟 Turn wall-clock 的 OR 阈值后轮换，Turn 之间的 idle 不计时；inactivity-based rotation 默认在 AgentHub Session 最后一次语义 Turn 活动距今达到 1440 分钟后轮换。两者都只在下一条 queued input 即将开始新 Turn 时检查，活动 Turn 的 steer 不检查。旧 `enabled` 配置迁移时同时控制两个新开关，设置页可分别关闭并保留阈值。
 

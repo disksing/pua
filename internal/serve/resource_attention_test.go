@@ -390,7 +390,8 @@ func TestTreeProjectsSharedChatUnreadForCurrentUser(t *testing.T) {
 	user := app.LegacyDefaultUserName
 	ids := []string{"workspace", "scheduler", "project1", "project1.task1"}
 	for i, id := range ids {
-		c := resourceChat{ID: chatID(id, user), ResourceID: id, User: user, Epoch: 1, Open: i%2 == 0, ReadThrough: 1,
+		c := resourceChat{ID: sharedChatID(id), ResourceID: id, Epoch: 1, Open: i%2 == 0,
+			ReadCursors: map[string]int{user: 1},
 			Messages: []chatMessage{
 				{ID: "read", Role: "agent", CreatedAt: "2099-01-01T00:00:00Z"},
 				{ID: "unread", Role: "agent", CreatedAt: fmt.Sprintf("2026-10-14T00:00:0%dZ", i)},
@@ -401,20 +402,20 @@ func TestTreeProjectsSharedChatUnreadForCurrentUser(t *testing.T) {
 		}
 	}
 	for _, id := range []string{"project1.task2", "project1.task3"} {
-		c := resourceChat{ID: chatID(id, user), ResourceID: id, User: user, Epoch: 1, Open: true,
+		c := resourceChat{ID: sharedChatID(id), ResourceID: id, Epoch: 1, Open: true,
 			Messages: []chatMessage{{ID: "mine", Role: "user"}}}
 		if id == "project1.task3" {
 			c.Open = false
 			c.Messages[0].Role = "agent"
-			c.ReadThrough = 1
+			c.ReadCursors = map[string]int{user: 1}
 		}
 		if err := saveChatLocked(workspace, c); err != nil {
 			t.Fatal(err)
 		}
 	}
 	records := []generationRecord{{ID: "event-only", GenerationID: "event-only", AgentHubSessionID: "session-events", Generation: 1, ResourceID: "project1.task4", Status: "idle", TurnNumber: 9}}
-	privateChat, err := loadChatLocked(workspace, chatID("project1.task2", user))
-	if err != nil {
+	privateChat := resourceChat{ID: chatID("project1.task2", user), ResourceID: "project1.task2", User: user}
+	if err := saveChatLocked(workspace, privateChat); err != nil {
 		t.Fatal(err)
 	}
 	records = append(records, generationRecord{ID: "dialogue-only", GenerationID: "dialogue-only", AgentHubSessionID: "session-dialogue", Generation: 1, ResourceID: privateChat.address(), Status: "idle", TurnNumber: 5})

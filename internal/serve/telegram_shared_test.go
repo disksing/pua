@@ -59,6 +59,13 @@ func TestTelegramLegacyPendingMigrationAndRecovery(t *testing.T) {
 	if err := saveChatLocked(rt.workspace.Path, old); err != nil {
 		t.Fatal(err)
 	}
+	shared := resourceChat{ID: sharedChatID(resource), ResourceID: resource, Open: true, Epoch: old.Epoch + 1, MigrationEnd: 1,
+		Messages:      []chatMessage{{ID: "reply", Role: "agent", Text: "old reply", LegacyChatID: old.ID, LegacyID: "reply"}},
+		LegacySources: map[string]legacyChatSource{old.ID: {User: user, Open: true, Epoch: old.Epoch, MessageIDs: []string{"reply"}}},
+	}
+	if err := saveChatLocked(rt.workspace.Path, shared); err != nil {
+		t.Fatal(err)
+	}
 	st.Accounts[777] = user
 	st.Routes = append(st.Routes, telegramRoute{User: user, ChatID: 777, ThreadID: 41, Resource: resource, Epoch: 3,
 		Pending: &telegramDelivery{Text: "old reply", Chunks: []string{"old reply"}, NextCursor: 1, Status: "unknown"}})

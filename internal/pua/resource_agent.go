@@ -69,8 +69,6 @@ type serveLockMetadata struct {
 
 type resourceServerClient struct {
 	userName    string
-	chatID      string
-	chatToken   string
 	baseURL     string
 	workspaceID string
 	http        *http.Client
@@ -308,10 +306,6 @@ func (client *resourceServerClient) request(ctx context.Context, method, path st
 		request.Header.Set("X-PUA-Chat", os.Getenv("PUA_CHAT_ID"))
 		request.Header.Set("X-PUA-Chat-Token", os.Getenv("PUA_CHAT_TOKEN"))
 		request.Header.Set("X-PUA-Chat-Generation", os.Getenv("PUA_CHAT_GENERATION"))
-	}
-	if client.chatToken != "" {
-		request.Header.Set("X-PUA-Chat", client.chatID)
-		request.Header.Set("X-PUA-Chat-Token", client.chatToken)
 	}
 	response, err := client.http.Do(request)
 	if err != nil {
@@ -589,7 +583,7 @@ func runUserMessageSend(_ *resourceServerClient, options resourceServerOptions, 
 	if options.ModeSet {
 		return errors.New("--mode applies only to resource targets")
 	}
-	return errors.New("Inbox was removed; reply to user Chat inputs with the explicit pua chat publish command supplied in that input")
+	return errors.New("Inbox was removed; reply to user Chat inputs in the visible Turn")
 }
 
 func resolveMessageSender() (string, string, error) {

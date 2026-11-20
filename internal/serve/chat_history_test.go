@@ -206,7 +206,7 @@ func TestHistoryChatLateTurnRemainsUnreadAndForwardsOnce(t *testing.T) {
 	}
 	add("first", "first reply", "2026-11-19T10:01:00Z")
 	telegramFlush(t, rt, &state)
-	chat, err := ensureChatLocked(rt.workspace.Path, resource, "disksing")
+	chat, err := ensureChatLocked(rt.workspace.Path, resource)
 	if err != nil {
 		t.Fatal(err)
 	}

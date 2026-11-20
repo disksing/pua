@@ -208,7 +208,7 @@ func (rt *telegramRuntime) checkRoute(st *telegramState, r *telegramRoute, ws *a
 	}
 	id := sharedChatID(r.Resource)
 	chatMu.Lock()
-	c, err := ensureChatLocked(rt.workspace.Path, r.Resource, r.User)
+	c, err := ensureChatLocked(rt.workspace.Path, r.Resource)
 	if err != nil {
 		chatMu.Unlock()
 		return empty, time.Time{}, false, r.pause(telegramPauseChat)

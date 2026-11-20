@@ -77,7 +77,7 @@ func TestLegacyResultSubscriptionsAndOutboxDoNotResumeAfterRestart(t *testing.T)
 
 	// Persist queued inputs first, then write the pre-upgrade hot representation.
 	var sources []resourceMailboxMessage
-	for _, text := range []string{"unbound", "waiting one", "waiting two", "accepted"} {
+	for _, text := range []string{"unbound", "waiting one", "waiting two", "accepted", "completed receipt"} {
 		message, err := acceptMailboxMessage(workspace.Path, "project1.task1", resourceMessageRequest{
 			Text: text, Role: "agent", Mode: resourceMessageModeEnqueue,
 			Sender: &agentHubMessageSender{ID: "project1.task2"}, SenderWorkspaceInstanceID: runtime.InstanceID,
@@ -107,6 +107,21 @@ func TestLegacyResultSubscriptionsAndOutboxDoNotResumeAfterRestart(t *testing.T)
 	}
 	if err := writeResourceMailboxJSON(resourceMailboxHotPath(directory), hot); err != nil {
 		t.Fatal(err)
+	}
+	legacyTimestamp := "2026-01-01T00:00:00Z"
+	for _, fixture := range []struct {
+		index      int
+		id, status string
+	}{
+		{0, "old-unbound", resourceNotificationWaiting},
+		{4, "old-completed", resourceNotificationDelivered},
+	} {
+		if _, err := updateMailboxMessage(workspace.Path, sources[fixture.index].ID, func(message *resourceMailboxMessage) {
+			message.Notification = &resourceNotificationReceipt{ID: fixture.id, Type: resourceMessageTypeTurnResult,
+				Status: fixture.status, CreatedAt: legacyTimestamp, UpdatedAt: legacyTimestamp}
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	operations := []resourceMailboxNotificationOp{
 		{ID: "old-waiting", Type: resourceMessageTypeTurnResult, SourceMessageIDs: []string{sources[1].ID, sources[2].ID},
@@ -178,8 +193,13 @@ func TestLegacyResultSubscriptionsAndOutboxDoNotResumeAfterRestart(t *testing.T)
 		if err != nil || !found || updated.SubscribeResult == nil || !*updated.SubscribeResult || updated.ResultSubscriptionStatus != "pending" {
 			t.Fatalf("source audit fields lost: %#v found=%v err=%v", updated, found, err)
 		}
-		if i != 0 && (updated.Notification == nil || updated.Notification.Status != resourceNotificationTerminal ||
-			updated.Notification.LastErrorCode != "result_subscription_removed") {
+		if i == 4 {
+			if updated.Notification == nil || updated.Notification.ID != "old-completed" ||
+				updated.Notification.Status != resourceNotificationDelivered || updated.Notification.UpdatedAt != legacyTimestamp {
+				t.Fatalf("completed result receipt changed: %#v", updated.Notification)
+			}
+		} else if updated.Notification == nil || updated.Notification.Status != resourceNotificationTerminal ||
+			updated.Notification.LastErrorCode != "result_subscription_removed" || updated.Notification.TerminalAt == "" {
 			t.Fatalf("legacy operation receipt not retired: %#v", updated.Notification)
 		}
 	}

@@ -142,7 +142,7 @@ func (s *server) handleUsers(w http.ResponseWriter, r *http.Request, workspaceID
 			}
 			return
 		}
-		if err := revokeLegacyChatUserLocked(workspace.Path, name); err != nil {
+		if err := revokeChatUserLocked(workspace.Path, name); err != nil {
 			chatMu.Unlock()
 			writeError(w, err, http.StatusInternalServerError)
 			return
@@ -168,7 +168,7 @@ func (s *server) handleUsers(w http.ResponseWriter, r *http.Request, workspaceID
 	}
 }
 
-func (s *server) ensureWorkspaceUsersAndMigrateUIState(workspacePath string) error {
+func (s *server) ensureWorkspaceUIState(workspacePath string) error {
 	workspace, err := app.OpenWorkspace(workspacePath)
 	if err != nil {
 		return err
@@ -191,31 +191,6 @@ func (s *server) ensureWorkspaceUsersAndMigrateUIState(workspacePath string) err
 			sharedChanged = true
 		}
 	}
-	legacyPaths := []string{uiStatePath(workspacePath), filepath.Join(workspacepath.ControlDir(workspacePath), "gui-state.json")}
-	migratedPaths := make([]string, 0, len(legacyPaths))
-	var legacyDefaultState *uiState
-	for _, legacy := range legacyPaths {
-		if _, err := os.Stat(legacy); os.IsNotExist(err) {
-			continue
-		} else if err != nil {
-			return err
-		}
-		migratedPaths = append(migratedPaths, legacy)
-		state, err := loadUIStateFile(legacy)
-		if err != nil {
-			return fmt.Errorf("migrate legacy UI state: %w", err)
-		}
-		for resourceID, attention := range state.Attention {
-			if attention.TurnNumber > shared.TurnNumbers[resourceID] {
-				shared.TurnNumbers[resourceID] = attention.TurnNumber
-				sharedChanged = true
-			}
-		}
-		if legacyDefaultState == nil {
-			cloned := state
-			legacyDefaultState = &cloned
-		}
-	}
 	if sharedChanged {
 		if err := saveResourceStateFile(resourceStatePath(workspacePath), shared); err != nil {
 			return err
@@ -225,126 +200,29 @@ func (s *server) ensureWorkspaceUsersAndMigrateUIState(workspacePath string) err
 	if err != nil {
 		return err
 	}
-	legacyTarget := ""
 	for _, user := range users {
-		if user.Name == app.LegacyDefaultUserName {
-			legacyTarget = user.Name
-			break
-		}
-	}
-	if legacyTarget == "" && len(users) == 1 {
-		legacyTarget = users[0].Name
-	}
-	legacyConsumed := legacyDefaultState == nil
-	for _, user := range users {
-		statePath := userUIStatePath(workspacePath, user.Name)
-		_, statErr := os.Stat(statePath)
-		stateExists := statErr == nil
-		if statErr != nil && !os.IsNotExist(statErr) {
-			return statErr
-		}
-		var state uiState
-		if !stateExists && user.Name == legacyTarget && legacyDefaultState != nil {
-			state = *legacyDefaultState
-			legacyConsumed = true
-		} else {
-			state, err = loadUIStateFile(statePath)
-			if err != nil {
-				return err
-			}
-		}
-		if !stateExists || state.Version < 2 {
-			if err := saveUIStateFile(statePath, state); err != nil {
-				return err
-			}
-		}
-	}
-	if legacyConsumed {
-		for _, legacy := range migratedPaths {
-			_ = os.Remove(legacy)
+		if err := ensureUserUIStateFile(workspacePath, user.Name); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
 func (s *server) ensureUserUIStateBaseline(workspacePath, userName string) error {
-	workspace, err := app.OpenWorkspace(workspacePath)
-	if err != nil {
-		return err
-	}
-	users, err := workspace.Users()
-	if err != nil {
-		return err
-	}
-	consumeLegacy := userName == app.LegacyDefaultUserName || len(users) == 1
-
 	s.uiStateMu.Lock()
 	defer s.uiStateMu.Unlock()
+	return ensureUserUIStateFile(workspacePath, userName)
+}
+
+func ensureUserUIStateFile(workspacePath, userName string) error {
 	statePath := userUIStatePath(workspacePath, userName)
-	_, statErr := os.Stat(statePath)
-	stateExists := statErr == nil
-	if statErr != nil && !os.IsNotExist(statErr) {
-		return statErr
-	}
-	state, err := loadUIStateFile(statePath)
-	if err != nil {
+	if _, err := os.Stat(statePath); os.IsNotExist(err) {
+		return saveUIStateFile(statePath, uiState{ExpandedProjects: []string{}})
+	} else if err != nil {
 		return err
 	}
-	if stateExists && state.Version >= 2 {
-		return nil
-	}
-	legacyPaths := []string{uiStatePath(workspacePath), filepath.Join(workspacepath.ControlDir(workspacePath), "gui-state.json")}
-	migratedPaths := make([]string, 0, len(legacyPaths))
-	if !stateExists && consumeLegacy {
-		for _, legacy := range legacyPaths {
-			if _, statErr := os.Stat(legacy); os.IsNotExist(statErr) {
-				continue
-			} else if statErr != nil {
-				return statErr
-			}
-			legacyState, loadErr := loadUIStateFile(legacy)
-			if loadErr != nil {
-				return fmt.Errorf("migrate legacy UI state: %w", loadErr)
-			}
-			migratedPaths = append(migratedPaths, legacy)
-			if len(migratedPaths) == 1 {
-				state = legacyState
-			}
-		}
-	}
-	shared, err := loadResourceStateFile(resourceStatePath(workspacePath))
-	if err != nil {
-		return err
-	}
-	sharedChanged := false
-	records, err := loadGenerationRecords(workspacePath)
-	if err != nil {
-		return err
-	}
-	for resourceID, record := range latestTurnGenerationByResource(records) {
-		if record.TurnNumber > shared.TurnNumbers[resourceID] {
-			shared.TurnNumbers[resourceID] = record.TurnNumber
-			sharedChanged = true
-		}
-	}
-	for resourceID, attention := range state.Attention {
-		if attention.TurnNumber > shared.TurnNumbers[resourceID] {
-			shared.TurnNumbers[resourceID] = attention.TurnNumber
-			sharedChanged = true
-		}
-	}
-	if sharedChanged {
-		if err := saveResourceStateFile(resourceStatePath(workspacePath), shared); err != nil {
-			return err
-		}
-	}
-	if err := saveUIStateFile(statePath, state); err != nil {
-		return err
-	}
-	for _, legacy := range migratedPaths {
-		_ = os.Remove(legacy)
-	}
-	return nil
+	_, err := loadUIStateFile(statePath)
+	return err
 }
 
 func userUIStatePath(workspacePath, userName string) string {

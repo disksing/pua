@@ -279,16 +279,6 @@ func (m *agentManager) createResourceGeneration(ctx context.Context, workspace s
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
-	if strings.HasPrefix(resourceID, dialoguePrefix) {
-		c, err := loadDialogue(workspace.Path, resourceID)
-		if err != nil {
-			return generationRecord{}, err
-		}
-		record.RuntimeChannel = "dialogue"
-		record.ChatEpoch = c.Epoch
-		record.ChatToken = c.Token
-		record.OwnerResourceID = c.ResourceID
-	}
 	resourceKey := record.ResourceID
 	if resourceKey == "" {
 		resourceKey = "workspace"

@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,7 +15,7 @@ import (
 	"github.com/disksing/pua/internal/workspacepath"
 )
 
-// Legacy dialogue addresses remain stable for history and migration only.
+// Legacy dialogue addresses remain stable for history and retirement.
 // They are never destinations for new user input or runnable resources.
 const dialoguePrefix = "dialogue-"
 
@@ -204,13 +203,69 @@ func loadDialogue(root, address string) (resourceChat, error) {
 	defer chatMu.Unlock()
 	return loadChatLocked(root, strings.TrimPrefix(address, dialoguePrefix))
 }
-func ensureChatLocked(root, resourceID, user string) (resourceChat, error) {
+func ensureChatLocked(root, resourceID string) (resourceChat, error) {
+	resourceID = normalizedResourceID(resourceID)
 	id := sharedChatID(resourceID)
 	c, err := loadChatLocked(root, id)
 	if !os.IsNotExist(err) {
 		return c, err
 	}
-	return migrateSharedChatLocked(root, resourceID)
+	c = resourceChat{
+		Version: 4, ID: id, ResourceID: resourceID,
+		Messages: []chatMessage{},
+		Binding:  app.AgentBinding{Kind: "profile", Name: "default"},
+	}
+	return c, saveChatLocked(root, c)
+}
+
+func chatPaths(root string) ([]string, error) {
+	return filepath.Glob(filepath.Join(workspacepath.ControlDir(root), "chats", "*.json"))
+}
+
+func chatIDFromPath(path string) string {
+	return strings.TrimSuffix(filepath.Base(path), ".json")
+}
+
+func visitSharedChatsLocked(root string, visit func(resourceChat) error) error {
+	paths, err := chatPaths(root)
+	if err != nil {
+		return err
+	}
+	for _, path := range paths {
+		chat, err := loadChatLocked(root, chatIDFromPath(path))
+		if err != nil {
+			return err
+		}
+		if chat.Version >= 4 {
+			if err := visit(chat); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func revokeChatUserLocked(root, user string) error {
+	return visitSharedChatsLocked(root, func(chat resourceChat) error {
+		changed := false
+		for id, source := range chat.LegacySources {
+			if source.User == user && (source.Open || source.Token != "") {
+				source.Open, source.Token = false, ""
+				chat.LegacySources[id] = source
+				changed = true
+			}
+		}
+		_, hasHistory := chat.HistoryReads[user]
+		_, hasCursor := chat.ReadCursors[user]
+		_, hasLegacyUnread := chat.LegacyUnread[user]
+		if changed || hasHistory || hasCursor || hasLegacyUnread {
+			delete(chat.HistoryReads, user)
+			delete(chat.ReadCursors, user)
+			delete(chat.LegacyUnread, user)
+			return saveChatLocked(root, chat)
+		}
+		return nil
+	})
 }
 func (c resourceChat) address() string { return dialoguePrefix + c.ID }
 
@@ -505,82 +560,6 @@ func (c *resourceChat) queue(id, target, text string, users ...string) error {
 		}
 	}
 	c.Outbox = append(c.Outbox, chatDelivery{ID: id, Target: target, Text: text, Sender: sender, Epoch: c.Epoch})
-	return nil
-}
-
-// The capability is scoped to one resource and open epoch. Carry it in each
-// input because an execution session can outlive a chat close/reopen.
-func (c resourceChat) prompt(text string, users ...string) string {
-	user := c.User
-	if len(users) > 0 {
-		user = users[0]
-	}
-	capability := c.ID + "." + c.Token
-	if c.Version >= 4 {
-		capability = c.Token
-	}
-	return fmt.Sprintf(`User Chat input for resource %s, user %s. This resource has one shared Chat visible to all Workspace users. You are this resource's execution Agent: handle the request directly and follow its normal work/state instructions. This user may be inserting a message into an existing Turn; attribute requests to their sender.
-Only explicit publish writes to Chat. Ordinary final, commentary, tools, internal collaboration and system notifications are execution events, NEVER automatic public replies. Before finishing, publish the answer to this input using the command below, even if it opened the Turn. Do not delegate to a dialogue Agent. Reuse a stable --id when retrying; do not publish the same answer twice. Do not expose the reply capability in public messages. Closure revokes it; if publication is rejected, retain the result in execution history and do not redirect to another chat.
-At Turn start and after recovery, read spec.md and memory.md (scheduler.md for Scheduler) and check open items. Record actionable commitments and this source message's ID/History reference in memory.md (scheduler.md for Scheduler) without storing reply capabilities. Change spec.md only within the exact scope of a verifiable direct user instruction or approval. Keep work and notification statuses separate. Check pending replies and due notifications before ending. Mark published only after publish succeeds. If rejected, keep the item blocked. Register Scheduler conditions for wake-ups. Keep follow-ups in the current document.
-Read the shared history: pua chat show --reply-to=%s
-Reply: pua chat publish --reply-to=%s --id=reply-%s '<answer>'
-
-%s`, c.ResourceID, user, capability, capability, chatID(c.ID, text), text)
-}
-
-// Retire legacy dialogue inputs without replaying work already delivered to a
-// provider. A queued, never-attempted input is safe to move to execution. Old
-// mailbox entries and outbox records remain available for audit.
-func migrateChatLocked(root string, c *resourceChat) error {
-	if err := migrateChatDataLocked(root, c); err != nil {
-		return err
-	}
-	return saveChatLocked(root, *c)
-}
-
-func migrateChatDataLocked(root string, c *resourceChat) error {
-	if c.Version >= 3 {
-		return nil
-	}
-	mailbox, err := loadResourceMailboxForResource(root, c.address())
-	if err != nil {
-		return err
-	}
-	c.Token = ""
-	if c.Open {
-		c.Token = newGenerationRecordID()
-	}
-	c.IntervalSeconds, c.NextCheckAt = 0, ""
-	var migrated []chatDelivery
-	for i := range c.Outbox {
-		d := &c.Outbox[i]
-		if d.Target != c.address() {
-			continue
-		}
-		safe := !d.Accepted
-		for _, message := range mailbox.Messages {
-			if message.ID == "chat-"+chatID(c.ID, d.ID) {
-				// Retirement may have reached this mailbox before a failed
-				// migration write was retried. Never-attempted cancellation
-				// is still safe; delivery_unknown is deliberately excluded.
-				safe = message.AttemptCount == 0 && (message.Status == resourceMessageQueued ||
-					(message.Status == resourceMessageUndeliverable && message.LastErrorCode == "resource_archived"))
-				break
-			}
-		}
-		if safe && c.Open && d.Epoch == c.Epoch && strings.HasPrefix(d.ID, "input-") {
-			for _, message := range c.Messages {
-				if message.Role == "user" && "input-"+message.ID == d.ID {
-					migrated = append(migrated, chatDelivery{ID: "migrated-input-" + chatID(c.ID, message.ID), Target: c.ResourceID, Text: c.prompt("User message " + message.ID + " from " + c.User + ":\n" + message.Text), Epoch: c.Epoch})
-					break
-				}
-			}
-		}
-		d.Accepted = true
-	}
-	c.Outbox = append(c.Outbox, migrated...)
-
-	c.Version = 3
 	return nil
 }
 

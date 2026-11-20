@@ -167,20 +167,7 @@ func (m *agentManager) routeNotification(ctx context.Context, source serveWorksp
 		return nil
 	}
 	if isLegacyTurnResultType(receipt.Type) || isLegacyTurnResultType(generated.Type) {
-		operation, found, err := mailboxNotificationOperation(source.Path, sourceMessage.ID)
-		if err != nil {
-			return err
-		}
-		if found {
-			if operation.SourceResourceID == "" {
-				operation.SourceResourceID = sourceMessage.ResourceID
-			}
-			return retireLegacyResultOperation(source.Path, operation)
-		}
-		if receipt.Status != resourceNotificationDelivered && receipt.Status != resourceNotificationTerminal {
-			return terminalNotificationReceipt(source.Path, sourceMessage.ID, "result_subscription_removed", "Automatic Turn results are no longer sent.")
-		}
-		return nil
+		return reconcileRetiredResultReceipt(source.Path, sourceMessage)
 	}
 	if generated.ID != "" {
 		if err := upsertMailboxNotificationOperation(source.Path, sourceMessage.ID, mailboxNotificationOperationFromGenerated(sourceMessage, generated)); err != nil {
@@ -395,6 +382,36 @@ func (m *agentManager) reconcileTerminalNotice(ctx context.Context, workspace se
 	return m.routeNotification(ctx, workspace, updated, generated)
 }
 
+func reconcileRetiredResultReceipt(workspacePath string, source resourceMailboxMessage) error {
+	receipt := source.Notification
+	if receipt.Status == resourceNotificationDelivered || receipt.Status == resourceNotificationTerminal {
+		return nil
+	}
+	operation, found, err := mailboxNotificationOperation(workspacePath, source.ID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return updateNotificationReceipt(workspacePath, source.ID, retireResultReceipt)
+	}
+	if operation.SourceResourceID == "" {
+		operation.SourceResourceID = source.ResourceID
+	}
+	return retireLegacyResultOperation(workspacePath, operation)
+}
+
+func retireResultReceipt(receipt *resourceNotificationReceipt) {
+	if receipt.Status == resourceNotificationDelivered || receipt.Status == resourceNotificationTerminal {
+		return
+	}
+	now := time.Now().Format(time.RFC3339Nano)
+	receipt.Status = resourceNotificationTerminal
+	receipt.TerminalAt = now
+	receipt.UpdatedAt = now
+	receipt.LastErrorCode = "result_subscription_removed"
+	receipt.LastError = "Automatic Turn results are no longer sent."
+}
+
 // Retire an old outbox operation without delivering it, retaining source receipts.
 func retireLegacyResultOperation(workspacePath string, operation resourceMailboxNotificationOp) error {
 	_, err := mutateResourceMailboxStoreForResource(workspacePath, operation.SourceResourceID, func(store *resourceMailboxStore) error {
@@ -406,14 +423,7 @@ func retireLegacyResultOperation(workspacePath string, operation resourceMailbox
 			if message.Notification == nil {
 				message.Notification = &resourceNotificationReceipt{ID: operation.ID, Type: operation.Type, Status: operation.Status, TargetWorkspaceInstanceID: operation.TargetWorkspaceInstanceID, TargetResourceID: operation.TargetResourceID, CreatedAt: operation.UpdatedAt}
 			}
-			if message.Notification.Status != resourceNotificationDelivered && message.Notification.Status != resourceNotificationTerminal {
-				now := time.Now().Format(time.RFC3339Nano)
-				message.Notification.Status = resourceNotificationTerminal
-				message.Notification.TerminalAt = now
-				message.Notification.UpdatedAt = now
-				message.Notification.LastErrorCode = "result_subscription_removed"
-				message.Notification.LastError = "Automatic Turn results are no longer sent."
-			}
+			retireResultReceipt(message.Notification)
 		}
 		for index := range store.Outbox.Operations {
 			current := &store.Outbox.Operations[index]
@@ -446,7 +456,7 @@ func (m *agentManager) reconcileWorkspaceNotifications(ctx context.Context, work
 		sort.SliceStable(messages, func(i, j int) bool { return messages[i].Sequence < messages[j].Sequence })
 		for _, message := range messages {
 			if message.Notification != nil && isLegacyTurnResultType(message.Notification.Type) {
-				if err := m.routeNotification(ctx, workspace, message, resourceMailboxMessage{}); err != nil {
+				if err := reconcileRetiredResultReceipt(workspace.Path, message); err != nil {
 					failures = append(failures, fmt.Sprintf("message %s legacy result: %v", message.ID, err))
 				}
 				continue

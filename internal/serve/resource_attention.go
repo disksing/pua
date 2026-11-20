@@ -12,16 +12,7 @@ import (
 	"time"
 
 	"github.com/disksing/pua/internal/app"
-	"github.com/disksing/pua/internal/workspacepath"
 )
-
-// resourceAttentionState is the version 1 persisted shape. It is read only
-// while migrating read cursors to the version 2 resource state model.
-type resourceAttentionState struct {
-	ReadTurnNumber *int `json:"readTurnNumber,omitempty"`
-	DismissedTurn  *int `json:"dismissedTurn,omitempty"`
-	TurnNumber     int  `json:"turnNumber,omitempty"`
-}
 
 type resourceUserState struct {
 	ReadTurnNumber *int `json:"readTurnNumber,omitempty"`
@@ -36,14 +27,6 @@ type resourceState struct {
 	TurnNumbers map[string]int `json:"turnNumbers,omitempty"`
 }
 
-func cloneIntPointer(value *int) *int {
-	if value == nil {
-		return nil
-	}
-	cloned := *value
-	return &cloned
-}
-
 func loadUIStateFile(path string) (uiState, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -56,25 +39,11 @@ func loadUIStateFile(path string) (uiState, error) {
 	if err := json.Unmarshal(data, &state); err != nil {
 		return uiState{}, err
 	}
-	if state.Version == 0 {
-		state.Version = 1
-	}
 	if state.ExpandedProjects == nil {
 		state.ExpandedProjects = []string{}
 	}
 	if state.ResourceStates == nil {
 		state.ResourceStates = map[string]resourceUserState{}
-	}
-	for resourceID, attention := range state.Attention {
-		if attention.ReadTurnNumber == nil && attention.DismissedTurn != nil {
-			attention.ReadTurnNumber = cloneIntPointer(attention.DismissedTurn)
-		}
-		state.Attention[resourceID] = attention
-		if _, exists := state.ResourceStates[resourceID]; !exists && attention.ReadTurnNumber != nil {
-			state.ResourceStates[resourceID] = resourceUserState{
-				ReadTurnNumber: cloneIntPointer(attention.ReadTurnNumber),
-			}
-		}
 	}
 	return state, nil
 }
@@ -91,7 +60,6 @@ func saveUIStateFile(path string, state uiState) error {
 			delete(state.ResourceStates, resourceID)
 		}
 	}
-	state.Attention = nil
 	return saveJSONStateFile(path, ".ui-state-*.tmp", state)
 }
 
@@ -222,12 +190,6 @@ func prunedUIState(state uiState, archived map[string]bool) (uiState, bool) {
 	for id := range state.ResourceStates {
 		if archived[id] {
 			delete(state.ResourceStates, id)
-			changed = true
-		}
-	}
-	for id := range state.Attention {
-		if archived[id] {
-			delete(state.Attention, id)
 			changed = true
 		}
 	}
@@ -538,25 +500,13 @@ func (s *server) enrichTreeUserState(workspacePath string, tree *workspaceTree, 
 		return fmt.Errorf("load resource generations for user state: %w", err)
 	}
 	chats := make(map[string]resourceChat)
-	// Migrate existing chats without creating unrelated resources or waking models.
 	chatMu.Lock()
-	chatErr := migrateExistingChatsLocked(workspacePath)
-	var paths []string
-	if chatErr == nil {
-		paths, chatErr = filepath.Glob(filepath.Join(workspacepath.ControlDir(workspacePath), "chats", "*.json"))
-	}
-	if chatErr == nil {
-		for _, path := range paths {
-			c, err := loadChatLocked(workspacePath, strings.TrimSuffix(filepath.Base(path), ".json"))
-			if err != nil {
-				chatErr = err
-				break
-			}
-			if c.Version >= 4 && c.Epoch > 0 {
-				chats[c.ResourceID] = c
-			}
+	chatErr := visitSharedChatsLocked(workspacePath, func(c resourceChat) error {
+		if c.Epoch > 0 {
+			chats[c.ResourceID] = c
 		}
-	}
+		return nil
+	})
 	chatMu.Unlock()
 	if chatErr != nil {
 		return chatErr

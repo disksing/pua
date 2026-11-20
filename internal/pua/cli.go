@@ -69,6 +69,8 @@ func Run(args []string) error {
 		return runAgent(args[1:])
 	case "user":
 		return runUser(args[1:])
+	case "card":
+		return runCard(args[1:])
 	case "chat":
 		return runChat(args[1:])
 	case "turn":
@@ -290,6 +292,7 @@ Usage:
   pua scheduler <command>
   pua agent <command>
   pua user <command>
+  pua card list|create|update --help
   pua workspace <command>
   pua chat show|notes|publish|dispatch|timer
   pua turn status|switch|finish|cancel-resume
@@ -382,6 +385,8 @@ func runHelp(args []string) error {
 		printAgentHelp()
 	case "user":
 		printUserHelp()
+	case "card":
+		fmt.Println(cardHelp)
 	case "workspace":
 		printWorkspaceHelp()
 	case "chat":

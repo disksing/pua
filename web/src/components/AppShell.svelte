@@ -12,6 +12,7 @@
   import SchedulerNav from "./SchedulerNav.svelte";
   import WorkspaceSwitcher from "./WorkspaceSwitcher.svelte";
   import WorkspaceUserGate from "./WorkspaceUserGate.svelte";
+  import WorkspaceCards from "./WorkspaceCards.svelte";
 
   let { channel, details }: {
     channel: ModelChannel<AppShellModel>;
@@ -21,6 +22,7 @@
   let model = $state(channel.current());
   let appliedRouteRevision = $state(0);
   let doctorOpen = $state(false);
+  let cardsOpen = $state(false);
   let narrow = $state(false);
   let sidebar = $state<HTMLElement>();
   let navigationTrigger = $state<HTMLButtonElement>();
@@ -33,6 +35,7 @@
       model = next;
     });
     const keydown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && cardsOpen) cardsOpen = false;
       if (event.key === "Escape" && !event.defaultPrevented && sidebarOpen) model.onMobileSidebar(false);
     };
     const popstate = () => {
@@ -166,6 +169,9 @@
     ><Icon name="x" /></button>
     <div class="brand-mark"><img src="/workspace-icons/pua-yellow.png" alt="" aria-hidden="true" /></div>
     <div class="brand-copy"><strong>PUA</strong><span>{model.version}</span></div>
+    {#if model.cardUser && !model.userGate?.mode}
+      <button class="cards-launch" type="button" aria-controls="agentPanel" aria-expanded={cardsOpen} onclick={() => { model.onMobileSidebar(false); cardsOpen = !cardsOpen; }}>Cards</button>
+    {/if}
     {#if model.doctor.summary.errors + model.doctor.summary.warnings > 0 || model.doctor.error}
       <button
         id="doctorButton"
@@ -197,7 +203,13 @@
   {:else}
   <section id="detailsPanel" class="details-panel" data-component-owner="detail-panel">{#if details}{@render details(navigation)}{/if}</section>
   <PaneResizeHandle id="detailsResize" kind="chatWidth" className="details-resize" label="Resize right column" onPreview={model.onPanePreview} onCommit={model.onPaneCommit} />
-  <div id="agentPanel" class="agent-panel" aria-hidden="true"></div>
+  <aside id="agentPanel" class="agent-panel" class:cards-open={cardsOpen} aria-label="Workspace cards">
+    {#if model.cardUser && model.activeWorkspaceId}
+      {#key JSON.stringify([model.activeWorkspaceId, model.cardUser])}
+        <WorkspaceCards workspace={model.activeWorkspaceId} user={model.cardUser} tree={model.cardTree ?? null} treeError={model.error} onSelect={model.onSelectResource} onClose={() => cardsOpen = false} />
+      {/key}
+    {/if}
+  </aside>
   {/if}
 </main>
 </div>

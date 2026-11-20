@@ -247,6 +247,7 @@ async function installMockApi(page: Page, lastResourceId = "project1.task1", wit
         workspaces: [{ id: "ws-test", name: "Isolated E2E", path: "/tmp/pua-e2e" }],
       });
     }
+    if (path === "/api/workspaces/ws-test/cards" && method === "GET") return json(route, []);
     if (path === "/api/workspaces/ws-test/users") {
       if (method === "POST") {
         const name = String((request.postDataJSON() as { name?: string }).name || "");
@@ -1217,7 +1218,7 @@ for (const viewport of [{ width: 1500, height: 800 }, { width: 440, height: 844 
     const scroller = page.locator("#chatTimeline");
     await expect(page.getByRole("tab").first()).toHaveText("Chat");
     await expect(page.locator("#detailsPanel #chatTimeline")).toBeVisible();
-    await expect(page.locator("#agentPanel > *")).toHaveCount(0);
+    await expect(page.locator("#agentPanel h2")).toHaveText("Workspace cards");
     if (viewport.width < 980) await expect(page.locator("#agentPanel")).toBeHidden();
     else await expect(page.locator("#agentPanel")).toBeVisible();
     const dock = scroller.locator(".public-chat-dock");

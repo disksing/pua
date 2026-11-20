@@ -767,6 +767,12 @@ func (s *server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		s.worktreeDiff(w, r, id)
 	case "ui-state":
 		s.handleUIState(w, r, id)
+	case "cards":
+		if len(parts) != 2 {
+			http.NotFound(w, r)
+			return
+		}
+		s.handleCards(w, r, id)
 	case "projects":
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)

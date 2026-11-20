@@ -4,6 +4,7 @@ import type { CreateDialogModel } from "./models/create";
 import type { DetailPanelModel } from "./models/detail";
 import type { SettingsModel } from "./models/settings";
 import type { AppShellModel, DoctorSnapshotModel, ShellDragTarget, ShellResourceItem, ShellStatusPresentation, ShellTreeFilter } from "./models/shell";
+import { cardObservation } from "./components/workspace-cards";
 import type { AgentConfig, AgentProfile, DiffRecord, ResourceRecord, WorkspaceConfig, WorkspaceFileRecord, WorkspaceTree, WorkspaceUser } from "./models/workspace";
 import type { ApiErrorResponse, ArchiveResponse } from "./api/types";
 import { createAgentDraftController } from "./controllers/agent-draft-controller";
@@ -733,6 +734,7 @@ async function autoRefresh() {
 	try {
 		const [tree, doctor, settingsRevision] = await Promise.all([fetchCurrentTree(workspaceId), fetchDoctorSnapshot(), fetchSettingsRevision()]);
 		if (!tree || !isCurrentAutoRefresh(workspaceId, navigationVersion, refreshVersion)) return;
+		cardObservation.set({ workspace:workspaceId, user:currentUserName(), tree });
 		let changed = !sameJSON(controllerState.tree, tree);
 		if (changed) controllerState.tree = tree;
 		if (!sameJSON(controllerState.doctor, doctor)) {
@@ -920,6 +922,8 @@ function renderAppShell() {
 	if (controllerState.tree) controllerState.taskOperationalStateKey = taskOperationalStateKey();
 	const workspaceState = resourceNavigationState(controllerState.tree?.workspace);
 	publisher.renderAppShell({
+		cardUser: currentUserName(),
+		cardTree: controllerState.tree,
 		identity: controllerState.activeWorkspaceId || "no-workspace",
 		loading: Boolean(controllerState.navigationLoading),
 		error: controllerState.navigationError || "",
@@ -1474,6 +1478,7 @@ async function fetchCurrentTree(workspaceId = controllerState.activeWorkspaceId)
 			await loadWorkspaceContext();
 			return null;
 		}
+		if (isCurrentWorkspaceView(workspaceId,navigationVersion,requestVersion)) cardObservation.set({workspace:workspaceId,user:currentUserName(),tree:null});
 		throw error;
 	}
 	return isCurrentWorkspaceView(workspaceId, navigationVersion, requestVersion) ? tree : null;

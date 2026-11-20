@@ -1,4 +1,5 @@
 import type { WorkspaceOption } from "./common";
+import type { WorkspaceTree } from "./workspace";
 
 export interface ShellStatusItem {
   key: string;
@@ -86,6 +87,8 @@ export interface ShellDragTarget {
 }
 
 export interface AppShellModel {
+  cardUser?: string;
+  cardTree?: WorkspaceTree | null;
   identity: string;
   loading: boolean;
   error: string;

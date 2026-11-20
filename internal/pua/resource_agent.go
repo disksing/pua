@@ -68,6 +68,7 @@ type serveLockMetadata struct {
 }
 
 type resourceServerClient struct {
+	userName    string
 	chatID      string
 	chatToken   string
 	baseURL     string
@@ -299,6 +300,9 @@ func (client *resourceServerClient) request(ctx context.Context, method, path st
 	}
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
+	}
+	if client.userName != "" {
+		request.Header.Set("X-PUA-User", client.userName)
 	}
 	if os.Getenv("PUA_CHANNEL") == "dialogue" {
 		request.Header.Set("X-PUA-Chat", os.Getenv("PUA_CHAT_ID"))

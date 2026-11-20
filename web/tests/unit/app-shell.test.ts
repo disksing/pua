@@ -337,8 +337,9 @@ describe("AppShell", () => {
     expect(target.querySelector("#workspaceMenu")).toBeNull();
   });
 
-  it("reserves an empty right column without a stacked divider", async () => {
-    const initial = model();
+  it("shows the user's workspace cards beside the details pane", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("[]")));
+    const initial = model({cardUser:"Alice"});
     const channel = createModelChannel(initial);
     const target = document.body.appendChild(document.createElement("div"));
     const component = mount(AppShell, { target, props: { channel } });
@@ -349,7 +350,7 @@ describe("AppShell", () => {
     expect(target.querySelector("#agentPanel")).not.toBeNull();
     expect(target.querySelector("#paneDetailsTab")).toBeNull();
     expect(target.querySelector("#paneChatTab")).toBeNull();
-    expect(target.querySelector("#agentPanel")?.childElementCount).toBe(0);
+    expect(target.querySelector("#agentPanel h2")?.textContent).toBe("Workspace cards");
     expect(target.querySelector("#detailsResizeY")).toBeNull();
     const vertical = target.querySelector<HTMLElement>("#detailsResize")!;
     expect(vertical.getAttribute("aria-orientation")).toBe("vertical");

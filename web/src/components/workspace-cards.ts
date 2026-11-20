@@ -1,0 +1,55 @@
+import type { ResourceRecord, WorkspaceTree } from "../models/workspace";
+import { writable } from "svelte/store";
+
+export const cardObservation = writable<{workspace:string; user:string; tree:WorkspaceTree|null} | null>(null);
+
+export const styles = { stat: "Stat", gauge: "Gauge", pie: "Pie Chart", trend: "Trend", list: "List", html: "HTML" } as const;
+export type Kind = keyof typeof styles;
+export const sources: Record<Kind, string[]> = {
+  stat: ["running", "running-tasks", "tasks"], trend: ["running", "running-tasks", "tasks"],
+  list: ["running", "running-tasks", "tasks"], gauge: ["task-ratio"], pie: ["task-states"], html: [],
+};
+export const labels: Record<string, string> = {
+  running: "Running resources", "running-tasks": "Running tasks", tasks: "All tasks",
+  "task-ratio": "Running share of tasks", "task-states": "Task states", agent: "Agent publication",
+};
+export interface Item { label: string; resource?: string; url?: string; value?: number }
+export interface Point { time: string; value: number }
+export interface Content { value?: number; max?: number; items?: Item[]; points?: Point[]; html?: string }
+export interface Card {
+  id: string; title: string; kind: Kind; source: string; version: number;
+  collapsed: boolean; height?: number; content?: Content; updated?: string;
+}
+export function summarize(tree: WorkspaceTree) {
+  const resources: ResourceRecord[] = [];
+  function collect(item?: ResourceRecord) {
+    if (!item || item.archived) return;
+    resources.push(item);
+    item.children?.forEach(collect);
+  }
+  collect(tree.workspace);
+  collect(tree.scheduler);
+  tree.projects.forEach(collect);
+  const tasks = resources.filter(item => item.type === "task");
+  const running = resources.filter(item => item.runtime?.activeTurn);
+  const bySource: Record<string, ResourceRecord[]> = {tasks, running, "running-tasks": tasks.filter(item => item.runtime?.activeTurn)};
+  const states = new Map<string, number>();
+  for (const item of tasks) {
+    const state = item.state || "unknown";
+    states.set(state, (states.get(state) || 0) + 1);
+  }
+  return {bySource, states};
+}
+export type Summary = ReturnType<typeof summarize>;
+export interface Sample { time: string; counts: Record<string, number> }
+export function project(card: Card, summary: Summary | null, samples: Sample[]): Content | null {
+  if (card.source === "agent") return card.content ?? null;
+  if (!summary) return null;
+  const {bySource, states} = summary;
+  if (card.kind === "gauge") return {value: bySource["running-tasks"].length, max: bySource.tasks.length};
+  if (card.kind === "pie") return {items: Array.from(states, ([label,value]) => ({label,value}))};
+  const rows = bySource[card.source];
+  if (!rows) return null;
+  if (card.kind === "list") return {items: rows.map(item => ({label: item.title || item.id, resource: item.id}))};
+  return {value: rows.length, points: samples.map(sample => ({time: sample.time, value: sample.counts[card.source]}))};
+}

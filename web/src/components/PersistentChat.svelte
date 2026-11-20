@@ -45,6 +45,7 @@
   let draft = $state("");
   let draftResetVersion = $state(0);
   let quote = $state<{ text: string; messageId: string; left: number; top: number } | null>(null);
+  let mouseSelectingQuote = false;
   let uploadOpen = $state(false);
   let uploadCycle = $state(0);
   let bindingSaving = $state(false);
@@ -191,7 +192,7 @@
     } };
   }
   function selectedQuote() {
-    if (!canQuote || !root) return null;
+    if (mouseSelectingQuote || !canQuote || !root) return null;
     const selection = window.getSelection();
     if (!selection || selection.isCollapsed || selection.rangeCount !== 1) return null;
     const range = selection.getRangeAt(0);
@@ -227,6 +228,21 @@
   }
   function updateQuote() {
     quote = selectedQuote();
+  }
+  function beginQuoteSelection(event: PointerEvent) {
+    if (!canQuote || event.pointerType !== "mouse" || event.button !== 0) return;
+    if (event.target instanceof Element && event.target.closest(".chat-quote")) return;
+    mouseSelectingQuote = true;
+    quote = null;
+  }
+  function endQuoteSelection(event: PointerEvent) {
+    if (event.pointerType !== "mouse" || !mouseSelectingQuote) return;
+    mouseSelectingQuote = false;
+    if (event.type === "pointerup") updateQuote();
+  }
+  function clearQuoteSelection() {
+    mouseSelectingQuote = false;
+    quote = null;
   }
   async function appendQuote() {
     if (!canQuote || !quote) return;
@@ -352,6 +368,8 @@
   $effect(() => { if (!canQuote) quote = null; });
 
 </script>
+<svelte:window onpointerdowncapture={beginQuoteSelection} onpointerupcapture={endQuoteSelection}
+  onpointercancelcapture={endQuoteSelection} onblur={clearQuoteSelection} />
 <svelte:document onselectionchange={updateQuote} />
 <section tabindex="-1" use:trackScroll class="persistent-chat" class:quoting={canQuote && quote !== null} aria-label="Resource chat">
   <SessionControls {model} enabled={visible && canLoad && !archived && Boolean(chat || model.detail || model.resourceType === "workspace")} {followTail} onLatest={jumpToLatest}>
@@ -421,7 +439,7 @@
 <style>
   .persistent-chat { display:flex; flex-direction:column; min-height:100%; gap:8px; padding:12px 16px 0; }
   .quoting { position:relative; }
-  .chat-quote { position:absolute; z-index:3; padding:0; user-select:none; background:var(--panel); }
+  .chat-quote { position:absolute; z-index:3; justify-content:center; user-select:none; }
   .older-messages { display:flex; flex-direction:column; align-items:center; gap:4px; }
   article {
     align-self:flex-start;

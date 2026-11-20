@@ -1288,12 +1288,26 @@ for (const viewport of [{ width: 1500, height: 844 }, { width: 440, height: 820 
       await page.mouse.move(start.x, start.y);
       await page.mouse.down();
       await page.mouse.move(end.x, end.y, { steps: 6 });
-      await page.mouse.up();
       await expect.poll(() => page.evaluate(() => window.getSelection()?.toString())).toBe(text);
+      await expect(quote).toHaveCount(0);
+      await page.mouse.up();
+      await expect(quote).toBeVisible();
     }
 
     await selectText(paragraphs[0], "quote this");
-    await expect(quote).toBeVisible();
+    await expect(quote).toHaveClass(/secondary-button/);
+    const labelOffset = await quote.evaluate(button => {
+      const range = document.createRange();
+      range.selectNodeContents(button);
+      const label = range.getBoundingClientRect();
+      const bounds = button.getBoundingClientRect();
+      return {
+        horizontal: Math.abs(label.left + label.width / 2 - bounds.left - bounds.width / 2),
+        vertical: Math.abs(label.top + label.height / 2 - bounds.top - bounds.height / 2),
+      };
+    });
+    expect(labelOffset.horizontal).toBeLessThan(2);
+    expect(labelOffset.vertical).toBeLessThan(2);
     await page.evaluate(() => {
       const paragraphs = document.querySelectorAll("#chatTimeline article p");
       window.getSelection()!.setBaseAndExtent(paragraphs[0].firstChild!, 1, paragraphs[1].firstChild!, 4);
@@ -1303,7 +1317,6 @@ for (const viewport of [{ width: 1500, height: 844 }, { width: 440, height: 820 
     let expected = "Existing draft";
     for (const [index, text] of ["quote this", "agent reply"].entries()) {
       await selectText(paragraphs[index], text);
-      await expect(quote).toBeVisible();
       const box = (await quote.boundingBox())!;
       expect(box.x).toBeGreaterThanOrEqual(0);
       expect(box.x + box.width).toBeLessThanOrEqual(viewport.width);

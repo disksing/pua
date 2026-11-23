@@ -55,8 +55,8 @@
     && ["running", "waiting_approval"].includes(status.session.state || status.sessionState || "")
     ? `${status.generation.generationId}:${status.session.currentTurnId}` : "");
   const statusRow = $derived(sections.flatMap(section => section.rows).find((row): row is HistoryRow =>
-    row.kind === "history" && row.key === activeKey && Boolean(row.block.turn)));
-  const activeRow = $derived(statusRow?.block.turn?.closed ? undefined : statusRow);
+    row.kind === "history" && row.key === activeKey));
+  const activeRow = $derived(statusRow?.turn.closed ? undefined : statusRow);
   const legacy = $derived(findLegacy(model.detail?.artifacts || []));
   const uid = $props.id();
   let expanded = $state(new Set<string>());
@@ -197,28 +197,33 @@
 
 </script>
 
+{#snippet eventDetails(block: ConversationBlock)}
+  <TurnEventDetails {block} project={projectConversationEvents} presentItem={historyItem}
+    workspaceId={model.workspaceId} resolveResourceTitle={model.resolveResourceTitle}
+    onNavigate={model.onNavigate} {onOpenFile} onExpand={expandCompact} readOnly
+    contextIdentity={snapshot.identity} onApproval={async () => {}} onToast={model.onToast} />
+{/snippet}
+
 {#snippet turnChip(row: HistoryRow)}
-  {@const block = row.block}
+  {@const { block, turn } = row}
   {@const detailsId = `${uid}-${block.key}`}
   {@const open = isExpanded(row.key)}
-  <div class="history-chip" data-timeline-key={row.key} data-turn-chip={row.key} data-history-input={block.turn?.triggerMessageId} data-chat-row={row.key}>
-    <TimelineSourceButton source={turnSource(block, row.input)} {onInspect}
-      status={activeRow?.key === row.key ? block.turn?.status : undefined}
+  <div class="history-chip" data-timeline-key={row.key} data-turn-chip={row.key} data-history-input={turn.triggerMessageId} data-chat-row={row.key}>
+    <TimelineSourceButton source={turnSource(turn, row.input)} {onInspect}
+      status={activeRow?.key === row.key ? turn.status : undefined}
       expanded={open} controls={open ? detailsId : undefined} onToggle={(button) => toggle(block, button)} />
   </div>
 {/snippet}
 
 {#snippet turnDetails(row: HistoryRow)}
   {#if isExpanded(row.key)}
-    {@const block = row.block}
+    {@const { block, turn } = row}
     {@const detailsId = `${uid}-${block.key}`}
-    {@const source = turnSource(block, row.input)}
+    {@const source = turnSource(turn, row.input)}
     <section class="expanded-history history-wide" id={detailsId} aria-label={`${source.label} Turn details`}>
       <header>
         <strong>{source.sender || source.label}</strong>
-        {#if block.turn}
-          <small>{[block.turn.status, `${block.turn.eventCount} events`, new Date(block.turn.startedAt).toLocaleString()].filter(Boolean).join(" · ")}</small>
-        {/if}
+        <small>{[turn.status, `${turn.eventCount} events`, new Date(turn.startedAt).toLocaleString()].filter(Boolean).join(" · ")}</small>
       </header>
       {#if !block.items && !block.events && !block.error}
         {#if source.text && !row.input}<p class="trigger-preview">{source.text}</p>{/if}
@@ -226,12 +231,9 @@
       {/if}
       {#if block.error}
         <TimelineNotice title="Turn unavailable" text={block.error} error />
-        {#if block.turn && !block.items && !block.events}<button type="button" class="secondary-button" onclick={() => controller.loadTurn(block.turn?.reference || "")}>Retry</button>{/if}
+        {#if !block.items && !block.events}<button type="button" class="secondary-button" onclick={() => controller.loadTurn(turn.reference)}>Retry</button>{/if}
       {/if}
-      <TurnEventDetails {block} project={projectConversationEvents} presentItem={historyItem}
-        workspaceId={model.workspaceId} resolveResourceTitle={model.resolveResourceTitle}
-        onNavigate={model.onNavigate} {onOpenFile} onExpand={expandCompact} readOnly
-        contextIdentity={snapshot.identity} onApproval={async () => {}} onToast={model.onToast} />
+      {@render eventDetails(block)}
       <button type="button" class="ghost-button collapse-history" onclick={() => collapse(block, detailsId)}><Icon name="chevron-up" />Collapse turn</button>
     </section>
   {/if}
@@ -251,7 +253,7 @@
       <button type="button" class="ghost-button" onclick={() => controller.retryHistory()}>Retry history</button>
     </div>
   {/if}
-  {@render execution(activeRow ? runningChip : undefined, activeRow ? turnWorkingLabel(activeRow) : "", Boolean(statusRow?.block.turn?.closed))}
+  {@render execution(activeRow ? runningChip : undefined, activeRow ? turnWorkingLabel(activeRow) : "", Boolean(statusRow?.turn.closed))}
   {#if activeRow}{@render turnDetails(activeRow)}{/if}
   {#if queue.length}
     <div class="queued-inputs" role="group" aria-label="Waiting messages">
@@ -285,14 +287,18 @@
       {#each section.rows as row (row.key)}
         {#if row.kind === "message"}
           <div class="chat-bubble-row" data-chat-row={row.key}>{@render bubble(row.message)}</div>
-        {:else if row.block.kind === "gap"}
+        {:else if row.kind === "gap"}
           {@const starting = row.block.gap?.code === "session_starting"}
           <div class:conversation-session-starting={starting} class:conversation-gap={!starting} class="history-wide" data-timeline-key={row.key} data-chat-row={row.key}>
             <Icon name={starting ? "loader-circle" : "triangle-alert"} />
             <span><strong>{starting ? "Starting agent…" : "History unavailable"}</strong><small>{row.block.gap?.message || "This generation could not be read."}</small></span>
             {#if row.block.gap?.retryable}<button type="button" class="secondary-button" onclick={() => controller.retryHistory()}>Retry</button>{/if}
           </div>
-        {:else if row.key !== activeRow?.key}
+        {:else if row.kind === "session"}
+          <div class="history-wide" data-timeline-key={row.key} data-chat-row={row.key}>
+            {@render eventDetails(row.block)}
+          </div>
+        {:else if row.kind === "history" && row.key !== activeRow?.key}
           {@render turnChip(row)}
           {@render turnDetails(row)}
         {/if}

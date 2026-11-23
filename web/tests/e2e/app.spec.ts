@@ -4002,6 +4002,83 @@ test("moves active Turn icons and durable pending user bubbles through the unifi
   await session.detach();
 });
 
+test("keeps orphan replay events out of Turn chips across a running Chat reload and history refresh", async ({ page }) => {
+  await installMockApi(page);
+  const stamp = (eventId: number) => new Date(Date.parse(now) + eventId * 1000).toISOString();
+  const generation = {
+    generation: 4, generationId: "replay-4", status: "running", createdAt: stamp(0),
+    turnTotals: { count: 5, executionMs: 61000, latestEventId: 1970 },
+  };
+  const previous = [[18, 393], [394, 439], [440, 793], [796, 1246]].map(([startEventId, lastEventId]) => ({
+    generation, reference: `replay-${startEventId}`, turnId: `turn-${startEventId}`, triggerRole: "user",
+    startedAt: stamp(startEventId), startEventId, lastEventId, closed: true, status: "completed", eventCount: 2,
+  }));
+  const active = {
+    generation, reference: "replay-active", turnId: "active", triggerRole: "system", triggerPreview: "Resume the fixture",
+    startedAt: stamp(1968), startEventId: 1968, lastEventId: 1970, closed: false, status: "active", eventCount: 3,
+  };
+  const frame = (id: number, type: string, data: Record<string, unknown>, turnId?: string) => {
+    const source = { sessionId: "replay-session", time: stamp(id), turnId };
+    const events = [{ id: `replay-${id}`, sourceEventId: id, index: 0, type, data }];
+    return `id: ${id}\ndata: ${JSON.stringify({ schema: "agenthub.semantic-events.v1", cursor: id, source, events })}\n\n`;
+  };
+  let indexed = false;
+  await page.route("**/api/workspaces/ws-test/resources/project1.task1/**", async route => {
+    const url = new URL(route.request().url());
+    const op = url.pathname.split("/project1.task1/")[1];
+    if (op === "status") return json(route, {
+      generation, sessionState: "working",
+      session: { id: "replay-session", state: "running", currentTurnId: active.turnId },
+      waitingMessages: [],
+    });
+    if (op === "chat") return json(route, { id: "replay-chat", open: true, epoch: 1, unreadCount: 0, messages: [] });
+    if (op === "history/turns") return json(route, {
+      segments: [{ generation, turns: indexed ? [...previous, active] : previous }], page: { hasMore: false },
+    });
+    if (op === "history/turns/replay-active") return json(route, { turn: active, latestEventId: 1968, items: [] });
+    if (op === "events") return json(route, { schema: "agenthub.semantic-events.v1", frames: [], page: { hasMore: false } });
+    if (op === "stream") {
+      const replay = indexed ? frame(1971, "provider.event", { method: "fixture/refresh" }) : [
+        frame(1247, "message.reasoning.delta", { text: "Unassigned fixture reasoning" }),
+        frame(1248, "provider.event", { method: "fixture/unassigned" }),
+        frame(1969, "message.reasoning.delta", { text: "Reasoning inside the formal Turn" }, active.turnId),
+        frame(1970, "provider.event", { method: "fixture/active" }, active.turnId),
+      ].join("");
+      const notice = `event: pua.notice\ndata: ${JSON.stringify({ data: { text: "Replay frames received" } })}\n\n`;
+      return route.fulfill({ status: 200, contentType: "text/event-stream", body: `retry: 1000\n\n${replay}${notice}` });
+    }
+    return route.fallback();
+  });
+  const chat = page.locator("#chatTimeline");
+  const chips = chat.locator("[data-turn-chip]");
+  const marker = chat.locator('[data-generation-id="replay-4"]');
+  const controls = chat.getByRole("group", { name: "Execution controls" });
+  const activeChip = controls.getByRole("button", { name: "Turn · System · active", exact: true });
+  const expectUnindexed = async () => {
+    await expect(chat.getByText("Replay frames received", { exact: true })).toBeVisible();
+    await expect(chips).toHaveCount(4);
+    await expect(chat.getByRole("button", { name: /Turn · System/ })).toHaveCount(0);
+    await expect(controls.getByRole("button", { name: "Stop execution" })).toBeVisible();
+    await expect(marker.locator("[data-generation-turn-count]")).toHaveText("5 Turns");
+  };
+  await page.goto("/w/ws-test/r/project1.task1");
+  await expectUnindexed();
+  await page.reload();
+  await expectUnindexed();
+
+  indexed = true;
+  await expect(activeChip).toBeVisible();
+  await expect(chips).toHaveCount(5);
+  await expect(marker).toHaveCount(1);
+  await expect(marker.locator("[data-generation-turn-count]")).toHaveText("5 Turns");
+  if (await activeChip.getAttribute("aria-expanded") !== "true") await activeChip.click();
+  const details = chat.getByRole("region", { name: "System Turn details" });
+  await expect(details).toContainText("Reasoning inside the formal Turn");
+  await expect(chat.getByText("Unassigned fixture reasoning", { exact: true })).toHaveCount(0);
+  await details.getByRole("button", { name: "Collapse turn" }).click();
+  await expect(activeChip).toHaveAttribute("aria-expanded", "false");
+});
+
 for (const { mode, width } of [{ mode: "recovering", width: 1500 }, { mode: "starting", width: 440 }]) {
   test(`hides empty Session event rows while ${mode} in unified Chat at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 820 });
@@ -4027,6 +4104,7 @@ for (const { mode, width } of [{ mode: "recovering", width: 1500 }, { mode: "sta
       [15, "provider.metadata"],
       [16, "session.state", { state: "stopped", reason: "startup_error" }],
       [17, "provider.error", { message: "Fixture provider diagnostic" }],
+      [18, "message.input", { role: "system", text: "Fixture system message outside a Turn" }],
       [19, "provider.metadata"],
     ];
     const schema = "agenthub.semantic-events.v1";
@@ -4079,12 +4157,11 @@ for (const { mode, width } of [{ mode: "recovering", width: 1500 }, { mode: "sta
     const system = chat.getByRole("button", { name: "Turn · System", exact: true });
     await expect(controls.getByRole("button", { name: "Turn · User notification · active", exact: true })).toBeVisible();
     await expect(controls).toContainText("Agent is updating you");
-    await expect(chips).toHaveCount(2);
-    await system.click();
-    const details = chat.getByRole("region", { name: "System Turn details" });
-    await expect(details).toContainText("Session stopped · startup error");
-    await expect(details).toContainText("Fixture provider diagnostic");
-    await details.getByRole("button", { name: "Collapse turn" }).click();
+    await expect(chat.getByText("Session stopped · startup error")).toBeVisible();
+    await expect(chat.getByText("Fixture provider diagnostic")).toBeVisible();
+    await expect(chat.getByText("Fixture system message outside a Turn")).toBeVisible();
+    await expect(chips).toHaveCount(1);
+    await expect(system).toHaveCount(0);
 
     await expect(marker.locator("[data-generation-turn-count]")).toHaveText("2 Turns");
     await expect(marker.locator("[data-generation-duration]")).toHaveText("1m 1s execution");
@@ -4093,10 +4170,10 @@ for (const { mode, width } of [{ mode: "recovering", width: 1500 }, { mode: "sta
     await expect(marker).toHaveCount(1);
     await expect(marker.locator("[data-generation-turn-count]")).toHaveText("2 Turns");
     await expect(marker.locator("[data-generation-duration]")).toHaveText("1m 1s execution");
-    await expect(chips).toHaveCount(3);
+    await expect(chips).toHaveCount(2);
     await expect(chips.first()).toHaveAttribute("data-turn-chip", "startup-34:first");
-    await system.first().click();
-    await expect(details).toContainText("Real System Turn detail");
+    await system.click();
+    await expect(chat.getByRole("region", { name: "System Turn details" })).toContainText("Real System Turn detail");
   });
 }
 

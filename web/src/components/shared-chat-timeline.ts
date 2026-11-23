@@ -1,5 +1,7 @@
-import type { ConversationBlock, ResourceHistoryGeneration, TimelineItem, TurnResumeSource, WaitingMessage } from "./models";
+import type { ConversationBlock, ResourceHistoryGeneration, ResourceHistoryTurnSummary, TimelineItem, TurnResumeSource, WaitingMessage } from "./models";
 import { projectConversationEvents } from "./timeline-events";
+
+const SESSION_NOTICE_EVENTS = new Set(["message.input", "provider.error", "session.archived", "session.state"]);
 
 export interface SharedChatMessage {
   id: string;
@@ -19,10 +21,14 @@ export interface HistoryRow {
   key: string;
   time: number;
   block: ConversationBlock;
+  turn: ResourceHistoryTurnSummary;
   input?: SharedChatMessage;
 }
 
-type TimelineRow = { kind: "message"; key: string; time: number; message: SharedChatMessage } | HistoryRow;
+type TimelineRow =
+  | { kind: "message"; key: string; time: number; message: SharedChatMessage }
+  | { kind: "gap" | "session"; key: string; time: number; block: ConversationBlock }
+  | HistoryRow;
 type GenerationBoundary = { kind: "generation"; key: string; time: number; generation: ResourceHistoryGeneration };
 type TimelineSection = { key: string; generation?: ResourceHistoryGeneration; rows: TimelineRow[] };
 
@@ -58,14 +64,11 @@ function source(trigger: TurnResumeSource, text: string, resumeSource?: TurnResu
   return { role: "unknown", label: "Unknown source", icon: "circle-help", ...details };
 }
 
-export function turnSource(block: ConversationBlock, input?: SharedChatMessage): TimelineSource {
-  const turn = block.turn;
-  return turn
-    ? source({
-        role: input ? "user" : turn.triggerRole, type: turn.triggerType,
-        sender: turn.triggerSender || (input ? { name: input.sender } : undefined), sourceResourceId: turn.triggerSourceResourceId,
-      }, input?.text || legacyInputText(turn.triggerPreview), turn.resumeSource)
-    : source({ role: "system" }, "Session events");
+export function turnSource(turn: ResourceHistoryTurnSummary, input?: SharedChatMessage): TimelineSource {
+  return source({
+    role: input ? "user" : turn.triggerRole, type: turn.triggerType,
+    sender: turn.triggerSender || (input ? { name: input.sender } : undefined), sourceResourceId: turn.triggerSourceResourceId,
+  }, input?.text || legacyInputText(turn.triggerPreview), turn.resumeSource);
 }
 
 export function queueSource(message: WaitingMessage): TimelineSource {
@@ -74,7 +77,7 @@ export function queueSource(message: WaitingMessage): TimelineSource {
 }
 
 export function turnWorkingLabel(row: HistoryRow): string {
-  const source = turnSource(row.block, row.input);
+  const source = turnSource(row.turn, row.input);
   if (source.resumed) return "Agent is resuming work";
   switch (source.role) {
     case "notification": return "Agent is updating you";
@@ -109,19 +112,25 @@ export function timelineSections(messages: SharedChatMessage[], blocks: Conversa
     message: message.continuation ? { ...message, text: message.continuation.text } : message,
   }));
   for (const block of blocks) {
-    const events = block.events || [];
-    const firstEvent = events[0];
-    if (!block.turn && block.kind !== "gap" && (!firstEvent || firstEvent.turnId || !projectConversationEvents(events).length)) continue;
-    const input = byInput.get(block.turn?.triggerMessageId || "");
-    const time = timestamp(block.turn?.startedAt || firstEvent?.time || block.generation.createdAt);
+    const { key, turn, events = [] } = block;
+    const time = timestamp(turn?.startedAt || events[0]?.time || block.generation.createdAt);
+    if (block.kind === "gap") {
+      rows.push({ kind: "gap", key, time, block });
+    } else if (turn) {
+      rows.push({ kind: "history", key, time, block, turn, input: byInput.get(turn.triggerMessageId || "") });
+    } else {
+      const items = projectConversationEvents(events.filter(event => !event.turnId && SESSION_NOTICE_EVENTS.has(event.type)))
+        .filter(item => item.kind !== "message" || item.role === "system");
+      if (!items.length) continue;
+      rows.push({ kind: "session", key, time, block: { ...block, events: undefined, items } });
+    }
     const id = block.generation.generationId;
     const marker = generations.get(id);
     const boundary = Math.min(time, timestamp(block.generation.createdAt) || time);
     if (!marker || boundary < marker.time) generations.set(id, { kind: "generation", key: `generation:${id}`, generation: block.generation, time: boundary });
-    rows.push({ kind: "history", key: block.key, time, block, input });
   }
   rows.push(...generations.values());
-  const order = { generation: 0, message: 1, history: 2 };
+  const order = { generation: 0, message: 1, history: 2, gap: 2, session: 2 };
   rows.sort((left, right) => left.time - right.time || order[left.kind] - order[right.kind]);
   const sections: TimelineSection[] = [];
   let section: TimelineSection = { key: "before-generations", rows: [] };

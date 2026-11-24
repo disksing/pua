@@ -182,17 +182,6 @@
   background: var(--panel);
 }
 
-:where([data-component-owner="app-shell"]) .chat-timeline {
-  flex: 1;
-  min-width: 0;
-  overflow-x: hidden;
-  overflow-y: auto;
-  padding: 12px 14px;
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  font-size: 13px;
-  line-height: 1.55;
-}
-
 :where([data-component-owner="app-shell"]) .chat-composer {
   flex: 0 0 auto;
   background: var(--bg);
@@ -229,13 +218,6 @@
 
 :where([data-component-owner="app-shell"]) .chat-panel {
   box-shadow: none;
-}
-
-:where([data-component-owner="app-shell"]) .chat-timeline {
-  container: shared-chat / inline-size;
-  background: var(--shared-chat-canvas);
-  overflow-anchor: none;
-  padding: 0;
 }
 
 /* Two-column mode gives all space beside the sidebar to resource details. */

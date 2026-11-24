@@ -43,11 +43,6 @@
     }
   }));
 
-  $effect(() => {
-    draft;
-    void tick().then(resize);
-  });
-
   function context() {
     return { workspaceId: model.workspaceId, resourceId: model.resourceId, draftKey: model.draftKey };
   }
@@ -114,14 +109,6 @@
     void send();
   }
 
-  function resize(): void {
-    if (!input) return;
-    input.style.height = "auto";
-    const nextHeight = Math.min(input.scrollHeight, 160);
-    input.style.height = `${nextHeight}px`;
-    input.style.overflowY = input.scrollHeight > 160 ? "auto" : "hidden";
-  }
-
   function selectBinding(binding: ResourceAgentBindingModel): void {
     void model.onSaveAgentBinding(binding);
   }
@@ -158,7 +145,9 @@
   </div>
 {/if}
 <form id="chatForm" class="chat-input" onsubmit={send}>
-    <textarea aria-label="Chat message" id="chatInput" bind:this={input} rows="1" autocomplete="off" data-agent-draft-key={model.draftKey} placeholder={model.unavailableReason || "Message this resource"} disabled={blocked} value={draft} oninput={(event) => updateDraft(event.currentTarget.value)} onkeydown={keydown}></textarea>
+    <div class="chat-input-field" data-value={draft}>
+      <textarea aria-label="Chat message" id="chatInput" bind:this={input} rows="1" autocomplete="off" data-agent-draft-key={model.draftKey} placeholder={model.unavailableReason || "Message this resource"} disabled={blocked} value={draft} oninput={(event) => updateDraft(event.currentTarget.value)} onkeydown={keydown}></textarea>
+    </div>
     <div class="chat-composer-bar">
       <button type="button" id="agentUploadButton" class="chat-upload-button" title="Upload files" aria-label="Upload files" disabled={Boolean(model.unavailableReason)} onclick={model.onOpenUpload}><Icon name="plus" /></button>
       <div class="chat-composer-options">

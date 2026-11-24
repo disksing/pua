@@ -30,15 +30,14 @@ function page(messages: Message[], query: URLSearchParams) {
 function setup() {
   const channel = createPUAAppChannels().detail;
   channel.publish({ ...channel.current(), identity: "w:project1.task1", workspaceId: "w", resourceId: "project1.task1", currentUserName: "disksing", resourceTitle: "Task 1" });
-  const scroller = document.body.appendChild(document.createElement("div"));
-  scroller.id = "chatTimeline";
-  const target = scroller.appendChild(document.createElement("div"));
+  const target = document.body.appendChild(document.createElement("div"));
+  const component = mount(PersistentChat, { target, props: { channel } });
+  cleanups.push(() => unmount(component));
+  const scroller = target.querySelector<HTMLElement>("#chatTimeline")!;
   Object.defineProperties(scroller, {
     clientHeight: { configurable: true, value: 400 },
     scrollHeight: { configurable: true, get: () => target.querySelectorAll("article").length * 100 + 500 },
   });
-  const component = mount(PersistentChat, { target, props: { channel } });
-  cleanups.push(() => unmount(component));
   return { channel, scroller, target };
 }
 

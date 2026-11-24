@@ -193,9 +193,7 @@
 </script>
 
 {#snippet chatPanel()}
-  <div id="chatTimeline" class="chat-timeline" hidden={activeTab !== "chat"}>
-    <PersistentChat {channel} visible={activeTab === "chat"} />
-  </div>
+  <PersistentChat {channel} visible={activeTab === "chat"} />
 {/snippet}
 
 <header class="details-header" class:details-header-empty={!model.workspaceId}>

@@ -34,7 +34,9 @@
       return at ? { ...message, timelineAt: at } : message;
     });
   });
+  const lastMessageID = $derived(messages.at(-1)?.id);
   let root: HTMLElement;
+  let timeline: HTMLElement | undefined;
   let followTail = $state(true);
   let scrollIdentity = "";
   let hasOlder = $state(false);
@@ -134,8 +136,7 @@
         if (disposed || key !== identity) return;
         const active = untrack(() => chat);
         if (!active || active.id !== current.id) return;
-        const container = root?.closest<HTMLElement>("#chatTimeline");
-        const restore = container ? captureChatAnchor(container, root) : undefined;
+        const restore = timeline ? captureChatAnchor(timeline, root) : undefined;
         const known = new Set(active.messages.map(message => message.id));
         followTail = false;
         chat = { ...active, timelineInputs: { ...next.timelineInputs, ...active.timelineInputs }, messages: [...next.messages.filter(message => !known.has(message.id)), ...active.messages] };
@@ -152,19 +153,17 @@
   });
   function trackScroll(element: HTMLElement) {
     root = element;
-    const container = element.closest<HTMLElement>("#chatTimeline");
+    const container = element.querySelector<HTMLElement>("#chatTimeline");
     if (!container) return;
-    const dock = element.querySelector<HTMLElement>(".public-chat-dock");
+    timeline = container;
     const updateScrollPadding = () => {
-      const height = dock?.getBoundingClientRect().height ?? 0;
-      container.style.scrollPaddingBlockEnd = height ? `${Math.ceil(height) + 8}px` : "";
-      const markers = element.querySelectorAll(".history-generation.sticky");
+      const markers = container.querySelectorAll(".history-generation.sticky");
       const headerHeight = Math.max(0, ...Array.from(markers, marker => marker.getBoundingClientRect().height));
       container.style.scrollPaddingBlockStart = headerHeight ? `${Math.ceil(headerHeight) + 8}px` : "";
     };
     const movePreview = () => {
       if (!("showPopover" in HTMLElement.prototype)) return;
-      const preview = element.querySelector<HTMLElement>(".timeline-preview:popover-open");
+      const preview = container.querySelector<HTMLElement>(".timeline-preview:popover-open");
       if (preview) positionTimelinePreview(preview, container);
     };
     const onScroll = () => {
@@ -181,14 +180,13 @@
     });
     updateScrollPadding();
     resize?.observe(container);
-    resize?.observe(element);
-    if (dock) resize?.observe(dock, { box: "border-box" });
+    if (container.firstElementChild) resize?.observe(container.firstElementChild);
     container.addEventListener("scroll", onScroll, { passive: true });
     return { destroy: () => {
       resize?.disconnect();
-      container.style.scrollPaddingBlockEnd = "";
       container.style.scrollPaddingBlockStart = "";
       container.removeEventListener("scroll", onScroll);
+      timeline = undefined;
     } };
   }
   function selectedQuote() {
@@ -203,14 +201,13 @@
     const text = selection.toString();
     if (!text.trim()) return null;
 
-    const scroll = root.closest<HTMLElement>("#chatTimeline");
+    const scroll = timeline;
     if (!scroll) return null;
     const bounds = scroll.getBoundingClientRect();
-    const dock = root.querySelector(".public-chat-dock")?.getBoundingClientRect();
     const left = Math.max(0, bounds.left);
     const right = Math.min(document.documentElement.clientWidth, bounds.left + scroll.clientLeft + scroll.clientWidth);
     const top = Math.max(0, bounds.top + (parseFloat(scroll.style.scrollPaddingBlockStart) || 0));
-    const bottom = Math.min(bounds.bottom, document.documentElement.clientHeight, dock?.top ?? Infinity);
+    const bottom = Math.min(bounds.bottom, document.documentElement.clientHeight);
     const gap = 6;
     if (right - left < QUOTE_WIDTH + 2 * gap || bottom - top < QUOTE_HEIGHT + 2 * gap) return null;
     const rect = Array.from(range.getClientRects()).find(rect =>
@@ -260,8 +257,7 @@
     input?.setSelectionRange(input.value.length, input.value.length);
   }
   function pinToTail() {
-    const container = root?.closest<HTMLElement>("#chatTimeline");
-    if (container) container.scrollTop = container.scrollHeight;
+    if (timeline) timeline.scrollTop = timeline.scrollHeight;
   }
   async function jumpToLatest() {
     followTail = true;
@@ -270,9 +266,8 @@
     if (visible) root?.focus({ preventScroll: true });
   }
   $effect(() => {
-    const last = messages.at(-1)?.id;
     if (scrollIdentity !== identity) { scrollIdentity = identity; followTail = true; }
-    if (!visible || !last || !untrack(() => followTail)) return;
+    if (!visible || !lastMessageID || !untrack(() => followTail)) return;
     void tick().then(() => { if (visible && followTail) pinToTail(); });
   });
   async function act(operation: string, body: unknown = {}) {
@@ -371,36 +366,40 @@
 <svelte:window onpointerdowncapture={beginQuoteSelection} onpointerupcapture={endQuoteSelection}
   onpointercancelcapture={endQuoteSelection} onblur={clearQuoteSelection} />
 <svelte:document onselectionchange={updateQuote} />
-<section tabindex="-1" use:trackScroll class="persistent-chat" class:quoting={canQuote && quote !== null} aria-label="Resource chat">
+<section tabindex="-1" use:trackScroll class="persistent-chat" class:quoting={canQuote && quote !== null} aria-label="Resource chat" hidden={!visible}>
   <SessionControls {model} enabled={visible && canLoad && !archived && Boolean(chat || model.detail || model.resourceType === "workspace")} {followTail} onLatest={jumpToLatest}>
     {#snippet children(execution, notices, status)}
-      {#if hasOlder}
-        <div class="older-messages">
-          <button type="button" disabled={loadingOlder} onclick={() => loadOlder()}>{loadingOlder ? "Loading older messages…" : "Load older messages"}</button>
-          {#if olderError}<small role="alert">{olderError}</small>{/if}
+      <div id="chatTimeline" class="chat-timeline">
+        <div class="chat-history">
+          {#if hasOlder}
+            <div class="older-messages">
+              <button type="button" disabled={loadingOlder} onclick={() => loadOlder()}>{loadingOlder ? "Loading older messages…" : "Load older messages"}</button>
+              {#if olderError}<small role="alert">{olderError}</small>{/if}
+            </div>
+          {/if}
+          {#key identity}
+            <SharedChatTimeline {model} {visible} {status} {messages} queuedMessages={chat?.queuedMessages}
+              followLatestTurn={chat?.open === false} {execution} {followTail} onOpenFile={openLinkedFile} onInspect={() => followTail = false}>
+              {#snippet bubble(message)}
+                <article class:own-message={message.role === "user" && message.sender === userName}>
+                  <small class="message-meta"><strong>{message.role === "user" ? (message.sender || "User") : (message.sender?.trim() || "Agent")}</strong> <time datetime={message.createdAt}>{new Date(message.createdAt).toLocaleString()}</time></small>
+                  <div class="markdown-rendered" data-chat-message-body={message.id} use:markdownResourceNavigation={{ resolveResourceTitle: model.resolveResourceTitle, onNavigate: model.onNavigate, onOpenFile: openLinkedFile }}>{@html markdownHTML(message.text, { resolveResourceTitle: model.resolveResourceTitle, workspaceId: model.workspaceId })}</div>
+                </article>
+              {/snippet}
+              {#snippet empty()}
+                {#if chat && !firstOpen}
+                  <div class="chat-empty">
+                    <strong>{archived || !chat.open ? "No chat history" : "No messages yet"}</strong>
+                    {#if chat.open && !archived}<p>Send a message to start the conversation.</p>{/if}
+                  </div>
+                {:else if !chat && canLoad && !error}
+                  <div class="chat-empty" role="status">Loading chat…</div>
+                {/if}
+              {/snippet}
+            </SharedChatTimeline>
+          {/key}
         </div>
-      {/if}
-      {#key identity}
-        <SharedChatTimeline {model} {visible} {status} {messages} queuedMessages={chat?.queuedMessages}
-          followLatestTurn={chat?.open === false} {execution} {followTail} onOpenFile={openLinkedFile} onInspect={() => followTail = false}>
-          {#snippet bubble(message)}
-          <article class:own-message={message.role === "user" && message.sender === userName}>
-            <small class="message-meta"><strong>{message.role === "user" ? (message.sender || "User") : (message.sender?.trim() || "Agent")}</strong> <time datetime={message.createdAt}>{new Date(message.createdAt).toLocaleString()}</time></small>
-            <div class="markdown-rendered" data-chat-message-body={message.id} use:markdownResourceNavigation={{ resolveResourceTitle: model.resolveResourceTitle, onNavigate: model.onNavigate, onOpenFile: openLinkedFile }}>{@html markdownHTML(message.text, { resolveResourceTitle: model.resolveResourceTitle, workspaceId: model.workspaceId })}</div>
-          </article>
-          {/snippet}
-          {#snippet empty()}
-            {#if chat && !firstOpen}
-              <div class="chat-empty">
-                <strong>{archived || !chat.open ? "No chat history" : "No messages yet"}</strong>
-                {#if chat.open && !archived}<p>Send a message to start the conversation.</p>{/if}
-              </div>
-            {:else if !chat && canLoad && !error}
-              <div class="chat-empty" role="status">Loading chat…</div>
-            {/if}
-          {/snippet}
-        </SharedChatTimeline>
-      {/key}
+      </div>
       <div class="public-chat-dock">
         {@render notices()}
         {#if error}<div class="chat-error" role="alert">Could not load chat. {error}</div>{/if}
@@ -437,7 +436,27 @@
 <div data-component-owner="upload-dialog" style="display: contents"><UploadDialog channel={upload} /></div>
 <FilePreviewModal {client} workspaceId={model.workspaceId} resourceId={model.resourceId} selection={preview} editable={false} resolveResourceTitle={model.resolveResourceTitle} onNavigate={model.onNavigate} onOpenFile={openLinkedFile} onSaveMarkdown={rejectReadOnlySave} onClose={() => preview = null} onError={model.onToast} />
 <style>
-  .persistent-chat { display:flex; flex-direction:column; min-height:100%; gap:8px; padding:12px 16px 0; }
+  .persistent-chat {
+    display:flex;
+    flex:1;
+    flex-direction:column;
+    min-width:0;
+    min-height:0;
+    container:shared-chat / inline-size;
+    background:var(--shared-chat-canvas);
+    font-size:13px;
+    line-height:1.55;
+  }
+  .persistent-chat[hidden] { display:none; }
+  .chat-timeline {
+    flex:1;
+    min-height:0;
+    overflow-x:hidden;
+    overflow-y:auto;
+    overflow-anchor:none;
+    scroll-padding-block-end:8px;
+  }
+  .chat-history { display:flex; flex-direction:column; min-height:100%; gap:8px; padding:12px 16px 8px; }
   .quoting { position:relative; }
   .chat-quote { position:absolute; z-index:3; justify-content:center; user-select:none; }
   .older-messages { display:flex; flex-direction:column; align-items:center; gap:4px; }
@@ -468,15 +487,14 @@
   .chat-empty strong { display:block; font-size:15px; color:var(--text); }
   .chat-empty p, .chat-closed p { margin:2px 0 0; }
   .public-chat-dock {
-    position:sticky;
+    position:relative;
     z-index:2;
-    bottom:0;
     display:flex;
+    flex:none;
     flex-direction:column;
     gap:4px;
     min-width:0;
     padding:0 16px 8px;
-    margin:0 -16px;
     background:var(--shared-chat-canvas, var(--bg));
   }
   .public-chat-dock:empty { display:none; }

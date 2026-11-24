@@ -1221,7 +1221,7 @@ for (const viewport of [{ width: 1500, height: 800 }, { width: 440, height: 844 
     await expect(page.locator("#agentPanel h2")).toHaveText("Workspace cards");
     if (viewport.width < 980) await expect(page.locator("#agentPanel")).toBeHidden();
     else await expect(page.locator("#agentPanel")).toBeVisible();
-    const dock = scroller.locator(".public-chat-dock");
+    const dock = page.locator(".public-chat-dock");
     const articles = scroller.locator(".public-messages article");
     await expect(articles).toHaveCount(40);
     await expect(articles.first()).toContainText("Paginated message 80:");
@@ -1239,9 +1239,9 @@ for (const viewport of [{ width: 1500, height: 800 }, { width: 440, height: 844 
     expect(Math.abs(afterY - beforeY)).toBeLessThan(2);
     expect(Math.abs((await dockBottom()) - bottomDockY)).toBeLessThan(2);
     expect(requests.some(url => url.searchParams.get("before") === "m80")).toBe(true);
-    await scroller.getByRole("button", { name: "Chat options" }).click();
-    await scroller.getByRole("button", { name: "Close chat" }).click();
-    await expect(scroller.getByRole("button", { name: "Reopen chat" })).toBeVisible();
+    await dock.getByRole("button", { name: "Chat options" }).click();
+    await dock.getByRole("button", { name: "Close chat" }).click();
+    await expect(dock.getByRole("button", { name: "Reopen chat" })).toBeVisible();
     await expect(articles).toHaveCount(80);
   });
 }
@@ -1265,7 +1265,7 @@ for (const viewport of [{ width: 1500, height: 844 }, { width: 440, height: 820 
       messages: new URL(route.request().url()).searchParams.has("after") ? [] : messages,
     }));
     await page.goto("/w/ws-test/r/project1.task1");
-    const chat = page.locator("#chatTimeline");
+    const chat = page.getByRole("region", { name: "Resource chat" });
     const input = chat.getByRole("textbox", { name: "Chat message" });
     const quote = chat.getByRole("button", { name: "引用", exact: true });
     const paragraphs = messages.map(message => chat.locator("article p").filter({ hasText: message.text }));
@@ -1372,25 +1372,25 @@ for (const viewport of [{ width: 1500, height: 844 }, { width: 440, height: 820 
     await page.goto("/w/ws-test/r/project1.task1");
     const scroller = page.locator("#chatTimeline");
     const articles = scroller.locator(".public-messages article");
-    const dock = scroller.locator(".public-chat-dock");
+    const dock = page.locator(".public-chat-dock");
     const composer = dock.getByRole("textbox", { name: "Chat message" });
     const chip = scroller.getByRole("button", { name: "Turn · Task Agent · project1.task2" });
     const jump = dock.getByRole("button", { name: "Jump to latest" });
     const dockHeight = () => dock.evaluate(element => element.getBoundingClientRect().height);
-    const expectDockPadding = async (height: number) => {
-      await expect.poll(() => scroller.evaluate(element => parseFloat(getComputedStyle(element).scrollPaddingBlockEnd)))
-        .toBe(Math.ceil(height) + 8);
+    const expectDockClearance = async () => {
+      await expect(scroller).toHaveCSS("scroll-padding-block-end", "8px");
+      const bounds = (await scroller.boundingBox())!;
+      expect(bounds.y + bounds.height).toBeCloseTo((await dock.boundingBox())!.y, 0);
     };
     const nearestFromBelow = (target: Locator) => target.evaluate(element => {
       const scroll = element.closest<HTMLElement>("#chatTimeline")!;
-      const dock = scroll.querySelector(".public-chat-dock")!;
       scroll.scrollTop += element.getBoundingClientRect().top - scroll.getBoundingClientRect().bottom - 150;
       const startedBelow = element.getBoundingClientRect().top > scroll.getBoundingClientRect().bottom;
       element.scrollIntoView({ block: "nearest" });
       const rect = element.getBoundingClientRect();
       const x = rect.x + rect.width / 2, y = rect.y + rect.height / 2;
       const hit = document.elementFromPoint(x, y);
-      return { x, y, startedBelow, hitTarget: element.contains(hit), clearOfDock: rect.bottom <= dock.getBoundingClientRect().top };
+      return { x, y, startedBelow, hitTarget: element.contains(hit), clearOfDock: rect.bottom <= scroll.getBoundingClientRect().bottom };
     });
 
     await expect(articles).toHaveCount(40);
@@ -1403,7 +1403,7 @@ for (const viewport of [{ width: 1500, height: 844 }, { width: 440, height: 820 
     await expect(jump).toBeVisible();
     await expect.poll(dockHeight).toBeGreaterThan(initialDock);
     const compactDock = await dockHeight();
-    await expectDockPadding(compactDock);
+    await expectDockClearance();
     const chipCenter = await nearestFromBelow(chip);
     expect(chipCenter).toMatchObject({ startedBelow: true, hitTarget: true, clearOfDock: true });
     await page.mouse.move(chipCenter.x, chipCenter.y);
@@ -1417,7 +1417,7 @@ for (const viewport of [{ width: 1500, height: 844 }, { width: 440, height: 820 
     await composer.fill(Array.from({ length: 10 }, (_, index) => `Draft line ${index}`).join("\n"));
     await expect.poll(dockHeight).toBeGreaterThan(compactDock);
     const grownDock = await dockHeight();
-    await expectDockPadding(grownDock);
+    await expectDockClearance();
     const collapseCenter = await nearestFromBelow(scroller.getByRole("button", { name: "Collapse turn" }));
     expect(collapseCenter).toMatchObject({ startedBelow: true, hitTarget: true, clearOfDock: true });
     await page.mouse.click(collapseCenter.x, collapseCenter.y);
@@ -1431,10 +1431,10 @@ for (const viewport of [{ width: 1500, height: 844 }, { width: 440, height: 820 
     await jump.click();
     await expect(jump).toHaveCount(0);
     await expect.poll(dockHeight).toBeLessThan(grownDock);
-    await expectDockPadding(await dockHeight());
+    await expectDockClearance();
     await composer.fill("");
     await expect.poll(dockHeight).toBe(initialDock);
-    await expectDockPadding(initialDock);
+    await expectDockClearance();
 
     for (const [before, total] of [["m80", 80], ["m40", 120]] as const) {
       const sharedPage = page.waitForRequest(request => new URL(request.url()).searchParams.get("before") === before);
@@ -1472,10 +1472,11 @@ test("fits shared chat bubbles to the panel and caps long replies", async ({ pag
     json(route, { id: "shared", open: true, epoch: 1, unreadCount: 0, messages }));
   await page.goto("/w/ws-test/r/project1.task1");
   const panel = page.locator("#chatTimeline");
+  const chat = page.getByRole("region", { name: "Resource chat" });
   const articles = panel.locator("article");
   await expect(articles).toHaveCount(3);
   for (const width of [390, 800, 1023, 1024, 1200]) {
-    await panel.evaluate((element, size) => { element.style.width = `${size}px`; }, width);
+    await chat.evaluate((element, size) => { element.style.width = `${size}px`; }, width);
     const [own, peer, reply] = await articles.evaluateAll(items => items.map(item => {
       const { x, width } = item.getBoundingClientRect();
       return { x, width };
@@ -3521,7 +3522,7 @@ test("unifies mixed Turn icons, Generation markers, shared messages and waiting 
   });
 
   await page.goto("/w/ws-test/r/project1.task1");
-  const chat = page.locator("#chatTimeline"), gen2Marker = chat.locator('[data-generation-id="mixed-2"]');
+  const chat = page.getByRole("region", { name: "Resource chat" }), gen2Marker = chat.locator('[data-generation-id="mixed-2"]');
   const chips = chat.locator(".history-chip[data-chat-row] button"), allDetails = chat.locator(".expanded-history");
   const agentChip = chat.getByRole("button", { name: "Turn · Task Agent · project1.task2" });
   const schedulerChip = chat.getByRole("button", { name: "Turn · Scheduler" });
@@ -3704,8 +3705,9 @@ for (const width of [1500, 440]) {
     await page.getByRole("tab", { name: "Chat", exact: true }).click();
     await expect(details).toHaveText([/older detail/, /next detail/]);
 
-    await chat.getByRole("button", { name: "Open chat", exact: true }).click();
-    await expect(chat.getByRole("textbox", { name: "Chat message" })).toBeVisible();
+    const dock = page.locator(".public-chat-dock");
+    await dock.getByRole("button", { name: "Open chat", exact: true }).click();
+    await expect(dock.getByRole("textbox", { name: "Chat message" })).toBeVisible();
     turns.push(makeTurn("chat-open", 40, true));
     await expect(chip("chat-open")).toHaveAttribute("aria-expanded", "false");
     await expect(details).toHaveText([/older detail/]);
@@ -3867,9 +3869,10 @@ test("moves active Turn icons and durable pending user bubbles through the unifi
   await expect(controls.getByRole("button", { name: "Stop execution" })).toBeVisible();
 
   const first = "First queued [attachment](/project1/task1/files/notes.md)", second = "Second queued";
+  const dock = page.locator(".public-chat-dock");
   for (const text of [first, second]) {
-    await chat.getByRole("textbox", { name: "Chat message" }).fill(text);
-    await chat.getByRole("button", { name: "Send input" }).click();
+    await dock.getByRole("textbox", { name: "Chat message" }).fill(text);
+    await dock.getByRole("button", { name: "Send input" }).click();
     await expect(chat.locator("[data-queued-chat-message]").last()).toContainText(text.split(" [")[0]);
   }
   await expect(queue.getByRole("button")).toHaveCount(2);
@@ -4264,9 +4267,10 @@ test("keeps whole-Generation statistics and hands the sticky marker across three
       if (generation < 3) expect(await marker(generation + 1).evaluate(element => element.getBoundingClientRect().top)).toBeGreaterThan(0);
     }
   }
-  await chat.getByRole("button", { name: "Chat options" }).click();
-  await chat.getByRole("button", { name: "Close chat", exact: true }).click();
-  await expect(chat.getByRole("button", { name: "Reopen chat" })).toBeVisible();
+  const dock = page.locator(".public-chat-dock");
+  await dock.getByRole("button", { name: "Chat options" }).click();
+  await dock.getByRole("button", { name: "Close chat", exact: true }).click();
+  await expect(dock.getByRole("button", { name: "Reopen chat" })).toBeVisible();
   await navigate("sticky-msg-2-10");
   await expect.poll(() => pinned(2)).toBe(true);
 });
@@ -4477,6 +4481,77 @@ test("Unread follows public Chat badges and keeps the selected detail after read
   await expect(filter).toBeDisabled();
 });
 
+test("public Chat keeps multiline IME edits from scrolling the history", async ({ page }) => {
+  test.setTimeout(60_000);
+  await installMockApi(page);
+  const messages = Array.from({ length: 40 }, (_, index) => ({
+    id: `ime-${index}`, role: "agent", text: `Shared message ${index}`, createdAt: now,
+  }));
+  const chat = { id: "ime-chat", open: true, epoch: 1, unreadCount: 0 };
+  await page.route("**/resources/project1.task1/chat?*", route => {
+    const after = new URL(route.request().url()).searchParams.get("after");
+    const start = after ? messages.findIndex(message => message.id === after) + 1 : 0;
+    return json(route, { ...chat, messages: messages.slice(start) });
+  });
+  await page.route("**/resources/project1.task1/chat/messages?*", route => {
+    const { id, text } = route.request().postDataJSON();
+    const message = { id, text, role: "user", sender: "User", createdAt: new Date().toISOString() };
+    messages.push(message);
+    return json(route, { ...chat, messages: [message] });
+  });
+  await page.goto("/w/ws-test/r/project1.task1");
+  const timeline = page.locator("#chatTimeline");
+  const chatRegion = page.getByRole("region", { name: "Resource chat" });
+  const composer = chatRegion.getByRole("textbox", { name: "Chat message" });
+  const tailDistance = () => timeline.evaluate(element => element.scrollHeight - element.clientHeight - element.scrollTop);
+  const settledLayout = () => chatRegion.evaluate(async element => {
+    await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    return {
+      top: element.querySelector("#chatTimeline")!.scrollTop,
+      height: element.querySelector(".public-chat-dock")!.getBoundingClientRect().height,
+    };
+  });
+
+  await expect(timeline.locator(".public-messages article")).toHaveCount(40);
+  const draft = "First line\nSecond line\nThird line\nFourth line\nFifth line\n";
+  await composer.fill(draft);
+  await expect.poll(tailDistance).toBeLessThan(2);
+  await timeline.evaluate(element => { element.scrollTop -= 32; });
+  const before = await settledLayout();
+  expect(await tailDistance()).toBeCloseTo(32, 0);
+
+  const refresh = page.waitForResponse(response => {
+    const url = new URL(response.url());
+    return url.pathname.endsWith("/chat") && url.searchParams.get("after") === messages.at(-1)?.id;
+  });
+  const session = await page.context().newCDPSession(page);
+  for (const text of ["n", "ni", "nih", "nihao", "你好"]) {
+    await session.send("Input.imeSetComposition", { text, selectionStart: text.length, selectionEnd: text.length });
+    await expect(composer).toHaveValue(draft + text);
+    expect(await settledLayout()).toEqual(before);
+  }
+  await session.send("Input.insertText", { text: "你好" });
+  await expect(composer).toHaveValue(`${draft}你好`);
+  expect((await refresh).ok()).toBe(true);
+  expect(await settledLayout()).toEqual(before);
+
+  messages.push({ id: "ime-new", role: "agent", text: "New message while following", createdAt: now });
+  await expect(timeline.getByText("New message while following")).toBeVisible({ timeout: 10_000 });
+  await expect.poll(tailDistance).toBeLessThan(2);
+
+  await composer.press("Control+Enter");
+  await expect(composer).toHaveValue("");
+  await expect(timeline.locator("article").last()).toContainText("你好");
+  await expect.poll(tailDistance).toBeLessThan(2);
+  expect((await settledLayout()).height).toBeLessThan(before.height);
+
+  await composer.fill("Single-line message");
+  await composer.press("Enter");
+  await expect(composer).toHaveValue("");
+  await expect(timeline.locator("article").last()).toContainText("Single-line message");
+  await expect.poll(tailDistance).toBeLessThan(2);
+});
+
 test("public Chat restores the upload dialog, send card and execution model selector", async ({ page }, testInfo) => {
   test.setTimeout(120_000);
   const harness = await installMockApi(page);
@@ -4559,7 +4634,7 @@ test("public Chat restores the upload dialog, send card and execution model sele
   for (const theme of ["default", "slate", "riso"]) {
     await page.evaluate(theme => {
       document.documentElement.dataset.theme = theme;
-      const chatPanel = document.getElementById("chatTimeline")!;
+      const chatPanel = document.getElementById("chatTimeline")!.closest<HTMLElement>(".persistent-chat")!;
       chatPanel.style.width = "260px"; chatPanel.style.minWidth = "260px";
     }, theme);
     await input.fill("A draft in the restored composer");

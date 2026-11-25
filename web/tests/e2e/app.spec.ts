@@ -4298,19 +4298,19 @@ test("keeps whole-Generation statistics and hands the sticky marker across three
   await installMockApi(page);
   const stamp = (index: number) => new Date(Date.parse(now) + index * 1000).toISOString();
   const generations = [1, 2, 3].map(index => ({
-    generation: index, generationId: `sticky-${index}`, status: "idle", createdAt: stamp(index * 100),
+    generation: index + 36, generationId: `sticky-${index}`, status: "idle", createdAt: stamp(index * 100),
     agentName: index === 2 ? "Shared Chat regression fixture agent with a longer profile name" : "Agent",
     turnTotals: { count: index * 10, executionMs: index * 61000, latestEventId: 150 },
   }));
   const segments = generations.map(generation => {
-    const index = generation.generation;
+    const index = generation.generation - 36;
     return { generation, turns: Array.from({ length: 5 }, (_, turnIndex) => ({
       generation, reference: `sticky-${index}-${turnIndex}`, turnId: `turn-${index}-${turnIndex}`,
       triggerRole: "system", closed: true, status: "completed", eventCount: 2,
       startedAt: stamp(index * 100 + 2 + turnIndex * 4), startEventId: 20 * turnIndex + 1, lastEventId: 20 * turnIndex + 2,
     })) };
   });
-  const messages = generations.flatMap(({ generation }) => Array.from({ length: 20 }, (_, index) => ({
+  const messages = [1, 2, 3].flatMap(generation => Array.from({ length: 20 }, (_, index) => ({
     id: `sticky-msg-${generation}-${index}`, role: "agent", createdAt: stamp(generation * 100 + 1 + index),
     text: `Generation ${generation} message ${index}\n\n${"Shared history provides scrollable content. ".repeat(8)}`,
   })));
@@ -4339,7 +4339,10 @@ test("keeps whole-Generation statistics and hands the sticky marker across three
     if (op === "history/turns") {
       const cursor = url.searchParams.get("cursor");
       if (cursor) historyCursors.push(cursor);
-      return json(route, { segments: singleGeneration ? [segments[2]] : cursor ? segments : [{ generation: generations[1], turns: segments[1].turns.slice(2) }, segments[2]],
+      const headersSince = url.searchParams.get("generationHeadersSince");
+      const generationHeaders = !singleGeneration && !cursor && headersSince
+        ? (Date.parse(headersSince) < Date.parse(generations[1].createdAt) ? generations.slice(0, 2) : [generations[1]]) : [];
+      return json(route, { segments: cursor ? segments : [segments[2]], generationHeaders,
         page: { hasMore: !singleGeneration && !cursor, nextCursor: cursor || singleGeneration ? "" : "sticky-earlier" } });
     }
     return route.fallback();
@@ -4353,17 +4356,46 @@ test("keeps whole-Generation statistics and hands the sticky marker across three
   }, id);
   const pinned = (generation: number) => marker(generation).evaluate(element => {
     const scroll = element.closest("#chatTimeline")!;
-    return Math.abs(element.getBoundingClientRect().top - scroll.getBoundingClientRect().top) <= 1;
+    const bounds = element.getBoundingClientRect();
+    const top = scroll.getBoundingClientRect().top;
+    return Math.abs(bounds.top - top) <= 1 && element.contains(document.elementFromPoint(bounds.left + bounds.width / 2, top + 1));
   });
   const crossBoundary = async (previous: number) => {
     await navigate(`sticky-msg-${previous}-10`);
     await expect.poll(() => pinned(previous)).toBe(true);
-    const boundary = await marker(previous + 1).evaluate(element => {
+    const scrollToOffset = (offset: number) => marker(previous + 1).evaluate(async (element, offset) => {
+      const heading = element.closest<HTMLElement>("[data-generation-heading]")!;
       const scroll = element.closest("#chatTimeline")!;
-      return scroll.scrollTop + element.getBoundingClientRect().top - scroll.getBoundingClientRect().top;
-    });
-    for (const [offset, expected] of [[-2, previous], [2, previous + 1], [-2, previous]]) {
-      await chat.evaluate((scroll, top) => { scroll.scrollTop = top; }, boundary + offset);
+      heading.style.position = "static";
+      const distance = heading.getBoundingClientRect().top - scroll.getBoundingClientRect().top - scroll.clientTop;
+      heading.style.removeProperty("position");
+      scroll.scrollTop += distance + offset;
+      await new Promise(requestAnimationFrame);
+      await new Promise(requestAnimationFrame);
+    }, offset);
+    await scrollToOffset(90);
+    await expect.poll(() => pinned(previous + 1)).toBe(true);
+    const duringScroll = await chat.evaluate((scroll, previous) => {
+      const top = scroll.getBoundingClientRect().top + scroll.clientTop;
+      const current = scroll.querySelector(`[data-generation-id="sticky-${previous + 1}"]`)!;
+      const older = scroll.querySelector(`[data-generation-id="sticky-${previous}"]`)!;
+      const bounds = older.getBoundingClientRect();
+      const center = bounds.left + bounds.width / 2;
+      const heading = current.closest<HTMLElement>("[data-generation-heading]")!;
+      heading.style.position = "static";
+      const boundary = scroll.scrollTop + heading.getBoundingClientRect().top - top;
+      heading.style.removeProperty("position");
+      scroll.scrollTop = boundary + 72;
+      const drift = current.getBoundingClientRect().top - top;
+      scroll.scrollTop = boundary - 2;
+      return { drift, departing: current.getBoundingClientRect().top - top,
+        atTop: document.elementFromPoint(center, top + 0.25)?.closest<HTMLElement>("[data-generation-id]")?.dataset.generationId };
+    }, previous);
+    expect(duringScroll.drift).toBeCloseTo(0, 0);
+    expect(duringScroll.departing).toBeCloseTo(2, 0);
+    expect(duringScroll.atTop).toBe(`sticky-${previous}`);
+    for (const [offset, expected] of [[-1, previous], [2, previous + 1], [-2, previous]]) {
+      await scrollToOffset(offset);
       await expect.poll(() => chat.evaluate(scroll => {
         const top = scroll.getBoundingClientRect().top;
         return [...scroll.querySelectorAll("[data-generation-id]")].map(element => {
@@ -4380,14 +4412,24 @@ test("keeps whole-Generation statistics and hands the sticky marker across three
         expect(await marker(previous + 1).evaluate(element => {
           const scroll = element.closest("#chatTimeline")!;
           return element.getBoundingClientRect().top - scroll.getBoundingClientRect().top;
-        })).toBeGreaterThan(1);
+        })).toBeGreaterThan(0);
       }
     }
+    const box = await chat.boundingBox();
+    if (!box) throw new Error("Chat scroller is missing");
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.wheel(0, 80);
+    await expect.poll(() => pinned(previous + 1)).toBe(true);
+    await page.mouse.wheel(0, -120);
+    await expect.poll(() => pinned(previous)).toBe(true);
   };
   const viewports = [{ width: 1500, height: 844 }, { width: 440, height: 820 }];
   await page.goto("/w/ws-test/r/project1.task1");
   await expect(marker(2).locator("[data-generation-turn-count]")).toHaveText("20 Turns", { timeout: 15_000 });
   await expect(marker(2).locator("[data-generation-duration]")).toHaveText("2m 2s execution");
+  await expect(marker(2)).toContainText("Generation 38");
+  await expect(marker(3)).toContainText("Generation 39");
+  await expect(chat.locator('[data-turn-chip^="sticky-2:"]')).toHaveCount(0);
   await expect(chat.getByText("Generation 2 message 10", { exact: true })).toBeAttached();
   await navigate("sticky-msg-2-10");
   await expect.poll(() => pinned(2)).toBe(true);
@@ -4399,6 +4441,8 @@ test("keeps whole-Generation statistics and hands the sticky marker across three
   await chat.evaluate(scroll => scroll.scrollTop = 0);
   await expect.poll(() => olderChatPages).toBe(1);
   await expect(chat.getByText("Generation 1 message 0", { exact: true })).toBeAttached();
+  await expect(marker(1)).toContainText("Generation 37");
+  await expect(chat.locator('[data-turn-chip^="sticky-1:"]')).toHaveCount(0);
   const hit = await older.evaluate(element => {
     element.scrollIntoView({ block: "nearest" });
     const box = element.getBoundingClientRect();

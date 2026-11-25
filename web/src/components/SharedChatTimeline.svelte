@@ -28,7 +28,8 @@
     onInspect: () => void;
   } = $props();
 
-  const base = $derived(`/api/workspaces/${encodeURIComponent(model.workspaceId)}/resources/${encodeURIComponent(model.resourceId)}`);
+  const earliestMessage = $derived(messages.reduce((time, message) =>
+    Math.min(time, Date.parse(message.timelineAt || message.createdAt) || Infinity), Infinity));
   const api = new ApiClient((input, init) => {
     const headers = new Headers(init?.headers);
     headers.set("X-PUA-User", model.currentUserName);
@@ -36,6 +37,7 @@
   });
   const controller = new ChatSessionController({
     api, collapseNonUserTurns: false, refreshHistoryOnStatusChange: true, syncStatus: false, keepHistoryOnGenerationChange: true,
+    generationHeadersSince: () => Number.isFinite(earliestMessage) ? new Date(earliestMessage).toISOString() : "previous",
   });
   let snapshot = $state.raw(controller.snapshot());
   const unsubscribe = controller.subscribe(next => { if (next.identity) snapshot = next; });
@@ -50,7 +52,8 @@
     return [...new Set(queue.flatMap(message => byInput.get(message.messageId) || []))];
   });
   const pendingBubbleIds = $derived(new Set(pendingBubbles.map(message => message.id)));
-  const sections = $derived(timelineSections(messages.filter(message => !pendingBubbleIds.has(message.id)), snapshot.blocks));
+  const placedMessages = $derived(messages.filter(message => !pendingBubbleIds.has(message.id)));
+  const sections = $derived(timelineSections(placedMessages, snapshot.blocks, snapshot.generationHeaders));
   const activeKey = $derived(status?.session?.currentTurnId && status.generation?.generationId
     && ["running", "waiting_approval"].includes(status.session.state || status.sessionState || "")
     ? `${status.generation.generationId}:${status.session.currentTurnId}` : "");
@@ -63,9 +66,19 @@
   let autoExpanded = $state.raw<{ key: string; reference: string } | null>(null);
   let lastFollowedKey = "";
   const latestTurn = $derived(snapshot.blocks.filter(block => block.turn).at(-1));
-  let pinnedHeading = $state.raw<{ key: string; offset: number } | null>(null);
+  let pinnedHeading = $state("");
+  let pinnedHeight = $state(0);
   let root: HTMLDivElement;
   let previousPending = new Set<string>();
+  const firstHeading = $derived(sections.find(section => section.generation)?.generation);
+
+  let requestedMessageTime = Infinity;
+  $effect(() => {
+    if (!visible || !snapshot.loaded || !snapshot.hasMoreBefore || earliestMessage >= requestedMessageTime) return;
+    if (!firstHeading || firstHeading.generation <= 1 || earliestMessage >= Date.parse(firstHeading.createdAt)) return;
+    requestedMessageTime = earliestMessage;
+    untrack(() => void controller.refresh());
+  });
 
   $effect(() => {
     const available = visible && Boolean(model.currentUserName);
@@ -101,11 +114,15 @@
     }
   });
 
+  let previousFirstHeading = "";
   $effect.pre(() => {
     const ids = pendingBubbleIds;
     const moved = [...previousPending].some(id => !ids.has(id));
     previousPending = ids;
-    if (!moved || untrack(() => followTail || !visible)) return;
+    const first = firstHeading?.generationId || "";
+    const prepended = previousFirstHeading && first && first !== previousFirstHeading;
+    previousFirstHeading = first;
+    if ((!moved && !prepended) || untrack(() => followTail || !visible)) return;
     const scroll = root?.closest<HTMLElement>("#chatTimeline");
     if (!scroll) return;
     const restore = captureChatAnchor(scroll, root);
@@ -147,27 +164,21 @@
     if (!scroll) return;
     $effect(() => {
       if (!visible || !sections.length) {
-        pinnedHeading = null;
+        pinnedHeading = "";
         return;
       }
-      const headings = Array.from(element.querySelectorAll<HTMLElement>(":scope > .generation-section > [data-generation-heading]"));
+      const headings = Array.from(element.querySelectorAll<HTMLElement>("[data-generation-heading]")).reverse();
       const update = () => {
         const top = scroll.getBoundingClientRect().top + scroll.clientTop;
-        let next = null;
-        for (let index = headings.length - 1; index >= 0; index--) {
-          const heading = headings[index];
-          const offset = top - heading.getBoundingClientRect().top;
-          if (offset < 0) continue;
-          next = { key: heading.dataset.generationHeading!, offset };
-          break;
-        }
-        if (next?.key !== pinnedHeading?.key || next?.offset !== pinnedHeading?.offset) pinnedHeading = next;
+        const active = headings.find(heading => heading.getBoundingClientRect().top <= top);
+        pinnedHeading = active?.dataset.generationHeading || "";
+        pinnedHeight = active?.getBoundingClientRect().height || 0;
       };
       untrack(update);
       const resize = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(update);
       resize?.observe(scroll);
       resize?.observe(element);
-      for (const child of element.children) resize?.observe(child);
+      for (const heading of headings) resize?.observe(heading);
       scroll.addEventListener("scroll", update, { passive: true });
       return () => {
         resize?.disconnect();
@@ -303,7 +314,7 @@
   {/each}
 {/snippet}
 
-<div bind:this={root} use:trackGenerationHeadings class="shared-chat-stream public-messages" data-component-owner="event-timeline">
+<div bind:this={root} use:trackGenerationHeadings class="shared-chat-stream public-messages" data-component-owner="event-timeline" style:--pinned-height={`${pinnedHeight}px`}>
   {#if snapshot.hasMoreBefore || legacy}
     <div class="history-actions">
       {#if snapshot.hasMoreBefore}
@@ -315,35 +326,31 @@
     </div>
   {/if}
   {#each sections as section, index (section.key)}
-    <div class="generation-section">
-      {#if section.generation}
-        {@const offset = pinnedHeading?.key === section.key ? pinnedHeading.offset : undefined}
-        <div class="generation-heading" data-generation-heading={section.key} class:pinned={offset !== undefined}
-          style:--generation-pin-offset={offset === undefined ? undefined : `${offset}px`}>
-          <GenerationMarker generation={section.generation} status={effectiveGenerationStatus({ generation: section.generation }, status)} />
+    {#if section.generation}
+      <div class="generation-heading" data-generation-heading={section.key} class:pinned={pinnedHeading === section.key}>
+        <GenerationMarker generation={section.generation} status={effectiveGenerationStatus({ generation: section.generation }, status)} />
+      </div>
+    {/if}
+    {#each section.rows as row (row.key)}
+      {#if row.kind === "message"}
+        <div class="chat-bubble-row" data-chat-row={row.key}>{@render bubble(row.message)}</div>
+      {:else if row.kind === "gap"}
+        {@const starting = row.block.gap?.code === "session_starting"}
+        <div class:conversation-session-starting={starting} class:conversation-gap={!starting} class="history-wide" data-timeline-key={row.key} data-chat-row={row.key}>
+          <Icon name={starting ? "loader-circle" : "triangle-alert"} />
+          <span><strong>{starting ? "Starting agent…" : "History unavailable"}</strong><small>{row.block.gap?.message || "This generation could not be read."}</small></span>
+          {#if row.block.gap?.retryable}<button type="button" class="secondary-button" onclick={() => controller.retryHistory()}>Retry</button>{/if}
         </div>
+      {:else if row.kind === "session"}
+        <div class="history-wide" data-timeline-key={row.key} data-chat-row={row.key}>
+          {@render eventDetails(row.block)}
+        </div>
+      {:else if row.kind === "history" && row.key !== activeRow?.key}
+        {@render turnChip(row)}
+        {@render turnDetails(row)}
       {/if}
-      {#each section.rows as row (row.key)}
-        {#if row.kind === "message"}
-          <div class="chat-bubble-row" data-chat-row={row.key}>{@render bubble(row.message)}</div>
-        {:else if row.kind === "gap"}
-          {@const starting = row.block.gap?.code === "session_starting"}
-          <div class:conversation-session-starting={starting} class:conversation-gap={!starting} class="history-wide" data-timeline-key={row.key} data-chat-row={row.key}>
-            <Icon name={starting ? "loader-circle" : "triangle-alert"} />
-            <span><strong>{starting ? "Starting agent…" : "History unavailable"}</strong><small>{row.block.gap?.message || "This generation could not be read."}</small></span>
-            {#if row.block.gap?.retryable}<button type="button" class="secondary-button" onclick={() => controller.retryHistory()}>Retry</button>{/if}
-          </div>
-        {:else if row.kind === "session"}
-          <div class="history-wide" data-timeline-key={row.key} data-chat-row={row.key}>
-            {@render eventDetails(row.block)}
-          </div>
-        {:else if row.kind === "history" && row.key !== activeRow?.key}
-          {@render turnChip(row)}
-          {@render turnDetails(row)}
-        {/if}
-      {/each}
-      {#if index === sections.length - 1}{@render tail()}{/if}
-    </div>
+    {/each}
+    {#if index === sections.length - 1}{@render tail()}{/if}
   {:else}
     {@render empty()}
     {@render tail()}
@@ -351,12 +358,11 @@
 </div>
 
 <style>
-  .shared-chat-stream, .generation-section { display: flex; flex-wrap: wrap; align-content: start; align-items: start; min-width: 0; gap: 8px 6px; }
-  .shared-chat-stream { flex: 1; }
-  .generation-section { flex: 0 0 100%; }
-  .generation-heading { display: flex; flex: 0 0 100%; min-width: 0; margin: 8px 0 2px; }
+  .shared-chat-stream { display: flex; flex: 1; flex-wrap: wrap; align-content: start; align-items: start; min-width: 0; gap: 8px 6px; }
+  .generation-heading { display: flex; flex: 0 0 100%; min-width: 0; margin: 8px 0 2px; position: sticky; top: 0; }
+  .generation-heading.pinned { z-index: 1; }
+  .generation-heading:has(~ .generation-heading.pinned) { clip-path: inset(0 0 max(0px, calc(100% - var(--pinned-height))) 0); }
   .generation-heading > :global(.history-generation) { margin: 0; }
-  .generation-heading.pinned > :global(.history-generation) { position: relative; inset-block-start: var(--generation-pin-offset); z-index: 1; }
   .chat-bubble-row { display: flex; flex-direction: column; flex: 0 0 100%; min-width: 0; }
   .history-chip { display: flex; }
   .history-wide, .history-actions, .queued-inputs { flex: 0 0 100%; min-width: 0; box-sizing: border-box; }

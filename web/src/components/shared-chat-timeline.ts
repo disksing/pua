@@ -96,7 +96,7 @@ export function legacyInputText(text?: string): string {
   return body >= 0 ? text.slice(body + 2).replace(/^User message [^\n]+:\n/, "") : "Legacy Chat input";
 }
 
-export function timelineSections(messages: SharedChatMessage[], blocks: ConversationBlock[]): TimelineSection[] {
+export function timelineSections(messages: SharedChatMessage[], blocks: ConversationBlock[], olderHeaders: ResourceHistoryGeneration[] = []): TimelineSection[] {
   const byInput = new Map(messages.flatMap(message => (message.inputMessageIds || []).map(id => [id, message] as const)));
   const generations = new Map<string, GenerationBoundary>();
   const bubbles = new Map<string, SharedChatMessage>();
@@ -128,6 +128,10 @@ export function timelineSections(messages: SharedChatMessage[], blocks: Conversa
     const marker = generations.get(id);
     const boundary = Math.min(time, timestamp(block.generation.createdAt) || time);
     if (!marker || boundary < marker.time) generations.set(id, { kind: "generation", key: `generation:${id}`, generation: block.generation, time: boundary });
+  }
+  for (const generation of olderHeaders) {
+    const id = generation.generationId;
+    if (!generations.has(id)) generations.set(id, { kind: "generation", key: `generation:${id}`, generation, time: timestamp(generation.createdAt) });
   }
   rows.push(...generations.values());
   const order = { generation: 0, message: 1, history: 2, gap: 2, session: 2 };

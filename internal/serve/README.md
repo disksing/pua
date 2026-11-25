@@ -87,6 +87,8 @@ DELETE /api/workspaces/{workspaceId}/users/{name}
 
 共享 Chat 分页响应的 `queuedMessages` 投影当前仍待执行的用户消息，顺序来自持久投递记录，独立于 `messages` 的游标范围。历史分段的 `generation.turnTotals` 来自 AgentHub 的整代统计，包含已启动 Turn 数、已知累计执行毫秒数和可选的活动 Turn 起始时间。旧 AgentHub 可省略整代统计。缺失历史起止边界时省略执行毫秒数。
 
+共享 Chat 读取 `history/turns` 时可用 `generationHeadersSince=previous` 请求本页最早分段的上一代表头，或传入最早可见消息的 RFC 3339 时间，补齐到该消息所在代。响应的 `generationHeaders` 按从新到旧排列，使用同一套整代统计。Turn 仍使用 `page.nextCursor` 单独补页。
+
 共享 Chat 消息可包含 `inputMessageIds`，用于关联用户消息的邮箱输入；历史投影的自动回复包含 `turnId` 和 `startEventId`。执行历史摘要的 `triggerMessageId` 来自 canonical Turn，`triggerType` 为已知的触发类型，`triggerSourceResourceId` 来自已知的触发因果关系。续接的历史摘要和状态接口的等待项可包含可选 `resumeSource`，提供用于显示的原工作角色、类型和发送者。旧记录只返回仍能核对到的字段。展开 Turn 时可按消息 ID 或事件位置省略同一时间线已展示的共享消息。
 
 个人 UI 和资源状态保存在 `<control-dir>/users/{name}/ui-state.json`，公共 Turn 编号高水位保存在 `<control-dir>/resource-state.json`。用户级请求通过 `X-PUA-User` 指定用户。`ui-state` 保存侧栏虚拟目录和顺序（`folders` 与 `folderOrder`），`taskOrder` 中混合记录项目根级的 Task 和目录 ID。虚拟目录只挂在 Project 下。归档 Project/Task 时删除相关阅读状态和目录引用。

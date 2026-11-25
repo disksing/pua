@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/disksing/pua/internal/app"
 )
@@ -138,9 +139,10 @@ type resourceHistorySegment struct {
 }
 
 type resourceHistoryPage struct {
-	CompletedTurnNumber int                      `json:"completedTurnNumber"`
-	ResourceID          string                   `json:"resourceId"`
-	Segments            []resourceHistorySegment `json:"segments"`
+	GenerationHeaders   []resourceHistoryGeneration `json:"generationHeaders,omitempty"`
+	CompletedTurnNumber int                         `json:"completedTurnNumber"`
+	ResourceID          string                      `json:"resourceId"`
+	Segments            []resourceHistorySegment    `json:"segments"`
 	Page                struct {
 		Limit      int    `json:"limit"`
 		NextCursor string `json:"nextCursor,omitempty"`
@@ -367,7 +369,7 @@ func validateResourceHistoryTarget(workspace serveWorkspace, resourceID string) 
 	return nil
 }
 
-func (m *agentManager) resourceHistoryPage(ctx context.Context, workspace serveWorkspace, resourceID, cursorValue string, limit int) (resourceHistoryPage, error) {
+func (m *agentManager) resourceHistoryPage(ctx context.Context, workspace serveWorkspace, resourceID, cursorValue string, limit int, headerSince *time.Time) (resourceHistoryPage, error) {
 	resourceID = normalizedResourceID(resourceID)
 	if err := validateResourceHistoryTarget(workspace, resourceID); err != nil {
 		return resourceHistoryPage{}, err
@@ -500,6 +502,24 @@ func (m *agentManager) resourceHistoryPage(ctx context.Context, workspace serveW
 				return resourceHistoryPage{}, err
 			}
 			break
+		}
+	}
+	if headerSince != nil && len(page.Segments) > 0 {
+		for _, older := range records[start+len(page.Segments):] {
+			if err := ctx.Err(); err != nil {
+				return resourceHistoryPage{}, err
+			}
+			header := historyGeneration(older)
+			if older.AgentHubSessionID != "" {
+				if turns, err := client.SessionTurns(ctx, older.AgentHubSessionID, 0, true, 1); err == nil {
+					header.TurnTotals = turns.Totals
+				}
+			}
+			page.GenerationHeaders = append(page.GenerationHeaders, header)
+			created, err := time.Parse(time.RFC3339Nano, header.CreatedAt)
+			if headerSince.IsZero() || (err == nil && !created.After(*headerSince)) {
+				break
+			}
 		}
 	}
 	return page, nil
@@ -705,7 +725,19 @@ func (m *agentManager) handleResourceHistory(w http.ResponseWriter, r *http.Requ
 			writeError(w, parseErr, resourceErrorStatus(parseErr))
 			return
 		}
-		page, historyErr := m.resourceHistoryPage(r.Context(), workspace, resourceID, r.URL.Query().Get("cursor"), limit)
+		var headerSince *time.Time
+		if value := r.URL.Query().Get("generationHeadersSince"); value != "" {
+			var since time.Time
+			if value != "previous" {
+				since, parseErr = time.Parse(time.RFC3339Nano, value)
+				if parseErr != nil {
+					writeError(w, &resourceAPIError{Code: "invalid_request", Message: "invalid generationHeadersSince timestamp"}, http.StatusBadRequest)
+					return
+				}
+			}
+			headerSince = &since
+		}
+		page, historyErr := m.resourceHistoryPage(r.Context(), workspace, resourceID, r.URL.Query().Get("cursor"), limit, headerSince)
 		if historyErr != nil {
 			writeError(w, historyErr, resourceErrorStatus(historyErr))
 			return

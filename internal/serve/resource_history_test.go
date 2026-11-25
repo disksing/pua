@@ -300,6 +300,24 @@ func TestResourceHistoryPaginatesAcrossGenerationsWithGap(t *testing.T) {
 	}
 	turnReference := page.Segments[0].Turns[0].Reference
 
+	for _, test := range []struct {
+		since string
+		count int
+	}{
+		{"previous", 1},
+		{time.Unix(0, 0).UTC().Format(time.RFC3339), 2},
+	} {
+		response := httptest.NewRecorder()
+		manager.server.handleWorkspace(response, httptest.NewRequest(http.MethodGet,
+			"/api/workspaces/"+workspace.ID+"/resources/project1.task1/history/turns?limit=2&generationHeadersSince="+url.QueryEscape(test.since), nil))
+		var withHeaders resourceHistoryPage
+		if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &withHeaders) != nil ||
+			len(withHeaders.GenerationHeaders) != test.count || withHeaders.GenerationHeaders[0].GenerationID != "gen-2" ||
+			len(withHeaders.Segments) != 1 || len(withHeaders.Segments[0].Turns) != 2 || withHeaders.Page != page.Page {
+			t.Fatalf("generation headers for %s: %d %s", test.since, response.Code, response.Body.String())
+		}
+	}
+
 	// A new head Turn cannot shift the stable cursor into duplicate results.
 	fake.mu.Lock()
 	fake.turns["ses-3"] = append(fake.turns["ses-3"], historyTestTurn("turn-new", 8, false))

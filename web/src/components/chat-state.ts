@@ -43,6 +43,8 @@ interface ResourceChatContext {
   requestGeneration: number;
   streamGeneration: number;
   segments: Map<string, ResourceHistorySegment>;
+  generationHeaders: Map<string, ResourceHistoryGeneration>;
+  headHeaderRange?: string;
   details: Map<string, ResourceHistoryTurnDetail>;
   detailLoading: Set<string>;
   detailErrors: Map<string, string>;
@@ -78,6 +80,7 @@ interface ResourceChatContext {
 }
 
 export interface ChatSessionControllerOptions {
+  generationHeadersSince?: () => string;
   api?: ApiClient;
   eventSourceFactory?: EventSourceFactory;
   onEvent?: (workspaceId: string, resourceId: string, event: AgentEvent) => void;
@@ -114,11 +117,13 @@ export class ChatSessionController {
   private readonly keepHistoryOnGenerationChange: boolean;
   private readonly collapseNonUserTurns: boolean;
   private readonly refreshHistoryOnStatusChange: boolean;
+  private readonly generationHeadersSince?: () => string;
   private activeKey = "";
   private disposed = false;
 
   constructor(options: ChatSessionControllerOptions = {}) {
     this.api = options.api ?? new ApiClient();
+    this.generationHeadersSince = options.generationHeadersSince;
     this.eventSourceFactory = options.eventSourceFactory ?? ((url) => new EventSource(url));
     this.onEvent = options.onEvent;
     this.onNotice = options.onNotice;
@@ -215,7 +220,7 @@ export class ChatSessionController {
     context.error = "";
     this.emit();
     try {
-      const page = await this.api.latest<ResourceHistoryPage>(historyPath(context, cursor), { scope: requestScope(context, "older") });
+      const page = await this.api.latest<ResourceHistoryPage>(historyPath(context, cursor, this.generationHeadersSince?.()), { scope: requestScope(context, "older") });
       if (!this.isCurrent(context, generation)) return false;
       this.mergePage(context, page);
       return page.segments.some((segment) => segment.turns?.length || segment.gap);
@@ -356,6 +361,9 @@ export class ChatSessionController {
       resourceId: context.resourceId,
       generationId: context.generationId,
       blocks: this.blocks(context),
+      generationHeaders: this.generationHeadersSince ? [
+        ...Array.from(context.segments.values(), segment => segment.generation), ...context.generationHeaders.values(),
+      ] : undefined,
       notices: [...context.notices],
       hasMoreBefore: context.hasMoreBefore,
       loading: context.loading,
@@ -381,7 +389,7 @@ export class ChatSessionController {
   private createContext(workspaceId: string, resourceId: string): ResourceChatContext {
     const context: ResourceChatContext = {
       key: contextKey(workspaceId, resourceId), workspaceId, resourceId, status: null, generationId: "",
-      requestGeneration: 1, streamGeneration: 0, segments: new Map(), details: new Map(), detailLoading: new Set(),
+      requestGeneration: 1, streamGeneration: 0, segments: new Map(), generationHeaders: new Map(), details: new Map(), detailLoading: new Set(),
       detailErrors: new Map(), expandedTurns: new Set(), liveEvents: new Map(), orphanEvents: new Map(), detailChain: Promise.resolve(), notices: [], noticeTimers: new Map(), nextCursor: "", hasMoreBefore: false,
       loading: false, loadingOlder: false, loaded: false, error: "", stream: null, pendingEvents: [], headRefreshing: false, headRefreshPending: false,
       terminalMaterializing: new Set(), terminalPending: new Set(), terminalError: "", flushTimer: null, statusSyncTimer: null, statusSyncInFlight: false,
@@ -397,13 +405,15 @@ export class ChatSessionController {
     context.error = "";
     this.emit();
     try {
-      const page = await this.api.latest<ResourceHistoryPage>(historyPath(context), { scope: requestScope(context, "initial") });
+      const range = this.generationHeadersSince?.();
+      const page = await this.api.latest<ResourceHistoryPage>(historyPath(context, "", range), { scope: requestScope(context, "initial") });
       if (!this.isCurrent(context, generation)) return;
       const overlaps = keepHistory && page.segments.some(segment => segment.turns?.some(
         turn => context.segments.get(segment.generation.generationId)?.turns.some(item => item.reference === turn.reference),
       ));
       if (!overlaps) {
         context.segments.clear();
+        context.generationHeaders.clear();
         context.details.clear();
         context.detailErrors.clear();
         context.expandedTurns.clear();
@@ -411,6 +421,7 @@ export class ChatSessionController {
         context.orphanEvents.clear();
       }
       context.completedTurnNumber = page.completedTurnNumber;
+      context.headHeaderRange = range;
       this.mergePage(context, page, !overlaps);
       context.loaded = true;
       this.connect(context);
@@ -426,6 +437,7 @@ export class ChatSessionController {
   }
 
   private mergePage(context: ResourceChatContext, page: ResourceHistoryPage, updateCursor = true): void {
+    for (const header of page.generationHeaders || []) context.generationHeaders.set(header.generationId, header);
     for (const incoming of page.segments || []) {
       const id = incoming.generation.generationId;
       const existing = context.segments.get(id);
@@ -756,8 +768,10 @@ export class ChatSessionController {
     context.headRefreshing = true;
     const generation = context.requestGeneration;
     try {
-      const page = await this.api.latest<ResourceHistoryPage>(historyPath(context), { scope: requestScope(context, "stream-head") });
+      const range = this.generationHeadersSince?.();
+      const page = await this.api.latest<ResourceHistoryPage>(historyPath(context, "", range === context.headHeaderRange ? undefined : range), { scope: requestScope(context, "stream-head") });
       if (this.isCurrent(context, generation)) {
+        context.headHeaderRange = range;
         context.completedTurnNumber = page.completedTurnNumber;
         this.mergePage(context, page, !context.segments.size);
         this.retryPendingTerminals(context);
@@ -886,6 +900,8 @@ export class ChatSessionController {
     this.api.requests.abort(requestScope(context, "stream-head"));
     if (!keepHistory) {
       context.segments.clear();
+      context.generationHeaders.clear();
+      context.headHeaderRange = undefined;
       context.details.clear();
       context.expandedTurns.clear();
       context.nextCursor = "";
@@ -1022,9 +1038,10 @@ function resourceBase(context: ResourceChatContext): string {
   return `/api/workspaces/${encodeURIComponent(context.workspaceId)}/resources/${encodeURIComponent(context.resourceId)}`;
 }
 
-function historyPath(context: ResourceChatContext, cursor = ""): string {
+function historyPath(context: ResourceChatContext, cursor = "", headerRange?: string): string {
   const query = new URLSearchParams({ limit: String(HISTORY_LIMIT) });
   if (cursor) query.set("cursor", cursor);
+  if (headerRange) query.set("generationHeadersSince", headerRange);
   return `${resourceBase(context)}/history/turns?${query}`;
 }
 

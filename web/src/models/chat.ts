@@ -225,6 +225,7 @@ export interface ResourceHistorySegment {
 }
 
 export interface ResourceHistoryPage {
+  generationHeaders?: ResourceHistoryGeneration[];
   completedTurnNumber?: number;
   resourceId: string;
   segments: ResourceHistorySegment[];
@@ -304,6 +305,7 @@ export interface TimelineItem {
 }
 
 export interface ChatContextSnapshot {
+  generationHeaders?: ResourceHistoryGeneration[];
   completedTurnNumber?: number;
   identity: string;
   workspaceId: string;

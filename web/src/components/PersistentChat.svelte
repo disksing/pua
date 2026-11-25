@@ -157,7 +157,7 @@
     if (!container) return;
     timeline = container;
     const updateScrollPadding = () => {
-      const markers = container.querySelectorAll(".history-generation.sticky");
+      const markers = container.querySelectorAll("[data-generation-heading]");
       const headerHeight = Math.max(0, ...Array.from(markers, marker => marker.getBoundingClientRect().height));
       container.style.scrollPaddingBlockStart = headerHeight ? `${Math.ceil(headerHeight) + 8}px` : "";
     };

@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { ResourceHistoryGeneration } from "./models";
 
-  let { generation, status = generation.status, sticky = false }: { generation: ResourceHistoryGeneration; status?: string; sticky?: boolean } = $props();
+  let { generation, status = generation.status }: { generation: ResourceHistoryGeneration; status?: string } = $props();
   const agent = $derived(generation.agentName || generation.resolvedProfile || generation.binding?.name || "Unknown agent");
   const totals = $derived(generation.turnTotals);
   const activeStart = $derived(Date.parse(totals?.activeStartedAt || ""));
@@ -27,7 +27,7 @@
   }
 </script>
 
-<div class="history-generation" class:sticky data-generation-id={generation.generationId}>
+<div class="history-generation" data-generation-id={generation.generationId}>
   <span class="generation-label">Generation {generation.generation}</span>
   <strong>{agent}</strong>
   <span class="generation-meta">
@@ -56,7 +56,6 @@
     padding: 6px 10px;
     overflow-wrap: anywhere;
   }
-  .sticky { position: sticky; inset-block-start: 0; z-index: 1; }
   .generation-label {
     color: var(--faint);
     font-size: 11px;

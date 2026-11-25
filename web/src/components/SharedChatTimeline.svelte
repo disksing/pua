@@ -63,6 +63,7 @@
   let autoExpanded = $state.raw<{ key: string; reference: string } | null>(null);
   let lastFollowedKey = "";
   const latestTurn = $derived(snapshot.blocks.filter(block => block.turn).at(-1));
+  let pinnedHeading = $state.raw<{ key: string; offset: number } | null>(null);
   let root: HTMLDivElement;
   let previousPending = new Set<string>();
 
@@ -139,6 +140,40 @@
       if (path) return path;
     }
     return "";
+  }
+
+  function trackGenerationHeadings(element: HTMLDivElement) {
+    const scroll = element.closest<HTMLElement>("#chatTimeline");
+    if (!scroll) return;
+    $effect(() => {
+      if (!visible || !sections.length) {
+        pinnedHeading = null;
+        return;
+      }
+      const headings = Array.from(element.querySelectorAll<HTMLElement>(":scope > .generation-section > [data-generation-heading]"));
+      const update = () => {
+        const top = scroll.getBoundingClientRect().top + scroll.clientTop;
+        let next = null;
+        for (let index = headings.length - 1; index >= 0; index--) {
+          const heading = headings[index];
+          const offset = top - heading.getBoundingClientRect().top;
+          if (offset < 0) continue;
+          next = { key: heading.dataset.generationHeading!, offset };
+          break;
+        }
+        if (next?.key !== pinnedHeading?.key || next?.offset !== pinnedHeading?.offset) pinnedHeading = next;
+      };
+      untrack(update);
+      const resize = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(update);
+      resize?.observe(scroll);
+      resize?.observe(element);
+      for (const child of element.children) resize?.observe(child);
+      scroll.addEventListener("scroll", update, { passive: true });
+      return () => {
+        resize?.disconnect();
+        scroll.removeEventListener("scroll", update);
+      };
+    });
   }
 
   async function loadOlder() {
@@ -268,7 +303,7 @@
   {/each}
 {/snippet}
 
-<div bind:this={root} class="shared-chat-stream public-messages" data-component-owner="event-timeline">
+<div bind:this={root} use:trackGenerationHeadings class="shared-chat-stream public-messages" data-component-owner="event-timeline">
   {#if snapshot.hasMoreBefore || legacy}
     <div class="history-actions">
       {#if snapshot.hasMoreBefore}
@@ -282,7 +317,11 @@
   {#each sections as section, index (section.key)}
     <div class="generation-section">
       {#if section.generation}
-        <GenerationMarker generation={section.generation} status={effectiveGenerationStatus({ generation: section.generation }, status)} sticky />
+        {@const offset = pinnedHeading?.key === section.key ? pinnedHeading.offset : undefined}
+        <div class="generation-heading" data-generation-heading={section.key} class:pinned={offset !== undefined}
+          style:--generation-pin-offset={offset === undefined ? undefined : `${offset}px`}>
+          <GenerationMarker generation={section.generation} status={effectiveGenerationStatus({ generation: section.generation }, status)} />
+        </div>
       {/if}
       {#each section.rows as row (row.key)}
         {#if row.kind === "message"}
@@ -315,6 +354,9 @@
   .shared-chat-stream, .generation-section { display: flex; flex-wrap: wrap; align-content: start; align-items: start; min-width: 0; gap: 8px 6px; }
   .shared-chat-stream { flex: 1; }
   .generation-section { flex: 0 0 100%; }
+  .generation-heading { display: flex; flex: 0 0 100%; min-width: 0; margin: 8px 0 2px; }
+  .generation-heading > :global(.history-generation) { margin: 0; }
+  .generation-heading.pinned > :global(.history-generation) { position: relative; inset-block-start: var(--generation-pin-offset); z-index: 1; }
   .chat-bubble-row { display: flex; flex-direction: column; flex: 0 0 100%; min-width: 0; }
   .history-chip { display: flex; }
   .history-wide, .history-actions, .queued-inputs { flex: 0 0 100%; min-width: 0; box-sizing: border-box; }

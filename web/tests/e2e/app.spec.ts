@@ -4299,6 +4299,7 @@ test("keeps whole-Generation statistics and hands the sticky marker across three
   const stamp = (index: number) => new Date(Date.parse(now) + index * 1000).toISOString();
   const generations = [1, 2, 3].map(index => ({
     generation: index, generationId: `sticky-${index}`, status: "idle", createdAt: stamp(index * 100),
+    agentName: index === 2 ? "Shared Chat regression fixture agent with a longer profile name" : "Agent",
     turnTotals: { count: index * 10, executionMs: index * 61000, latestEventId: 150 },
   }));
   const segments = generations.map(generation => {
@@ -4314,27 +4315,32 @@ test("keeps whole-Generation statistics and hands the sticky marker across three
     text: `Generation ${generation} message ${index}\n\n${"Shared history provides scrollable content. ".repeat(8)}`,
   })));
   let open = true;
+  let running = false;
+  let singleGeneration = false;
   const historyCursors: string[] = [];
   let olderChatPages = 0;
   await page.route("**/api/workspaces/ws-test/resources/project1.task1/**", async route => {
     const url = new URL(route.request().url());
     const op = url.pathname.split("/project1.task1/")[1];
-    if (op === "status") return json(route, { generation: generations[2], sessionState: "idle", session: { state: "idle" }, waitingMessages: [] });
+    if (op === "status") return json(route, {
+      generation: { ...generations[2], status: running ? "running" : "idle" },
+      sessionState: running ? "working" : "idle", session: { state: running ? "running" : "idle" }, waitingMessages: [],
+    });
     if (op === "chat/close") open = false;
     if (op === "chat" || op === "chat/close") {
       const before = url.searchParams.has("before");
       if (before) olderChatPages++;
       return json(route, {
         id: "sticky-chat", open, epoch: 1, unreadCount: 0, queuedMessages: [],
-        messages: op === "chat/close" || url.searchParams.has("after") ? [] : before ? messages.slice(0, 20) : messages.slice(20),
-        hasOlder: !before && !url.searchParams.has("after"), hasNewer: false,
+        messages: op === "chat/close" || url.searchParams.has("after") ? [] : before ? messages.slice(0, 20) : messages.slice(singleGeneration ? 40 : 20),
+        hasOlder: !singleGeneration && !before && !url.searchParams.has("after"), hasNewer: false,
       });
     }
     if (op === "history/turns") {
       const cursor = url.searchParams.get("cursor");
       if (cursor) historyCursors.push(cursor);
-      return json(route, { segments: cursor ? segments : [{ generation: generations[1], turns: segments[1].turns.slice(2) }, segments[2]],
-        page: { hasMore: !cursor, nextCursor: cursor ? "" : "sticky-earlier" } });
+      return json(route, { segments: singleGeneration ? [segments[2]] : cursor ? segments : [{ generation: generations[1], turns: segments[1].turns.slice(2) }, segments[2]],
+        page: { hasMore: !singleGeneration && !cursor, nextCursor: cursor || singleGeneration ? "" : "sticky-earlier" } });
     }
     return route.fallback();
   });
@@ -4349,12 +4355,46 @@ test("keeps whole-Generation statistics and hands the sticky marker across three
     const scroll = element.closest("#chatTimeline")!;
     return Math.abs(element.getBoundingClientRect().top - scroll.getBoundingClientRect().top) <= 1;
   });
+  const crossBoundary = async (previous: number) => {
+    await navigate(`sticky-msg-${previous}-10`);
+    await expect.poll(() => pinned(previous)).toBe(true);
+    const boundary = await marker(previous + 1).evaluate(element => {
+      const scroll = element.closest("#chatTimeline")!;
+      return scroll.scrollTop + element.getBoundingClientRect().top - scroll.getBoundingClientRect().top;
+    });
+    for (const [offset, expected] of [[-2, previous], [2, previous + 1], [-2, previous]]) {
+      await chat.evaluate((scroll, top) => { scroll.scrollTop = top; }, boundary + offset);
+      await expect.poll(() => chat.evaluate(scroll => {
+        const top = scroll.getBoundingClientRect().top;
+        return [...scroll.querySelectorAll("[data-generation-id]")].map(element => {
+          const bounds = element.getBoundingClientRect();
+          const center = bounds.left + bounds.width / 2;
+          const unobscured = element.contains(document.elementFromPoint(center, top + 1))
+            && element.contains(document.elementFromPoint(center, bounds.bottom - 1));
+          return { id: element.getAttribute("data-generation-id"), top: bounds.top - top, unobscured };
+        });
+      })).toEqual(expect.arrayContaining([{
+        id: `sticky-${expected}`, top: expect.closeTo(0, 0), unobscured: true,
+      }]));
+      if (offset < 0) {
+        expect(await marker(previous + 1).evaluate(element => {
+          const scroll = element.closest("#chatTimeline")!;
+          return element.getBoundingClientRect().top - scroll.getBoundingClientRect().top;
+        })).toBeGreaterThan(1);
+      }
+    }
+  };
+  const viewports = [{ width: 1500, height: 844 }, { width: 440, height: 820 }];
   await page.goto("/w/ws-test/r/project1.task1");
   await expect(marker(2).locator("[data-generation-turn-count]")).toHaveText("20 Turns", { timeout: 15_000 });
   await expect(marker(2).locator("[data-generation-duration]")).toHaveText("2m 2s execution");
   await expect(chat.getByText("Generation 2 message 10", { exact: true })).toBeAttached();
   await navigate("sticky-msg-2-10");
   await expect.poll(() => pinned(2)).toBe(true);
+  for (const viewport of viewports) {
+    await page.setViewportSize(viewport);
+    await crossBoundary(2);
+  }
 
   await chat.evaluate(scroll => scroll.scrollTop = 0);
   await expect.poll(() => olderChatPages).toBe(1);
@@ -4368,24 +4408,34 @@ test("keeps whole-Generation statistics and hands the sticky marker across three
   expect(hit.target).toBe(true);
   await page.mouse.click(hit.x, hit.y);
   await expect.poll(() => historyCursors).toEqual(["sticky-earlier"]);
-  await expect(marker(1)).toHaveCount(1);
-  await expect(marker(2).locator("[data-generation-turn-count]")).toHaveText("20 Turns");
-  for (const viewport of [{ width: 1500, height: 844 }, { width: 440, height: 820 }]) {
-    await page.setViewportSize(viewport);
-    for (const generation of [1, 2, 3, 2, 1]) {
-      await navigate(`sticky-msg-${generation}-10`);
-      await expect.poll(() => pinned(generation)).toBe(true);
-      await expect(marker(generation)).toHaveCount(1);
-      await expect(marker(generation).locator("[data-generation-turn-count]")).toHaveText(`${generation * 10} Turns`);
-      if (generation < 3) expect(await marker(generation + 1).evaluate(element => element.getBoundingClientRect().top)).toBeGreaterThan(0);
-    }
+  for (const generation of [1, 2, 3]) {
+    await expect(marker(generation)).toHaveCount(1);
+    await expect(marker(generation).locator("[data-generation-turn-count]")).toHaveText(`${generation * 10} Turns`);
   }
+  for (const viewport of viewports) {
+    await page.setViewportSize(viewport);
+    await crossBoundary(1);
+    await crossBoundary(2);
+  }
+  await navigate("sticky-msg-3-10");
+  running = true;
+  await expect(marker(3).locator("[data-generation-status]")).toHaveText("running");
+  await expect.poll(() => pinned(3)).toBe(true);
+  await crossBoundary(2);
   const dock = page.locator(".public-chat-dock");
   await dock.getByRole("button", { name: "Chat options" }).click();
   await dock.getByRole("button", { name: "Close chat", exact: true }).click();
   await expect(dock.getByRole("button", { name: "Reopen chat" })).toBeVisible();
   await navigate("sticky-msg-2-10");
   await expect.poll(() => pinned(2)).toBe(true);
+
+  singleGeneration = true;
+  open = true;
+  await page.reload();
+  await expect(chat.locator("[data-generation-id]")).toHaveCount(1);
+  await expect(chat.getByText("Generation 3 message 10", { exact: true })).toBeAttached();
+  await navigate("sticky-msg-3-10");
+  await expect.poll(() => pinned(3)).toBe(true);
 });
 
 for (const width of [280, 220, 320]) {

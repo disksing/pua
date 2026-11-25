@@ -766,11 +766,12 @@ func (s *server) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 	case "ui-state":
 		s.handleUIState(w, r, id)
 	case "cards":
-		if len(parts) != 2 {
+		quota := len(parts) == 3 && parts[2] == "magpie-quota"
+		if len(parts) != 2 && !quota {
 			http.NotFound(w, r)
 			return
 		}
-		s.handleCards(w, r, id)
+		s.handleCards(w, r, id, quota)
 	case "projects":
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)

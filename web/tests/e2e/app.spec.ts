@@ -2885,6 +2885,64 @@ test("displays Chat beside the sidebar in the two-column layout", async ({ page 
   await expect(page.locator("#detailsResize")).toBeVisible();
 });
 
+test("adds Magpie usage and keeps multiple accounts readable in a narrow drawer", async ({ page }) => {
+  test.setTimeout(90000);
+  await installMockApi(page);
+  const cards: Array<{id:string; kind:string; source:string; title:string; version:number; collapsed:boolean; height:number}> = [];
+  await page.route("**/api/workspaces/ws-test/cards", async route => {
+    if (route.request().method() === "GET") return route.fulfill({json:cards});
+    const change = route.request().postDataJSON();
+    if (change.action === "create") {
+      cards.push({id:"quota-card", kind:change.kind, source:change.source, title:change.title, version:1, collapsed:false, height:0});
+    } else {
+      Object.assign(cards[0], change, {version:cards[0].version + 1});
+    }
+    return route.fulfill({json:{cards}});
+  });
+  const longPlan = "Enterprise".repeat(10);
+  const providers = [
+    {label:"First provider", accountLabel:"A1", planLabel:longPlan, quotas:[{label:"Weekly", remainingPercent:22, resetsAt:"2027-01-01T00:00:00Z"}]},
+    {label:"Second provider", accountLabel:"B2", quotas:[{label:"Balance", remainingPercent:null, display:"$12"}]},
+  ];
+  let snapshot = {configured:true, connected:true, stale:false, providers};
+  let requests = 0;
+  await page.route("**/cards/magpie-quota", async route => {
+    requests++;
+    return route.fulfill({json:snapshot});
+  });
+  await page.goto("/w/ws-test/r/project1.task1");
+  await page.getByRole("button", {name:"Add card", exact:true}).click();
+  expect(requests).toBe(0);
+  await page.getByRole("combobox", {name:"Style", exact:true}).selectOption("quota");
+  await page.getByRole("button", {name:"Add to workspace"}).click();
+  const card = page.locator("#agentPanel article");
+  await expect(card.getByText("22% left")).toBeVisible();
+  await expect(card.locator("time")).toHaveAttribute("datetime", "2027-01-01T00:00:00Z");
+  await page.setViewportSize({width:320, height:720});
+  await page.getByRole("button", {name:"Open workspace cards"}).click();
+  await expect(card.getByText("$12", {exact:true})).toBeVisible();
+  expect(await card.locator(".body").evaluate(body=>body.scrollWidth <= body.clientWidth)).toBe(true);
+  await card.getByRole("button", {name:"Magpie usage"}).click();
+  await expect(card.getByText("2 accounts")).toBeVisible();
+  await expect(card.locator(".body")).toHaveCount(0);
+  await card.getByRole("button", {name:/Magpie usage/}).click();
+  await card.locator("summary").click();
+  await card.getByRole("button", {name:"Resize"}).click();
+  await expect(card.locator(".body")).toHaveCSS("height","180px");
+  await page.setViewportSize({width:1500, height:800});
+  for (const [state, message] of [
+    [{configured:false, connected:false, stale:false, providers:[]}, "Magpie not configured"],
+    [{configured:true, connected:false, stale:false, providers:[]}, "Magpie disconnected"],
+    [{configured:true, connected:false, stale:true, providers}, "Disconnected · Stale readings"],
+    [{configured:true, connected:true, stale:true, providers}, "Stale readings"],
+  ] as const) {
+    snapshot = {...state, providers:[...state.providers]};
+    await page.reload({waitUntil:"domcontentloaded"});
+    await expect(card.getByText(message, {exact:true})).toBeVisible();
+    await expect(card.getByText("0% left", {exact:true})).toHaveCount(0);
+  }
+});
+
 test("collapses docked cards and opens a drawer from the details header at narrower widths", async ({ page }) => {
   await page.setViewportSize({ width: 1441, height: 800 });
   await installMockApi(page);

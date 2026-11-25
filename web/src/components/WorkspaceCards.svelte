@@ -2,7 +2,7 @@
   import {onMount, untrack, type Snippet} from "svelte";
   import type {WorkspaceTree} from "../models/workspace";
   import CardContent from "./CardContent.svelte";
-  import {cardObservation, collapsedReadout, labels, project, sources, styles, summarize, type Card, type Kind, type Sample, type Summary} from "./workspace-cards";
+  import {cardObservation, collapsedReadout, labels, project, sources, styles, summarize, type Card, type Content, type Kind, type Sample, type Summary} from "./workspace-cards";
 
   let {workspace,user,tree,treeError,onSelect,onClose,panelAction}: {
     workspace:string; user:string; tree:WorkspaceTree|null; treeError:string;
@@ -15,6 +15,31 @@
   let kind=$state<Kind>("stat"), source=$state("running"), title=$state("");
   let dragging=$state("");
   let offline=$state(false);
+  let quotaData=$state<Content | null>(null);
+  const hasQuota=$derived(cards.some(card=>card.source==="magpie-quota"));
+  $effect(()=>{
+    if (!hasQuota) {
+      quotaData=null;
+      return;
+    }
+    const controller=new AbortController();
+    const url=`/api/workspaces/${encodeURIComponent(workspace)}/cards/magpie-quota`;
+    const headers={"X-PUA-User":user};
+    let timer:ReturnType<typeof setTimeout>;
+    async function refresh() {
+      try {
+        const response=await fetch(url,{headers,signal:controller.signal});
+        const next=response.ok ? {quota:await response.json()} : {};
+        if (!controller.signal.aborted) quotaData=next;
+      } catch {
+        if (!controller.signal.aborted) quotaData={};
+      } finally {
+        if (!controller.signal.aborted) timer=setTimeout(refresh,15000);
+      }
+    }
+    void refresh();
+    return ()=>{controller.abort();clearTimeout(timer);};
+  });
   const summary=$derived(tree && !treeError ? summarize(tree) : null);
   const cacheKey=$derived(`pua-card-samples:${JSON.stringify([workspace,user])}`);
   let serial=0, disposed=false;
@@ -102,7 +127,7 @@
   {#if error}<p role="alert">{error} <button onclick={load}>Retry</button></p>{/if}
   <div class="stack">
     {#each cards as card,index (card.id)}
-      {@const data=project(card,offline ? null:summary,samples)}
+      {@const data=card.source==="magpie-quota" ? quotaData : project(card,offline ? null:summary,samples)}
       <article class:stat-card={card.kind === "stat"} draggable="true" ondragstart={()=>dragging=card.id} ondragend={()=>dragging=""}
         ondragover={(event)=>event.preventDefault()} ondrop={(event)=>{event.preventDefault();const item=cards.find(item=>item.id===dragging);if(item && item.id!==card.id) void layout(item,{before:card.id});dragging="";}}>
         <div class="heading">
@@ -120,7 +145,7 @@
         </div>
         {#if !card.collapsed}
           <div class="body" style:height={card.height ? `${card.height}px`:undefined}>
-            {#if data}<CardContent kind={card.kind} source={card.source} {data} onSelect={select}/>{:else}<small>Data unavailable</small>{/if}
+            {#if data}<CardContent kind={card.kind} source={card.source} {data} onSelect={select}/>{:else}<small>{card.kind==="quota" ? "Loading quota…" : "Data unavailable"}</small>{/if}
           </div>
           <footer>{card.source === "agent" ? "Agent" : `System · ${labels[card.source]}`}{#if card.updated} · {new Date(card.updated).toLocaleTimeString()}{/if}</footer>
         {/if}

@@ -1,5 +1,5 @@
 import {describe, expect, it} from "vitest";
-import {collapsedReadout, project, summarize, type Card} from "../../src/components/workspace-cards";
+import {collapsedReadout, project, quotaStatus, quotaValue, summarize, type Card} from "../../src/components/workspace-cards";
 
 describe("workspace card sources", () => {
   const tree = {projects:[{id:"project1",type:"project",children:[
@@ -27,5 +27,16 @@ describe("workspace card sources", () => {
     expect(collapsedReadout("list", {items:[]})).toBe("0");
     expect(collapsedReadout("pie", {items:[{label:"Running",value:3}]})).toBe("3");
     expect(collapsedReadout("html", {html:"<p>Ready</p>"})).toBe("");
+  });
+  it("distinguishes quota availability, stale readings and measured zero", () => {
+    const snapshot = {configured:true, connected:true, providers:[]};
+    expect(quotaStatus({...snapshot, configured:false, connected:false})).toBe("Magpie not configured");
+    expect(quotaStatus({...snapshot, connected:false})).toBe("Magpie disconnected");
+    expect(quotaStatus({...snapshot, stale:true})).toBe("Stale readings");
+    expect(quotaStatus(snapshot)).toBe("No quota readings");
+    expect(quotaValue({label:"Weekly", remainingPercent:null})).toBe("Unavailable");
+    expect(quotaValue({label:"Weekly", remainingPercent:0})).toBe("0% left");
+    expect(quotaValue({label:"Credits", remainingPercent:null, display:"$12"})).toBe("$12");
+    expect(collapsedReadout("quota", {})).toBe("Unavailable");
   });
 });

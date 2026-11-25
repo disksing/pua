@@ -3,19 +3,42 @@ import { writable } from "svelte/store";
 
 export const cardObservation = writable<{workspace:string; user:string; tree:WorkspaceTree|null} | null>(null);
 
-export const styles = { stat: "Stat", gauge: "Gauge", pie: "Pie Chart", trend: "Trend", list: "List", html: "HTML" } as const;
+export const styles = { stat: "Stat", gauge: "Gauge", pie: "Pie Chart", trend: "Trend", list: "List", html: "HTML", quota: "Quota" } as const;
 export type Kind = keyof typeof styles;
 export const sources: Record<Kind, string[]> = {
   stat: ["running", "running-tasks", "tasks"], trend: ["running", "running-tasks", "tasks"],
-  list: ["running", "running-tasks", "tasks"], gauge: ["task-ratio"], pie: ["task-states"], html: [],
+  list: ["running", "running-tasks", "tasks"], gauge: ["task-ratio"], pie: ["task-states"], html: [], quota: ["magpie-quota"],
 };
 export const labels: Record<string, string> = {
   running: "Running resources", "running-tasks": "Running tasks", tasks: "All tasks",
   "task-ratio": "Running share of tasks", "task-states": "Task states", agent: "Agent publication",
+  "magpie-quota": "Magpie usage",
 };
 export interface Item { label: string; resource?: string; url?: string; value?: number }
 export interface Point { time: string; value: number }
-export interface Content { value?: number; max?: number; items?: Item[]; points?: Point[]; html?: string }
+interface QuotaWindow {
+  label: string; remainingPercent: number | null; display?: string; unlimited?: boolean;
+  resetsAt?: string; stale?: boolean; used?: number; limit?: number; unit?: string;
+}
+export interface QuotaSnapshot {
+  configured: boolean; connected: boolean; stale?: boolean;
+  providers: {label: string; accountLabel?: string; planLabel?: string; stale?: boolean; status: string; quotas: QuotaWindow[]}[];
+}
+export function quotaStatus(quota: QuotaSnapshot) {
+  if (!quota.configured) return "Magpie not configured";
+  if (!quota.connected) return quota.providers.length ? "Disconnected · Stale readings" : "Magpie disconnected";
+  if (quota.stale) return "Stale readings";
+  if (!quota.providers.length) return "No quota readings";
+  return "";
+}
+export function quotaValue(window: QuotaWindow) {
+  if (window.unlimited) return "Unlimited";
+  if (window.remainingPercent != null) return `${Number(window.remainingPercent.toFixed(1))}% left`;
+  if (window.display) return window.display;
+  if (window.used != null && window.limit != null) return `${window.used} / ${window.limit} ${window.unit ?? ""}`.trim();
+  return "Unavailable";
+}
+export interface Content { value?: number; max?: number; items?: Item[]; points?: Point[]; html?: string; quota?: QuotaSnapshot }
 export interface Card {
   id: string; title: string; kind: Kind; source: string; version: number;
   collapsed: boolean; height?: number; content?: Content; updated?: string;
@@ -29,6 +52,11 @@ export function collapsedReadout(kind: Kind, data: Content | null) {
     case "list": return String(data.items?.length ?? 0);
     case "pie": return String(data.items?.reduce((sum, item) => sum + (item.value ?? 0), 0) ?? 0);
     case "html": return "";
+    case "quota": {
+      if (!data.quota) return "Unavailable";
+      const count = data.quota.providers.length;
+      return quotaStatus(data.quota) || `${count} ${count === 1 ? "account" : "accounts"}`;
+    }
   }
 }
 export function summarize(tree: WorkspaceTree) {

@@ -73,6 +73,7 @@ var cardSources = map[string][]string{
 	"trend": {"running", "running-tasks", "tasks"},
 	"list":  {"running", "running-tasks", "tasks"},
 	"html":  {},
+	"quota": {"magpie-quota"},
 }
 
 var cardColor = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
@@ -175,7 +176,19 @@ func cardKeyID(key string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (s *server) handleCards(w http.ResponseWriter, r *http.Request, workspaceID string) {
+func readWorkspaceCards(path string) ([]workspaceCard, error) {
+	cards := []workspaceCard{}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return cards, nil
+	}
+	if err == nil {
+		err = json.Unmarshal(data, &cards)
+	}
+	return cards, err
+}
+
+func (s *server) handleCards(w http.ResponseWriter, r *http.Request, workspaceID string, quota bool) {
 	workspace, err := s.workspace(workspaceID)
 	if err != nil {
 		writeError(w, err, http.StatusNotFound)
@@ -187,6 +200,25 @@ func (s *server) handleCards(w http.ResponseWriter, r *http.Request, workspaceID
 		return
 	}
 	var change cardChange
+	path := filepath.Join(filepath.Dir(userUIStatePath(workspace.Path, user)), "cards.json")
+	w.Header().Set("Cache-Control", "no-store")
+	if quota {
+		if r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		cards, err := readWorkspaceCards(path)
+		if err != nil {
+			writeError(w, err, http.StatusInternalServerError)
+			return
+		}
+		if !slices.ContainsFunc(cards, func(card workspaceCard) bool { return card.Source == "magpie-quota" }) {
+			http.NotFound(w, r)
+			return
+		}
+		s.serveMagpieQuota(w, r)
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 	case http.MethodPost:
@@ -206,17 +238,11 @@ func (s *server) handleCards(w http.ResponseWriter, r *http.Request, workspaceID
 	}
 	s.uiStateMu.Lock()
 	defer s.uiStateMu.Unlock()
-	path := filepath.Join(filepath.Dir(userUIStatePath(workspace.Path, user)), "cards.json")
-	cards := []workspaceCard{}
-	data, err := os.ReadFile(path)
-	if err == nil {
-		err = json.Unmarshal(data, &cards)
-	}
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
+	cards, err := readWorkspaceCards(path)
+	if err != nil {
 		writeError(w, err, 500)
 		return
 	}
-	w.Header().Set("Cache-Control", "no-store")
 	if r.Method == http.MethodGet {
 		writeJSON(w, cards)
 		return
@@ -243,6 +269,9 @@ func applyCardChange(cards []workspaceCard, change cardChange) ([]workspaceCard,
 		}
 		card := workspaceCard{ID: rand.Text(), Title: title, Kind: change.Kind, Source: change.Source, Version: 1}
 		if change.Source == "agent" {
+			if change.Kind == "quota" {
+				return nil, "", 400, errors.New("quota requires a system source")
+			}
 			if len(change.Key) < 26 || len(change.Key) > 128 {
 				return nil, "", 400, errors.New("a private publisher key is required")
 			}

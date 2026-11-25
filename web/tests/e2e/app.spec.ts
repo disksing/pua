@@ -1252,8 +1252,12 @@ for (const viewport of [{ width: 1500, height: 844 }, { width: 440, height: 820 
     await installMockApi(page);
     const messages = [
       { id: "chat-user-stable", role: "user", sender: "User", text: "Please quote this sentence.", createdAt: now },
-      { id: "chat-agent-stable", role: "agent", sender: "Agent", text: "This agent reply includes a quote.", createdAt: now },
+      { id: "chat-agent-stable", role: "agent", sender: "Agent", text: "First line.\nSecond line extends farther right.", createdAt: now },
     ];
+    const laterMessage = {
+      id: "chat-later-stable", role: "agent", text: "Later message with more history.\n".repeat(40),
+      createdAt: new Date(Date.parse(now) + 1000).toISOString(),
+    };
     const sendRequests: string[] = [];
     page.on("request", request => {
       if (request.method() === "POST" && new URL(request.url()).pathname.endsWith("/chat/messages")) {
@@ -1262,23 +1266,25 @@ for (const viewport of [{ width: 1500, height: 844 }, { width: 440, height: 820 
     });
     await page.route("**/resources/project1.task1/chat?*", route => json(route, {
       id: "quote-chat", open: true, epoch: 1, unreadCount: 0,
-      messages: new URL(route.request().url()).searchParams.has("after") ? [] : messages,
+      messages: new URL(route.request().url()).searchParams.has("after") ? [] : [...messages, laterMessage],
     }));
     await page.goto("/w/ws-test/r/project1.task1");
     const chat = page.getByRole("region", { name: "Resource chat" });
     const input = chat.getByRole("textbox", { name: "Chat message" });
     const quote = chat.getByRole("button", { name: "引用", exact: true });
-    const paragraphs = messages.map(message => chat.locator("article p").filter({ hasText: message.text }));
-    await input.fill("Existing draft");
+    const paragraphs = messages.map(message => chat.locator(`[data-chat-message-body="${message.id}"] p`));
 
     async function selectText(paragraph: Locator, text: string) {
       await paragraph.scrollIntoViewIfNeeded();
       const [start, end] = await paragraph.evaluate((element, text) => {
         window.getSelection()?.removeAllRanges();
-        const node = element.firstChild!;
-        const offset = node.textContent!.indexOf(text);
+        const lines = text.split("\n");
+        const first = element.firstChild!;
+        const last = lines.length > 1 ? element.lastChild! : first;
+        const start = first.textContent!.indexOf(lines[0]);
+        const end = last.textContent!.indexOf(lines.at(-1)!) + lines.at(-1)!.length;
         const range = document.createRange();
-        return [offset, offset + text.length].map(position => {
+        return ([[first, start], [last, end]] as const).map(([node, position]) => {
           range.setStart(node, position);
           range.collapse(true);
           const rect = range.getBoundingClientRect();
@@ -1292,6 +1298,22 @@ for (const viewport of [{ width: 1500, height: 844 }, { width: 440, height: 820 
       await expect(quote).toHaveCount(0);
       await page.mouse.up();
       await expect(quote).toBeVisible();
+    }
+
+    async function measurePlacement() {
+      return quote.evaluate(button => {
+        const selection = window.getSelection()!.getRangeAt(0).getBoundingClientRect();
+        const bounds = button.getBoundingClientRect();
+        const timeline = document.querySelector<HTMLElement>("#chatTimeline")!;
+        const chat = timeline.getBoundingClientRect();
+        return {
+          horizontalGap: bounds.left - selection.right,
+          aboveGap: selection.top - bounds.bottom,
+          belowGap: bounds.top - selection.bottom,
+          roomAbove: selection.top - chat.top - (parseFloat(timeline.style.scrollPaddingBlockStart) || 0),
+          rightInset: chat.left + timeline.clientLeft + timeline.clientWidth - bounds.right,
+        };
+      });
     }
 
     await selectText(paragraphs[0], "quote this");
@@ -1314,22 +1336,42 @@ for (const viewport of [{ width: 1500, height: 844 }, { width: 440, height: 820 
     });
     await expect(quote).toHaveCount(0);
 
-    let expected = "Existing draft";
-    for (const [index, text] of ["quote this", "agent reply"].entries()) {
-      await selectText(paragraphs[index], text);
-      const box = (await quote.boundingBox())!;
-      expect(box.x).toBeGreaterThanOrEqual(0);
-      expect(box.x + box.width).toBeLessThanOrEqual(viewport.width);
+    const firstQuote = `> this sentence.\n来源消息：${messages[0].id}\n`;
+    for (const [draft, prefix] of [["", ""], ["Existing draft", "Existing draft\n\n"], ["Existing draft\n", "Existing draft\n\n"]]) {
+      await input.fill(draft);
+      await paragraphs[0].evaluate(paragraph => {
+        const timeline = paragraph.closest<HTMLElement>("#chatTimeline")!;
+        const visibleTop = timeline.getBoundingClientRect().top + (parseFloat(timeline.style.scrollPaddingBlockStart) || 0);
+        timeline.scrollTop += paragraph.getBoundingClientRect().top - visibleTop - 24;
+      });
+      await selectText(paragraphs[0], "this sentence.");
+      const placement = await measurePlacement();
+      expect(placement.roomAbove).toBeLessThan(56);
+      expect(placement.belowGap).toBeCloseTo(6, 0);
+      if (viewport.width === 440) expect(placement.rightInset).toBeCloseTo(6, 0);
       await quote.click();
-      expected += `\n\n> ${text}\n来源消息：${messages[index].id}`;
-      await expect(input).toHaveValue(expected);
+      await expect(input).toHaveValue(prefix + firstQuote);
       await expect(input).toBeFocused();
       await expect(quote).toHaveCount(0);
+      await page.keyboard.insertText("接着输入");
+      await expect(input).toHaveValue(`${prefix}${firstQuote}接着输入`);
     }
 
+    const multiline = messages[1].text;
+    await selectText(paragraphs[1], multiline);
+    const multilinePlacement = await measurePlacement();
+    expect(multilinePlacement.horizontalGap).toBeCloseTo(6, 0);
+    expect(multilinePlacement.aboveGap).toBeCloseTo(6, 0);
+    await quote.click();
+    const expected = `Existing draft\n\n${firstQuote}接着输入\n\n> First line.\n> Second line extends farther right.\n来源消息：${messages[1].id}\n`;
+    await expect(input).toHaveValue(expected);
+    await expect(input).toBeFocused();
+
+    await selectText(paragraphs[0], "this sentence.");
+    await quote.click();
     await input.selectText();
     await expect(quote).toHaveCount(0);
-    await expect(input).toHaveValue(expected);
+    await expect(input).toHaveValue(`${expected}\n${firstQuote}`);
     expect(sendRequests).toEqual([]);
   });
 }

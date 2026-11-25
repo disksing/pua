@@ -210,17 +210,19 @@
     const bottom = Math.min(bounds.bottom, document.documentElement.clientHeight);
     const gap = 6;
     if (right - left < QUOTE_WIDTH + 2 * gap || bottom - top < QUOTE_HEIGHT + 2 * gap) return null;
-    const rect = Array.from(range.getClientRects()).find(rect =>
+    const rects = Array.from(range.getClientRects()).filter(rect =>
       rect.width > 0 && rect.right > left && rect.left < right && rect.bottom > top && rect.top < bottom);
-    if (!rect) return null;
+    if (!rects.length) return null;
 
     const origin = root.getBoundingClientRect();
-    const center = (Math.max(left, rect.left) + Math.min(right, rect.right)) / 2;
-    const above = rect.top - QUOTE_HEIGHT - gap;
+    const selectionRight = Math.max(...rects.map(rect => rect.right));
+    const selectionTop = Math.min(...rects.map(rect => rect.top));
+    const selectionBottom = Math.max(...rects.map(rect => rect.bottom));
+    const above = selectionTop - QUOTE_HEIGHT - gap;
     return {
       text, messageId,
-      left: Math.max(left + gap, Math.min(center - QUOTE_WIDTH / 2, right - QUOTE_WIDTH - gap)) - origin.left,
-      top: (above >= top + gap ? above : Math.min(rect.bottom + gap, bottom - QUOTE_HEIGHT - gap)) - origin.top,
+      left: Math.min(selectionRight + gap, right - QUOTE_WIDTH - gap) - origin.left,
+      top: (above >= top + gap ? above : Math.min(selectionBottom + gap, bottom - QUOTE_HEIGHT - gap)) - origin.top,
     };
   }
   function updateQuote() {
@@ -246,7 +248,7 @@
     const key = identity;
     const { text, messageId } = quote;
     const separator = !draft || draft.endsWith("\n\n") ? "" : draft.endsWith("\n") ? "\n" : "\n\n";
-    draft += `${separator}> ${text.replaceAll("\n", "\n> ")}\n来源消息：${messageId}`;
+    draft += `${separator}> ${text.replaceAll("\n", "\n> ")}\n来源消息：${messageId}\n`;
     draftResetVersion++;
     quote = null;
     window.getSelection()?.removeAllRanges();

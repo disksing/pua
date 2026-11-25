@@ -3,6 +3,7 @@ package serve
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -62,6 +63,19 @@ func (c *resourceController) run() {
 		}
 		job.done <- err
 	}
+}
+
+func (c *resourceController) cancelQueued(done <-chan error, err error) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for index, job := range c.jobs {
+		if job.done == done {
+			c.jobs = slices.Delete(c.jobs, index, index+1)
+			job.done <- err
+			return true
+		}
+	}
+	return false
 }
 
 func (c *resourceController) do(ctx context.Context, fn func() error) error {

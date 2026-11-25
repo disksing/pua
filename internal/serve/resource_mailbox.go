@@ -1067,6 +1067,9 @@ func (m *agentManager) ensureMailboxGeneration(ctx context.Context, workspace se
 }
 
 func resourceDeliveryErrorCode(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "deadline_exceeded"
+	}
 	var apiErr *resourceAPIError
 	if errors.As(err, &apiErr) && strings.TrimSpace(apiErr.Code) != "" {
 		return apiErr.Code
@@ -1237,6 +1240,8 @@ func (m *agentManager) promoteWaitingMessageLocked(ctx context.Context, workspac
 }
 
 func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, workspace serveWorkspace, resourceID string) error {
+	ctx, cancel := context.WithTimeout(ctx, agentHubRequestTimeout)
+	defer cancel()
 	resourceID = normalizedResourceID(resourceID)
 	_, archived, _, resourceErr := resourceExistsAndArchived(workspace.Path, resourceID)
 	if resourceErr != nil {
@@ -1260,6 +1265,9 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 		return nil
 	}
 	for iteration := 0; iteration < 32; iteration++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if iteration == 0 {
 			works, e := loadTurnWork(workspace.Path, resourceID)
 			if e != nil {
@@ -1294,6 +1302,12 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 		}
 		if !found {
 			return nil
+		}
+		if message.Status == resourceMessageQueued && message.TaskStartFailureCount >= maxTaskStateRecoveryAttempts {
+			if err := finalizeStartFailure(ctx, workspace, message); err != nil {
+				return err
+			}
+			continue
 		}
 		if isLegacyTurnResultType(message.Type) {
 			_, err = updateMailboxMessage(workspace.Path, message.ID, func(current *resourceMailboxMessage) {
@@ -1346,7 +1360,7 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 			record, rt, client, err = m.ensureMailboxGeneration(ctx, workspace, resourceID)
 			if err != nil {
 				recordMailboxFailure(workspace.Path, message.ID, err)
-				exhausted, stateErr := m.recordTaskStartFailure(workspace, message, err)
+				exhausted, stateErr := m.recordTaskStartFailure(ctx, workspace, message, err)
 				if stateErr != nil {
 					return stateErr
 				}
@@ -1485,7 +1499,7 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 			resumed, terminal, resumeErr := m.resumeStoppedGenerationLocked(ctx, workspace, record, rt, client, lifecyclePlan)
 			if terminal {
 				recordMailboxFailure(workspace.Path, message.ID, resumeErr)
-				exhausted, stateErr := m.recordTaskStartFailure(workspace, message, resumeErr)
+				exhausted, stateErr := m.recordTaskStartFailure(ctx, workspace, message, resumeErr)
 				if stateErr != nil {
 					return stateErr
 				}
@@ -1674,13 +1688,17 @@ func (m *agentManager) reconcileResourceMailboxLocked(ctx context.Context, works
 			return err
 		}
 		message = contextualMessage
-		if err := prepareTurnWork(workspace.Path, resourceID, record.GenerationID, session.ID, message); err != nil {
+		if err := prepareTurnWork(ctx, workspace.Path, resourceID, record.GenerationID, session.ID, message); err != nil {
 			recordMailboxFailure(workspace.Path, message.ID, err)
 			return err
 		}
 		m.requestTurnOutput(workspace, resourceID)
 		deliveryPlan := lifecyclePlan
-		if err := m.prepareTaskWorkChain(workspace, message, rt); err != nil {
+		if err := m.prepareTaskWorkChain(ctx, workspace, message, rt); err != nil {
+			recordMailboxFailure(workspace.Path, message.ID, err)
+			return err
+		}
+		if err := ctx.Err(); err != nil {
 			recordMailboxFailure(workspace.Path, message.ID, err)
 			return err
 		}

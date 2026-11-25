@@ -1,6 +1,7 @@
 package serve
 
 import (
+	"context"
 	"strings"
 
 	"github.com/disksing/pua/internal/app"
@@ -9,7 +10,7 @@ import (
 
 type advisoryRenderer func(language string, compact bool) (string, error)
 
-func renderWorkspaceAdvisory(workspace serveWorkspace, render advisoryRenderer) (string, error) {
+func renderWorkspaceAdvisory(ctx context.Context, workspace serveWorkspace, render advisoryRenderer) (string, error) {
 	root, err := app.OpenWorkspace(workspace.Path)
 	if err != nil {
 		return "", err
@@ -18,7 +19,10 @@ func renderWorkspaceAdvisory(workspace serveWorkspace, render advisoryRenderer) 
 	if err != nil {
 		return "", err
 	}
-	compact, guidanceErr := root.HasCurrentTurnGuidance()
+	compact, guidanceErr := root.HasCurrentTurnGuidanceContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	return render(language, compact && guidanceErr == nil)
 }
 

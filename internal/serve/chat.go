@@ -332,12 +332,6 @@ func (m *agentManager) reconcileWorkspaceChats(ctx context.Context, workspace se
 }
 
 func (m *agentManager) reconcileChatOutbox(ctx context.Context, workspace serveWorkspace, id string, registered map[string]bool) (transferred int, resultErr error) {
-	destinations := make(map[string]bool)
-	defer func() {
-		for resource := range destinations {
-			m.requestChatInput(workspace, resource, chatInputMailbox)
-		}
-	}()
 	chatMu.Lock()
 	defer chatMu.Unlock()
 	if err := ctx.Err(); err != nil {
@@ -408,7 +402,7 @@ func (m *agentManager) reconcileChatOutbox(ctx context.Context, workspace serveW
 				return transferred, acceptErr
 			}
 			delivery.Accepted = true
-			destinations[delivery.Target] = true
+			m.requestChatInputAt(workspace, delivery.Target, chatInputMailbox, started)
 			transferred++
 			log.Printf("Chat input accepted workspace=%s resource=%s input=%s message=%s saved_at=%s accepted_at=%s accept_ms=%d",
 				workspace.ID, delivery.Target, delivery.ID, message.ID, savedAt[delivery.ID], message.AcceptedAt, time.Since(started).Milliseconds())

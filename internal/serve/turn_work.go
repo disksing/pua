@@ -134,7 +134,7 @@ func (f turnWorkFile) canPreview(work *turnWork, messageID string) bool {
 	return true
 }
 
-func prepareTurnWork(root, resource, generation, session string, message resourceMailboxMessage) error {
+func prepareTurnWork(ctx context.Context, root, resource, generation, session string, message resourceMailboxMessage) error {
 	if message.ProviderContext == nil || message.ProviderContext.Protocol != 1 || message.ActualMode == resourceMessageModeSteer {
 		return nil
 	}
@@ -158,7 +158,7 @@ func prepareTurnWork(root, resource, generation, session string, message resourc
 	if err != nil {
 		return err
 	}
-	if err := ws.RefreshTurnGuidance(resource); err != nil {
+	if err := ws.RefreshTurnGuidanceContext(ctx, resource); err != nil {
 		return err
 	}
 	work := turnWork{ID: message.ID, GenerationID: generation, SessionID: session,
@@ -497,7 +497,7 @@ func (m *agentManager) reconcileTurnWorkLocked(ctx context.Context, workspace se
 			return err
 		}
 	}
-	return settleTurnTaskState(workspace.Path, resource, file)
+	return settleTurnTaskState(ctx, workspace.Path, resource, file)
 }
 
 func selectedTurnWorkInput(root, resource string, mailbox resourceMailbox) (string, error) {
@@ -569,7 +569,7 @@ func (m *agentManager) previewQueuedInput(ctx context.Context, workspace serveWo
 		if err != nil {
 			return err
 		}
-		text, err := renderWorkspaceAdvisory(workspace, queuePreviewRenderer(&file, work, session, message, mailbox))
+		text, err := renderWorkspaceAdvisory(ctx, workspace, queuePreviewRenderer(&file, work, session, message, mailbox))
 		if err != nil {
 			return err
 		}
@@ -882,7 +882,7 @@ func cancelSuspendedTurnWork(root, resource, reason string) error {
 	return nil
 }
 
-func settleTurnTaskState(root, resource string, file turnWorkFile) error {
+func settleTurnTaskState(ctx context.Context, root, resource string, file turnWorkFile) error {
 	if file.advisoryBarrier() {
 		return nil
 	}
@@ -921,6 +921,6 @@ func settleTurnTaskState(root, resource string, file turnWorkFile) error {
 	if len(file.Works) > 0 && file.Works[len(file.Works)-1].State == "blocked" {
 		state, note = app.TaskStateBlocked, "Turn work requires attention; inspect pua turn status"
 	}
-	_, err = ws.SetTaskState(resource, state, note)
+	_, err = ws.SetTaskStateContext(ctx, resource, state, note)
 	return err
 }

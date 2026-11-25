@@ -92,7 +92,7 @@ func (m *agentManager) resumeStoppedGenerationLocked(ctx context.Context, worksp
 			// exact Session before treating the error as transient: startup_error
 			// is a durable terminal boundary for this generation and must consume
 			// the Task work-chain recovery budget instead of retrying forever.
-			if afterFailure, observeErr := client.GetSession(context.WithoutCancel(ctx), observed.ID); observeErr == nil && agentHubSessionStartupFailed(afterFailure) {
+			if afterFailure, observeErr := client.GetSession(ctx, observed.ID); observeErr == nil && agentHubSessionStartupFailed(afterFailure) {
 				terminal = true
 				resumeErr = providerStartupFailure(afterFailure, resumeErr)
 			}

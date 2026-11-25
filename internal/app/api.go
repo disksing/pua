@@ -7,6 +7,7 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -707,10 +708,22 @@ func (w *Workspace) ArchiveResource(id string) (ArchiveResult, error) {
 		return ArchiveResult{}, err
 	}
 	var result ArchiveResult
-	err := withWorkspaceMutationLock(w.root, func() error {
-		var err error
-		result, err = w.archiveResource(id)
-		return err
+	err := withWorkspaceFileLock(context.Background(), w.root, "archive.lock", func() error {
+		var tasks []archiveTaskReference
+		err := withWorkspaceMutationLock(w.root, func() error {
+			var moveErr error
+			result, moveErr = w.archiveResource(id, &tasks)
+			return moveErr
+		})
+		if err != nil {
+			return err
+		}
+		for _, task := range tasks {
+			result.Warnings = append(result.Warnings, repairArchivedTaskWorktrees(w.root, task.Path, task.Task)...)
+			result.Warnings = append(result.Warnings, inspectTaskRepoWorktrees(w.root, task.Path, task.Task)...)
+		}
+		result.Warnings = sortArchiveWarnings(result.Warnings)
+		return nil
 	})
 	if err != nil {
 		var apiErr *APIError
@@ -722,7 +735,7 @@ func (w *Workspace) ArchiveResource(id string) (ArchiveResult, error) {
 	return result, nil
 }
 
-func (w *Workspace) archiveResource(id string) (ArchiveResult, error) {
+func (w *Workspace) archiveResource(id string, tasks *[]archiveTaskReference) (ArchiveResult, error) {
 	if err := w.require(); err != nil {
 		return ArchiveResult{}, err
 	}
@@ -738,15 +751,11 @@ func (w *Workspace) archiveResource(id string) (ArchiveResult, error) {
 	if pathExists(dst) {
 		return ArchiveResult{}, &APIError{Operation: "archive resource", Kind: "resource", Workspace: w.root, ResourceID: cleanID, Path: relPath(w.root, dst), Err: fmt.Errorf("archive destination already exists: %s", relPath(w.root, dst))}
 	}
-	var (
-		warnings []ArchiveWarning
-		children []archiveTaskReference
-	)
+	var warnings []ArchiveWarning
 	if isProject(resource) {
-		children, warnings = collectProjectArchiveTasks(w.root, src, *resource.(*Project))
-	}
-	if task, ok := resource.(*Task); ok {
-		warnings = append(warnings, inspectTaskRepoWorktrees(w.root, src, *task)...)
+		*tasks, warnings = collectProjectArchiveTasks(w.root, src, dst, *resource.(*Project))
+	} else if task, ok := resource.(*Task); ok {
+		*tasks = []archiveTaskReference{{Task: *task, Path: dst}}
 	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return ArchiveResult{}, &APIError{Operation: "archive resource", Kind: "resource", Workspace: w.root, ResourceID: cleanID, Err: err}
@@ -762,10 +771,5 @@ func (w *Workspace) archiveResource(id string) (ArchiveResult, error) {
 			warnings = append(warnings, warning)
 		}
 	}
-	if task, ok := resource.(*Task); ok {
-		warnings = append(warnings, repairArchivedTaskWorktrees(w.root, dst, *task)...)
-	} else {
-		warnings = append(warnings, archiveTaskReferencesAfterMove(w.root, src, dst, children)...)
-	}
-	return ArchiveResult{ResourceID: cleanID, Path: relPath(w.root, dst), Warnings: sortArchiveWarnings(warnings)}, nil
+	return ArchiveResult{ResourceID: cleanID, Path: relPath(w.root, dst), Warnings: warnings}, nil
 }

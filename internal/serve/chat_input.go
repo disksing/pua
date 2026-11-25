@@ -42,6 +42,10 @@ func (m *agentManager) wakeChatInputs() {
 }
 
 func (m *agentManager) requestChatInput(workspace serveWorkspace, resource string, stage chatInputStage) {
+	m.requestChatInputAt(workspace, resource, stage, time.Now())
+}
+
+func (m *agentManager) requestChatInputAt(workspace serveWorkspace, resource string, stage chatInputStage, queuedAt time.Time) {
 	key := chatInputKey{root: workspace.Path, resource: normalizedResourceID(resource), stage: stage}
 	m.chatInputMu.Lock()
 	target := m.chatInputTargets[key]
@@ -50,7 +54,7 @@ func (m *agentManager) requestChatInput(workspace serveWorkspace, resource strin
 		m.chatInputTargets[key] = target
 	}
 	if !target.requested {
-		target.queuedAt = time.Now()
+		target.queuedAt = queuedAt
 	}
 	target.requested, target.nextAt = true, time.Time{}
 	m.chatInputMu.Unlock()
@@ -158,6 +162,11 @@ func (m *agentManager) enqueueChatInput(ctx context.Context, key chatInputKey, w
 		m.finishChatInput(ctx, key, context.Canceled)
 		return
 	}
+	attempt := ctx
+	cancel := func() {}
+	if key.stage == chatInputMailbox {
+		attempt, cancel = context.WithDeadline(ctx, queuedAt.Add(agentHubRequestTimeout))
+	}
 	execute := func() error {
 		started := time.Now()
 		var err error
@@ -167,7 +176,7 @@ func (m *agentManager) enqueueChatInput(ctx context.Context, key chatInputKey, w
 				started.UTC().Format(time.RFC3339Nano), started.Sub(queuedAt).Milliseconds(),
 				time.Since(started).Milliseconds(), reconcileErrorCode(err))
 		}()
-		if err = ctx.Err(); err != nil {
+		if err = attempt.Err(); err != nil {
 			return err
 		}
 		if !m.server.ownsWorkspace(workspace.Path) {
@@ -191,28 +200,45 @@ func (m *agentManager) enqueueChatInput(ctx context.Context, key chatInputKey, w
 			_, err = m.reconcileChatOutbox(ctx, workspace, sharedChatID(key.resource), registered)
 			return err
 		}
-		queryContext, cancel := context.WithTimeout(ctx, agentHubRequestTimeout)
-		defer cancel()
-		err = m.reconcileResourceMailboxLocked(queryContext, workspace, key.resource)
+		err = m.reconcileResourceMailboxLocked(attempt, workspace, key.resource)
 		return err
 	}
 	if key.stage == chatInputTransfer {
 		go func() {
 			defer finished()
+			defer cancel()
 			m.finishChatInput(ctx, key, execute())
 		}()
 		return
 	}
 	controller, err := m.controllerForResource(workspace, key.resource)
 	if err != nil {
+		cancel()
 		finished()
 		m.finishChatInput(ctx, key, err)
 		return
 	}
-	done := controller.enqueue(ctx, execute)
+	done := controller.enqueue(attempt, execute)
 	go func() {
 		defer finished()
-		m.finishChatInput(ctx, key, <-done)
+		defer cancel()
+		deadline, _ := attempt.Deadline()
+		waiting := time.AfterFunc(time.Until(queuedAt.Add(2*time.Second)), func() {
+			log.Printf("Chat input pending workspace=%s resource=%s stage=%s elapsed_ms=%d deadline_at=%s",
+				workspace.ID, key.resource, key.stage, time.Since(queuedAt).Milliseconds(), deadline.UTC().Format(time.RFC3339Nano))
+		})
+		defer waiting.Stop()
+		select {
+		case err := <-done:
+			m.finishChatInput(ctx, key, err)
+		case <-attempt.Done():
+			if errors.Is(attempt.Err(), context.DeadlineExceeded) {
+				queued := controller.cancelQueued(done, attempt.Err())
+				log.Printf("Chat input deadline workspace=%s resource=%s stage=%s controller_queued=%t elapsed_ms=%d error_code=deadline_exceeded",
+					workspace.ID, key.resource, key.stage, queued, time.Since(queuedAt).Milliseconds())
+			}
+			m.finishChatInput(ctx, key, <-done)
+		}
 	}()
 }
 

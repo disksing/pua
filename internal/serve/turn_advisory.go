@@ -183,7 +183,7 @@ func (manager *agentManager) reserveAdvisory(ctx context.Context, workspace serv
 	if err != nil || !available {
 		return err
 	}
-	text, err := renderWorkspaceAdvisory(workspace, render)
+	text, err := renderWorkspaceAdvisory(ctx, workspace, render)
 	if err != nil {
 		return err
 	}

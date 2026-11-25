@@ -2,6 +2,7 @@ package serve
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -39,7 +40,7 @@ func TestTaskMessageAcceptanceWaitsForDeliveryBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	rt := newAgentHubRuntime(manager, workspace, record, nil)
-	if err := manager.prepareTaskWorkChain(workspace, message, rt); err != nil {
+	if err := manager.prepareTaskWorkChain(context.Background(), workspace, message, rt); err != nil {
 		t.Fatal(err)
 	}
 	detail, err = puaWorkspace.Resource("project1.task1")
@@ -55,7 +56,7 @@ func TestTaskMessageAcceptanceWaitsForDeliveryBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	message.Status = resourceMessageDelivering
-	if err := manager.prepareTaskWorkChain(workspace, message, rt); err != nil {
+	if err := manager.prepareTaskWorkChain(context.Background(), workspace, message, rt); err != nil {
 		t.Fatal(err)
 	}
 	detail, err = puaWorkspace.Resource("project1.task1")
@@ -346,7 +347,7 @@ func TestTaskStartFailureExhaustionIsDurable(t *testing.T) {
 		t.Fatal(err)
 	}
 	for attempt := 1; attempt <= maxTaskStateRecoveryAttempts; attempt++ {
-		exhausted, err := manager.recordTaskStartFailure(workspace, message, &resourceAPIError{Code: "binding_unavailable", Message: "provider unavailable"})
+		exhausted, err := manager.recordTaskStartFailure(context.Background(), workspace, message, &resourceAPIError{Code: "binding_unavailable", Message: "provider unavailable"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -371,7 +372,7 @@ func TestNonTaskStartFailureExhaustionIsDurable(t *testing.T) {
 		t.Fatal(err)
 	}
 	for attempt := 1; attempt <= maxTaskStateRecoveryAttempts; attempt++ {
-		exhausted, err := manager.recordTaskStartFailure(workspace, message, &resourceAPIError{Code: "provider_start_failed", Message: "provider unavailable"})
+		exhausted, err := manager.recordTaskStartFailure(context.Background(), workspace, message, &resourceAPIError{Code: "provider_start_failed", Message: "provider unavailable"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -382,5 +383,35 @@ func TestNonTaskStartFailureExhaustionIsDurable(t *testing.T) {
 	stored, found, err := mailboxMessageByID(workspace.Path, message.ID)
 	if err != nil || !found || stored.Status != resourceMessageUndeliverable || stored.LastErrorCode != "generation_start_retry_exhausted" {
 		t.Fatalf("stored Project start failure = %#v, found=%v err=%v", stored, found, err)
+	}
+}
+
+func TestMailboxFinishesInterruptedStartFailure(t *testing.T) {
+	manager, workspace, fake, _ := outputTestFixture(t, nil)
+	message := queueWorkflowUser(t, manager, workspace, "exhausted", "Start failed")
+	if _, err := updateMailboxMessage(workspace.Path, message.ID, func(current *resourceMailboxMessage) {
+		current.TaskStartFailureCount = maxTaskStateRecoveryAttempts - 1
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := manager.recordTaskStartFailure(ctx, workspace, message, context.DeadlineExceeded); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected interrupted Task state write, got %v", err)
+	}
+	pending, _, err := mailboxMessageByID(workspace.Path, message.ID)
+	if err != nil || pending.Status != resourceMessageQueued || pending.TaskStartFailureCount != maxTaskStateRecoveryAttempts {
+		t.Fatalf("missing exhausted start attempt: %+v, %v", pending, err)
+	}
+	if err := manager.reconcileResourceMailboxLocked(context.Background(), workspace, message.ResourceID); err != nil {
+		t.Fatal(err)
+	}
+	current, _, err := mailboxMessageByID(workspace.Path, message.ID)
+	if err != nil || current.Status != resourceMessageUndeliverable || current.LastErrorCode != "task_state_retry_exhausted" {
+		t.Fatalf("start failure recovery: %+v, %v", current, err)
+	}
+	detail, _, err := taskDetail(workspace.Path, message.ResourceID)
+	if err != nil || detail.State != app.TaskStateError || runtimeFakeListCalls(fake) != 0 {
+		t.Fatalf("unexpected Task or AgentHub state: %+v, %v", detail, err)
 	}
 }

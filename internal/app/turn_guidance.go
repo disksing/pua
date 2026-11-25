@@ -1,13 +1,18 @@
 package app
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 )
 
 func (w *Workspace) HasCurrentTurnGuidance() (bool, error) {
+	return w.HasCurrentTurnGuidanceContext(context.Background())
+}
+
+func (w *Workspace) HasCurrentTurnGuidanceContext(ctx context.Context) (bool, error) {
 	current := false
-	err := withWorkspaceMutationLock(w.root, func() error {
+	err := withWorkspaceFileLock(ctx, w.root, workspaceMutationLockFile, func() error {
 		language, err := workspaceLanguage(w.root)
 		if err != nil {
 			return err
@@ -47,7 +52,11 @@ func (w *Workspace) RefreshWorkspaceGuidance() error {
 // RefreshTurnGuidance updates only managed instructions, preserving custom text.
 // It is called at new-protocol input boundaries, never to change an active Turn.
 func (w *Workspace) RefreshTurnGuidance(resourceID string) error {
-	return withWorkspaceMutationLock(w.root, func() error {
+	return w.RefreshTurnGuidanceContext(context.Background(), resourceID)
+}
+
+func (w *Workspace) RefreshTurnGuidanceContext(ctx context.Context, resourceID string) error {
+	return withWorkspaceFileLock(ctx, w.root, workspaceMutationLockFile, func() error {
 		language, err := workspaceLanguage(w.root)
 		if err != nil {
 			return err

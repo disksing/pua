@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -9,6 +10,10 @@ import (
 // SetTaskState persists the workflow state of an open Task. Authorization for
 // server-owned versus Agent-owned states belongs to the caller.
 func (w *Workspace) SetTaskState(id string, state TaskState, note string) (Task, error) {
+	return w.SetTaskStateContext(context.Background(), id, state, note)
+}
+
+func (w *Workspace) SetTaskStateContext(ctx context.Context, id string, state TaskState, note string) (Task, error) {
 	if err := w.require(); err != nil {
 		return Task{}, err
 	}
@@ -24,7 +29,7 @@ func (w *Workspace) SetTaskState(id string, state TaskState, note string) (Task,
 		return Task{}, &APIError{Operation: "set task state", Kind: "state", Workspace: w.root, ResourceID: id, Err: fmt.Errorf("task state note must be a single line")}
 	}
 	var result Task
-	err := withWorkspaceMutationLock(w.root, func() error {
+	err := withWorkspaceFileLock(ctx, w.root, workspaceMutationLockFile, func() error {
 		path, resource, err := loadOpenResource(w.root, id)
 		if err != nil {
 			return err

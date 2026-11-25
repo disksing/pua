@@ -90,7 +90,7 @@ func TestWorkspaceAdvisoryGuidanceGateAndIdentity(t *testing.T) {
 					Sender: &agentHubMessageSender{Name: "disksing"}, Text: "Keep the original business body.\n\n",
 				}
 				message.Causation = &resourceMessageCausation{AutomaticChat: true}
-				text, err := renderWorkspaceAdvisory(serveWorkspace{Path: root.Root()},
+				text, err := renderWorkspaceAdvisory(context.Background(), serveWorkspace{Path: root.Root()},
 					queuePreviewRenderer(&turnWorkFile{}, &turnWork{ID: "active", State: "running"},
 						agentHubSession{}, message, resourceMailbox{}))
 				if err != nil {
@@ -129,7 +129,7 @@ func TestWorkspaceAdvisoryLanguageValidation(t *testing.T) {
 			}
 			setAdvisoryTestLanguage(t, root.Root(), language)
 			called := false
-			text, err := renderWorkspaceAdvisory(serveWorkspace{Path: root.Root()}, func(language string, compact bool) (string, error) {
+			text, err := renderWorkspaceAdvisory(context.Background(), serveWorkspace{Path: root.Root()}, func(language string, compact bool) (string, error) {
 				called = true
 				return language, nil
 			})
@@ -149,7 +149,7 @@ func TestWorkspaceAdvisoryLanguageValidation(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(root.Root(), "workspace.json"), []byte("{"), 0644); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := renderWorkspaceAdvisory(serveWorkspace{Path: root.Root()}, func(string, bool) (string, error) {
+			if _, err := renderWorkspaceAdvisory(context.Background(), serveWorkspace{Path: root.Root()}, func(string, bool) (string, error) {
 				t.Fatal("unreadable config rendered")
 				return "", nil
 			}); err == nil {

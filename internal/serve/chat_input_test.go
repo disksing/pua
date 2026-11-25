@@ -135,6 +135,126 @@ func TestChatInputTransfersWhileColdAuditIsBlocked(t *testing.T) {
 	}
 }
 
+func TestChatInputDeliversDuringArchiveGit(t *testing.T) {
+	manager, workspace, _, _ := outputTestFixture(t, nil)
+	root, err := app.OpenWorkspace(workspace.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := root.CreateTask(app.CreateTaskInput{ProjectID: "project1", Title: "Archive"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root.Root(), task.Path, "worktree", "repo", ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	t.Setenv("PUA_TEST_GIT_DIR", bin)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(`#!/bin/sh
+case " $* " in
+  *" status "*)
+    touch "$PUA_TEST_GIT_DIR/started"
+    while [ ! -f "$PUA_TEST_GIT_DIR/release" ]; do sleep 0.05; done
+    ;;
+esac
+`), 0755); err != nil {
+		t.Fatal(err)
+	}
+	archived := make(chan error, 1)
+	go func() {
+		_, err := root.ArchiveResource(task.ID)
+		archived <- err
+	}()
+	startChatInputTestLoop(t, manager)
+	t.Cleanup(func() {
+		if err := os.WriteFile(filepath.Join(bin, "release"), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-archived; err != nil {
+			t.Error(err)
+		}
+	})
+	waitForRuntimeTest(t, func() bool {
+		_, err := os.Stat(filepath.Join(bin, "started"))
+		return err == nil
+	})
+	mustChatOK(t, chatCall(t, manager, workspace, "project1.task1", "reader", "messages", chatRequest{ID: "archive", Text: "While archive runs"}, false))
+	waitForRuntimeTest(t, func() bool { return inputTestDelivered(t, workspace, "project1.task1", "archive") })
+}
+
+func TestMailboxWorkspaceLockDeadlineAndRetry(t *testing.T) {
+	manager, workspace, fake, _ := outputTestFixture(t, nil)
+	message := queueWorkflowUser(t, manager, workspace, "lock", "Wait for workspace")
+	if _, _, _, err := manager.ensureMailboxGeneration(context.Background(), workspace, message.ResourceID); err != nil {
+		t.Fatal(err)
+	}
+	root, err := app.OpenWorkspace(workspace.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, release := make(chan struct{}), make(chan struct{})
+	lockDone := make(chan error, 1)
+	go func() {
+		lockDone <- root.WithResourceDocumentMutation(func() error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- manager.reconcileResourceMailboxLocked(ctx, workspace, message.ResourceID) }()
+	select {
+	case err = <-done:
+	case <-time.After(4 * time.Second):
+		close(release)
+		<-lockDone
+		<-done
+		t.Fatal("delivery ignored its deadline while waiting for the workspace lock")
+	}
+	close(release)
+	if lockErr := <-lockDone; lockErr != nil {
+		t.Fatal(lockErr)
+	}
+	current, _, readErr := mailboxMessageByID(workspace.Path, message.ID)
+	if !errors.Is(err, context.DeadlineExceeded) || readErr != nil || current.LastErrorCode != "deadline_exceeded" ||
+		!strings.Contains(current.LastError, "application.lock") || current.Status != resourceMessageQueued || current.AttemptCount != 0 {
+		t.Fatalf("unexpected delivery after lock timeout: %+v, %v, %v", current, err, readErr)
+	}
+	startChatInputTestLoop(t, manager)
+	waitForRuntimeTest(t, func() bool { return inputTestDelivered(t, workspace, message.ResourceID, "lock") })
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.messageIDs) != 1 || fake.messageIDs[0] != message.ID {
+		t.Fatalf("unexpected delivered IDs: %v", fake.messageIDs)
+	}
+}
+
+func TestChatMailboxDeadlineIncludesControllerQueue(t *testing.T) {
+	manager, workspace, _, _ := outputTestFixture(t, nil)
+	message := queueWorkflowUser(t, manager, workspace, "queue-budget", "Wait for controller")
+	controller, err := manager.controllerForResource(workspace, message.ResourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	blocked := controller.enqueue(context.Background(), func() error { <-release; return nil })
+	defer func() { close(release); <-blocked }()
+	key := chatInputKey{root: workspace.Path, resource: message.ResourceID, stage: chatInputMailbox}
+	manager.enqueueChatInput(context.Background(), key, workspace, time.Now().Add(100*time.Millisecond-agentHubRequestTimeout))
+	waitForRuntimeTest(t, func() bool {
+		controller.mu.Lock()
+		defer controller.mu.Unlock()
+		return len(controller.jobs) == 0
+	})
+	if len(workFile(t, workspace).Works) != 0 {
+		t.Fatal("expired queued job created work")
+	}
+}
+
 func TestChatInputIsolatesResourcesAndWorkspacesAndCoalesces(t *testing.T) {
 	manager, workspace, fake, client := outputTestFixture(t, nil)
 	ws, err := app.OpenWorkspace(workspace.Path)

@@ -40,11 +40,11 @@ func resourceArchiveDestination(root, resourcePath string, resource Resource) (s
 }
 
 type archiveTaskReference struct {
-	Task    Task
-	OldPath string
+	Task Task
+	Path string
 }
 
-func collectProjectArchiveTasks(root, projectPath string, project Project) ([]archiveTaskReference, []ArchiveWarning) {
+func collectProjectArchiveTasks(root, projectPath, destination string, project Project) ([]archiveTaskReference, []ArchiveWarning) {
 	entries, err := readTaskEntriesInDirs(
 		[]string{projectPath, filepath.Join(projectPath, archiveDir)},
 		projectTaskName(project.ID),
@@ -59,14 +59,13 @@ func collectProjectArchiveTasks(root, projectPath string, project Project) ([]ar
 	refs := make([]archiveTaskReference, 0, len(entries))
 	warnings := make([]ArchiveWarning, 0)
 	for _, entry := range entries {
-		refs = append(refs, archiveTaskReference{Task: entry.Task, OldPath: entry.Path})
+		refs = append(refs, archiveTaskReference{Task: entry.Task, Path: filepath.Join(destination, relPath(projectPath, entry.Path))})
 		if !isArchivedPath(root, entry.Path) {
 			warning := archiveWarning("open_child_task", fmt.Sprintf("open child Task %s is being archived as part of Project %s; its files and worktree are preserved", entry.Task.ID, project.ID))
 			warning.ResourceID = entry.Task.ID
 			warning.Path = relPath(root, entry.Path)
 			warnings = append(warnings, warning)
 		}
-		warnings = append(warnings, inspectTaskRepoWorktrees(root, entry.Path, entry.Task)...)
 	}
 	return refs, warnings
 }
@@ -182,22 +181,6 @@ func repairArchivedTaskWorktrees(root, taskPath string, task Task) []ArchiveWarn
 			warning.Path = repo.WorktreePath
 			warnings = append(warnings, warning)
 		}
-	}
-	return warnings
-}
-
-func archiveTaskReferencesAfterMove(root, sourcePath, destinationPath string, refs []archiveTaskReference) []ArchiveWarning {
-	warnings := make([]ArchiveWarning, 0)
-	for _, ref := range refs {
-		relative, err := filepath.Rel(sourcePath, ref.OldPath)
-		if err != nil {
-			warning := archiveWarning("child_path_unverifiable", fmt.Sprintf("archived Project child Task %s moved, but its relative path could not be computed: %v", ref.Task.ID, err))
-			warning.ResourceID = ref.Task.ID
-			warnings = append(warnings, warning)
-			continue
-		}
-		newTaskPath := filepath.Join(destinationPath, relative)
-		warnings = append(warnings, repairArchivedTaskWorktrees(root, newTaskPath, ref.Task)...)
 	}
 	return warnings
 }

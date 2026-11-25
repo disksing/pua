@@ -40,31 +40,54 @@ func taskWaitingScheduleMessageID(resourceID, generationID, chainID, marker stri
 	return "task-waiting-schedule-" + hex.EncodeToString(digest[:12])
 }
 
-func taskDetail(workspacePath, resourceID string) (app.ResourceDetailView, bool, error) {
-	if strings.TrimSpace(resourceID) == "workspace" {
-		return app.ResourceDetailView{}, false, nil
+type taskStateDetail struct {
+	app.Task
+	Archived bool
+}
+
+func taskDetail(workspacePath, resourceID string) (taskStateDetail, bool, error) {
+	if !strings.Contains(resourceID, ".task") {
+		return taskStateDetail{}, false, nil
 	}
 	puaWorkspace, err := app.OpenWorkspace(workspacePath)
 	if err != nil {
-		return app.ResourceDetailView{}, false, err
+		return taskStateDetail{}, false, err
 	}
-	detail, err := puaWorkspace.Resource(resourceID)
-	if err != nil {
-		return app.ResourceDetailView{}, false, err
+	resource, err := puaWorkspace.ResourceValue(resourceID)
+	if err != nil || resource.Task == nil {
+		return taskStateDetail{}, false, err
 	}
-	return detail, detail.Type == "task", nil
+	return taskStateDetail{Task: *resource.Task, Archived: resource.Archived}, true, nil
 }
 
-func (m *agentManager) recordTaskStartFailure(workspace serveWorkspace, message resourceMailboxMessage, cause error) (bool, error) {
+func (m *agentManager) recordTaskStartFailure(ctx context.Context, workspace serveWorkspace, message resourceMailboxMessage, cause error) (bool, error) {
 	if cause == nil || message.GenerationID != "" {
 		return false, nil
 	}
-	isTask := strings.Contains(normalizedResourceID(message.ResourceID), ".task")
 	updated, err := updateMailboxMessage(workspace.Path, message.ID, func(current *resourceMailboxMessage) {
 		current.TaskStartFailureCount++
-		if current.TaskStartFailureCount < maxTaskStateRecoveryAttempts {
-			return
+		current.LastError = cause.Error()
+	})
+	if err != nil || updated.TaskStartFailureCount < maxTaskStateRecoveryAttempts {
+		return false, err
+	}
+	err = finalizeStartFailure(ctx, workspace, updated)
+	return err == nil, err
+}
+
+func finalizeStartFailure(ctx context.Context, workspace serveWorkspace, message resourceMailboxMessage) error {
+	isTask := strings.Contains(normalizedResourceID(message.ResourceID), ".task")
+	if isTask {
+		puaWorkspace, err := app.OpenWorkspace(workspace.Path)
+		if err != nil {
+			return err
 		}
+		note := strings.Join(strings.Fields(message.LastError), " ")
+		if _, err := puaWorkspace.SetTaskStateContext(ctx, message.ResourceID, app.TaskStateError, note); err != nil {
+			return err
+		}
+	}
+	_, err := updateMailboxMessage(workspace.Path, message.ID, func(current *resourceMailboxMessage) {
 		now := time.Now().Format(time.RFC3339Nano)
 		current.Status = resourceMessageUndeliverable
 		current.TerminalAt = now
@@ -73,28 +96,13 @@ func (m *agentManager) recordTaskStartFailure(workspace serveWorkspace, message 
 		if isTask {
 			current.LastErrorCode = "task_state_retry_exhausted"
 		}
-		current.LastError = cause.Error()
 	})
-	if err != nil || updated.TaskStartFailureCount < maxTaskStateRecoveryAttempts {
-		return false, err
-	}
-	if !isTask {
-		return true, nil
-	}
-	puaWorkspace, err := app.OpenWorkspace(workspace.Path)
-	if err != nil {
-		return false, err
-	}
-	note := strings.Join(strings.Fields(cause.Error()), " ")
-	if _, err := puaWorkspace.SetTaskState(message.ResourceID, app.TaskStateError, note); err != nil {
-		return false, err
-	}
-	return true, nil
+	return err
 }
 
 // prepareTaskWorkChain runs at the durable delivery boundary. Ordinary input
 // starts a fresh budget; a generated continuation keeps the current budget.
-func (m *agentManager) prepareTaskWorkChain(workspace serveWorkspace, message resourceMailboxMessage, rt *agentRuntime) error {
+func (m *agentManager) prepareTaskWorkChain(ctx context.Context, workspace serveWorkspace, message resourceMailboxMessage, rt *agentRuntime) error {
 	if !strings.Contains(normalizedResourceID(message.ResourceID), ".task") || message.Status != resourceMessageQueued {
 		return nil
 	}
@@ -119,7 +127,7 @@ func (m *agentManager) prepareTaskWorkChain(workspace serveWorkspace, message re
 	if err != nil {
 		return err
 	}
-	_, err = puaWorkspace.SetTaskState(detail.ID, app.TaskStateInProgress, "")
+	_, err = puaWorkspace.SetTaskStateContext(ctx, detail.ID, app.TaskStateInProgress, "")
 	return err
 }
 
@@ -251,7 +259,7 @@ func (m *agentManager) handleTaskTurnCompletionLocked(ctx context.Context, rt *a
 		if detail.State == app.TaskStateWaiting {
 			note = taskWaitingScheduleExhaustedNote(language)
 		}
-		if _, err := puaWorkspace.SetTaskState(record.ResourceID, app.TaskStateError, note); err != nil {
+		if _, err := puaWorkspace.SetTaskStateContext(ctx, record.ResourceID, app.TaskStateError, note); err != nil {
 			return err
 		}
 		return markTaskTurnCompletionHandled(rt, marker)

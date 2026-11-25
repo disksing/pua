@@ -148,7 +148,7 @@ func (m *agentManager) findOrCreateAgentHubSession(ctx context.Context, client *
 	}
 	// Create is non-idempotent. Any response or transport failure can be
 	// ambiguous, so always query the complete source tuple before deciding.
-	recovered, queryErr := findAgentHubSourceSessions(context.WithoutCancel(ctx), client, source)
+	recovered, queryErr := findAgentHubSourceSessions(ctx, client, source)
 	if queryErr != nil {
 		return agentHubSession{}, fmt.Errorf("AgentHub create outcome is unknown (%v); source recovery failed: %w", createErr, queryErr)
 	}

@@ -362,7 +362,7 @@ func TestTurnWorkExpiredCancelledResumeUnblocksMailbox(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := prepareTurnWork(workspace.Path, resource, record.GenerationID, record.AgentHubSessionID, resume); err != nil {
+	if err := prepareTurnWork(context.Background(), workspace.Path, resource, record.GenerationID, record.AgentHubSessionID, resume); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pauseTaskAfterManualTurnStop(workspace, resource); err != nil {

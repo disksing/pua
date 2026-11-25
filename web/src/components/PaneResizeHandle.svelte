@@ -30,9 +30,7 @@
     const workspace = document.querySelector<HTMLElement>(".workspace-panel");
     const chat = document.getElementById("agentPanel");
     if (!app || !sidebar || !workspace || !chat) return;
-    // Two-column mode stacks details above chat in one column, so the sidebar
-    // only has to leave room for the details minimum.
-    const twoColumn = document.body.dataset.layout === "two";
+    const cardsDocked = workspace.closest(".cards-docked") !== null;
     const startX = event.clientX;
     const startY = event.clientY;
     const startSidebar = sidebar.getBoundingClientRect().width;
@@ -44,7 +42,7 @@
     document.body.classList.add(bodyClass);
     const move = (moveEvent: PointerEvent) => {
       if (kind === "sidebarWidth") {
-        const reserved = twoColumn ? 360 : 360 + 8 + Math.max(320, chat.getBoundingClientRect().width);
+        const reserved = cardsDocked ? 360 + 8 + Math.max(320, chat.getBoundingClientRect().width) : 360;
         const max = Math.max(220, app.getBoundingClientRect().width - 8 - reserved);
         onPreview(kind, Math.min(max, Math.max(220, startSidebar + moveEvent.clientX - startX)));
       } else if (kind === "chatWidth") {

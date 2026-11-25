@@ -17,7 +17,11 @@
   import ResourceSettingsPanel from "./ResourceSettingsPanel.svelte";
   import type { DetailPanelModel, FilePreviewModel, ResourceFileModel, ResourceRepoModel } from "./models";
 
-  let { channel, navigation }: { channel: ModelChannel<DetailPanelModel>; navigation?: Snippet } = $props();
+  let { channel, navigation, cardsLauncher }: {
+    channel: ModelChannel<DetailPanelModel>;
+    navigation?: Snippet;
+    cardsLauncher?: Snippet;
+  } = $props();
   // svelte-ignore state_referenced_locally
   let model = $state(channel.current());
   let identity = $state("");
@@ -209,6 +213,7 @@
     </nav>
     <h1 class="details-title">{model.resourceTitle}{#if model.resourceType !== "scheduler"}<code class="resource-ref-badge">{resourceReference(model.resourceId)}</code>{/if}</h1>
   {/if}
+  {@render cardsLauncher?.()}
 </header>
 
 {#if !model.workspaceId}

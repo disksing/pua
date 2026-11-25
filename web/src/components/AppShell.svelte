@@ -1,7 +1,7 @@
 <script lang="ts">
   import "./AppShell.css";
 
-  import { onMount, type Snippet } from "svelte";
+  import { onMount, tick, type Snippet } from "svelte";
 
   import Icon from "./Icon.svelte";
   import DoctorDialog from "./DoctorDialog.svelte";
@@ -16,27 +16,62 @@
 
   let { channel, details }: {
     channel: ModelChannel<AppShellModel>;
-    details?: Snippet<[Snippet]>;
+    details?: Snippet<[Snippet, Snippet]>;
   } = $props();
   // svelte-ignore state_referenced_locally
   let model = $state(channel.current());
   let appliedRouteRevision = $state(0);
   let doctorOpen = $state(false);
-  let cardsOpen = $state(false);
+  let cardsCollapsed = $state(false);
+  let cardsDrawerOpen = $state(false);
+  let cardsNarrow = $state(false);
   let narrow = $state(false);
   let sidebar = $state<HTMLElement>();
   let navigationTrigger = $state<HTMLButtonElement>();
   let navigationClose = $state<HTMLButtonElement>();
+  let cardsPanel = $state<HTMLElement>();
+  let cardsTrigger = $state<HTMLButtonElement>();
+  let cardsDismiss = $state<HTMLButtonElement>();
   const sidebarOpen = $derived(narrow && model.mobile.sidebarOpen);
+  const cardsAvailable = $derived(Boolean(model.cardUser && model.activeWorkspaceId && !model.userGate?.mode));
+  const cardsDocked = $derived(cardsAvailable && !cardsNarrow && !cardsCollapsed);
+  const cardsOverlay = $derived(cardsAvailable && cardsNarrow && cardsDrawerOpen);
   let wasSidebarOpen = false;
+
+  async function focusCardsControl(): Promise<void> {
+    await tick();
+    (cardsDocked || cardsOverlay ? cardsDismiss : cardsTrigger)?.focus({ preventScroll: true });
+  }
+
+  function openCards(): void {
+    if (cardsNarrow) cardsDrawerOpen = true;
+    else cardsCollapsed = false;
+    void focusCardsControl();
+  }
+
+  function closeCardsDrawer(): void {
+    if (!cardsOverlay) return;
+    cardsDrawerOpen = false;
+    void focusCardsControl();
+  }
+
+  function dismissCards(): void {
+    if (cardsNarrow) {
+      closeCardsDrawer();
+    } else {
+      cardsCollapsed = true;
+      void focusCardsControl();
+    }
+  }
 
   onMount(() => {
     const unsubscribe = channel.subscribe((next) => {
       model = next;
     });
     const keydown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && cardsOpen) cardsOpen = false;
-      if (event.key === "Escape" && !event.defaultPrevented && sidebarOpen) model.onMobileSidebar(false);
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (cardsOverlay) closeCardsDrawer();
+      else if (sidebarOpen) model.onMobileSidebar(false);
     };
     const popstate = () => {
       void model.onHistoryNavigation(window.location.pathname).catch((reason) => {
@@ -45,9 +80,8 @@
     };
     const viewport = window.visualViewport;
     const viewportTimers = new Set<number>();
-    const mobileQuery = typeof window.matchMedia === "function"
-      ? window.matchMedia("(max-width: 980px)")
-      : { matches: false, addEventListener: () => undefined, removeEventListener: () => undefined } as unknown as MediaQueryList;
+    const mobileQuery = window.matchMedia?.("(max-width: 980px)");
+    const cardsQuery = window.matchMedia?.("(max-width: 1440px)");
     const syncViewport = () => {
       const root = document.documentElement;
       if (!narrow || !viewport) {
@@ -83,12 +117,20 @@
       scheduleViewportReset(300);
     };
     const resize = () => {
-      const nextNarrow = mobileQuery.matches;
+      const nextNarrow = mobileQuery?.matches ?? false;
       if (nextNarrow && !narrow && sidebar?.contains(document.activeElement)) {
         navigationTrigger?.focus({ preventScroll: true });
       }
       narrow = nextNarrow;
       if (!narrow && model.mobile.sidebarOpen) model.onMobileSidebar(false);
+      const nextCardsNarrow = cardsQuery?.matches ?? false;
+      if (cardsNarrow !== nextCardsNarrow) {
+        const focused = document.activeElement;
+        const restoreFocus = cardsPanel?.contains(focused) || (focused === cardsTrigger && !cardsCollapsed);
+        cardsNarrow = nextCardsNarrow;
+        if (!cardsNarrow) cardsDrawerOpen = false;
+        if (restoreFocus) void focusCardsControl();
+      }
       model.onPaneViewport();
       syncViewport();
     };
@@ -99,7 +141,8 @@
     window.addEventListener("popstate", popstate);
     viewport?.addEventListener("resize", syncViewport);
     viewport?.addEventListener("scroll", syncViewport);
-    mobileQuery.addEventListener?.("change", resize);
+    mobileQuery?.addEventListener?.("change", resize);
+    cardsQuery?.addEventListener?.("change", resize);
     resize();
     return () => {
       unsubscribe();
@@ -110,7 +153,8 @@
       window.removeEventListener("popstate", popstate);
       viewport?.removeEventListener("resize", syncViewport);
       viewport?.removeEventListener("scroll", syncViewport);
-      mobileQuery.removeEventListener?.("change", resize);
+      mobileQuery?.removeEventListener?.("change", resize);
+      cardsQuery?.removeEventListener?.("change", resize);
       clearViewportTimers();
       document.body.classList.remove("mobile-sidebar-open", "resizing-x", "resizing-y");
     };
@@ -155,8 +199,23 @@
   ><Icon name="menu" /></button>
 {/snippet}
 
-<div data-component-owner="app-shell" class="app-shell">
-<aside bind:this={sidebar} id="mobileSidebar" class="sidebar" class:sidebar-open={sidebarOpen} aria-label="Navigation" tabindex="-1" inert={narrow && !sidebarOpen}>
+{#snippet cardsLauncher()}
+  {#if cardsAvailable && !cardsDocked}
+    <button
+      bind:this={cardsTrigger}
+      class="cards-launch"
+      type="button"
+      title="Open workspace cards"
+      aria-label="Open workspace cards"
+      aria-controls="agentPanel"
+      aria-expanded={cardsOverlay}
+      onclick={openCards}
+    ><Icon name="panel-right-open" /></button>
+  {/if}
+{/snippet}
+
+<div data-component-owner="app-shell" class="app-shell" class:cards-docked={cardsDocked}>
+<aside bind:this={sidebar} id="mobileSidebar" class="sidebar" class:sidebar-open={sidebarOpen} aria-label="Navigation" tabindex="-1" inert={cardsOverlay || (narrow && !sidebarOpen)}>
   <div class="brand-band">
     <button
       bind:this={navigationClose}
@@ -169,9 +228,6 @@
     ><Icon name="x" /></button>
     <div class="brand-mark"><img src="/workspace-icons/pua-yellow.png" alt="" aria-hidden="true" /></div>
     <div class="brand-copy"><strong>PUA</strong><span>{model.version}</span></div>
-    {#if model.cardUser && !model.userGate?.mode}
-      <button class="cards-launch" type="button" aria-controls="agentPanel" aria-expanded={cardsOpen} onclick={() => { model.onMobileSidebar(false); cardsOpen = !cardsOpen; }}>Cards</button>
-    {/if}
     {#if model.doctor.summary.errors + model.doctor.summary.warnings > 0 || model.doctor.error}
       <button
         id="doctorButton"
@@ -201,15 +257,35 @@
   {#if model.userGate?.mode}
     <WorkspaceUserGate {model} {navigation} />
   {:else}
-  <section id="detailsPanel" class="details-panel" data-component-owner="detail-panel">{#if details}{@render details(navigation)}{/if}</section>
-  <PaneResizeHandle id="detailsResize" kind="chatWidth" className="details-resize" label="Resize right column" onPreview={model.onPanePreview} onCommit={model.onPaneCommit} />
-  <aside id="agentPanel" class="agent-panel" class:cards-open={cardsOpen} aria-label="Workspace cards">
+  <section id="detailsPanel" class="details-panel" data-component-owner="detail-panel" inert={cardsOverlay}>{#if details}{@render details(navigation, cardsLauncher)}{/if}</section>
+  {#if cardsDocked}
+    <PaneResizeHandle id="detailsResize" kind="chatWidth" className="details-resize" label="Resize right column" onPreview={model.onPanePreview} onCommit={model.onPaneCommit} />
+  {/if}
+  {#if cardsOverlay}<div class="cards-backdrop" aria-hidden="true"></div>{/if}
+  <div
+    bind:this={cardsPanel}
+    id="agentPanel"
+    class="agent-panel"
+    class:cards-drawer={cardsNarrow}
+    class:cards-open={cardsOverlay}
+    role={cardsNarrow ? "dialog" : "complementary"}
+    aria-label="Workspace cards"
+    aria-modal={cardsNarrow ? true : undefined}
+    inert={!cardsDocked && !cardsOverlay}
+  >
     {#if model.cardUser && model.activeWorkspaceId}
       {#key JSON.stringify([model.activeWorkspaceId, model.cardUser])}
-        <WorkspaceCards workspace={model.activeWorkspaceId} user={model.cardUser} tree={model.cardTree ?? null} treeError={model.error} onSelect={model.onSelectResource} onClose={() => cardsOpen = false} />
+        <WorkspaceCards workspace={model.activeWorkspaceId} user={model.cardUser} tree={model.cardTree ?? null} treeError={model.error} onSelect={model.onSelectResource} onClose={closeCardsDrawer}>
+          {#snippet panelAction()}
+            {@const label = cardsNarrow ? "Close workspace cards" : "Collapse workspace cards"}
+            <button bind:this={cardsDismiss} class="cards-dismiss" type="button" title={label} aria-label={label} onclick={dismissCards}>
+              <Icon name={cardsNarrow ? "x" : "arrow-left"} />
+            </button>
+          {/snippet}
+        </WorkspaceCards>
       {/key}
     {/if}
-  </aside>
+  </div>
   {/if}
 </main>
 </div>

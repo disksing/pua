@@ -1,12 +1,13 @@
 <script lang="ts">
-  import {onMount, untrack} from "svelte";
+  import {onMount, untrack, type Snippet} from "svelte";
   import type {WorkspaceTree} from "../models/workspace";
   import CardContent from "./CardContent.svelte";
   import {cardObservation, collapsedReadout, labels, project, sources, styles, summarize, type Card, type Kind, type Sample, type Summary} from "./workspace-cards";
 
-  let {workspace,user,tree,treeError,onSelect,onClose}: {
+  let {workspace,user,tree,treeError,onSelect,onClose,panelAction}: {
     workspace:string; user:string; tree:WorkspaceTree|null; treeError:string;
     onSelect:(id:string)=>Promise<void>; onClose:()=>void;
+    panelAction:Snippet;
   } = $props();
   let cards=$state<Card[]>([]);
   let samples=$state<Sample[]>([]);
@@ -86,7 +87,7 @@
   <header>
     <h2>Workspace cards</h2>
     <button class="add" aria-label="Add card" title="Add card" disabled={!loaded} onclick={()=>adding=!adding} aria-expanded={adding}>+</button>
-    <button class="cards-drawer-close" onclick={onClose} aria-label="Close cards">×</button>
+    {@render panelAction()}
   </header>
   {#if adding}
     <form onsubmit={(event)=>{event.preventDefault();void add();}}>
@@ -149,7 +150,9 @@
   button:disabled { opacity:.5; cursor:default }
   button,select,input { font:inherit; color:inherit; border:1px solid var(--card-line); border-radius:6px; background:var(--card-surface) }
   button { padding:5px 9px }
-  .add,.cards-drawer-close { width:30px; height:30px; padding:0; font-size:20px; line-height:1; background:transparent }
+  .add { width:30px; height:30px; padding:0; font-size:20px; line-height:1; background:transparent }
+  header :global(.cards-dismiss) { border:1px solid var(--card-line); background:transparent; color:inherit }
+  header :global(.cards-dismiss:hover) { background:var(--card-surface) }
   .primary { color:#fff; background:var(--card-accent); border-color:transparent }
   .stack { display:grid; gap:9px; padding:15px }
   form,article,.menu { border:1px solid var(--card-line); border-radius:12px; background:var(--card-surface) }

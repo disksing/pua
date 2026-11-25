@@ -2880,6 +2880,77 @@ test("displays Chat beside the sidebar in the two-column layout", async ({ page 
   await expect(page.locator("#detailsResize")).toBeVisible();
 });
 
+test("collapses docked cards and opens a drawer from the details header at narrower widths", async ({ page }) => {
+  await page.setViewportSize({ width: 1441, height: 800 });
+  await installMockApi(page);
+  await page.goto("/w/ws-test/r/project1.task1");
+
+  const panel = page.locator("#agentPanel");
+  const details = page.locator("#detailsPanel");
+  const sidebar = page.locator("#mobileSidebar");
+  const divider = page.locator("#detailsResize");
+  const launcher = page.getByRole("button", { name: "Open workspace cards" });
+  const collapse = page.getByRole("button", { name: "Collapse workspace cards" });
+  const close = page.getByRole("button", { name: "Close workspace cards" });
+  const drawer = page.getByRole("dialog", { name: "Workspace cards" });
+
+  await expect(panel).toBeVisible();
+  await expect(panel).toHaveCSS("position", "static");
+  await expect(launcher).toHaveCount(0);
+  const dockedDetailsWidth = (await details.boundingBox())!.width;
+
+  await page.setViewportSize({ width: 1440, height: 800 });
+  await expect(panel).toBeHidden();
+  await page.setViewportSize({ width: 1441, height: 800 });
+  await expect(panel).toBeVisible();
+
+  await collapse.focus();
+  await collapse.press("Enter");
+  await expect(panel).toBeHidden();
+  await expect(divider).toBeHidden();
+  await expect(launcher).toBeFocused();
+  await expect(details.locator(".details-header > :last-child")).toHaveClass("cards-launch");
+  expect((await details.boundingBox())!.width).toBeGreaterThan(dockedDetailsWidth);
+
+  await page.setViewportSize({ width: 1440, height: 800 });
+  const drawerDetailsWidth = (await details.boundingBox())!.width;
+  await launcher.click();
+  await expect(drawer).toBeVisible();
+  await expect(panel).toHaveCSS("position", "absolute");
+  await expect(panel).toHaveCSS("width", "420px");
+  await expect(details).toHaveAttribute("inert", "");
+  expect((await details.boundingBox())!.width).toBe(drawerDetailsWidth);
+  await expect(close).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(panel).toBeHidden();
+  await expect(launcher).toBeFocused();
+
+  for (const width of [980, 390]) {
+    await page.setViewportSize({ width, height: 800 });
+    await expect(sidebar).toBeHidden();
+    await expect(sidebar.locator(".cards-launch")).toHaveCount(0);
+    await launcher.click();
+    await expect(drawer).toBeVisible();
+    await expect(panel).toHaveCSS("width", `${width}px`);
+    await close.click();
+    await expect(panel).toBeHidden();
+    await expect(launcher).toBeFocused();
+  }
+  await page.getByRole("button", { name: "Open navigation" }).click();
+  await expect(sidebar).toBeVisible();
+  await expect(panel).toBeHidden();
+  await page.getByRole("button", { name: "Close navigation" }).click();
+
+  await page.setViewportSize({ width: 1441, height: 800 });
+  await expect(panel).toBeHidden();
+  await launcher.press("Space");
+  await expect(panel).toBeVisible();
+  await expect(panel).toHaveCSS("position", "static");
+  await expect(collapse).toBeFocused();
+  await expect(divider).toBeVisible();
+  expect((await details.boundingBox())!.width).toBe(dockedDetailsWidth);
+});
+
 test("ignores saved appearance preferences and keeps responsive layout and pane resizing", async ({ page }) => {
   await installShellMockApi(page);
   await page.goto("/w/ws-a/r/project1.task1");

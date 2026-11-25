@@ -248,7 +248,7 @@
     const key = identity;
     const { text, messageId } = quote;
     const separator = !draft || draft.endsWith("\n\n") ? "" : draft.endsWith("\n") ? "\n" : "\n\n";
-    draft += `${separator}> ${text.replaceAll("\n", "\n> ")}\n来源消息：${messageId}\n`;
+    draft += `${separator}> ${text.replaceAll("\n", "\n> ")}\n来源消息：${messageId}\n\n`;
     draftResetVersion++;
     quote = null;
     window.getSelection()?.removeAllRanges();

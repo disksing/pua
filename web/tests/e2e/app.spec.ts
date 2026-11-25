@@ -1336,7 +1336,7 @@ for (const viewport of [{ width: 1500, height: 844 }, { width: 440, height: 820 
     });
     await expect(quote).toHaveCount(0);
 
-    const firstQuote = `> this sentence.\n来源消息：${messages[0].id}\n`;
+    const firstQuote = `> this sentence.\n来源消息：${messages[0].id}\n\n`;
     for (const [draft, prefix] of [["", ""], ["Existing draft", "Existing draft\n\n"], ["Existing draft\n", "Existing draft\n\n"]]) {
       await input.fill(draft);
       await paragraphs[0].evaluate(paragraph => {
@@ -1355,6 +1355,11 @@ for (const viewport of [{ width: 1500, height: 844 }, { width: 440, height: 820 
       await expect(quote).toHaveCount(0);
       await page.keyboard.insertText("接着输入");
       await expect(input).toHaveValue(`${prefix}${firstQuote}接着输入`);
+      const reply = await page.evaluate(draft => {
+        const html = window.marked!.parse(draft);
+        return new DOMParser().parseFromString(html, "text/html").querySelector("body > blockquote + p")?.textContent;
+      }, await input.inputValue());
+      expect(reply).toBe("接着输入");
     }
 
     const multiline = messages[1].text;
@@ -1363,7 +1368,7 @@ for (const viewport of [{ width: 1500, height: 844 }, { width: 440, height: 820 
     expect(multilinePlacement.horizontalGap).toBeCloseTo(6, 0);
     expect(multilinePlacement.aboveGap).toBeCloseTo(6, 0);
     await quote.click();
-    const expected = `Existing draft\n\n${firstQuote}接着输入\n\n> First line.\n> Second line extends farther right.\n来源消息：${messages[1].id}\n`;
+    const expected = `Existing draft\n\n${firstQuote}接着输入\n\n> First line.\n> Second line extends farther right.\n来源消息：${messages[1].id}\n\n`;
     await expect(input).toHaveValue(expected);
     await expect(input).toBeFocused();
 
@@ -1371,7 +1376,7 @@ for (const viewport of [{ width: 1500, height: 844 }, { width: 440, height: 820 
     await quote.click();
     await input.selectText();
     await expect(quote).toHaveCount(0);
-    await expect(input).toHaveValue(`${expected}\n${firstQuote}`);
+    await expect(input).toHaveValue(expected + firstQuote);
     expect(sendRequests).toEqual([]);
   });
 }

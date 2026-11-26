@@ -3,6 +3,7 @@
   import type {WorkspaceTree} from "../models/workspace";
   import CardContent from "./CardContent.svelte";
   import MagpieQuota from "./MagpieQuota.svelte";
+  import MagpieQuotaFilter from "./MagpieQuotaFilter.svelte";
   import {cardObservation, collapsedReadout, labels, project, sources, styles, summarize, type Card, type Content, type Kind, type Sample, type Summary} from "./workspace-cards";
 
   let {workspace,user,tree,treeError,onSelect,onClose,panelAction}: {
@@ -129,6 +130,7 @@
   <div class="stack">
     {#each cards as card,index (card.id)}
       {@const data=card.source==="magpie-quota" ? quotaData : project(card,offline ? null:summary,samples)}
+      {@const filterProviders=data?.quota?.providers.filter(provider => provider.quotas?.length)}
       <article class:stat-card={card.kind === "stat"} draggable="true" ondragstart={()=>dragging=card.id} ondragend={()=>dragging=""}
         ondragover={(event)=>event.preventDefault()} ondrop={(event)=>{event.preventDefault();const item=cards.find(item=>item.id===dragging);if(item && item.id!==card.id) void layout(item,{before:card.id});dragging="";}}>
         <div class="heading">
@@ -137,19 +139,22 @@
             {#if card.collapsed}<span class="brief">{collapsedReadout(card.kind, data, card.hiddenQuotaKeys)}</span>{/if}
             <span class="chevron" aria-hidden="true"></span>
           </button>
-          <details><summary aria-label={`Options for ${card.title}`}>···</summary><div class="menu">
+          <details><summary aria-label={`Options for ${card.title}`}>···</summary><div class="menu" class:quota-menu={filterProviders?.length}>
             <button disabled={index===0||busy} onclick={()=>layout(card,{before:cards[index-1].id})}>Move up</button>
             <button disabled={index===cards.length-1||busy} onclick={()=>layout(card,{before:cards[index+2]?.id ?? ""})}>Move down</button>
             <button onclick={()=>layout(card,{height:card.height===180 ? 320:card.height===320 ? 0:180})}>Resize</button>
             <button onclick={()=>change({action:"remove",id:card.id,version:card.version})}>Remove</button>
+            {#if filterProviders?.length}
+              <MagpieQuotaFilter providers={filterProviders} hiddenKeys={card.hiddenQuotaKeys ?? []} {busy}
+                onFilter={(hiddenQuotaKeys)=>layout(card,{hiddenQuotaKeys})}/>
+            {/if}
           </div></details>
         </div>
         {#if !card.collapsed}
           <div class="body" style:height={card.height ? `${card.height}px`:undefined}>
             {#if card.kind === "quota"}
               {#if data?.quota}
-                <MagpieQuota quota={data.quota} hiddenKeys={card.hiddenQuotaKeys ?? []} {busy}
-                  onFilter={(hiddenQuotaKeys)=>layout(card,{hiddenQuotaKeys})}/>
+                <MagpieQuota quota={data.quota} hiddenKeys={card.hiddenQuotaKeys ?? []}/>
               {:else}<small>{data ? "AgentHub quota unavailable" : "Loading quota…"}</small>{/if}
             {:else if data}<CardContent kind={card.kind} source={card.source} {data} onSelect={select}/>{:else}<small>Data unavailable</small>{/if}
           </div>
@@ -203,6 +208,7 @@
   summary { list-style:none; padding:5px; color:var(--card-muted); border-radius:4px }
   summary::-webkit-details-marker { display:none }
   .menu { position:absolute; z-index:2; right:0; top:100%; min-width:110px; padding:4px; background:#fffef8; box-shadow:0 5px 18px #263b251c }
+  .quota-menu { box-sizing:border-box; width:min(19rem, calc(100cqw - 50px)); max-height:65dvh; overflow:auto }
   .menu button { display:block; width:100%; background:transparent; border:0; text-align:left }
   .menu button:hover,summary:hover,.add:hover { background:#dce6d7 }
   .name:hover strong { color:var(--card-accent) }

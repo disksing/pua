@@ -32,7 +32,7 @@ describe("workspace card sources", () => {
     const snapshot = {configured:true, connected:true, providers:[]};
     expect(quotaStatus({...snapshot, configured:false, connected:false})).toBe("Magpie not configured");
     expect(quotaStatus({...snapshot, connected:false})).toBe("Magpie disconnected");
-    expect(quotaStatus({...snapshot, stale:true})).toBe("Stale readings");
+    expect(quotaStatus({...snapshot, stale:true})).toBe("No quota readings");
     expect(quotaStatus(snapshot)).toBe("No quota readings");
     expect(quotaValue({label:"Weekly", remainingPercent:null})).toBe("Unavailable");
     expect(quotaValue({label:"Weekly", remainingPercent:0})).toBe("0% left");
@@ -44,6 +44,7 @@ describe("workspace card sources", () => {
     const first = {id:"first", label:"Provider", status:"ok", quotas:[weekly]};
     const second = {...first, id:"second"};
     const quota = {configured:true, connected:true, providers:[first, second]};
+    expect(quotaStatus({...quota, stale:true})).toBe("");
     const hideFirst = [quotaEntryKey(first, weekly)];
     const hideBoth = [...hideFirst, quotaEntryKey(second, weekly)];
     expect(visibleQuotaProviders(quota, hideFirst)).toEqual([second]);

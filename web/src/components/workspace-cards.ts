@@ -39,8 +39,7 @@ export function visibleQuotaProviders(quota: QuotaSnapshot, hiddenKeys: string[]
 }
 export function quotaStatus(quota: QuotaSnapshot) {
   if (!quota.configured) return "Magpie not configured";
-  if (!quota.connected) return quota.providers.length ? "Disconnected · Stale readings" : "Magpie disconnected";
-  if (quota.stale) return "Stale readings";
+  if (!quota.connected) return "Magpie disconnected";
   if (!quota.providers.length) return "No quota readings";
   return "";
 }

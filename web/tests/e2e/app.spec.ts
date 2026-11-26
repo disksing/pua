@@ -2912,7 +2912,7 @@ test("adds Magpie usage and keeps multiple accounts readable in a narrow drawer"
       quotas:["Daily", "Monthly"].map(label => ({key:label, label, remainingPercent:53.5, windowPositionPercent:40, resetInSeconds:5400})),
     })),
   ];
-  let snapshot = {configured:true, connected:true, stale:false, providers};
+  let snapshot = {configured:true, connected:true, stale:true, providers};
   let requests = 0;
   await page.route("**/cards/magpie-quota", async route => {
     requests++;
@@ -2933,6 +2933,7 @@ test("adds Magpie usage and keeps multiple accounts readable in a narrow drawer"
   await expect(card.getByText("Reset due")).toBeVisible();
   await expect(card.locator("time")).toHaveAttribute("datetime", "2027-01-01T00:00:00Z");
   const body = card.locator(".body");
+  await expect(body.locator(".status")).toHaveCount(0);
   const filters = card.getByRole("group", {name:"Filter entries"});
   const options = card.locator("summary[aria-label='Options for Magpie usage']");
   for (const width of [1500, 320]) {
@@ -2989,12 +2990,13 @@ test("adds Magpie usage and keeps multiple accounts readable in a narrow drawer"
   for (const [state, message] of [
     [{configured:false, connected:false, stale:false, providers:[]}, "Magpie not configured"],
     [{configured:true, connected:false, stale:false, providers:[]}, "Magpie disconnected"],
-    [{configured:true, connected:false, stale:true, providers}, "Disconnected · Stale readings"],
-    [{configured:true, connected:true, stale:true, providers}, "Stale readings"],
+    [{configured:true, connected:false, stale:true, providers}, "Magpie disconnected"],
   ] as const) {
     snapshot = {...state, providers:[...state.providers]};
     await page.reload({waitUntil:"domcontentloaded"});
     await expect(card.getByText(message, {exact:true})).toBeVisible();
+    await expect(body).not.toContainText("Stale readings");
+    if (state.providers.length) await expect(body.getByText("22% left")).toBeVisible();
     await expect(card.getByText("0% left", {exact:true})).toHaveCount(0);
   }
 });

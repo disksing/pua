@@ -41,29 +41,31 @@ type cardContent struct {
 }
 
 type workspaceCard struct {
-	ID        string       `json:"id"`
-	Kind      string       `json:"kind"`
-	Source    string       `json:"source"`
-	Title     string       `json:"title"`
-	Version   int          `json:"version"`
-	Collapsed bool         `json:"collapsed"`
-	Height    int          `json:"height,omitempty"`
-	Content   *cardContent `json:"content,omitempty"`
-	Updated   string       `json:"updated,omitempty"`
+	HiddenQuotaKeys []string     `json:"hiddenQuotaKeys,omitempty"`
+	ID              string       `json:"id"`
+	Kind            string       `json:"kind"`
+	Source          string       `json:"source"`
+	Title           string       `json:"title"`
+	Version         int          `json:"version"`
+	Collapsed       bool         `json:"collapsed"`
+	Height          int          `json:"height,omitempty"`
+	Content         *cardContent `json:"content,omitempty"`
+	Updated         string       `json:"updated,omitempty"`
 }
 
 type cardChange struct {
-	Action    string       `json:"action"`
-	ID        string       `json:"id,omitempty"`
-	Key       string       `json:"key,omitempty"`
-	Version   int          `json:"version,omitempty"`
-	Kind      string       `json:"kind,omitempty"`
-	Source    string       `json:"source,omitempty"`
-	Title     string       `json:"title,omitempty"`
-	Content   *cardContent `json:"content,omitempty"`
-	Collapsed *bool        `json:"collapsed,omitempty"`
-	Height    *int         `json:"height,omitempty"`
-	Before    *string      `json:"before,omitempty"`
+	HiddenQuotaKeys []string     `json:"hiddenQuotaKeys,omitempty"`
+	Action          string       `json:"action"`
+	ID              string       `json:"id,omitempty"`
+	Key             string       `json:"key,omitempty"`
+	Version         int          `json:"version,omitempty"`
+	Kind            string       `json:"kind,omitempty"`
+	Source          string       `json:"source,omitempty"`
+	Title           string       `json:"title,omitempty"`
+	Content         *cardContent `json:"content,omitempty"`
+	Collapsed       *bool        `json:"collapsed,omitempty"`
+	Height          *int         `json:"height,omitempty"`
+	Before          *string      `json:"before,omitempty"`
 }
 
 var cardSources = map[string][]string{
@@ -306,6 +308,12 @@ func applyCardChange(cards []workspaceCard, change cardChange) ([]workspaceCard,
 	case "remove":
 		return slices.Delete(cards, index, index+1), change.ID, 200, nil
 	case "layout":
+		if change.HiddenQuotaKeys != nil {
+			if card.Source != "magpie-quota" {
+				return nil, "", 400, errors.New("quota visibility requires a Magpie card")
+			}
+			card.HiddenQuotaKeys = change.HiddenQuotaKeys
+		}
 		if change.Collapsed != nil {
 			card.Collapsed = *change.Collapsed
 		}

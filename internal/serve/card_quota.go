@@ -6,18 +6,23 @@ import (
 )
 
 type cardQuotaWindow struct {
-	Label            string   `json:"label"`
-	RemainingPercent *float64 `json:"remainingPercent"`
-	Display          string   `json:"display,omitempty"`
-	Used             *float64 `json:"used,omitempty"`
-	Limit            *float64 `json:"limit,omitempty"`
-	Unit             string   `json:"unit,omitempty"`
-	Unlimited        bool     `json:"unlimited,omitempty"`
-	ResetsAt         string   `json:"resetsAt,omitempty"`
-	Stale            bool     `json:"stale,omitempty"`
+	Key                   string   `json:"key,omitempty"`
+	WindowPositionPercent *float64 `json:"windowPositionPercent,omitempty"`
+	ResetInSeconds        *int64   `json:"resetInSeconds,omitempty"`
+	Expired               bool     `json:"expired,omitempty"`
+	Label                 string   `json:"label"`
+	RemainingPercent      *float64 `json:"remainingPercent"`
+	Display               string   `json:"display,omitempty"`
+	Used                  *float64 `json:"used,omitempty"`
+	Limit                 *float64 `json:"limit,omitempty"`
+	Unit                  string   `json:"unit,omitempty"`
+	Unlimited             bool     `json:"unlimited,omitempty"`
+	ResetsAt              string   `json:"resetsAt,omitempty"`
+	Stale                 bool     `json:"stale,omitempty"`
 }
 
 type cardQuotaProvider struct {
+	ID           string            `json:"id,omitempty"`
 	Label        string            `json:"label"`
 	AccountLabel string            `json:"accountLabel,omitempty"`
 	PlanLabel    string            `json:"planLabel,omitempty"`

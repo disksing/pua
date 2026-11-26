@@ -2,14 +2,80 @@ package serve
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/disksing/pua/internal/app"
 )
+
+func TestMagpieQuotaFilterScope(t *testing.T) {
+	server, root := attentionTestServer(t)
+	workspace, err := app.OpenWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspace.RegisterUser("second"); err != nil {
+		t.Fatal(err)
+	}
+	_, otherRoot := attentionTestServer(t)
+	cfg, err := server.loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Workspaces = append(cfg.Workspaces, serveWorkspace{ID: "workspace-two", Path: otherRoot})
+	if err := server.saveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	request := func(workspace, user, method, body string) []byte {
+		t.Helper()
+		req := httptest.NewRequest(method, "/api/workspaces/"+workspace+"/cards", strings.NewReader(body))
+		req.Header.Set(workspaceUserHeader, user)
+		rec := httptest.NewRecorder()
+		server.handleWorkspace(rec, req)
+		if rec.Code != 200 {
+			t.Fatalf("%s %s %s: %d %s", workspace, user, method, rec.Code, rec.Body.String())
+		}
+		return rec.Body.Bytes()
+	}
+	const user = app.LegacyDefaultUserName
+	const create = `{"action":"create","kind":"quota","source":"magpie-quota","title":"Usage"}`
+	var created struct{ ID string }
+	if err := json.Unmarshal(request("workspace-one", user, "POST", create), &created); err != nil {
+		t.Fatal(err)
+	}
+	request("workspace-one", user, "POST", create)
+	request("workspace-one", "second", "POST", create)
+	request("workspace-two", user, "POST", create)
+	request("workspace-one", user, "POST", fmt.Sprintf(`{"action":"layout","id":%q,"version":1,"hiddenQuotaKeys":["weekly"]}`, created.ID))
+	for _, scope := range []struct{ workspace, user string }{{"workspace-one", user}, {"workspace-one", "second"}, {"workspace-two", user}} {
+		var cards []workspaceCard
+		if err := json.Unmarshal(request(scope.workspace, scope.user, "GET", ""), &cards); err != nil || len(cards) == 0 {
+			t.Fatalf("%v: %v %v", scope, cards, err)
+		}
+		ownsCard := scope.workspace == "workspace-one" && scope.user == user
+		if slices.ContainsFunc(cards, func(card workspaceCard) bool { return card.ID == created.ID }) != ownsCard {
+			t.Fatalf("wrong card layout for %v: %v", scope, cards)
+		}
+		for _, card := range cards {
+			var want []string
+			if card.ID == created.ID {
+				want = []string{"weekly"}
+			}
+			if !slices.Equal(card.HiddenQuotaKeys, want) {
+				t.Fatalf("%v card %q: got %v, want %v", scope, card.ID, card.HiddenQuotaKeys, want)
+			}
+		}
+	}
+	result := request("workspace-one", user, "POST", fmt.Sprintf(`{"action":"layout","id":%q,"version":2,"hiddenQuotaKeys":[]}`, created.ID))
+	if strings.Contains(string(result), "weekly") {
+		t.Fatal(string(result))
+	}
+}
 
 func TestWorkspaceCardLifecycle(t *testing.T) {
 	server, _ := attentionTestServer(t)
@@ -85,7 +151,7 @@ func TestMagpieQuotaCard(t *testing.T) {
 		if r.Method != "GET" || r.URL.Path != "/v1/quota" || r.Header.Get(workspaceUserHeader) != "" {
 			t.Errorf("unexpected AgentHub request: %s %s", r.Method, r.URL.Path)
 		}
-		io.WriteString(w, `{"quota":{"configured":true,"connected":false,"stale":true,"error":"private","providers":[{"label":"Provider","accountLabel":"test","secret":"private","quotas":[{"label":"Weekly","remainingPercent":0}]}]}}`)
+		io.WriteString(w, `{"quota":{"configured":true,"connected":false,"stale":true,"error":"private","providers":[{"id":"account","label":"Provider","accountLabel":"test","secret":"private","quotas":[{"key":"weekly","label":"Weekly","remainingPercent":0,"windowPositionPercent":0,"resetInSeconds":12},{"key":"daily","expired":true}]}]}}`)
 	}))
 	defer hub.Close()
 	cfg, err := server.loadConfig()
@@ -101,10 +167,14 @@ func TestMagpieQuotaCard(t *testing.T) {
 	if err := json.Unmarshal([]byte(result), &snapshot); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(result, "private") || !snapshot.Stale || len(snapshot.Providers) != 1 || len(snapshot.Providers[0].Quotas) != 1 {
+	if strings.Contains(result, "private") || !snapshot.Stale || len(snapshot.Providers) != 1 || len(snapshot.Providers[0].Quotas) != 2 {
 		t.Fatal(result)
 	}
-	if remaining := snapshot.Providers[0].Quotas[0].RemainingPercent; remaining == nil || *remaining != 0 {
+	provider := snapshot.Providers[0]
+	weekly, daily := provider.Quotas[0], provider.Quotas[1]
+	if provider.ID != "account" || weekly.Key != "weekly" || weekly.RemainingPercent == nil || *weekly.RemainingPercent != 0 ||
+		weekly.WindowPositionPercent == nil || *weekly.WindowPositionPercent != 0 || weekly.ResetInSeconds == nil || *weekly.ResetInSeconds != 12 ||
+		!daily.Expired || daily.WindowPositionPercent != nil || daily.ResetInSeconds != nil {
 		t.Fatal(result)
 	}
 	hub.Close()

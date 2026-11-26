@@ -1,6 +1,5 @@
 <script lang="ts">
   import type { Content, Kind, Point } from "./workspace-cards";
-  import MagpieQuota from "./MagpieQuota.svelte";
   let {kind, data, source, onSelect}: {kind: Kind; data: Content; source: string; onSelect: (id:string)=>Promise<void>} = $props();
   const palette = ["#427a65", "#bb7951", "#d4b26e", "#c5c9bd", "#85749c", "#6b889a", "#a46e78"];
   const fillId = $props.id();
@@ -65,8 +64,6 @@
   <ul class="items">{#each items as item}<li>{#if item.resource}<button onclick={() => onSelect(item.resource!)}>{item.label}</button>
     {:else if item.url}<a href={item.url} target="_blank" rel="noopener noreferrer">{item.label}</a>{:else}{item.label}{/if}</li>
     {:else}<li><small>No items</small></li>{/each}</ul>
-{:else if kind === "quota"}
-  {#if data.quota}<MagpieQuota quota={data.quota}/>{:else}<small>AgentHub quota unavailable</small>{/if}
 {:else if kind === "html"}
   <iframe title="Published card content" sandbox="" referrerpolicy="no-referrer" srcdoc={`<!doctype html><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none'"><style>body{font:14px/1.5 system-ui;margin:0;color:#24392c;background:#fffef8}h1,h2,h3,p,ul{margin:.3em 0}table{border-collapse:collapse;width:100%}th,td{border-bottom:1px solid #d6d9cc;padding:5px;text-align:left}</style>${data.html ?? ""}`}></iframe>
 {/if}

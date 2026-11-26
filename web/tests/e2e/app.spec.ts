@@ -2901,8 +2901,12 @@ test("adds Magpie usage and keeps multiple accounts readable in a narrow drawer"
   });
   const longPlan = "Enterprise".repeat(10);
   const providers = [
-    {label:"First provider", accountLabel:"A1", planLabel:longPlan, quotas:[{label:"Weekly", remainingPercent:22, resetsAt:"2027-01-01T00:00:00Z"}]},
-    {label:"Second provider", accountLabel:"B2", quotas:[{label:"Balance", remainingPercent:null, display:"$12"}]},
+    {id:"first", label:"First provider", accountLabel:"A1", planLabel:longPlan, quotas:[
+      {key:"weekly", label:"Weekly", remainingPercent:22, windowPositionPercent:68, resetInSeconds:9000},
+      {key:"other", label:"Other window", remainingPercent:80, resetsAt:"2027-01-01T00:00:00Z"},
+      {key:"due", label:"Daily", remainingPercent:null, expired:true, stale:true},
+    ]},
+    {id:"second", label:"Second provider", accountLabel:"B2", quotas:[{key:"balance", label:"Balance", remainingPercent:null, display:"$12"}]},
   ];
   let snapshot = {configured:true, connected:true, stale:false, providers};
   let requests = 0;
@@ -2917,16 +2921,31 @@ test("adds Magpie usage and keeps multiple accounts readable in a narrow drawer"
   await page.getByRole("button", {name:"Add to workspace"}).click();
   const card = page.locator("#agentPanel article");
   await expect(card.getByText("22% left")).toBeVisible();
+  const cursor = card.getByRole("img", {name:"68% of reset window remaining"});
+  await expect(cursor).toBeVisible();
+  expect(await cursor.evaluate(node=>node.style.left)).toBe("68%");
+  await expect(card.getByRole("img")).toHaveCount(1);
+  await expect(card.getByText("Resets in 2h 30m")).toBeVisible();
+  await expect(card.getByText("Reset due · awaiting new reading")).toBeVisible();
   await expect(card.locator("time")).toHaveAttribute("datetime", "2027-01-01T00:00:00Z");
   await page.setViewportSize({width:320, height:720});
   await page.getByRole("button", {name:"Open workspace cards"}).click();
   await expect(card.getByText("$12", {exact:true})).toBeVisible();
+  const settings = card.getByText("Filter entries", {exact:true});
+  await settings.click();
+  const balance = card.getByRole("checkbox", {name:"Second provider · B2 · Balance"});
+  await balance.uncheck();
+  await expect(card.getByText("$12", {exact:true})).toHaveCount(0);
   expect(await card.locator(".body").evaluate(body=>body.scrollWidth <= body.clientWidth)).toBe(true);
   await card.getByRole("button", {name:"Magpie usage"}).click();
-  await expect(card.getByText("2 accounts")).toBeVisible();
+  await expect(card.getByText("1 account")).toBeVisible();
   await expect(card.locator(".body")).toHaveCount(0);
   await card.getByRole("button", {name:/Magpie usage/}).click();
-  await card.locator("summary").click();
+  await settings.click();
+  await expect(balance).not.toBeChecked();
+  await balance.check();
+  await expect(card.getByText("$12", {exact:true})).toBeVisible();
+  await card.locator("summary[aria-label='Options for Magpie usage']").click();
   await card.getByRole("button", {name:"Resize"}).click();
   await expect(card.locator(".body")).toHaveCSS("height","180px");
   await page.setViewportSize({width:1500, height:800});

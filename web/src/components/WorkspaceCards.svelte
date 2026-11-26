@@ -2,6 +2,7 @@
   import {onMount, untrack, type Snippet} from "svelte";
   import type {WorkspaceTree} from "../models/workspace";
   import CardContent from "./CardContent.svelte";
+  import MagpieQuota from "./MagpieQuota.svelte";
   import {cardObservation, collapsedReadout, labels, project, sources, styles, summarize, type Card, type Content, type Kind, type Sample, type Summary} from "./workspace-cards";
 
   let {workspace,user,tree,treeError,onSelect,onClose,panelAction}: {
@@ -133,7 +134,7 @@
         <div class="heading">
           <button class="name" aria-expanded={!card.collapsed} onclick={()=>layout(card,{collapsed:!card.collapsed})}>
             <strong>{card.title}</strong>
-            {#if card.collapsed}<span class="brief">{collapsedReadout(card.kind, data)}</span>{/if}
+            {#if card.collapsed}<span class="brief">{collapsedReadout(card.kind, data, card.hiddenQuotaKeys)}</span>{/if}
             <span class="chevron" aria-hidden="true"></span>
           </button>
           <details><summary aria-label={`Options for ${card.title}`}>···</summary><div class="menu">
@@ -145,7 +146,12 @@
         </div>
         {#if !card.collapsed}
           <div class="body" style:height={card.height ? `${card.height}px`:undefined}>
-            {#if data}<CardContent kind={card.kind} source={card.source} {data} onSelect={select}/>{:else}<small>{card.kind==="quota" ? "Loading quota…" : "Data unavailable"}</small>{/if}
+            {#if card.kind === "quota"}
+              {#if data?.quota}
+                <MagpieQuota quota={data.quota} hiddenKeys={card.hiddenQuotaKeys ?? []} {busy}
+                  onFilter={(hiddenQuotaKeys)=>layout(card,{hiddenQuotaKeys})}/>
+              {:else}<small>{data ? "AgentHub quota unavailable" : "Loading quota…"}</small>{/if}
+            {:else if data}<CardContent kind={card.kind} source={card.source} {data} onSelect={select}/>{:else}<small>Data unavailable</small>{/if}
           </div>
           <footer>{card.source === "agent" ? "Agent" : `System · ${labels[card.source]}`}{#if card.updated} · {new Date(card.updated).toLocaleTimeString()}{/if}</footer>
         {/if}

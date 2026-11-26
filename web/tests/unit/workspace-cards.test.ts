@@ -1,5 +1,5 @@
 import {describe, expect, it} from "vitest";
-import {collapsedReadout, project, quotaStatus, quotaValue, summarize, type Card} from "../../src/components/workspace-cards";
+import {collapsedReadout, project, quotaEntryKey, quotaStatus, quotaValue, summarize, visibleQuotaProviders, type Card} from "../../src/components/workspace-cards";
 
 describe("workspace card sources", () => {
   const tree = {projects:[{id:"project1",type:"project",children:[
@@ -38,5 +38,18 @@ describe("workspace card sources", () => {
     expect(quotaValue({label:"Weekly", remainingPercent:0})).toBe("0% left");
     expect(quotaValue({label:"Credits", remainingPercent:null, display:"$12"})).toBe("$12");
     expect(collapsedReadout("quota", {})).toBe("Unavailable");
+  });
+  it("filters matching window keys per account and preserves empty provider readings", () => {
+    const weekly = {key:"weekly", label:"Weekly", remainingPercent:50};
+    const first = {id:"first", label:"Provider", status:"ok", quotas:[weekly]};
+    const second = {...first, id:"second"};
+    const quota = {configured:true, connected:true, providers:[first, second]};
+    const hideFirst = [quotaEntryKey(first, weekly)];
+    const hideBoth = [...hideFirst, quotaEntryKey(second, weekly)];
+    expect(visibleQuotaProviders(quota, hideFirst)).toEqual([second]);
+    expect(collapsedReadout("quota", {quota}, hideBoth)).toBe("All entries hidden");
+    expect(collapsedReadout("quota", {quota})).toBe("2 accounts");
+    const empty = {...first, quotas:[]};
+    expect(visibleQuotaProviders({...quota, providers:[empty]}, hideBoth)).toEqual([empty]);
   });
 });

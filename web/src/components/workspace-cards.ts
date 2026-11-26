@@ -17,12 +17,25 @@ export const labels: Record<string, string> = {
 export interface Item { label: string; resource?: string; url?: string; value?: number }
 export interface Point { time: string; value: number }
 interface QuotaWindow {
+  key?: string; windowPositionPercent?: number; resetInSeconds?: number; expired?: boolean;
   label: string; remainingPercent: number | null; display?: string; unlimited?: boolean;
   resetsAt?: string; stale?: boolean; used?: number; limit?: number; unit?: string;
 }
 export interface QuotaSnapshot {
   configured: boolean; connected: boolean; stale?: boolean;
-  providers: {label: string; accountLabel?: string; planLabel?: string; stale?: boolean; status: string; quotas: QuotaWindow[]}[];
+  providers: {id?: string; label: string; accountLabel?: string; planLabel?: string; stale?: boolean; status: string; quotas: QuotaWindow[]}[];
+}
+export function quotaEntryKey(provider: QuotaSnapshot["providers"][number], window: QuotaWindow) {
+  return JSON.stringify([provider.id ?? [provider.label, provider.accountLabel], window.key ?? window.label]);
+}
+export function visibleQuotaProviders(quota: QuotaSnapshot, hiddenKeys: string[]) {
+  if (!hiddenKeys.length) return quota.providers;
+  const hidden = new Set(hiddenKeys);
+  return quota.providers.flatMap(provider => {
+    if (!provider.quotas?.length) return [provider];
+    const quotas = provider.quotas.filter(window => !hidden.has(quotaEntryKey(provider, window)));
+    return quotas.length ? [{...provider, quotas}] : [];
+  });
 }
 export function quotaStatus(quota: QuotaSnapshot) {
   if (!quota.configured) return "Magpie not configured";
@@ -42,8 +55,9 @@ export interface Content { value?: number; max?: number; items?: Item[]; points?
 export interface Card {
   id: string; title: string; kind: Kind; source: string; version: number;
   collapsed: boolean; height?: number; content?: Content; updated?: string;
+  hiddenQuotaKeys?: string[];
 }
-export function collapsedReadout(kind: Kind, data: Content | null) {
+export function collapsedReadout(kind: Kind, data: Content | null, hiddenKeys: string[] = []) {
   if (!data) return "—";
   switch (kind) {
     case "stat":
@@ -54,8 +68,8 @@ export function collapsedReadout(kind: Kind, data: Content | null) {
     case "html": return "";
     case "quota": {
       if (!data.quota) return "Unavailable";
-      const count = data.quota.providers.length;
-      return quotaStatus(data.quota) || `${count} ${count === 1 ? "account" : "accounts"}`;
+      const count = visibleQuotaProviders(data.quota, hiddenKeys).length;
+      return quotaStatus(data.quota) || (count ? `${count} ${count === 1 ? "account" : "accounts"}` : "All entries hidden");
     }
   }
 }

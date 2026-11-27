@@ -20,8 +20,6 @@
   type Message = SharedChatMessage;
   type Chat = { id: string; open: boolean; epoch: number; unreadCount: number; messages: Message[]; queuedMessages?: Message[]; timelineInputs?: Record<string, string>; hasOlder?: boolean; hasNewer?: boolean; reset?: boolean; endPosition?: number };
   const PAGE_SIZE = 40;
-  const QUOTE_WIDTH = 56;
-  const QUOTE_HEIGHT = 44;
   let chat = $state<Chat | null>(null);
   let echoes = $state<Message[]>([]);
   const messages = $derived.by(() => {
@@ -47,7 +45,8 @@
   let draft = $state("");
   let draftResetVersion = $state(0);
   let quote = $state<{ text: string; messageId: string; left: number; top: number } | null>(null);
-  let mouseSelectingQuote = false;
+  let selectionQuoteControl = $state<HTMLDivElement>();
+  let mouseSelectingQuote = $state(false);
   let uploadOpen = $state(false);
   let uploadCycle = $state(0);
   let bindingSaving = $state(false);
@@ -190,7 +189,7 @@
     } };
   }
   function selectedQuote() {
-    if (mouseSelectingQuote || !canQuote || !root) return null;
+    if (mouseSelectingQuote || !canQuote || !root || !selectionQuoteControl) return null;
     const selection = window.getSelection();
     if (!selection || selection.isCollapsed || selection.rangeCount !== 1) return null;
     const range = selection.getRangeAt(0);
@@ -209,7 +208,8 @@
     const top = Math.max(0, bounds.top + (parseFloat(scroll.style.scrollPaddingBlockStart) || 0));
     const bottom = Math.min(bounds.bottom, document.documentElement.clientHeight);
     const gap = 6;
-    if (right - left < QUOTE_WIDTH + 2 * gap || bottom - top < QUOTE_HEIGHT + 2 * gap) return null;
+    const { width, height } = selectionQuoteControl.getBoundingClientRect();
+    if (right - left < width + 2 * gap || bottom - top < height + 2 * gap) return null;
     const rects = Array.from(range.getClientRects()).filter(rect =>
       rect.width > 0 && rect.right > left && rect.left < right && rect.bottom > top && rect.top < bottom);
     if (!rects.length) return null;
@@ -218,11 +218,11 @@
     const selectionRight = Math.max(...rects.map(rect => rect.right));
     const selectionTop = Math.min(...rects.map(rect => rect.top));
     const selectionBottom = Math.max(...rects.map(rect => rect.bottom));
-    const above = selectionTop - QUOTE_HEIGHT - gap;
+    const above = selectionTop - height - gap;
     return {
       text, messageId,
-      left: Math.min(selectionRight + gap, right - QUOTE_WIDTH - gap) - origin.left,
-      top: (above >= top + gap ? above : Math.min(selectionBottom + gap, bottom - QUOTE_HEIGHT - gap)) - origin.top,
+      left: Math.min(selectionRight + gap, right - width - gap) - origin.left,
+      top: (above >= top + gap ? above : Math.min(selectionBottom + gap, bottom - height - gap)) - origin.top,
     };
   }
   function updateQuote() {
@@ -243,10 +243,9 @@
     mouseSelectingQuote = false;
     quote = null;
   }
-  async function appendQuote() {
-    if (!canQuote || !quote) return;
+  async function appendQuote(text: string, messageId: string) {
+    if (!canQuote || !messageId) return;
     const key = identity;
-    const { text, messageId } = quote;
     const separator = !draft || draft.endsWith("\n\n") ? "" : draft.endsWith("\n") ? "\n" : "\n\n";
     draft += `${separator}> ${text.replaceAll("\n", "\n> ")}\n来源消息：${messageId}\n\n`;
     draftResetVersion++;
@@ -368,7 +367,14 @@
 <svelte:window onpointerdowncapture={beginQuoteSelection} onpointerupcapture={endQuoteSelection}
   onpointercancelcapture={endQuoteSelection} onblur={clearQuoteSelection} />
 <svelte:document onselectionchange={updateQuote} />
-<section tabindex="-1" use:trackScroll class="persistent-chat" class:quoting={canQuote && quote !== null} aria-label="Resource chat" hidden={!visible}>
+{#snippet quoteButton(text: string, messageId: string, wholeMessage = false)}
+  <button type="button" class="chat-quote secondary-button" class:message-quote={wholeMessage}
+    inert={wholeMessage && (mouseSelectingQuote || quote !== null)}
+    onpointerdown={(event) => event.preventDefault()} onclick={() => appendQuote(text, messageId)}>
+    <Icon name="quote" /><span>引用</span>
+  </button>
+{/snippet}
+<section tabindex="-1" use:trackScroll class="persistent-chat" aria-label="Resource chat" hidden={!visible}>
   <SessionControls {model} enabled={visible && canLoad && !archived && Boolean(chat || model.detail || model.resourceType === "workspace")} {followTail} onLatest={jumpToLatest}>
     {#snippet children(execution, notices, status)}
       <div id="chatTimeline" class="chat-timeline">
@@ -384,7 +390,12 @@
               followLatestTurn={chat?.open === false} {execution} {followTail} onOpenFile={openLinkedFile} onInspect={() => followTail = false}>
               {#snippet bubble(message)}
                 <article class:own-message={message.role === "user" && message.sender === userName}>
-                  <small class="message-meta"><strong>{message.role === "user" ? (message.sender || "User") : (message.sender?.trim() || "Agent")}</strong> <time datetime={message.createdAt}>{new Date(message.createdAt).toLocaleString()}</time></small>
+                  <div class="message-header">
+                    <small class="message-meta"><strong>{message.role === "user" ? (message.sender || "User") : (message.sender?.trim() || "Agent")}</strong> <time datetime={message.createdAt}>{new Date(message.createdAt).toLocaleString()}</time></small>
+                    {#if canQuote && message.role === "agent" && message.text.trim()}
+                      {@render quoteButton(message.text, message.id, true)}
+                    {/if}
+                  </div>
                   <div class="markdown-rendered" data-chat-message-body={message.id} use:markdownResourceNavigation={{ resolveResourceTitle: model.resolveResourceTitle, onNavigate: model.onNavigate, onOpenFile: openLinkedFile }}>{@html markdownHTML(message.text, { resolveResourceTitle: model.resolveResourceTitle, workspaceId: model.workspaceId })}</div>
                 </article>
               {/snippet}
@@ -429,16 +440,18 @@
       </div>
     {/snippet}
   </SessionControls>
-  {#if canQuote && quote}
-    <button type="button" class="chat-quote secondary-button" style:left={`${quote.left}px`} style:top={`${quote.top}px`}
-      style:width={`${QUOTE_WIDTH}px`} style:height={`${QUOTE_HEIGHT}px`}
-      onpointerdown={(event) => event.preventDefault()} onclick={appendQuote}>引用</button>
+  {#if canQuote}
+    <div class="selection-quote" bind:this={selectionQuoteControl} inert={!quote}
+      style:left={`${quote?.left ?? 0}px`} style:top={`${quote?.top ?? 0}px`}>
+      {@render quoteButton(quote?.text ?? "", quote?.messageId ?? "")}
+    </div>
   {/if}
 </section>
 <div data-component-owner="upload-dialog" style="display: contents"><UploadDialog channel={upload} /></div>
 <FilePreviewModal {client} workspaceId={model.workspaceId} resourceId={model.resourceId} selection={preview} editable={false} resolveResourceTitle={model.resolveResourceTitle} onNavigate={model.onNavigate} onOpenFile={openLinkedFile} onSaveMarkdown={rejectReadOnlySave} onClose={() => preview = null} onError={model.onToast} />
 <style>
   .persistent-chat {
+    position:relative;
     display:flex;
     flex:1;
     flex-direction:column;
@@ -459,8 +472,24 @@
     scroll-padding-block-end:8px;
   }
   .chat-history { display:flex; flex-direction:column; min-height:100%; gap:8px; padding:12px 16px 8px; }
-  .quoting { position:relative; }
-  .chat-quote { position:absolute; z-index:3; justify-content:center; user-select:none; }
+  .selection-quote { position:absolute; z-index:3; display:flex; width:max-content; }
+  .selection-quote[inert], .message-quote[inert] { visibility:hidden; }
+  .chat-quote.secondary-button {
+    width:max-content;
+    min-height:0;
+    gap:3px;
+    padding:2px 5px;
+    font-size:12px;
+    line-height:16px;
+    white-space:nowrap;
+    user-select:none;
+  }
+  .chat-quote :global(svg) { width:12px; height:12px; }
+  .message-quote { opacity:0; pointer-events:none; }
+  .message-quote:focus-visible { opacity:1; pointer-events:auto; }
+  @media (hover: hover) {
+    article:hover .message-quote { opacity:1; pointer-events:auto; }
+  }
   .older-messages { display:flex; flex-direction:column; align-items:center; gap:4px; }
   article {
     align-self:flex-start;
@@ -481,7 +510,8 @@
   @container shared-chat (min-width:1024px) {
     .own-message { align-self:flex-start; }
   }
-  .message-meta { display:flex; flex-wrap:wrap; align-items:baseline; gap:0 8px; margin-bottom:3px; color:var(--muted-strong); opacity:1; }
+  .message-header { display:flex; justify-content:space-between; align-items:start; gap:8px; margin-bottom:3px; }
+  .message-meta { display:flex; flex-wrap:wrap; align-items:baseline; gap:0 8px; min-width:0; color:var(--muted-strong); opacity:1; }
   article .markdown-rendered { overflow-wrap:anywhere; font-size:14px; }
   article :global(.markdown-rendered img) { max-width:100%; height:auto; }
   article :global(.markdown-rendered table) { display:block; overflow-x:auto; table-layout:auto; }

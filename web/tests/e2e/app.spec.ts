@@ -1247,7 +1247,7 @@ for (const viewport of [{ width: 1500, height: 800 }, { width: 440, height: 844 
 }
 
 for (const viewport of [{ width: 1500, height: 844 }, { width: 440, height: 820 }]) {
-  test(`quotes text from a single shared Chat message at ${viewport.width}px`, async ({ page }) => {
+  test(`quotes shared Chat selections and whole Agent messages at ${viewport.width}px`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await installMockApi(page);
     const messages = [
@@ -1271,8 +1271,11 @@ for (const viewport of [{ width: 1500, height: 844 }, { width: 440, height: 820 
     await page.goto("/w/ws-test/r/project1.task1");
     const chat = page.getByRole("region", { name: "Resource chat" });
     const input = chat.getByRole("textbox", { name: "Chat message" });
-    const quote = chat.getByRole("button", { name: "引用", exact: true });
+    const quote = chat.locator(".selection-quote").getByRole("button", { name: "引用", exact: true });
     const paragraphs = messages.map(message => chat.locator(`[data-chat-message-body="${message.id}"] p`));
+    const agentArticle = chat.locator(`article:has([data-chat-message-body="${messages[1].id}"])`);
+    const agentQuote = agentArticle.locator(".message-quote");
+    const laterQuote = chat.locator(`article:has([data-chat-message-body="${laterMessage.id}"]) .message-quote`);
 
     async function selectText(paragraph: Locator, text: string) {
       await paragraph.scrollIntoViewIfNeeded();
@@ -1312,24 +1315,28 @@ for (const viewport of [{ width: 1500, height: 844 }, { width: 440, height: 820 
           belowGap: bounds.top - selection.bottom,
           roomAbove: selection.top - chat.top - (parseFloat(timeline.style.scrollPaddingBlockStart) || 0),
           rightInset: chat.left + timeline.clientLeft + timeline.clientWidth - bounds.right,
+          height: bounds.height,
         };
       });
     }
 
     await selectText(paragraphs[0], "quote this");
     await expect(quote).toHaveClass(/secondary-button/);
-    const labelOffset = await quote.evaluate(button => {
-      const range = document.createRange();
-      range.selectNodeContents(button);
-      const label = range.getBoundingClientRect();
+    const buttonLayout = await quote.evaluate(button => {
+      const icon = button.querySelector('svg[data-lucide="quote"]')!;
+      const label = button.querySelector("span")!.getBoundingClientRect();
       const bounds = button.getBoundingClientRect();
       return {
-        horizontal: Math.abs(label.left + label.width / 2 - bounds.left - bounds.width / 2),
-        vertical: Math.abs(label.top + label.height / 2 - bounds.top - bounds.height / 2),
+        width: bounds.width,
+        height: bounds.height,
+        gap: label.left - icon.getBoundingClientRect().right,
+        iconDrawn: icon.childElementCount > 0,
       };
     });
-    expect(labelOffset.horizontal).toBeLessThan(2);
-    expect(labelOffset.vertical).toBeLessThan(2);
+    expect(buttonLayout.width).toBeLessThan(56);
+    expect(buttonLayout.height).toBeLessThan(30);
+    expect(buttonLayout.gap).toBeCloseTo(3, 0);
+    expect(buttonLayout.iconDrawn).toBe(true);
     await page.evaluate(() => {
       const paragraphs = document.querySelectorAll("#chatTimeline article p");
       window.getSelection()!.setBaseAndExtent(paragraphs[0].firstChild!, 1, paragraphs[1].firstChild!, 4);
@@ -1346,9 +1353,9 @@ for (const viewport of [{ width: 1500, height: 844 }, { width: 440, height: 820 
       });
       await selectText(paragraphs[0], "this sentence.");
       const placement = await measurePlacement();
-      expect(placement.roomAbove).toBeLessThan(56);
+      expect(placement.roomAbove).toBeLessThan(placement.height + 12);
       expect(placement.belowGap).toBeCloseTo(6, 0);
-      if (viewport.width === 440) expect(placement.rightInset).toBeCloseTo(6, 0);
+      expect(placement.rightInset).toBeGreaterThanOrEqual(5.5);
       await quote.click();
       await expect(input).toHaveValue(prefix + firstQuote);
       await expect(input).toBeFocused();
@@ -1362,8 +1369,27 @@ for (const viewport of [{ width: 1500, height: 844 }, { width: 440, height: 820 
       expect(reply).toBe("接着输入");
     }
 
+    const userArticle = chat.locator(`article:has([data-chat-message-body="${messages[0].id}"])`);
+    await paragraphs[0].hover();
+    await expect(userArticle.locator(".message-quote")).toHaveCount(0);
+    await expect(agentQuote).toHaveCSS("opacity", "0");
+
+    await paragraphs[1].hover();
+    await expect(agentQuote).toHaveCSS("opacity", "1");
+    await expect(laterQuote).toHaveCSS("opacity", "0");
+    await expect(quote).toHaveCount(0);
+    const wholeButton = (await agentQuote.boundingBox())!;
+    const articleBounds = (await agentArticle.boundingBox())!;
+    const bodyBounds = (await paragraphs[1].boundingBox())!;
+    expect(wholeButton.x).toBeGreaterThan(articleBounds.x);
+    expect(wholeButton.x + wholeButton.width).toBeLessThan(articleBounds.x + articleBounds.width);
+    expect(wholeButton.y + wholeButton.height).toBeLessThan(bodyBounds.y);
+    expect(wholeButton.width).toBeCloseTo(buttonLayout.width, 0);
+    expect(wholeButton.height).toBeCloseTo(buttonLayout.height, 0);
+
     const multiline = messages[1].text;
     await selectText(paragraphs[1], multiline);
+    await expect(agentQuote).toBeHidden();
     const multilinePlacement = await measurePlacement();
     expect(multilinePlacement.horizontalGap).toBeCloseTo(6, 0);
     expect(multilinePlacement.aboveGap).toBeCloseTo(6, 0);
@@ -1372,11 +1398,18 @@ for (const viewport of [{ width: 1500, height: 844 }, { width: 440, height: 820 
     await expect(input).toHaveValue(expected);
     await expect(input).toBeFocused();
 
+    await paragraphs[1].hover();
+    await expect(agentQuote).toHaveCSS("opacity", "1");
+    await agentQuote.click();
+    const wholeQuote = `> First line.\n> Second line extends farther right.\n来源消息：${messages[1].id}\n\n`;
+    await expect(input).toHaveValue(expected + wholeQuote);
+    await expect(input).toBeFocused();
+
     await selectText(paragraphs[0], "this sentence.");
     await quote.click();
     await input.selectText();
     await expect(quote).toHaveCount(0);
-    await expect(input).toHaveValue(expected + firstQuote);
+    await expect(input).toHaveValue(expected + wholeQuote + firstQuote);
     expect(sendRequests).toEqual([]);
   });
 }

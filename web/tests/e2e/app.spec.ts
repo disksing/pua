@@ -2885,6 +2885,55 @@ test("displays Chat beside the sidebar in the two-column layout", async ({ page 
   await expect(page.locator("#detailsResize")).toBeVisible();
 });
 
+test("adds, reorders and collapses task state bars in the dock and drawer", async ({ page }) => {
+  await installMockApi(page);
+  const children = [...project.children, {...project.children[0], id:"project1.task3", state:"waiting"}];
+  await page.route("**/api/workspaces/ws-test/tree", route => json(route, {projects:[{...project, children}]}));
+  const cards = [{id:"total", kind:"stat", source:"tasks", title:"Task count", version:1, collapsed:false}];
+  await page.route("**/api/workspaces/ws-test/cards", route => {
+    if (route.request().method() === "GET") return json(route, cards);
+    const change = route.request().postDataJSON();
+    if (change.action === "create") {
+      expect(change).toMatchObject({kind:"bar", source:"task-states"});
+      cards.push({id:"states", version:1, collapsed:false, ...change});
+    } else if (change.before === "total") {
+      expect(change.id).toBe("states");
+      cards.unshift(cards.pop()!);
+      cards[0].version++;
+    } else {
+      Object.assign(cards[0], {collapsed:change.collapsed, version:cards[0].version + 1});
+    }
+    return json(route, {cards});
+  });
+  await page.goto("/w/ws-test/r/project1.task1");
+  await page.getByRole("button", {name:"Add card", exact:true}).click();
+  await page.getByRole("combobox", {name:"Style", exact:true}).selectOption({label:"Bar Chart"});
+  await expect(page.getByRole("combobox", {name:"Data source"})).toHaveValue("task-states");
+  await page.getByRole("button", {name:"Add to workspace"}).click();
+  const articles = page.locator("#agentPanel article");
+  const chart = articles.filter({hasText:"Task states"});
+  await chart.dragTo(articles.filter({hasText:"Task count"}));
+  await expect(articles.first()).toContainText("Task states");
+  for (const width of [1500, 320]) {
+    await page.setViewportSize({width, height:800});
+    if (width === 320) await page.getByRole("button", {name:"Open workspace cards"}).click();
+    const rows = chart.getByRole("listitem");
+    await expect(rows.nth(0)).toContainText(/not started\s*2/);
+    await expect(rows.nth(1)).toContainText(/waiting\s*1/);
+    const widths = await chart.locator(".track > div").evaluateAll(bars => bars.map(bar => bar.getBoundingClientRect().width));
+    expect(widths[0]).toBeGreaterThan(0);
+    expect(Math.abs(widths[0] - 2 * widths[1])).toBeLessThan(1);
+    await expect.poll(() => chart.evaluate(card => {
+      const bounds = card.getBoundingClientRect();
+      return bounds.left >= 0 && bounds.right <= innerWidth && card.scrollWidth <= card.clientWidth;
+    })).toBe(true);
+    await chart.getByRole("button", {name:"Task states", exact:true}).click();
+    await expect(chart.locator(".brief")).toHaveText("3");
+    await chart.getByRole("button", {name:/Task states/}).click();
+    await expect(rows.first()).toBeVisible();
+  }
+});
+
 test("adds Magpie usage and keeps multiple accounts readable in a narrow drawer", async ({ page }) => {
   test.setTimeout(90000);
   await installMockApi(page);

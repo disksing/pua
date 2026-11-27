@@ -6,6 +6,7 @@
   const unit = $derived(source === "running" ? "resources" : source === "tasks" || source === "running-tasks" ? "tasks" : "");
   let items = $derived(data.items ?? []);
   let total = $derived(items.reduce((sum,item) => sum + (item.value ?? 0), 0));
+  const largest = $derived(items.reduce((max, item) => Math.max(max, item.value ?? 0), 0));
   let gradient = $derived.by(() => {
     let current = 0;
     return items.map((item,index) => {
@@ -60,6 +61,20 @@
       <ul>{#each items as item,index}<li><i style:background={palette[index % palette.length]}></i>{item.label.replaceAll("_"," ")} <b>{item.value ?? 0}</b></li>{/each}</ul>
     </div>
   {:else}<small>No distribution yet</small>{/if}
+{:else if kind === "bar"}
+  {#if items.length}
+    <ul class="bars">
+      {#each items as item,index}
+        {@const value = item.value ?? 0}
+        <li>
+          <span>{item.label.replaceAll("_", " ")}</span> <b>{value}</b>
+          <div class="track" aria-hidden="true">
+            {#if value > 0}<div style:width={`${value / largest * 100}%`} style:background={palette[index % palette.length]}></div>{/if}
+          </div>
+        </li>
+      {/each}
+    </ul>
+  {:else}<small>No tasks</small>{/if}
 {:else if kind === "list"}
   <ul class="items">{#each items as item}<li>{#if item.resource}<button onclick={() => onSelect(item.resource!)}>{item.label}</button>
     {:else if item.url}<a href={item.url} target="_blank" rel="noopener noreferrer">{item.label}</a>{:else}{item.label}{/if}</li>
@@ -90,6 +105,11 @@
   .distribution ul { flex:1; max-width:160px; min-width:0 }
   .distribution li { display:flex; align-items:center; gap:7px; padding:2px 0 }
   .distribution li b { margin-left:auto }
+  .bars { display:grid; gap:10px }
+  .bars li { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:3px 8px; align-items:baseline }
+  .bars b { font-variant-numeric:tabular-nums }
+  .track { grid-column:1 / -1; height:5px; border-radius:3px; background:var(--card-line) }
+  .track div { height:100%; border-radius:inherit }
   i { flex:none; width:7px; height:7px; border-radius:50% }
   .items li { padding-block:6px }
   .items li + li { border-top:1px solid var(--card-line) }

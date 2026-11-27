@@ -1,4 +1,6 @@
 import {describe, expect, it} from "vitest";
+import {mount, unmount} from "svelte";
+import CardContent from "../../src/components/CardContent.svelte";
 import {collapsedReadout, project, quotaEntryKey, quotaStatus, quotaValue, summarize, visibleQuotaProviders, type Card} from "../../src/components/workspace-cards";
 
 describe("workspace card sources", () => {
@@ -19,6 +21,29 @@ describe("workspace card sources", () => {
     expect(project(card,null,[])).toBeNull();
     expect(project({...card,kind:"trend"},summary,[])?.points).toEqual([]);
     expect(project({...card,source:"agent",content:{value:9}},null,[])?.value).toBe(9);
+  });
+  it("projects task states into bars and totals them when collapsed", () => {
+    const bar: Card = {...card, kind:"bar", source:"task-states"};
+    const data = project(bar, summary, []);
+    expect(data?.items).toEqual([{label:"waiting",value:1}, {label:"unknown",value:1}]);
+    expect(collapsedReadout("bar", data)).toBe("2");
+    expect(collapsedReadout("bar", project(bar, summarize({projects:[]}), []))).toBe("0");
+  });
+  it.each([
+    {items:[], text:"No tasks"},
+    {items:[{label:"waiting",value:0}], text:"waiting 0"},
+    {items:[{label:"waiting",value:-1}], text:"waiting -1"},
+  ])("renders $text without a filled bar", async ({items, text}) => {
+    const target = document.createElement("div");
+    const component = mount(CardContent, {target, props:{
+      kind:"bar", data:{items}, source:"task-states", onSelect:async () => {},
+    }});
+    try {
+      expect(target.textContent?.replace(/\s+/g, " ").trim()).toBe(text);
+      expect(target.querySelector(".track > div")).toBeNull();
+    } finally {
+      await unmount(component);
+    }
   });
   it("shows a compact value when the card is collapsed", () => {
     expect(collapsedReadout("stat", {value:0})).toBe("0");

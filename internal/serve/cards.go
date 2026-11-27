@@ -72,6 +72,7 @@ var cardSources = map[string][]string{
 	"stat":  {"running", "running-tasks", "tasks"},
 	"gauge": {"task-ratio"},
 	"pie":   {"task-states"},
+	"bar":   {"task-states"},
 	"trend": {"running", "running-tasks", "tasks"},
 	"list":  {"running", "running-tasks", "tasks"},
 	"html":  {},
@@ -271,8 +272,8 @@ func applyCardChange(cards []workspaceCard, change cardChange) ([]workspaceCard,
 		}
 		card := workspaceCard{ID: rand.Text(), Title: title, Kind: change.Kind, Source: change.Source, Version: 1}
 		if change.Source == "agent" {
-			if change.Kind == "quota" {
-				return nil, "", 400, errors.New("quota requires a system source")
+			if change.Kind == "quota" || change.Kind == "bar" {
+				return nil, "", 400, fmt.Errorf("%s requires a system source", change.Kind)
 			}
 			if len(change.Key) < 26 || len(change.Key) > 128 {
 				return nil, "", 400, errors.New("a private publisher key is required")

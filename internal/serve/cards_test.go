@@ -107,6 +107,21 @@ func TestWorkspaceCardLifecycle(t *testing.T) {
 	post(cardChange{Action: "update", Key: key, ID: id, Version: 2, Content: &cardContent{}}, 404)
 }
 
+func TestBarCardSources(t *testing.T) {
+	change := cardChange{Action: "create", Kind: "bar", Title: "Task states", Key: "example-publisher-key-for-test-only"}
+	for source, want := range map[string]int{"task-states": 200, "tasks": 400, "agent": 400} {
+		change.Source = source
+		if source == "agent" {
+			change.Content = &cardContent{}
+		} else {
+			change.Content = nil
+		}
+		if _, _, status, err := applyCardChange(nil, change); status != want {
+			t.Errorf("create bar with %s: got %d (%v), want %d", source, status, err, want)
+		}
+	}
+}
+
 func TestMagpieQuotaCard(t *testing.T) {
 	server, root := attentionTestServer(t)
 	server.agents = newAgentManager(server)

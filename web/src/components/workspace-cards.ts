@@ -3,11 +3,11 @@ import { writable } from "svelte/store";
 
 export const cardObservation = writable<{workspace:string; user:string; tree:WorkspaceTree|null} | null>(null);
 
-export const styles = { stat: "Stat", gauge: "Gauge", pie: "Pie Chart", trend: "Trend", list: "List", html: "HTML", quota: "Quota" } as const;
+export const styles = { stat: "Stat", gauge: "Gauge", pie: "Pie Chart", bar: "Bar Chart", trend: "Trend", list: "List", html: "HTML", quota: "Quota" } as const;
 export type Kind = keyof typeof styles;
 export const sources: Record<Kind, string[]> = {
   stat: ["running", "running-tasks", "tasks"], trend: ["running", "running-tasks", "tasks"],
-  list: ["running", "running-tasks", "tasks"], gauge: ["task-ratio"], pie: ["task-states"], html: [], quota: ["magpie-quota"],
+  list: ["running", "running-tasks", "tasks"], gauge: ["task-ratio"], pie: ["task-states"], bar: ["task-states"], html: [], quota: ["magpie-quota"],
 };
 export const labels: Record<string, string> = {
   running: "Running resources", "running-tasks": "Running tasks", tasks: "All tasks",
@@ -63,6 +63,7 @@ export function collapsedReadout(kind: Kind, data: Content | null, hiddenKeys: s
     case "trend": return String(data.value ?? data.points?.at(-1)?.value ?? "—");
     case "gauge": return data.max && data.value != null ? `${Math.round(100 * data.value / data.max)}%` : "—";
     case "list": return String(data.items?.length ?? 0);
+    case "bar":
     case "pie": return String(data.items?.reduce((sum, item) => sum + (item.value ?? 0), 0) ?? 0);
     case "html": return "";
     case "quota": {
@@ -99,7 +100,7 @@ export function project(card: Card, summary: Summary | null, samples: Sample[]):
   if (!summary) return null;
   const {bySource, states} = summary;
   if (card.kind === "gauge") return {value: bySource["running-tasks"].length, max: bySource.tasks.length};
-  if (card.kind === "pie") return {items: Array.from(states, ([label,value]) => ({label,value}))};
+  if (card.kind === "pie" || card.kind === "bar") return {items: Array.from(states, ([label,value]) => ({label,value}))};
   const rows = bySource[card.source];
   if (!rows) return null;
   if (card.kind === "list") return {items: rows.map(item => ({label: item.title || item.id, resource: item.id}))};

@@ -20,7 +20,7 @@ const cardHelp = `Workspace cards (run from the publishing resource):
   echo '{"items":[{"label":"Review report","resource":"project1.task1"}]}' | pua card create --user NAME --kind list --source agent --title "Review"
   echo '{"items":[]}' | pua card update --user NAME --id CARD_ID --version CURRENT_VERSION
 
-System sources: stat/trend/list: running, running-tasks, tasks; gauge: task-ratio; pie: task-states; quota: magpie-quota.
+System sources: stat/trend/list: running, running-tasks, tasks; gauge: task-ratio; pie/bar: task-states; quota: magpie-quota.
 Agent content: stat {"value":4}; gauge {"value":4,"max":10}; pie {"items":[{"label":"Open","value":4}]};
 trend {"points":[{"time":"2026-01-01T00:00:00Z","value":4}]}; list {"items":[{"label":"Report","url":"https://example.org"}]};
 html {"html":"<h3>Milestones</h3><ul><li>Ready</li></ul>"} (close tags; optional color/background-color styles with six-digit hex colors).

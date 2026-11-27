@@ -107,6 +107,35 @@ func TestWorkspaceCardLifecycle(t *testing.T) {
 	post(cardChange{Action: "update", Key: key, ID: id, Version: 2, Content: &cardContent{}}, 404)
 }
 
+func TestWorkspaceCardLayoutHeight(t *testing.T) {
+	server, _ := attentionTestServer(t)
+	const path = "/api/workspaces/workspace-one/cards"
+	rec := attentionRequest(t, server, "POST", path, `{"action":"create","kind":"stat","source":"tasks","title":"Tasks"}`)
+	var created struct{ ID string }
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil || rec.Code != 200 || created.ID == "" {
+		t.Fatalf("create: %d %s (%v)", rec.Code, rec.Body.String(), err)
+	}
+	version := 1
+	for _, test := range []struct{ height, status int }{
+		{-1, 400}, {47, 400}, {48, 200}, {180, 200}, {237, 200}, {320, 200}, {960, 200}, {961, 400}, {0, 200},
+	} {
+		body := fmt.Sprintf(`{"action":"layout","id":%q,"version":%d,"height":%d}`, created.ID, version, test.height)
+		rec := attentionRequest(t, server, "POST", path, body)
+		if rec.Code != test.status {
+			t.Fatalf("height %d: got %d %s, want %d", test.height, rec.Code, rec.Body.String(), test.status)
+		}
+		if test.status != 200 {
+			continue
+		}
+		version++
+		rec = attentionRequest(t, server, "GET", path, "")
+		var cards []workspaceCard
+		if err := json.Unmarshal(rec.Body.Bytes(), &cards); err != nil || len(cards) != 1 || cards[0].Height != test.height || cards[0].Version != version {
+			t.Fatalf("reload height %d: %d %s (%v)", test.height, rec.Code, rec.Body.String(), err)
+		}
+	}
+}
+
 func TestBarCardSources(t *testing.T) {
 	change := cardChange{Action: "create", Kind: "bar", Title: "Task states", Key: "example-publisher-key-for-test-only"}
 	for source, want := range map[string]int{"task-states": 200, "tasks": 400, "agent": 400} {

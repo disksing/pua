@@ -15,7 +15,23 @@
   let samples=$state<Sample[]>([]);
   let adding=$state(false), loaded=$state(false), busy=$state(false), error=$state("");
   let kind=$state<Kind>("stat"), source=$state("running"), title=$state("");
-  let dragging=$state("");
+  const minHeight = 48, maxHeight = 960;
+  type Gesture = {
+    id: string;
+    pointer: number;
+    handle: HTMLButtonElement;
+    startY: number;
+    y: number;
+    resize: { height: number; scrollDelta: number } | null;
+  };
+  type Preview = { id: string; before: string } | { id: string; height: number };
+  let board: HTMLDivElement;
+  let stack: HTMLDivElement;
+  let gesture: Gesture | null = null;
+  let preview = $state.raw<Preview | null>(null);
+  let pendingHeight = $state.raw<{ id: string; height: number } | null>(null);
+  let suppressClick: HTMLButtonElement | null = null;
+  let scrollFrame = 0;
   let offline=$state(false);
   let quotaData=$state<Content | null>(null);
   const hasQuota=$derived(cards.some(card=>card.source==="magpie-quota"));
@@ -55,16 +71,16 @@
     return response.json();
   }
   async function load() {
-    if (busy || disposed) return;
+    if (busy || gesture || disposed) return;
     const current=++serial;
     try {
       const next=await request();
-      if (current!==serial || disposed) return;
+      if (current!==serial || gesture || disposed) return;
       cards=next; loaded=true; error="";
-    } catch(reason) {if(current===serial && !disposed) error=String(reason);}
+    } catch(reason) {if(current===serial && !gesture && !disposed) error=String(reason);}
   }
   async function change(body:object) {
-    if (busy) return;
+    if (busy || gesture) return;
     busy=true; serial++;
     try {
       const result=await request(body);
@@ -75,6 +91,117 @@
   }
   function layout(card:Card, patch:object) {
     return change({action:"layout",id:card.id,version:card.version,...patch});
+  }
+  function startGesture(event: PointerEvent & { currentTarget: HTMLButtonElement }, card: Card, resize = false) {
+    const handle = event.currentTarget;
+    if (gesture || !event.isPrimary || event.button !== 0) return;
+    suppressClick = null;
+    if (busy || (!resize && cards.length < 2)) return;
+    const body = resize ? handle.closest("article")?.querySelector(".body") : null;
+    if (resize && !body) return;
+    gesture = {
+      id: card.id, pointer: event.pointerId, handle, startY: event.clientY, y: event.clientY,
+      resize: body ? { height: parseFloat(getComputedStyle(body).height), scrollDelta: 0 } : null,
+    };
+    handle.setPointerCapture(event.pointerId);
+  }
+  function clampHeight(height: number) {
+    return Math.max(minHeight, Math.min(maxHeight, Math.round(height)));
+  }
+  function updatePreview(current: Gesture) {
+    if (current.resize) {
+      const height = clampHeight(current.resize.height + current.y - current.startY + current.resize.scrollDelta);
+      if (!preview || !("height" in preview) || preview.height !== height) preview = { id: current.id, height };
+      return;
+    }
+    let before = "";
+    for (const element of stack.children) {
+      if (!(element instanceof HTMLElement) || !element.dataset.cardId || element.dataset.cardId === current.id) continue;
+      const bounds = element.getBoundingClientRect();
+      if (current.y < bounds.top + bounds.height / 2) {
+        before = element.dataset.cardId;
+        break;
+      }
+    }
+    if (!preview || !("before" in preview) || preview.before !== before) preview = { id: current.id, before };
+  }
+  function scrollDuringGesture() {
+    scrollFrame = 0;
+    if (!gesture || !preview) return;
+    const bounds = board.getBoundingClientRect();
+    const top = Math.max(0, bounds.top), bottom = Math.min(window.innerHeight, bounds.bottom);
+    const step = gesture.y < top + 36 ? -12 : gesture.y > bottom - 36 ? 12 : 0;
+    if (!step || (gesture.resize && Math.sign(gesture.y - gesture.startY) !== Math.sign(step))) return;
+    const previous = board.scrollTop;
+    board.scrollTop += step;
+    const scrolled = board.scrollTop - previous;
+    if (scrolled) {
+      if (gesture.resize) gesture.resize.scrollDelta += scrolled;
+      updatePreview(gesture);
+      scrollFrame = requestAnimationFrame(scrollDuringGesture);
+    }
+  }
+  function moveGesture(event: PointerEvent) {
+    if (!gesture || gesture.pointer !== event.pointerId) return;
+    if (!preview && Math.abs(event.clientY - gesture.startY) < 5) return;
+    gesture.y = event.clientY;
+    suppressClick = gesture.handle;
+    updatePreview(gesture);
+    if (!scrollFrame) scrollFrame = requestAnimationFrame(scrollDuringGesture);
+  }
+  function clearGesture() {
+    const current = gesture;
+    gesture = null;
+    preview = null;
+    cancelAnimationFrame(scrollFrame);
+    scrollFrame = 0;
+    if (current?.handle.hasPointerCapture(current.pointer)) current.handle.releasePointerCapture(current.pointer);
+  }
+  function cancelGesture(event: KeyboardEvent) {
+    if (event.key !== "Escape" || !gesture) return;
+    event.preventDefault();
+    clearGesture();
+  }
+  function finishGesture(event: PointerEvent) {
+    if (!gesture || gesture.pointer !== event.pointerId) return;
+    if (event.type === "pointerup" && preview && event.clientY !== gesture.y) {
+      gesture.y = event.clientY;
+      updatePreview(gesture);
+    }
+    const result = preview;
+    clearGesture();
+    if (event.type !== "pointerup" || !result) return;
+    const index = cards.findIndex(card => card.id === result.id);
+    if (index < 0) return;
+    const card = cards[index];
+    if ("height" in result) {
+      if (card.height === result.height) return;
+      pendingHeight = result;
+      void layout(card, { height: result.height }).finally(() => { pendingHeight = null; });
+    } else if (result.before !== (cards[index + 1]?.id ?? "")) {
+      void layout(card, { before: result.before });
+    }
+  }
+  function clickTitle(event: MouseEvent & { currentTarget: HTMLButtonElement }, card: Card) {
+    if (event.detail && suppressClick === event.currentTarget) {
+      suppressClick = null;
+      return;
+    }
+    void layout(card, { collapsed: !card.collapsed });
+  }
+  function moveWithKeys(event: KeyboardEvent, card: Card, index: number) {
+    if (!event.altKey || busy || gesture || !["ArrowUp", "ArrowDown"].includes(event.key)) return;
+    event.preventDefault();
+    if (event.key === "ArrowUp" && index > 0) void layout(card, { before: cards[index - 1].id });
+    if (event.key === "ArrowDown" && index < cards.length - 1) void layout(card, { before: cards[index + 2]?.id ?? "" });
+  }
+  function resizeWithKeys(event: KeyboardEvent & { currentTarget: HTMLButtonElement }, card: Card) {
+    if (busy || gesture || !["ArrowUp", "ArrowDown"].includes(event.key)) return;
+    const body = event.currentTarget.closest("article")?.querySelector(".body");
+    if (!body) return;
+    event.preventDefault();
+    const height = clampHeight(parseFloat(getComputedStyle(body).height) + (event.key === "ArrowUp" ? -16 : 16));
+    if (card.height !== height) void layout(card, { height });
   }
   async function add() {
     if(await change({action:"create",kind,source,title:title.trim() || labels[source]})) {adding=false;title="";}
@@ -91,7 +218,7 @@
     });
     void load();
     const timer=setInterval(load,4000);
-    return ()=>{disposed=true;abort.abort();clearInterval(timer);unsubscribe();};
+    return ()=>{disposed=true;clearGesture();abort.abort();clearInterval(timer);unsubscribe();};
   });
   $effect(()=>{
     const current=summary, key=cacheKey;
@@ -110,7 +237,10 @@
   }
 </script>
 
-<div class="board">
+<svelte:window onblur={clearGesture} onkeydowncapture={cancelGesture}
+  onpointermove={moveGesture} onpointerup={finishGesture} onpointercancel={finishGesture} onlostpointercapture={finishGesture} />
+
+<div class="board" bind:this={board} onscroll={()=>{if(gesture && preview && !gesture.resize) updatePreview(gesture);}}>
   <header>
     <h2>Workspace cards</h2>
     <button class="add" aria-label="Add card" title="Add card" disabled={!loaded} onclick={()=>adding=!adding} aria-expanded={adding}>+</button>
@@ -127,22 +257,24 @@
     </form>
   {/if}
   {#if error}<p role="alert">{error} <button onclick={load}>Retry</button></p>{/if}
-  <div class="stack">
+  <div class="stack" bind:this={stack} class:drop-end={preview && "before" in preview && preview.before === "" && cards.at(-1)?.id !== preview.id}>
     {#each cards as card,index (card.id)}
       {@const data=card.source==="magpie-quota" ? quotaData : project(card,offline ? null:summary,samples)}
       {@const filterProviders=data?.quota?.providers.filter(provider => provider.quotas?.length)}
-      <article class:stat-card={card.kind === "stat"} draggable="true" ondragstart={()=>dragging=card.id} ondragend={()=>dragging=""}
-        ondragover={(event)=>event.preventDefault()} ondrop={(event)=>{event.preventDefault();const item=cards.find(item=>item.id===dragging);if(item && item.id!==card.id) void layout(item,{before:card.id});dragging="";}}>
+      <article data-card-id={card.id} class:stat-card={card.kind === "stat"}
+        class:dragging={preview?.id === card.id && "before" in preview}
+        class:resizing={preview?.id === card.id && "height" in preview}
+        class:drop-before={preview && "before" in preview && preview.before === card.id && cards[index - 1]?.id !== preview.id}>
         <div class="heading">
-          <button class="name" aria-expanded={!card.collapsed} onclick={()=>layout(card,{collapsed:!card.collapsed})}>
+          <button class="name" class:movable={cards.length > 1} aria-expanded={!card.collapsed}
+            title={cards.length > 1 ? "Drag to reorder" : undefined} aria-keyshortcuts={cards.length > 1 ? "Alt+ArrowUp Alt+ArrowDown" : undefined}
+            onpointerdown={(event)=>startGesture(event,card)} onclick={(event)=>clickTitle(event,card)}
+            onkeydown={(event)=>moveWithKeys(event,card,index)}>
             <strong>{card.title}</strong>
             {#if card.collapsed}<span class="brief">{collapsedReadout(card.kind, data, card.hiddenQuotaKeys)}</span>{/if}
             <span class="chevron" aria-hidden="true"></span>
           </button>
           <details><summary aria-label={`Options for ${card.title}`}>···</summary><div class="menu" class:quota-menu={filterProviders?.length}>
-            <button disabled={index===0||busy} onclick={()=>layout(card,{before:cards[index-1].id})}>Move up</button>
-            <button disabled={index===cards.length-1||busy} onclick={()=>layout(card,{before:cards[index+2]?.id ?? ""})}>Move down</button>
-            <button onclick={()=>layout(card,{height:card.height===180 ? 320:card.height===320 ? 0:180})}>Resize</button>
             <button onclick={()=>change({action:"remove",id:card.id,version:card.version})}>Remove</button>
             {#if filterProviders?.length}
               <MagpieQuotaFilter providers={filterProviders} hiddenKeys={card.hiddenQuotaKeys ?? []} {busy}
@@ -151,7 +283,9 @@
           </div></details>
         </div>
         {#if !card.collapsed}
-          <div class="body" style:height={card.height ? `${card.height}px`:undefined}>
+          {@const activeHeight = preview && "height" in preview ? preview : pendingHeight}
+          {@const height = activeHeight?.id === card.id ? activeHeight.height : card.height}
+          <div class="body" style:height={height ? `${height}px`:undefined}>
             {#if card.kind === "quota"}
               {#if data?.quota}
                 <MagpieQuota quota={data.quota} hiddenKeys={card.hiddenQuotaKeys ?? []}/>
@@ -159,6 +293,9 @@
             {:else if data}<CardContent kind={card.kind} source={card.source} {data} onSelect={select}/>{:else}<small>Data unavailable</small>{/if}
           </div>
           <footer>{card.source === "agent" ? "Agent" : `System · ${labels[card.source]}`}{#if card.updated} · {new Date(card.updated).toLocaleTimeString()}{/if}</footer>
+          <button type="button" class="resize" aria-label={`Resize ${card.title}`} aria-keyshortcuts="ArrowUp ArrowDown"
+            title="Drag or use arrow keys to resize" onpointerdown={(event)=>startGesture(event,card,true)}
+            onkeydown={(event)=>resizeWithKeys(event,card)}></button>
         {/if}
       </article>
     {:else}{#if loaded}<p>Add a card to follow this workspace.</p>{/if}{/each}
@@ -178,6 +315,7 @@
     color-scheme:light;
     background:#f7f7ef;
   }
+  .board:has(article.resizing) { overflow-anchor:none }
   header,.heading,.name { display:flex; align-items:center; gap:8px }
   header { padding:15px 19px; border-bottom:1px solid var(--card-line) }
   h2 { display:flex; align-items:center; gap:8px; flex:1; margin:0; font-size:1rem; letter-spacing:-.02em }
@@ -190,15 +328,23 @@
   header :global(.cards-dismiss) { border:1px solid var(--card-line); background:transparent; color:inherit }
   header :global(.cards-dismiss:hover) { background:var(--card-surface) }
   .primary { color:#fff; background:var(--card-accent); border-color:transparent }
-  .stack { display:grid; gap:9px; padding:15px }
+  .stack { position:relative; display:grid; gap:9px; padding:15px }
   form,article,.menu { border:1px solid var(--card-line); border-radius:12px; background:var(--card-surface) }
-  article { min-width:0 }
+  article { position:relative; min-width:0 }
+  article.dragging,article.resizing { border-color:var(--card-accent) }
+  article.dragging { opacity:.65 }
+  .drop-before::before,.drop-end::after { content:""; position:absolute; height:3px; border-radius:3px; background:var(--card-accent); pointer-events:none }
+  .drop-before::before { top:-7px; inset-inline:0 }
+  .drop-end::after { bottom:8px; inset-inline:15px }
   .stat-card { --card-surface:#e3eddc; border-color:#b8c9b0 }
   form { display:grid; gap:10px; margin:15px 15px 0; padding:14px }
   label { display:grid; gap:4px; font-size:.8rem }
   select,input { width:100%; box-sizing:border-box; padding:6px }
   .heading { padding:5px 8px 5px 14px; gap:2px }
   .name { min-width:0; flex:1; text-align:left; padding:7px 4px 7px 0; border:0; background:transparent; font-size:14px }
+  .name.movable { cursor:grab; user-select:none; touch-action:none }
+  .name.movable::before { content:""; flex:none; width:8px; height:12px; background:radial-gradient(circle,var(--card-muted) 1px,transparent 1.25px) 0 0 / 4px 4px }
+  .dragging .name.movable { cursor:grabbing }
   .name strong { flex:1; overflow-wrap:anywhere }
   .brief { font-variant-numeric:tabular-nums; color:var(--card-accent); overflow-wrap:anywhere }
   .chevron { flex:none; width:6px; height:6px; border:solid var(--card-muted); border-width:0 1px 1px 0; transform:rotate(45deg) }
@@ -213,6 +359,9 @@
   .menu button:hover,summary:hover,.add:hover { background:#dce6d7 }
   .name:hover strong { color:var(--card-accent) }
   footer,small,.stack>p { font-size:11px; color:var(--card-muted) }
-  footer { padding:5px 14px 12px }
+  footer { padding:5px 14px 0 }
+  .resize { display:grid; place-items:center; width:100%; height:12px; padding:0; border:0; border-radius:0 0 12px 12px; background:transparent; cursor:ns-resize; touch-action:none }
+  .resize::after { content:""; width:28px; height:2px; border-radius:2px; background:var(--card-line) }
+  .resize:hover::after,.resize:focus-visible::after,.resizing .resize::after { background:var(--card-accent) }
   p[role=alert] { margin-inline:15px; overflow-wrap:anywhere }
 </style>

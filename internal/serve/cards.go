@@ -68,6 +68,11 @@ type cardChange struct {
 	Before          *string      `json:"before,omitempty"`
 }
 
+const (
+	minCardHeight = 48
+	maxCardHeight = 960
+)
+
 var cardSources = map[string][]string{
 	"stat":  {"running", "running-tasks", "tasks"},
 	"gauge": {"task-ratio"},
@@ -319,7 +324,7 @@ func applyCardChange(cards []workspaceCard, change cardChange) ([]workspaceCard,
 			card.Collapsed = *change.Collapsed
 		}
 		if change.Height != nil {
-			if !slices.Contains([]int{0, 180, 320}, *change.Height) {
+			if *change.Height != 0 && (*change.Height < minCardHeight || *change.Height > maxCardHeight) {
 				return nil, "", 400, errors.New("invalid height")
 			}
 			card.Height = *change.Height

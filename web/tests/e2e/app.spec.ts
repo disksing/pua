@@ -2885,23 +2885,30 @@ test("displays Chat beside the sidebar in the two-column layout", async ({ page 
   await expect(page.locator("#detailsResize")).toBeVisible();
 });
 
-test("adds, reorders and collapses task state bars in the dock and drawer", async ({ page }) => {
+test("adds, drags, resizes and collapses task state bars in the dock and drawer", async ({ page }) => {
   await installMockApi(page);
   const children = [...project.children, {...project.children[0], id:"project1.task3", state:"waiting"}];
   await page.route("**/api/workspaces/ws-test/tree", route => json(route, {projects:[{...project, children}]}));
-  const cards = [{id:"total", kind:"stat", source:"tasks", title:"Task count", version:1, collapsed:false}];
+  const cards = [{id:"total", kind:"stat", source:"tasks", title:"Task count", version:1, collapsed:false, height:0}];
+  const writes: Array<Record<string, unknown>> = [];
   await page.route("**/api/workspaces/ws-test/cards", route => {
     if (route.request().method() === "GET") return json(route, cards);
     const change = route.request().postDataJSON();
+    writes.push(change);
     if (change.action === "create") {
       expect(change).toMatchObject({kind:"bar", source:"task-states"});
-      cards.push({id:"states", version:1, collapsed:false, ...change});
-    } else if (change.before === "total") {
-      expect(change.id).toBe("states");
-      cards.unshift(cards.pop()!);
-      cards[0].version++;
+      cards.push({id:"states", version:1, collapsed:false, height:0, ...change});
     } else {
-      Object.assign(cards[0], {collapsed:change.collapsed, version:cards[0].version + 1});
+      const index = cards.findIndex(card => card.id === change.id);
+      const card = cards[index];
+      expect(change.version).toBe(card.version);
+      card.version++;
+      if (change.before !== undefined) {
+        cards.splice(index, 1);
+        cards.splice(change.before ? cards.findIndex(card => card.id === change.before) : cards.length, 0, card);
+      }
+      if (change.height !== undefined) card.height = change.height;
+      if (change.collapsed !== undefined) card.collapsed = change.collapsed;
     }
     return json(route, {cards});
   });
@@ -2912,25 +2919,82 @@ test("adds, reorders and collapses task state bars in the dock and drawer", asyn
   await page.getByRole("button", {name:"Add to workspace"}).click();
   const articles = page.locator("#agentPanel article");
   const chart = articles.filter({hasText:"Task states"});
-  await chart.dragTo(articles.filter({hasText:"Task count"}));
-  await expect(articles.first()).toContainText("Task states");
+  const count = articles.filter({hasText:"Task count"});
+  const title = chart.getByRole("button", {name:/^Task states/});
+  const body = chart.locator(".body");
+  const drawer = page.getByRole("button", {name:"Open workspace cards"});
   for (const width of [1500, 320]) {
     await page.setViewportSize({width, height:800});
-    if (width === 320) await page.getByRole("button", {name:"Open workspace cards"}).click();
+    if (width === 320) {
+      await drawer.click();
+      await expect.poll(() => page.locator("#agentPanel").evaluate(panel => panel.getBoundingClientRect().right <= innerWidth)).toBe(true);
+    }
     const rows = chart.getByRole("listitem");
     await expect(rows.nth(0)).toContainText(/not started\s*2/);
     await expect(rows.nth(1)).toContainText(/waiting\s*1/);
     const widths = await chart.locator(".track > div").evaluateAll(bars => bars.map(bar => bar.getBoundingClientRect().width));
     expect(widths[0]).toBeGreaterThan(0);
     expect(Math.abs(widths[0] - 2 * widths[1])).toBeLessThan(1);
+
+    const moveUp = width === 1500;
+    const titleBox = (await title.boundingBox())!;
+    const target = (await count.boundingBox())!;
+    const dragX = titleBox.x + titleBox.width / 2;
+    const dragY = titleBox.y + titleBox.height / 2;
+    const dropY = target.y + target.height * (moveUp ? 0.25 : 0.75);
+    const moveWrites = writes.length;
+    await page.mouse.move(dragX, dragY);
+    await page.mouse.down();
+    await page.mouse.move(dragX, dropY, {steps:8});
+    await expect(chart).toHaveClass(/dragging/);
+    await expect(moveUp ? count : page.locator("#agentPanel .stack")).toHaveClass(moveUp ? /drop-before/ : /drop-end/);
+    expect(writes).toHaveLength(moveWrites);
+    await page.mouse.up();
+    await expect(moveUp ? articles.first() : articles.last()).toContainText("Task states");
+    await expect(title).toHaveAttribute("aria-expanded", "true");
+    expect(writes.slice(moveWrites)).toMatchObject([{id:"states", before:moveUp ? "total" : ""}]);
+
+    const resize = chart.getByRole("button", {name:"Resize Task states", exact:true});
+    await resize.scrollIntoViewIfNeeded();
+    const grip = (await resize.boundingBox())!;
+    const startHeight = await body.evaluate(node => parseFloat(getComputedStyle(node).height));
+    const delta = moveUp ? 137 : -59;
+    const height = Math.round(startHeight + delta);
+    const resizeWrites = writes.length;
+    await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2);
+    if (!moveUp) {
+      await page.mouse.down();
+      await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2 + delta, {steps:8});
+      await expect(body).toHaveCSS("height", `${height}px`);
+      await page.keyboard.press("Escape");
+      await page.mouse.up();
+      await expect(body).toHaveCSS("height", `${startHeight}px`);
+      expect(writes).toHaveLength(resizeWrites);
+      await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2);
+    }
+    await page.mouse.down();
+    await page.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2 + delta, {steps:8});
+    await expect(body).toHaveCSS("height", `${height}px`);
+    expect(writes).toHaveLength(resizeWrites);
+    await page.mouse.up();
+    await expect.poll(() => writes.slice(resizeWrites)).toMatchObject([{id:"states", height}]);
+    await page.reload({waitUntil:"domcontentloaded"});
+    if (!moveUp) await drawer.click();
+    await expect(body).toHaveCSS("height", `${height}px`);
+    await expect(moveUp ? articles.first() : articles.last()).toContainText("Task states");
     await expect.poll(() => chart.evaluate(card => {
+      const board = card.closest(".board")!;
       const bounds = card.getBoundingClientRect();
-      return bounds.left >= 0 && bounds.right <= innerWidth && card.scrollWidth <= card.clientWidth;
+      return bounds.left >= 0 && bounds.right <= innerWidth && card.scrollWidth <= card.clientWidth &&
+        board.scrollWidth <= board.clientWidth && document.documentElement.scrollWidth <= innerWidth;
     })).toBe(true);
-    await chart.getByRole("button", {name:"Task states", exact:true}).click();
+
+    await title.click();
     await expect(chart.locator(".brief")).toHaveText("3");
-    await chart.getByRole("button", {name:/Task states/}).click();
+    await expect(resize).toHaveCount(0);
+    await title.click();
     await expect(rows.first()).toBeVisible();
+    await expect(body).toHaveCSS("height", `${height}px`);
   }
 });
 
@@ -3018,7 +3082,7 @@ test("adds Magpie usage and keeps multiple accounts readable in a narrow drawer"
   await expect(card.getByText("$12", {exact:true})).toHaveCount(0);
   await options.click();
   await expect(filters).toBeHidden();
-  await card.getByRole("button", {name:"Magpie usage"}).click();
+  await card.getByRole("button", {name:"Magpie usage", exact:true}).click();
   await expect(card.getByText("11 accounts")).toBeVisible();
   await expect(body).toHaveCount(0);
   expect(await card.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true);
@@ -3030,11 +3094,10 @@ test("adds Magpie usage and keeps multiple accounts readable in a narrow drawer"
   await balance.check();
   await expect(card.getByText("12 accounts")).toBeVisible();
   await options.click();
-  await card.getByRole("button", {name:/Magpie usage/}).click();
+  await card.getByRole("button", {name:/^Magpie usage/}).click();
   await expect(card.getByText("$12", {exact:true})).toBeVisible();
   await options.click();
-  await card.getByRole("button", {name:"Resize"}).click();
-  await expect(card.locator(".body")).toHaveCSS("height","180px");
+  await expect(card.locator(".menu").getByRole("button")).toHaveText(["Remove"]);
   await page.setViewportSize({width:1500, height:800});
   for (const [state, message] of [
     [{configured:false, connected:false, stale:false, providers:[]}, "Magpie not configured"],
